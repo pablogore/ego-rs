@@ -10,29 +10,12 @@ Implement tasks from an OpenSpec change.
 
 1. **Select the change**
 
-    If a name is provided, use it. Otherwise:
-    - Infer from conversation context if the user mentioned a change
-    - Auto-select if only one active change exists
-    - If ambiguous, run `openspec list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
+   If a name is provided, use it. Otherwise:
+   - Infer from conversation context if the user mentioned a change
+   - Auto-select if only one active change exists
+   - If ambiguous, run `openspec list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
 
-    Always announce: "Using change: <name>" and how to override (e.g., `/opsx-apply <other>`).
-
-2. **Check approval status**
-
-    Read `openspec/changes/<name>/metadata.yaml`:
-    ```bash
-    cat openspec/changes/<name>/metadata.yaml
-    ```
-
-    **If file does not exist:**
-    - Create it with `approved: false, verified: false`
-    - Fail with: "Change not approved. Run: /opsx-verify and approve before apply."
-
-    **If approved is not true:**
-    - Fail with: "Change not approved. Run: /opsx-verify and approve before apply."
-
-    **If approved is true:**
-    - Proceed to implementation
+   Always announce: "Using change: <name>" and how to override (e.g., `/opsx-apply <other>`).
 
 2. **Check status to understand the schema**
    ```bash

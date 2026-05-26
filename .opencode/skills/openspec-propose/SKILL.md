@@ -34,17 +34,10 @@ When ready to implement, run /opsx-apply
    **IMPORTANT**: Do NOT proceed without understanding what the user wants to build.
 
 2. **Create the change directory**
-    ```bash
-    openspec new change "<name>"
-    ```
-    This creates a scaffolded change at `openspec/changes/<name>/` with `.openspec.yaml`.
-
-3. **Initialize metadata.yaml**
-    Create `openspec/changes/<name>/metadata.yaml`:
-    ```yaml
-    approved: false
-    verified: false
-    ```
+   ```bash
+   openspec new change "<name>"
+   ```
+   This creates a scaffolded change at `openspec/changes/<name>/` with `.openspec.yaml`.
 
 3. **Get the artifact build order**
    ```bash

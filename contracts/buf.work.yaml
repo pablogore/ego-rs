@@ -1,0 +1,18 @@
+modules = [
+  "core/v1",
+  "user/v1",
+]
+version: v1
+directories:
+  - contracts
+generate:
+  output: crates/ego-rs-contracts/src/generated
+breaking:
+  against: buf.lock
+  fail_on_no_breaking_baseline: true
+review_checklist:
+  - classification: "Command, Query, or Event"
+  - guidance: "Ensure the contract is classified correctly as Command, Query, or Event."
+  - compatibility: "Check for backward compatibility with existing contracts."
+  - ownership: "Define the domain-level owner or reviewer group."
+  - checklist: "Review the contract review checklist in contracts/review_checklist.md"

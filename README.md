@@ -1,118 +1,101 @@
-# OPSX Engineering Governance
+# OPSX/OpenSpec Proposal Mode
 
-Lightweight engineering governance for OPSX/OpenSpec.
+Generate specification proposals only. No implementation.
 
-## Overview
+## Project Constitution (SPEC-000)
 
-OPSX is a lightweight change workflow. This extension adds a quality gate before apply to prevent unreviewed changes.
+All project changes must comply with [SPEC-000: Project Constitution](openspec/changes/spec-000-project-constitution-objetivo/specs/project-constitution/spec.md). This constitution defines immutable rules for deterministic-first behavior, fail-closed decisions, explicit state, append-only lineage, OpenSpec-driven development, mandatory hexagonal architecture, CQRS + event-driven design, >=95% test coverage, no real resources in unit tests, observability by default, and backward compatibility.
 
-## Workflow
+Future OpenSpec changes must reference SPEC-000 and demonstrate constitution compliance. Amendments to the constitution require a dedicated OpenSpec change that preserves the rationale for the previous rule.
 
-```
-/opsx:propose
-    ↓
-draft (metadata: approved=false, verified=false)
-    ↓
-/opsx:continue (optional)
-    ↓
-/opsx:verify
-    ↓
-approved (metadata: approved=true, verified=true)
-    ↓
-/opsx:apply
-    ↓
-/opsx:archive
-```
-
-## Commands
-
-### `/opsx:propose`
-
-Propose a new change - create it and generate all artifacts in one step.
+## Quick Start
 
 ```bash
-/opsx:propose <change-name>
+# Create a proposal
+"create endpoint returning uuid and timestamp"
 ```
 
-Creates:
-- `proposal.md` (what & why)
-- `design.md` (how)
-- `tasks.md` (implementation steps)
-- `metadata.yaml` (approval tracking)
+## What It Does
 
-### `/opsx:verify`
+Transforms implementation wording into capability proposals:
 
-Verify proposal quality and approve before apply.
+- `create endpoint` → `expose capability through transport`
+- `uuid` → `identifier`
+- `timestamp` → `temporal metadata`
 
-```bash
-/opsx:verify <change-name>
+## Output Files
+
+### proposal.md
+
+- Why
+- Impact
+- Risks
+- NFRs
+
+### design.md
+
+- Purpose
+- Rules
+- Anti-patterns
+- Review checklist
+
+### spec.md
+
+- Capability requirements
+- Scenarios
+- Expected behavior
+- Constraints
+
+### tasks.md
+
+- Capability tasks
+- Validation tasks
+- Testing tasks
+
+## Rules
+
+1. **Preserve intent** - Don't generalize domain
+2. **One abstraction level** - uuid → identifier, not → entity reference
+3. **Proportional scope** - Small request → small proposal
+4. **Verb-preserving** - "create capability" not "creation capability"
+5. **No speculative architecture** - Don't invent CRUD, lifecycle, validation
+
+## Examples
+
+### Input
+
+```
+create endpoint returning uuid and timestamp
 ```
 
-Evaluates:
-- SOLID principles
-- Clean architecture
-- Hexagonal boundaries
-- Maintainability
-- Determinism
-- Testability
-- Dependency inversion
-- Mock-only compliance
-- Overengineering detection
-- Proportional complexity
+### Output
 
-Outputs: **PASS** | **WARN** | **FAIL**
+Capability proposal returning identifier and temporal metadata.
 
-### `/opsx:apply`
+### Input
 
-Implement tasks from an OpenSpec change.
-
-```bash
-/opsx:apply <change-name>
+```
+create hello endpoint
 ```
 
-**Fails if not approved:**
-```
-Change not approved.
-Run: /opsx:verify and approve before apply.
-```
+### Output
 
-### `/opsx:archive`
+Expose hello capability through transport.
 
-Archive a completed change.
+## Don't Do
 
-```bash
-/opsx:archive <change-name>
-```
+- ❌ Ask clarification questions
+- ❌ Expand into CRUD workflows
+- ❌ Add validation rules unless requested
+- ❌ Invent entities or business semantics
+- ❌ Generate implementation
 
-## Metadata Tracking
+## Success Criteria
 
-Each change has `metadata.yaml`:
+Result feels like:
 
-```yaml
-approved: false
-verified: false
-```
-
-After `/opsx:verify`:
-
-```yaml
-approved: true
-verified: true
-verdict: pass
-issues: []
-```
-
-## Engineering Context
-
-See `openspec/engineering-context.md` for:
-- Architecture principles
-- Quality standards
-- Testing strategy
-- Verification gate rules
-
-## Design Principles
-
-- **Keep OPSX simple** - No enterprise workflow
-- **Extend, don't replace** - Existing lifecycle unchanged
-- **Lightweight approval** - metadata.yaml, no workflow engine
-- **FAIL blocks apply** - Quality gate enforced
+- ✓ Proportional
+- ✓ Capability-driven
+- ✓ Semantically close to user intent
+- ✓ Specification-oriented
+- ✓ Boring engineering

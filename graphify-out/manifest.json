@@ -1,0 +1,262 @@
+{
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/transport/src/lib.rs": {
+    "mtime": 1779712759.757085,
+    "ast_hash": "079510eebf0b49fe37264f2984c0f820",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/application/src/ports.rs": {
+    "mtime": 1779681746.996082,
+    "ast_hash": "e3f11114986d61bf1f7121122cb796b3",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/application/src/lib.rs": {
+    "mtime": 1779655775.6072617,
+    "ast_hash": "92b44c38b11ab1b07ec702068b4afa00",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/application/src/hello.rs": {
+    "mtime": 1779681789.8049831,
+    "ast_hash": "e48f6e4b77961200cd728d0b04f6bb64",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/infrastructure/src/lib.rs": {
+    "mtime": 1779712752.7463093,
+    "ast_hash": "2ad9e3723ce4000d5ac6943b5094044f",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/domain/src/command.rs": {
+    "mtime": 1779655684.1929321,
+    "ast_hash": "4dd5b694b20bdc271fbc8d702bd0a893",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/domain/src/lib.rs": {
+    "mtime": 1779655682.652792,
+    "ast_hash": "7d759d076c2df7063de3038e3acc59d1",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/domain/src/query.rs": {
+    "mtime": 1779655686.1114593,
+    "ast_hash": "dacf794b527742e6e27375e87da69605",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/domain/src/hello.rs": {
+    "mtime": 1779655691.684549,
+    "ast_hash": "e3d93060cec25ba9ffba492c2a466562",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/crates/domain/src/event.rs": {
+    "mtime": 1779712742.1603467,
+    "ast_hash": "25a2b7df99bbb600b8b34a5d12a97646",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/package.json": {
+    "mtime": 1779651667.713954,
+    "ast_hash": "bc4105f797304ae00bc7e12f4f85bd1a",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/opencode.json": {
+    "mtime": 1779719190.6151712,
+    "ast_hash": "8dbb49afce63ed4a93762dd9c0901e05",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/plugins/execution-guard.ts": {
+    "mtime": 1779718963.6323416,
+    "ast_hash": "f224e84ccfc5acec74cf996b5db3eb3b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/scripts/verify-port-mocks.sh": {
+    "mtime": 1779669097.9396484,
+    "ast_hash": "0bf9084b621ecbb42c39b05a32e3738c",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/scripts/verify-no-infra-in-tests.sh": {
+    "mtime": 1779654945.0785372,
+    "ast_hash": "72ad4d83e210d640a09cfb7f0a36f60d",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/scripts/verify-layers.sh": {
+    "mtime": 1779681126.130469,
+    "ast_hash": "395c0a9473e08b66b5c3712c7af22c1d",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/scripts/hooks/pre-push": {
+    "mtime": 1779670865.887204,
+    "ast_hash": "0f4de32c08f4839767e53fcddd503db0",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/README.md": {
+    "mtime": 1779713826.506553,
+    "ast_hash": "957dba0e1202605c7620341d7113cd95",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/CONTRIBUTING.md": {
+    "mtime": 1779714902.9346266,
+    "ast_hash": "66efcf8cf5dfb2c3dab744a67141e438",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/commands/opsx-propose.md": {
+    "mtime": 1779718963.9888842,
+    "ast_hash": "ea82699f71b0140c53ceb79de3dd979b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/commands/opsx-apply.md": {
+    "mtime": 1779718963.938693,
+    "ast_hash": "2fc1cd41b80ac2e2483e18442de051b7",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/commands/opsx-archive.md": {
+    "mtime": 1779668490.5513074,
+    "ast_hash": "48a27c2c74ccc0c38f73f5fe1731403b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/commands/opsx-explore.md": {
+    "mtime": 1779668490.5508404,
+    "ast_hash": "74d5125862b00db97818eb3cbbee8167",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/skills/openspec-apply-change/SKILL.md": {
+    "mtime": 1779718963.734996,
+    "ast_hash": "4dd11671a5da2d7abc01b8c77d05a320",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/skills/openspec-explore/SKILL.md": {
+    "mtime": 1779668490.550077,
+    "ast_hash": "01227b0646944af4c0a5fd1b31ec6ce1",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/skills/openspec-archive-change/SKILL.md": {
+    "mtime": 1779668490.5504904,
+    "ast_hash": "f010cb3292d101742592bcad1abfe762",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.opencode/skills/openspec-propose/SKILL.md": {
+    "mtime": 1779718963.837802,
+    "ast_hash": "e41b66db6d4f6661503e8570fe938712",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/.github/workflows/ci.yml": {
+    "mtime": 1779669064.750505,
+    "ast_hash": "537407562aa6b7c4fce105c4356611f8",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/config.yaml": {
+    "mtime": 1779651659.9188497,
+    "ast_hash": "9e3e7672b387a282583011181ab35f9a",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/specs/project-constitution/spec.md": {
+    "mtime": 1779674945.9232326,
+    "ast_hash": "c07eb7bb147fa2a261d75f7d91566312",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/specs/testing-governance/spec.md": {
+    "mtime": 1779671147.4493406,
+    "ast_hash": "b977f375a49d72477bf71713140f646b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/specs/architecture-governance/spec.md": {
+    "mtime": 1779671147.447147,
+    "ast_hash": "93fce0b3d40f3f8dd62d76a22694eef4",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-spec-000-project-constitution-objetivo/.openspec.yaml": {
+    "mtime": 1779671446.045329,
+    "ast_hash": "496e122d84f76f05405078d5b1ac132a",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-spec-000-project-constitution-objetivo/tasks.md": {
+    "mtime": 1779715501.165491,
+    "ast_hash": "32374b6270df39717711b672bdabb4c5",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-spec-000-project-constitution-objetivo/design.md": {
+    "mtime": 1779673839.894897,
+    "ast_hash": "e03142bed7e92eecf852da7cc8b56098",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-spec-000-project-constitution-objetivo/proposal.md": {
+    "mtime": 1779673839.7571263,
+    "ast_hash": "549cf1c319ef6cf60fd561708479685a",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-spec-000-project-constitution-objetivo/specs/project-constitution/spec.md": {
+    "mtime": 1779673839.9942,
+    "ast_hash": "c07eb7bb147fa2a261d75f7d91566312",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-foundation-001-workspace-monorepo-structure/.openspec.yaml": {
+    "mtime": 1779677656.535145,
+    "ast_hash": "496e122d84f76f05405078d5b1ac132a",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-foundation-001-workspace-monorepo-structure/tasks.md": {
+    "mtime": 1779716709.102968,
+    "ast_hash": "fbaaa328eef1c526894936f85bcc4934",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-foundation-001-workspace-monorepo-structure/design.md": {
+    "mtime": 1779716691.6535795,
+    "ast_hash": "763f1b46f4384f2b9da99df33cc38b4d",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-foundation-001-workspace-monorepo-structure/proposal.md": {
+    "mtime": 1779678467.5493166,
+    "ast_hash": "71e415913ada764a3a5d084fa1a25499",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-foundation-001-workspace-monorepo-structure/specs/workspace-monorepo-structure/spec.md": {
+    "mtime": 1779678467.69561,
+    "ast_hash": "493ab579af123fc6051dd4ec85bc6fc8",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/.openspec.yaml": {
+    "mtime": 1779652683.696414,
+    "ast_hash": "35afe55009af1d12262789f288f88498",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/tasks.md": {
+    "mtime": 1779670741.0230794,
+    "ast_hash": "68b58b0ace994812be6663ff15abaeec",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/design.md": {
+    "mtime": 1779652788.4435287,
+    "ast_hash": "2526bb6ecda2eec7c7cff291c879143b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/proposal.md": {
+    "mtime": 1779652713.6247833,
+    "ast_hash": "bfd30e5a96596d1bd17f937e9859a532",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/specs/testing-governance/spec.md": {
+    "mtime": 1779652821.9122992,
+    "ast_hash": "b977f375a49d72477bf71713140f646b",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/archive/2026-05-25-project-governance/specs/architecture-governance/spec.md": {
+    "mtime": 1779652803.8914726,
+    "ast_hash": "93fce0b3d40f3f8dd62d76a22694eef4",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/foundation-002-canonical-contracts/tasks.md": {
+    "mtime": 1779720708.8198736,
+    "ast_hash": "411ae36103709ac529cd339d08250121",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/foundation-002-canonical-contracts/design.md": {
+    "mtime": 1779720454.0043652,
+    "ast_hash": "050a5a18c695ad5ce499ef083e60728f",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/foundation-002-canonical-contracts/proposal.md": {
+    "mtime": 1779720437.3926003,
+    "ast_hash": "0ca3e5f50503ab041844a8740529d7ab",
+    "semantic_hash": ""
+  },
+  "/Users/pablogore/workspace/pablogore/ego-rs/openspec/changes/foundation-002-canonical-contracts/specs/canonical-contract-governance/spec.md": {
+    "mtime": 1779720477.197471,
+    "ast_hash": "de4186a939be2abc8e1fa236b43dca67",
+    "semantic_hash": ""
+  }
+}

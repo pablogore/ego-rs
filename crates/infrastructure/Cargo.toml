@@ -1,0 +1,13 @@
+[package]
+name = "ego-infrastructure"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ego-domain = { path = "../domain" }
+ego-application = { path = "../application" }
+async-trait = "0.1"
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = "0.4"

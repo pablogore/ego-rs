@@ -4,7 +4,38 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3cf4bcb6-2301-47b8-9905-7e4fa5b14846" name="Changes" comment="" />
+    <list default="true" id="3cf4bcb6-2301-47b8-9905-7e4fa5b14846" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/Makefile" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/&lt;domain&gt;/v1/buf.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/buf.gen.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/buf.work.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/buf.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/review_checklist.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/contracts/user/v1/buf.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/buf" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/commands/opsx-apply.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/commands/opsx-archive.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/commands/opsx-explore.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/commands/opsx-propose.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/commands/opsx-verify.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/engineering-context/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/engineering-verify/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/openspec-apply-change/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/openspec-archive-change/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/openspec-explore/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.opencode/skills/openspec-propose/SKILL.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/.openspec.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/design.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/metadata.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/proposal.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/specs/crete-endpoint/spec.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/changes/crete-endpoint/tasks.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/config.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/engineering-context.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/openspec/openspec/changes/crete-endpoint/.openspec.yaml" beforeDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -17,9 +48,9 @@
   <component name="MacroExpansionManager">
     <option name="directoryName" value="aip84lQq" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 4
-}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 4
+}</component>
   <component name="ProjectId" id="3E39pIHr5GlfppwOuvqvFNrKad7" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -29,11 +60,13 @@
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.rust.reset.selective.auto.import": "true",
     "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "SHELLCHECK.PATH": "/Users/pablogore/Library/Application Support/JetBrains/RustRover2026.1/plugins/Shell Script/shellcheck",
     "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "master",
+    "git-widget-placeholder": "develop",
     "last_opened_file_path": "/Users/pablogore/workspace/pablogore/ego-rs",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
@@ -93,6 +126,7 @@
       <option name="presentableId" value="Default" />
       <updated>1779396566431</updated>
       <workItem from="1779396567606" duration="3483000" />
+      <workItem from="1779508879160" duration="68773000" />
     </task>
     <servers />
   </component>

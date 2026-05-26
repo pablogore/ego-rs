@@ -1,0 +1,20 @@
+version: v2
+lint:
+  use:
+    - DEFAULT
+  except:
+    - ENUM_VALUE_NOT_CAPITALIZED
+    - PACKAGE_DIRECTORY_MISMATCH
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_STANDARD_NAME
+    - SERVICE_DIRECTORY_MISMATCH
+    - SERVICE_NAME
+    - SYNTAX
+    - TYPE_NAME
+breaking:
+  use:
+    - FILE
+build:
+  roots:
+    - .

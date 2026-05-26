@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/transport",
+]
+resolver = "2"
+
+[workspace.dependencies]
+mockall = "0.12"

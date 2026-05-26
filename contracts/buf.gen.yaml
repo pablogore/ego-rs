@@ -1,0 +1,13 @@
+version: v1
+plugins:
+  - name: prost
+    out: crates/ego-rs-contracts/src/generated
+    opt:
+      - types
+      - bytes
+  - name: tonic
+    out: crates/ego-rs-contracts/src/generated
+    opt:
+      - transport
+      - server
+      - client

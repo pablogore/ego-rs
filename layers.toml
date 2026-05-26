@@ -1,0 +1,14 @@
+# Maps each workspace crate to its architectural layer.
+# Allowed layers: domain, application, infrastructure, transport
+#
+# Dependency rules (enforced by scripts/verify-layers.sh):
+#   transport      → application, domain           (NOT infrastructure)
+#   infrastructure → application, domain           (NOT transport)
+#   application    → domain                        (NOT infrastructure, NOT transport)
+#   domain         → nothing                       (no internal deps)
+
+[layers]
+"ego-domain" = "domain"
+"ego-application" = "application"
+"ego-infrastructure" = "infrastructure"
+"ego-transport" = "transport"

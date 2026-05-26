@@ -1,0 +1,16 @@
+[package]
+name = "ego-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ego-domain = { path = "../domain" }
+ego-application = { path = "../application" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = "0.4"

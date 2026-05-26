@@ -1,0 +1,26 @@
+#!/bin/bash
+
+case $1 in
+  lint)
+    buf lint contracts/
+    ;;
+  breaking)
+    if [ ! -f buf.lock ]; then
+      echo "buf.lock is missing. Breaking change check cannot proceed."
+      exit 1
+    fi
+    buf breaking --against buf.lock contracts/
+    ;;
+  generate)
+    buf generate contracts/
+    ;;
+  check)
+    buf lint contracts/
+    buf breaking --against buf.lock contracts/
+    buf generate contracts/
+    ;;
+  *)
+    echo "Unknown command: $1"
+    exit 1
+    ;;
+esac
