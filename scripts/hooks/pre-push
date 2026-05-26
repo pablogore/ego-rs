@@ -18,6 +18,13 @@ if ! cargo clippy --workspace -- -D warnings; then
 fi
 
 echo ""
+echo "==> make buf"
+if ! make buf; then
+    echo "ERROR: Buf checks failed. Fix Buf issues before pushing."
+    exit 1
+fi
+
+echo ""
 echo "==> cargo test --workspace"
 if ! cargo test --workspace; then
     echo "ERROR: tests failed. Fix failing tests before pushing."

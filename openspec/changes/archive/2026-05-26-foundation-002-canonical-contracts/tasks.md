@@ -49,12 +49,12 @@
 - [x] 8.4 `buf generate` — runs `buf generate` using `buf.gen.yaml`, outputs to configured crate path
 - [x] 8.5 `buf check` — runs lint + breaking + generate in sequence
 - [x] 8.6 Add `buf` target to `Makefile` (`.PHONY: buf`)
-- [ ] 8.7 Integrate `make buf` into pre-push hook (after clippy, before tests)
-- [ ] 8.8 Add `buf.lock` to `.gitignore`? No — commit `buf.lock` for reproducible breaking checks
-- [ ] 8.9 Document `scripts/buf` usage in CONTRIBUTING.md
+- [x] 8.7 Integrate `make buf` into pre-push hook (after clippy, before tests)
+- [x] 8.8 Add `buf.lock` to `.gitignore`? No — commit `buf.lock` for reproducible breaking checks
+- [x] 8.9 Document `scripts/buf` usage in CONTRIBUTING.md
 
 ## 9. Testing governance
 
-- [ ] 9.1 Define contract testing requirements (schema compatibility, generation expectations)
-- [ ] 9.2 Document infrastructure constraints (no live brokers, databases, network)
-- [ ] 9.3 Add contract test expectations to review checklist
+- [x] 9.1 Define contract testing requirements (schema compatibility, generation expectations)
+- [x] 9.2 Document infrastructure constraints (no live brokers, databases, network)
+- [x] 9.3 Add contract test expectations to review checklist

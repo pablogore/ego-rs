@@ -13,3 +13,4 @@ Before submitting any future OpenSpec change, verify SPEC-000 compliance:
 - [ ] New production workflows include structured observability.
 - [ ] Breaking changes document compatibility, migration, and rollback impact.
 - [ ] Constitution changes are proposed as dedicated OpenSpec amendments.
+- [ ] Contract tests are defined and pass.
