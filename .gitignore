@@ -4,11 +4,16 @@
 
 # IDE / Editor
 .idea/
+.idea/workspace.xml
 .vscode/
 *.iml
 .cursor/
 .claude/
 .cline/
+.aider.chat.history.md
+.aider.conf.yml
+.aider.input.history
+.aider.tags.cache.v4
 
 # OS files
 .DS_Store
