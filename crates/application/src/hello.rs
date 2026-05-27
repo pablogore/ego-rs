@@ -1,9 +1,8 @@
-use ego_domain::Query;
+use ego_domain::hello::{HelloQuery, HelloResponse};
+
+use crate::ports::QueryHandler;
 
 /// Error returned by [`HelloHandler`].
-///
-/// Wraps a human-readable error description. In production,
-/// replace with a proper error enum.
 #[derive(Debug)]
 pub struct HelloError(String);
 
@@ -15,30 +14,31 @@ impl std::fmt::Display for HelloError {
 
 impl std::error::Error for HelloError {}
 
-/// A handler that responds to [`HelloQuery`](ego_domain::hello::HelloQuery)
-/// with a greeting.
+/// A handler that responds to [`HelloQuery`] with a greeting.
 ///
-/// This is the reference implementation of a [`QueryHandler`](crate::ports::QueryHandler).
-/// It demonstrates the hexagonal flow: domain defines the query, application
-/// implements the handler, transport exposes it via HTTP/gRPC.
+/// This is the reference implementation of a [`QueryHandler`].
+/// It demonstrates the hexagonal flow: domain defines the query,
+/// application implements the handler, transport exposes via HTTP/gRPC.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use ego_domain::hello::HelloQuery;
+/// use ego_application::ports::QueryHandler;
+/// use ego_application::hello::HelloHandler;
 ///
 /// let handler = HelloHandler;
-/// let result = handler.handle(&HelloQuery);
-/// assert_eq!(result.unwrap(), "Hello from ego-rs!");
+/// let result = QueryHandler::handle(&handler, &HelloQuery);
+/// assert_eq!(result.unwrap().message, "Hello from ego-rs!");
 /// ```
 pub struct HelloHandler;
 
-impl HelloHandler {
-    /// Process a hello query. Returns a static greeting.
-    ///
-    /// In a real handler, this would likely fetch data from a projection
-    /// or read model through a port.
-    pub fn handle(&self, _query: &impl Query) -> Result<String, HelloError> {
-        Ok("Hello from ego-rs!".to_string())
+impl QueryHandler<HelloQuery> for HelloHandler {
+    type Error = HelloError;
+
+    fn handle(&self, _query: &HelloQuery) -> Result<HelloResponse, Self::Error> {
+        Ok(HelloResponse {
+            message: "Hello from ego-rs!".to_string(),
+        })
     }
 }

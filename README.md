@@ -1,101 +1,39 @@
-# OPSX/OpenSpec Proposal Mode
+# ego-rs
 
-Generate specification proposals only. No implementation.
+A hexagonal, actor-oriented, deterministic backend framework for Rust.
 
-## Project Constitution (SPEC-000)
+## Principles
 
-All project changes must comply with [SPEC-000: Project Constitution](openspec/changes/spec-000-project-constitution-objetivo/specs/project-constitution/spec.md). This constitution defines immutable rules for deterministic-first behavior, fail-closed decisions, explicit state, append-only lineage, OpenSpec-driven development, mandatory hexagonal architecture, CQRS + event-driven design, >=95% test coverage, no real resources in unit tests, observability by default, and backward compatibility.
+- **Deterministic-first** — same inputs, same outputs, every time
+- **Fail-closed** — ambiguous states produce rejection, not silent continuation
+- **Hexagonal architecture** — domain owns contracts, runtime owns execution
+- **CQRS + Event Sourcing** — commands mutate, events record, queries read
+- **Framework-first** — build the framework before modeling runtime governance
+- **Minimal primitives** — one concept, one trait, one responsibility
 
-Future OpenSpec changes must reference SPEC-000 and demonstrate constitution compliance. Amendments to the constitution require a dedicated OpenSpec change that preserves the rationale for the previous rule.
+## Crates
+
+| Crate | Layer | Description |
+|-------|-------|-------------|
+| `ego-domain` | Domain | Core contracts: Actor, Command, Event, Query |
+| `ego-application` | Application | Command/Query handlers, ports |
+| `ego-infrastructure` | Infrastructure | Adapters (in-memory, persistence) |
+| `ego-transport` | Transport | HTTP/gRPC endpoint wiring |
+| `runtime-slice` | Runtime (core) | Deterministic execution types |
 
 ## Quick Start
 
-```bash
-# Create a proposal
-"create endpoint returning uuid and timestamp"
+```rust
+use ego_domain::actor::Actor;
+
+struct MyActor;
+impl Actor for MyActor {
+    type Message = String;
+}
 ```
 
-## What It Does
+See [COOKBOOK.md](./COOKBOOK.md) for usage recipes and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
-Transforms implementation wording into capability proposals:
+## License
 
-- `create endpoint` → `expose capability through transport`
-- `uuid` → `identifier`
-- `timestamp` → `temporal metadata`
-
-## Output Files
-
-### proposal.md
-
-- Why
-- Impact
-- Risks
-- NFRs
-
-### design.md
-
-- Purpose
-- Rules
-- Anti-patterns
-- Review checklist
-
-### spec.md
-
-- Capability requirements
-- Scenarios
-- Expected behavior
-- Constraints
-
-### tasks.md
-
-- Capability tasks
-- Validation tasks
-- Testing tasks
-
-## Rules
-
-1. **Preserve intent** - Don't generalize domain
-2. **One abstraction level** - uuid → identifier, not → entity reference
-3. **Proportional scope** - Small request → small proposal
-4. **Verb-preserving** - "create capability" not "creation capability"
-5. **No speculative architecture** - Don't invent CRUD, lifecycle, validation
-
-## Examples
-
-### Input
-
-```
-create endpoint returning uuid and timestamp
-```
-
-### Output
-
-Capability proposal returning identifier and temporal metadata.
-
-### Input
-
-```
-create hello endpoint
-```
-
-### Output
-
-Expose hello capability through transport.
-
-## Don't Do
-
-- ❌ Ask clarification questions
-- ❌ Expand into CRUD workflows
-- ❌ Add validation rules unless requested
-- ❌ Invent entities or business semantics
-- ❌ Generate implementation
-
-## Success Criteria
-
-Result feels like:
-
-- ✓ Proportional
-- ✓ Capability-driven
-- ✓ Semantically close to user intent
-- ✓ Specification-oriented
-- ✓ Boring engineering
+MIT

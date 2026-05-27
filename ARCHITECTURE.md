@@ -96,7 +96,7 @@ ego-rs/
 │   ├── application/   # ego-application: handlers
 │   ├── infrastructure/ # ego-infrastructure: adapters
 │   ├── transport/     # ego-transport: HTTP/gRPC
-│   └── runtime/       # ego-runtime: actor execution (CORE-003)
+│   └── runtime/       # ego-runtime: actor execution (CORE-003, not yet created)
 ├── core/
 │   └── runtime-slice/ # runtime-slice: deterministic execution types
 ├── contracts/         # Protobuf contracts (Buf)
@@ -109,7 +109,7 @@ ego-rs/
 | ID | Name | Status |
 |----|------|--------|
 | CORE-001 | Deterministic Runtime Slice | In progress |
-| CORE-002 | Actor Primitive (domain) | Pending |
+| CORE-002 | Actor Primitive (domain) | Done |
 | CORE-003 | Runtime Actor Execution | Pending |
 | CORE-004 | Persistence SPI | Pending |
 | CORE-005 | Observability SPI | Pending |

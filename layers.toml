@@ -12,3 +12,4 @@
 "ego-application" = "application"
 "ego-infrastructure" = "infrastructure"
 "ego-transport" = "transport"
+"runtime-slice" = "domain"

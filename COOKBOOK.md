@@ -183,7 +183,7 @@ impl QueryHandler<GetUser> for GetUserHandler {
 use ego_domain::actor::{Actor, ActorId, actor_id};
 
 // Actor identity — compile-time, deterministic
-const USER_ACTOR: &ActorId = actor_id!(user_manager);
+let user_actor: &'static ActorId = actor_id!(user_manager);
 
 enum UserMessage {
     CreateUser { name: String, email: String },
@@ -203,7 +203,10 @@ The `actor_id!` macro produces a deterministic `&'static ActorId` at compile tim
 
 ---
 
-## Recipe 7: Spawn and Send Messages (CORE-003)
+## Recipe 7: Spawn and Send Messages (CORE-003 — coming)
+
+> Note: CORE-003 (Runtime Actor Execution) is **Pending**. The `ego-runtime` crate
+> and its types shown below are aspirational — the final API may differ.
 
 ```rust
 use ego_runtime::{ActorSystem, ActorRef};
@@ -220,12 +223,15 @@ actor_ref.send(UserMessage::CreateUser {
 }).expect("mailbox full");
 
 // Stop the actor
-system.stop(USER_ACTOR);
+system.stop(actor_id!(user_manager));
 ```
 
 ---
 
-## Recipe 8: Supervision (CORE-003)
+## Recipe 8: Supervision (CORE-003 — coming)
+
+> Note: CORE-003 (Runtime Actor Execution) is **Pending**. The API below is
+> aspirational and may change when implemented.
 
 ```rust
 use ego_runtime::supervisor::{RuntimeSupervisor, SupervisionStrategy};
