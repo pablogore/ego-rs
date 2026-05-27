@@ -1,2 +1,32 @@
+# Rust
 /target
+**/*.rs.bk
+
+# IDE / Editor
+.idea/
+.vscode/
+*.iml
+.cursor/
+.claude/
+.cline/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# AI / Coding assistants
 .aider*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll

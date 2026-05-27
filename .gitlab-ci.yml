@@ -1,0 +1,27 @@
+stages:
+  - governance
+
+governance:
+  stage: governance
+  script:
+    - chmod +x scripts/governance/gov
+    - ./scripts/governance/gov list
+    - |
+      BRANCH="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_BRANCH}"
+      if [[ "$BRANCH" != "main" ]] && [[ ! "$BRANCH" =~ ^feature/SPEC-[0-9]+- ]] && [[ ! "$BRANCH" =~ ^review/SPEC-[0-9]+$ ]]; then
+        echo "ERROR: Branch '${BRANCH}' does not follow governance naming"
+        exit 1
+      fi
+    - |
+      # Extract spec and validate state
+      SPEC_ID=$(echo "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_BRANCH}" | grep -o 'SPEC-[0-9]*' || true)
+      if [[ -n "$SPEC_ID" ]]; then
+        STATE=$(./scripts/governance/gov status "$SPEC_ID" | grep "STATE:" | awk '{print $2}')
+        if [[ "$CI_MERGE_REQUEST_IID" ]] && [[ "$STATE" != "VALIDATED" && "$STATE" != "DONE" ]]; then
+          echo "ERROR: ${SPEC_ID} is ${STATE}, must be VALIDATED to merge"
+          exit 1
+        fi
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"

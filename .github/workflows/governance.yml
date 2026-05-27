@@ -1,0 +1,42 @@
+name: Governance Checks
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches: ["main"]
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check spec approvals
+        run: |
+          chmod +x scripts/governance/gov
+          ./scripts/governance/gov list
+      - name: Validate branch naming
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          if [[ "$BRANCH" != "main" ]] && [[ ! "$BRANCH" =~ ^feature/SPEC-[0-9]+- ]] && [[ ! "$BRANCH" =~ ^review/SPEC-[0-9]+$ ]]; then
+            echo "ERROR: Branch '${BRANCH}' does not follow governance naming"
+            echo "Expected: feature/SPEC-XXX-slug or review/SPEC-XXX"
+            exit 1
+          fi
+          echo "Branch naming valid"
+      - name: Block unapproved implementations
+        run: |
+          # Fail if any IMPLEMENTING specs lack APPROVED state
+          ./scripts/governance/gov list | grep -i "implementing" && exit 1 || exit 0
+      - name: Validate merge readiness
+        if: github.event_name == 'pull_request'
+        run: |
+          # Extract spec from branch name
+          BRANCH="${{ github.head_ref }}"
+          SPEC_ID=$(echo "$BRANCH" | grep -o 'SPEC-[0-9]*' || true)
+          if [[ -n "$SPEC_ID" ]]; then
+            STATE=$(./scripts/governance/gov status "$SPEC_ID" | grep "STATE:" | awk '{print $2}')
+            if [[ "$STATE" != "VALIDATED" && "$STATE" != "DONE" ]]; then
+              echo "ERROR: ${SPEC_ID} is ${STATE}, must be VALIDATED to merge"
+              exit 1
+            fi
+          fi
