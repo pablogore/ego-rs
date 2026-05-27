@@ -1,42 +1,47 @@
-## 1. Runtime Slice Foundation
+## 1. Workspace Integration
 
-- [x] 1.1 Create `core/runtime-slice/` module structure with minimal types
-- [x] 1.2 Implement deterministic execution context with explicitly governed deterministic inputs
-- [x] 1.3 Implement command → behavior → state flow executor
-- [x] 1.4 Implement one minimal executable constitutional example
+- [ ] 1.1 Add `core/runtime-slice` to workspace members in root `Cargo.toml`
+- [ ] 1.2 Rename package to `ego-runtime-slice` for naming consistency (optional, match workspace convention)
+- [ ] 1.3 Verify `cargo build --workspace` succeeds with runtime-slice as member
 
-## 2. Persistence & Replay
+## 2. Executor Implementation
 
-- [x] 2.1 Implement in-memory persistence slice for runtime validation
-- [x] 2.2 Implement replay-safe state reconstruction for deterministic restoration
-- [x] 2.3 Implement replay execution with deterministic equivalence verification
+- [ ] 2.1 Implement `crate::executor` in `core/runtime-slice/src/executor.rs`
+- [ ] 2.2 Executor SHALL accept units of work and transition them through lifecycle states (Pending → Running → Completed/Failed)
+- [ ] 2.3 Executor SHALL fail closed on ambiguous states
+- [ ] 2.4 Executor SHALL produce deterministic observable semantics
 
-## 3. Projection & Lifecycle
+## 3. Projection Implementation
 
-- [x] 3.1 Implement minimal projection materialization for runtime validation
-- [x] 3.2 Implement minimal governed lifecycle transitions required by the runtime slice
-- [x] 3.3 Implement lifecycle immutability enforcement
+- [ ] 3.1 Implement `crate::projection` in `core/runtime-slice/src/projection.rs`
+- [ ] 3.2 Projection SHALL materialize execution outcomes into observable semantics
+- [ ] 3.3 Observable semantics SHALL be non-mutating
 
-## 4. Observability
+## 4. Validation Implementation
 
-- [x] 4.1 Implement semantic observable events for runtime slice stages
-- [x] 4.2 Implement observable semantics collection without runtime mutation
-- [ ] 4.3 Implement observability completeness verification
+- [ ] 4.1 Implement `crate::validation` in `core/runtime-slice/src/validation.rs`
+- [ ] 4.2 Validate deterministic equivalence across multiple executions with identical inputs
+- [ ] 4.3 Validate replay equivalence (original vs replay produces same semantics)
+- [ ] 4.4 Validate fail-closed behavior on ambiguous states
 
-## 5. Validation
+## 5. Module Wiring
 
-- [ ] 5.1 Verify deterministic equivalence through multiple executions with identical governed inputs
-- [ ] 5.2 Verify replay equivalence preserves all observable semantics
-- [ ] 5.3 Verify fail-closed behavior on ambiguous states
-- [ ] 5.4 Verify ownership-chain preservation through execution flow
-- [ ] 5.5 Verify constitutional ownership chain remains explicit and non-overlapping
-- [ ] 5.6 Verify no runtime coupling to infrastructure
-- [ ] 5.7 Verify minimal implementation boundary maintained
-- [ ] 5.8 Verify CORE-001 remains proof-of-execution only
-- [ ] 5.9 Verify no runtime architecture leakage exists
-- [ ] 5.10 Verify lifecycle neutrality preserved
-- [ ] 5.11 Verify observability remains semantic and non-mutating
-- [ ] 5.12 Verify deterministic equivalence remains implementation-neutral
-- [ ] 5.13 Verify no FOUNDATION mutation occurred
-- [ ] 5.14 Verify Runtime Execution Model authority remains distinct from Behavior, Lifecycle, Projection, Persistence, Placement, and Runtime Abstraction
-- [ ] 5.15 Verify Runtime Abstraction constitutional compliance
+- [ ] 5.1 Declare `executor`, `projection`, `validation` modules in `core/runtime-slice/src/lib.rs`
+- [ ] 5.2 Re-export public API types
+
+## 6. Tests
+
+- [ ] 6.1 Test: executor runs unit of work deterministically — identical inputs → identical observable semantics
+- [ ] 6.2 Test: executor transitions work Pending → Running → Completed
+- [ ] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
+- [ ] 6.4 Test: projection materializes non-mutating observable semantics
+- [ ] 6.5 Test: replay produces identical observable semantics as original execution
+- [ ] 6.6 Test: validation confirms deterministic equivalence
+- [ ] 6.7 Test: runtime slice is infrastructure-free — no I/O, no network, no database
+
+## 7. Verification
+
+- [ ] 7.1 Run `cargo test --workspace` — all tests pass
+- [ ] 7.2 Run `cargo clippy --workspace -- -D warnings` — no warnings
+- [ ] 7.3 Verify runtime-slice is a workspace member
+- [ ] 7.4 Verify all modules declared in lib.rs
