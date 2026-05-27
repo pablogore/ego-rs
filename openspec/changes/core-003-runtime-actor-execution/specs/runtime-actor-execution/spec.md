@@ -95,6 +95,10 @@ Each actor SHALL process exactly one message at a time. The runtime SHALL NOT be
 - **WHEN** a parent with strategy Escalate receives a child failure
 - **THEN** the failure SHALL propagate to the grandparent supervisor
 
+#### Scenario: Root supervisor handles unhandled failure
+- **WHEN** escalation reaches the root supervisor with no parent
+- **THEN** the actor SHALL be terminated; no further execution SHALL occur
+
 ### Requirement: Communication guarantees
 
 The runtime SHALL enforce CORE-002's communication contract:

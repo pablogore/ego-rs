@@ -10,7 +10,8 @@ The runtime slice SHALL execute behavior deterministically. Given identical inpu
 
 #### Scenario: Fail-closed on ambiguous state
 - **WHEN** an ambiguous state is encountered during execution
-- **THEN** the runtime slice SHALL fail closed
+- **THEN** the runtime slice SHALL fail closed by transitioning the unit of work to the **Failed** terminal state
+- **AND** the unit of work SHALL NOT produce execution effects
 
 ### Requirement: Runtime slice is minimal and in-memory
 

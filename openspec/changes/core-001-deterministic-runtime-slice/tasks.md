@@ -1,6 +1,6 @@
 ## 1. Workspace Integration
 
-- [ ] 1.1 Add `core/runtime-slice` to workspace members in root `Cargo.toml`
+- [x] 1.1 Add `core/runtime-slice` to workspace members in root `Cargo.toml`
 - [ ] 1.2 Rename package to `ego-runtime-slice` for naming consistency (optional, match workspace convention)
 - [ ] 1.3 Verify `cargo build --workspace` succeeds with runtime-slice as member
 
@@ -32,7 +32,7 @@
 ## 6. Tests
 
 - [ ] 6.1 Test: executor runs unit of work deterministically — identical inputs → identical observable semantics
-- [ ] 6.2 Test: executor transitions work Pending → Running → Completed
+- [ ] 6.2 Test: executor transitions work Pending → Running → Completed/Failed
 - [ ] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
 - [ ] 6.4 Test: projection materializes non-mutating observable semantics
 - [ ] 6.5 Test: replay produces identical observable semantics as original execution

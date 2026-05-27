@@ -22,7 +22,7 @@ The `Observability` trait SHALL define:
 - `metric(name: &str, value: f64)` — record a metric
 - `log(level: Level, message: &str)` — record a log entry
 
-`SemanticEvent` SHALL contain: event_name, correlation_id, actor_id, lifecycle_state, timestamp.
+`SemanticEvent` SHALL contain: event_name, correlation_id, actor_id, lifecycle_state, timestamp, metadata map.
 
 #### Scenario: Trace event captured
 - **WHEN** a trace is recorded via the Observability trait

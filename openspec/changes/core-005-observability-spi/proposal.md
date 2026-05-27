@@ -6,7 +6,7 @@ ego-rs is a backend-platform / actor-platform framework that treats observabilit
 
 - Introduces the canonical Observability SPI for ego-rs
 - Defines observable semantics: execution visibility, actor lifecycle visibility, message visibility, failure visibility, replay visibility, placement visibility, ownership visibility, persistence visibility, locality visibility, restoration visibility
-- Defines a canonical event model with semantic event categories (not telemetry payloads, not tracing spans, not logs, not metrics schema)
+- Defines a canonical event model with semantic event categories expressed through canonical observability channels (trace, metric, log) — not vendor telemetry representations
 - Defines deterministic correlation semantics independent of trace vendor IDs, runtime handles, transport identifiers, or network topology
 - Defines replay-safe observability: replay MUST NOT create semantic ambiguity; identical inputs produce identical observable semantics
 - Defines cluster-aware observability that observes placement, ownership, partition transitions, membership, and locality but does NOT own cluster behavior

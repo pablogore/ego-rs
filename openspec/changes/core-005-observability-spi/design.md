@@ -25,7 +25,7 @@ FOUNDATION-007 establishes the Observability SPI — the constitutional contract
 
 1. Define the canonical Observability SPI as a hexagonal port — pure semantic contract, no infrastructure
 2. Define observable semantics as first-class types: execution visibility, lifecycle visibility, message visibility, failure visibility, replay visibility, placement visibility, ownership visibility, persistence visibility, locality visibility, restoration visibility
-3. Define a deterministic event model with semantic event categories — NOT telemetry payloads, NOT tracing spans, NOT logs, NOT metrics
+3. Define a deterministic event model with semantic event categories expressed through canonical observability channels (trace, metric, log) — NOT vendor telemetry representations
 4. Define a correlation model that is deterministic, replay-safe, topology-independent, transport-independent
 5. Establish the Deterministic Observability Axiom as a constitutional invariant
 6. Define replay-safe observability semantics that distinguish live execution from replay execution
@@ -56,15 +56,15 @@ FOUNDATION-007 establishes the Observability SPI — the constitutional contract
 - Runtime plugin: Would couple observability to runtime lifecycle — rejected because runtime must be observable, not own observability
 - Event bus: Would introduce transport concerns — rejected because transport is an adapter concern, not a constitutional one
 
-### Decision 2: Semantic event categories over telemetry types
+### Decision 2: Three telemetry channels with semantic event categories
 
-**Choice**: Define events as semantic categories (execution_started, actor_created, replay_completed) rather than telemetry types (span, log, metric, trace).
+**Choice**: The SPI exposes three telemetry channels — `trace`, `metric`, `log` — as the interface. Semantic event categories (`execution_started`, `actor_created`, `replay_completed`) are embedded within these channels through the `SemanticEvent` type.
 
-**Rationale**: Telemetry types are implementation concerns. Semantic categories are platform semantics. The SPI defines the semantics; adapters map semantic categories to telemetry representations. The SPI defines the semantics; adapters define the mapping.
+**Rationale**: Three telemetry channels match the standard observability pillars (tracing, metrics, logging) that every adapter maps to. Semantic event categories define WHAT is emitted through these channels. The `SemanticEvent` struct carries the semantic payload; adapters map to vendor-specific representations. This avoids forcing every adapter author to re-invent the channel mapping.
 
 **Alternatives considered**:
-- Define spans/logs/metrics directly: Would couple SPI to telemetry concepts — rejected because it precludes adapters that map differently
-- Define a generic event envelope: Would lose semantic specificity — rejected because type safety is required for deterministic guarantees
+- Pure semantic categories without telemetry channels: Would force each adapter to independently decide which telemetry type maps to which semantic event — rejected because it shifts non-trivial mapping decisions to every adapter author.
+- Define spans/logs/metrics as the only interface without semantic categories: Would lose semantic specificity — rejected because type safety for deterministic guarantees requires structured event types.
 
 ### Decision 3: Deterministic correlation over vendor trace IDs
 

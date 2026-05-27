@@ -47,7 +47,7 @@ The proposal establishes a single coherent capability `persistence-spi` encompas
 - NOT a transport specification
 - NOT a CQRS or Event Store implementation
 - NOT a workflow or saga orchestration engine
-- NOT a repository interface or language-level trait definition in Rust
+- NOT a repository interface (canonical Rust trait ports are the constitutional port boundary, NOT a repository abstraction)
 - NOT a runtime adapter
 - NOT a migration engine or schema tooling
 - NOT a tenant isolation implementation strategy (schema-per-tenant, database-per-tenant)
@@ -64,14 +64,14 @@ Alternatives considered:
 - Split into per-concept specs: Rejected because it introduces circular dependencies (snapshot semantics depend on state and event semantics; failure model governs all) and forces readers to cross-reference constantly.
 - Split into contract vs. lifecycle vs. governance: Rejected because governance and lifecycle semantics are integral to each persistence concept.
 
-**Decision 2: Semantic contract only — no language-level interfaces**
+**Decision 2: Rust trait ports as constitutional interface**
 
-The SPI defines semantic contracts, not Rust traits, TypeScript interfaces, or any language binding.
+The Persistence SPI defines semantic contracts through canonical Rust trait ports in `crates/domain/`. These trait definitions are the constitutional port interface — they define WHAT the system guarantees, not how adapters implement storage. Implementation mechanics (storage engines, database connections, serialization) belong in adapter crates.
 
-Rationale: Constitutional specs define WHAT the system guarantees, not HOW it enforces those guarantees. Language-level interfaces are implementation concerns that belong in adapter crates.
+Rationale: In hexagonal architecture for Rust, domain-layer trait definitions are port boundaries, not implementation concerns. Infrastructure adapters implement these traits. The constitutional spec defines the trait methods and semantics; adapter crates provide the storage mechanics. This is consistent with FOUNDATION-001's hexagonal architecture — ports are constitutional, adapters are implementation.
 
 Alternatives considered:
-- Including Rust trait definitions: Rejected — would couple the constitution to a specific language and runtime, violating FOUNDATION-001's language neutrality principle.
+- Semantic contracts without trait definitions: Rejected — ports must be implementable by adapters; without canonical trait definitions at the port boundary, adapter contracts are ambiguous.
 - Including pseudo-code interfaces: Rejected — pseudo-code is neither normative nor implementable; it would create ambiguity about whether it is binding or illustrative.
 
 **Decision 3: Persistence Contract depends only on Runtime Contract and Canonical Contracts; Actor Contract consumes Persistence Contract**

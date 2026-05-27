@@ -109,11 +109,11 @@ ego-rs/
 | ID | Name | Status |
 |----|------|--------|
 | CORE-001 | Deterministic Runtime Slice | In progress |
-| CORE-002 | Actor Primitive (domain) | Done |
+| CORE-002 | Actor Primitive (domain) | Spec complete, not implemented |
 | CORE-003 | Runtime Actor Execution | Pending |
 | CORE-004 | Persistence SPI | Pending |
 | CORE-005 | Observability SPI | Pending |
-| CORE-007 | Cluster Model | Deferred |
+| CORE-007 | Cluster Model | Archived (deferred, post-MVP) |
 | CORE-010 | SDK + Developer API | Deferred |
 | CORE-011 | Examples | Deferred |
 

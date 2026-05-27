@@ -5,29 +5,16 @@ Foundation-005 defines the canonical Persistence SPI of ego-rs as a constitution
 ## What Changes
 
 - Introduce constitutional Persistence SPI as a semantic persistence contract — not a database abstraction, ORM, repository pattern, or storage engine
-- Define durability semantics: explicit acknowledgment, visibility boundaries, deterministic guarantees
-- Define state persistence semantics: actor/application state persistence, restoration, lifecycle relationship
-- Define event persistence semantics: append-only guarantees, ordering, replayability, idempotency
-- Define snapshot semantics: boundaries, restoration, consistency, lifecycle
-- Define replay persistence semantics: deterministic replay, restoration, consistency, fail-closed behavior
-- Define persistence capability model: mandatory, optional, and forbidden capabilities
-- Define persistence failure model: fail-closed semantics for durability ambiguity, partial writes, restoration ambiguity
-- Define persistence lifecycle: Requested → Persisting → Persisted → Restoring → Restored → Failed with invariants and transitions
-- Define Deterministic Persistence Axiom: identical inputs produce identical observable persistence outcomes
-- Define hexagonal boundaries: Persistence Contract depends only on Runtime Contract and Canonical Contracts; persistence remains transversal and actor-independent
-- Define unified persistence contract semantics: single coherent contract independent of storage realization
-- Define tenant isolation semantics: deterministic tenant boundaries for single and multi-tenant configurations
-- Define persistence evolution semantics: self-contained, reproducible, deterministic evolution without migration tooling coupling
-- Define persistence versioning semantics: version identifiers for state schemas, event schemas, and snapshot formats; version-aware persistence and restoration; fail-closed version mismatch handling; backward/forward compatibility semantics
-- Define ownership boundary: persistence does not own domain lifecycle semantics
-- Define governance: constitutional invariants, forbidden patterns, capability inflation protection, vendor neutrality, determinism enforcement
-- Define testing contract: deterministic tests, mock-only, replay reproducibility, no infrastructure dependencies, 95%+ coverage
-- Link to FOUNDATION-008 for canonical constitutional validation examples
+- Define core Persistence SPI traits (EventStore, SnapshotStore) with append and read semantics, optimistic concurrency via versioning
+- Define replay semantics: deterministic state reconstruction from event streams, snapshot + event catch-up
+- Define fail-closed behavior: version conflicts, ambiguous storage outcomes, partial writes all produce explicit errors
+- Define testing contract: in-memory adapters only, no real infrastructure, 95%+ coverage
+- Define ownership boundary: persistence does not own domain lifecycle semantics or execution
 
 ## Capabilities
 
 ### New Capabilities
-- `persistence-spi`: Canonical Persistence SPI encompassing durability, state persistence, event persistence, snapshot, replay, versioning semantics, capability model, failure model, lifecycle, deterministic axiom, hexagonal boundaries, governance, and testing contract. This is a single coherent capability — not decomposed into sub-capabilities — because the Persistence SPI is a unified constitutional surface whose sections are mutually dependent and must be validated as a whole.
+- `persistence-spi`: Canonical Persistence SPI encompassing core persistence port traits (EventStore, SnapshotStore), replay semantics, fail-closed behavior, ownership boundary, and testing contract. This is a single coherent capability — not decomposed into sub-capabilities — because the Persistence SPI is a unified constitutional surface whose sections are mutually dependent and must be validated as a whole.
 
 ### Modified Capabilities
 <!-- No existing capabilities are modified. This is a new foundation. -->

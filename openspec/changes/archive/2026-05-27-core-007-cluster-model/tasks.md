@@ -20,4 +20,4 @@
 - [ ] 3.2 Run `cargo clippy --workspace -- -D warnings` — no warnings
 - [ ] 3.3 Verify cluster model depends on actor model, not vice versa
 
-**Note:** CORE-007 is DEFERRED to post-MVP. Implement after CORE-002 (Actor Primitive), CORE-006 (Persistence SPI), and CORE-008 (Transport) are stable. The cluster model requires actors that can be distributed across nodes.
+**Note:** CORE-007 is DEFERRED to post-MVP. Implement after CORE-002 (Actor Primitive), CORE-004 (Persistence SPI), and transport are stable. The cluster model requires actors that can be distributed across nodes.

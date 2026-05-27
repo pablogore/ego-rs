@@ -23,7 +23,7 @@ CORE-002 defines the domain-layer actor contract: `Actor` trait, `ActorId`, sema
 
 ## Impact
 
-- New runtime implementation lives alongside `core/runtime-slice/` or in a new `crates/runtime/` crate
+- New runtime implementation lives in a new `crates/runtime/` crate
 - Depends on `core-002-actor-primitive` (for `Actor` trait, `ActorId`, lifecycle states) — unidirectional
 - No changes to domain layer
 - Infrastructure-agnostic: mailbox and dispatch are in-memory by default, no persistence or transport
