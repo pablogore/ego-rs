@@ -116,6 +116,17 @@ fn test_replay_identical_semantics() {
 }
 
 #[test]
+fn test_deterministic_equivalence_validation() {
+    let ctx = test_context(vec![("a", "1"), ("b", "2")]);
+    let executor = Executor::new();
+
+    let outcome_a = executor.execute(ctx.clone()).unwrap();
+    let outcome_b = executor.execute(ctx).unwrap();
+
+    assert!(validate_deterministic_equivalence(&outcome_a, &outcome_b));
+}
+
+#[test]
 fn test_executor_fail_closed_on_ambiguous_state() {
     let ctx = test_context(vec![("x", "1")]);
     let mut unit = UnitOfWork::new(ctx);
