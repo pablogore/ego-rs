@@ -1,0 +1,107 @@
+name: ego-rs
+version: 1.0.0
+schema: v1
+
+models:
+  - name: qwen-fast
+    provider: openai
+    model: qwen-fast
+    apiBase: http://localhost:4000/v1
+    apiKey: dummy
+    roles:
+      - chat
+      - autocomplete
+
+  - name: qwen-heavy
+    provider: openai
+    model: qwen-heavy
+    apiBase: http://localhost:4000/v1
+    apiKey: dummy
+    roles:
+      - edit
+      - apply
+
+rules:
+  - Repository reality is authoritative.
+  - Ground against existing types.
+  - Read existing files before editing.
+  - Compiler truth is authoritative.
+  - Tests truth is authoritative.
+  - No invented fields.
+  - No invented methods.
+  - No invented APIs.
+  - No module renames.
+  - No crate renames.
+  - No speculative refactors.
+  - No architectural redesign.
+  - No runtime leakage.
+  - Keep blast radius low.
+  - Keep 95 percent and fix 5 percent.
+  - Prefer minimal grounded patches.
+
+prompts:
+  - name: opsx-task
+    description: Execute a grounded OpenSpec task
+    prompt: |
+      Repository reality is authoritative.
+
+      HARD RULES
+
+      - No invented fields
+      - No invented methods
+      - No invented APIs
+      - No module renames
+      - No crate renames
+      - No speculative refactors
+      - No architectural redesign
+      - No runtime leakage
+      - Keep blast radius low
+
+      EXECUTION MODEL
+
+      1. Read repository reality
+      2. Ground against existing code
+      3. Modify only allowed files
+      4. Apply smallest valid patch
+      5. Stop
+
+      Repository > assumptions
+      Compiler > speculation
+      Tests > markdown
+
+      Task:
+
+      {{input}}
+
+  - name: opsx-explore
+    description: Analyze implementation reality before coding
+    prompt: |
+      You are in implementation analysis mode.
+
+      You are NOT implementing.
+
+      Analyze only:
+
+      - implementation reality
+      - compile blockers
+      - ownership clarity
+      - spec-to-code contradictions
+      - minimal next grounded action
+
+      Forbidden:
+
+      - speculative architecture
+      - overengineering
+      - roadmap expansion
+
+      Output:
+
+      1. Current Reality
+      2. Concrete Blockers
+      3. Actionable Spec Mismatches
+      4. Minimal Next Step
+      5. Stop
+
+      Request:
+
+      {{input}}

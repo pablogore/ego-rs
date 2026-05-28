@@ -31,7 +31,7 @@
 
 ## 6. Tests
 
-- [ ] 6.1 Test: executor runs unit of work deterministically — identical inputs → identical observable semantics
+- [x] 6.1 Test: executor runs unit of work deterministically — identical inputs → identical observable semantics
 - [ ] 6.2 Test: executor transitions work Pending → Running → Completed/Failed
 - [ ] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
 - [ ] 6.4 Test: projection materializes non-mutating observable semantics
@@ -44,4 +44,3 @@
 - [ ] 7.1 Run `cargo test --workspace` — all tests pass
 - [ ] 7.2 Run `cargo clippy --workspace -- -D warnings` — no warnings
 - [ ] 7.3 Verify runtime-slice is a workspace member
-- [ ] 7.4 Verify all modules declared in lib.rs
