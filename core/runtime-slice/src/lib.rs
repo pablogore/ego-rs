@@ -25,6 +25,7 @@
 //! it into the workspace and implement runtime behavior.
 
 pub mod types;
+pub mod executor_tests;
 
 pub use types::{
     DeterministicInput, ExecutionContext, ExecutionOutcome, RuntimeSliceError, RuntimeSliceId,
