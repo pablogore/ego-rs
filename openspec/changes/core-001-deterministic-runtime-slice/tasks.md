@@ -36,7 +36,7 @@
 - [x] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
 - [x] 6.4 Test: projection materializes non-mutating observable semantics
 - [x] 6.5 Test: replay produces identical observable semantics as original execution
-- [ ] 6.6 Test: validation confirms deterministic equivalence
+- [x] 6.6 Test: validation confirms deterministic equivalence
 - [ ] 6.7 Test: runtime slice is infrastructure-free — no I/O, no network, no database
 
 ## 7. Verification
