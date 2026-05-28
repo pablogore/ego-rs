@@ -92,3 +92,14 @@ fn test_infrastructure_free() {
     let projection = materialize(&outcome);
     assert!(!projection.observable_semantics.is_empty());
 }
+
+#[test]
+fn test_executor_fail_closed_on_ambiguous_state() {
+    let ctx = test_context(vec![("x", "1")]);
+    let mut unit = UnitOfWork::new(ctx);
+    unit.state = LifecycleState::Running;
+
+    let executor = Executor::new();
+    let result = executor.accept(unit);
+    assert!(result.is_err());
+}
