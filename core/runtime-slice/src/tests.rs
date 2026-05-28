@@ -105,6 +105,17 @@ fn test_infrastructure_free() {
 }
 
 #[test]
+fn test_replay_identical_semantics() {
+    let ctx = test_context(vec![("key", "value")]);
+    let executor = Executor::new();
+
+    let original = executor.execute(ctx.clone()).unwrap();
+    let replay = executor.execute(ctx).unwrap();
+
+    assert_eq!(original.observable_semantics, replay.observable_semantics);
+}
+
+#[test]
 fn test_executor_fail_closed_on_ambiguous_state() {
     let ctx = test_context(vec![("x", "1")]);
     let mut unit = UnitOfWork::new(ctx);
