@@ -84,6 +84,17 @@ fn test_validation_deterministic_equivalence() {
 }
 
 #[test]
+fn test_projection_non_mutating() {
+    let ctx = test_context(vec![("a", "1")]);
+    let executor = Executor::new();
+    let outcome = executor.execute(ctx).unwrap();
+
+    let projection = materialize(&outcome);
+    assert!(is_non_mutating(&outcome, &projection));
+    assert_eq!(outcome.slice_id.as_str(), projection.slice_id);
+}
+
+#[test]
 fn test_infrastructure_free() {
     let ctx = test_context(vec![("x", "1")]);
     let executor = Executor::new();
