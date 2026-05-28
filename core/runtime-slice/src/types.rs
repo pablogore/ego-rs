@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// # Example
 ///
 /// ```rust
-/// use runtime_slice::types::{RuntimeSliceId, RuntimeSliceError};
+/// use ego_runtime_slice::types::{RuntimeSliceId, RuntimeSliceError};
 ///
 /// let id = RuntimeSliceId::new("order-processing-001").unwrap();
 /// assert_eq!(id.as_str(), "order-processing-001");
@@ -49,7 +49,7 @@ impl RuntimeSliceId {
 /// # Example
 ///
 /// ```rust
-/// use runtime_slice::types::DeterministicInput;
+/// use ego_runtime_slice::types::DeterministicInput;
 ///
 /// let input = DeterministicInput::new("user_id", "abc-123").unwrap();
 /// assert_eq!(input.key, "user_id");
@@ -89,7 +89,7 @@ impl DeterministicInput {
 /// # Example
 ///
 /// ```rust
-/// use runtime_slice::types::{ExecutionContext, RuntimeSliceId, DeterministicInput};
+/// use ego_runtime_slice::types::{ExecutionContext, RuntimeSliceId, DeterministicInput};
 ///
 /// let slice_id = RuntimeSliceId::new("batch-42").unwrap();
 /// let inputs = vec![DeterministicInput::new("count", "100").unwrap()];
@@ -131,7 +131,7 @@ impl ExecutionContext {
 /// # Example
 ///
 /// ```rust
-/// use runtime_slice::types::{ExecutionOutcome, RuntimeSliceId};
+/// use ego_runtime_slice::types::{ExecutionOutcome, RuntimeSliceId};
 ///
 /// let slice_id = RuntimeSliceId::new("batch-42").unwrap();
 /// let outcome = ExecutionOutcome::new(

@@ -1,7 +1,7 @@
 ## 1. Workspace Integration
 
 - [x] 1.1 Add `core/runtime-slice` to workspace members in root `Cargo.toml`
-- [ ] 1.2 Rename package to `ego-runtime-slice` for naming consistency (optional, match workspace convention)
+- [x] 1.2 Rename package to `ego-runtime-slice` for naming consistency (optional, match workspace convention)
 - [x] 1.3 Verify `cargo build --workspace` succeeds with runtime-slice as member
 
 ## 2. Executor Implementation
