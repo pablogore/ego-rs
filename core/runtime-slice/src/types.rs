@@ -180,7 +180,7 @@ impl ExecutionOutcome {
 /// |---------|---------|
 /// | `AmbiguousInput(msg)` | Input validation failed |
 /// | `AmbiguousOutcome(msg)` | Outcome validation failed |
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum RuntimeSliceError {
     /// Input was empty, whitespace-only, or otherwise ambiguous.
     #[error("ambiguous input: {0}")]
