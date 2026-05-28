@@ -33,7 +33,7 @@
 
 - [x] 6.1 Test: executor runs unit of work deterministically — identical inputs → identical observable semantics
 - [x] 6.2 Test: executor transitions work Pending → Running → Completed/Failed
-- [ ] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
+- [x] 6.3 Test: executor fail-closed on ambiguous state — rejects, does not execute
 - [ ] 6.4 Test: projection materializes non-mutating observable semantics
 - [ ] 6.5 Test: replay produces identical observable semantics as original execution
 - [ ] 6.6 Test: validation confirms deterministic equivalence
