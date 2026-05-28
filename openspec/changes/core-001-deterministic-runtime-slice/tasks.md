@@ -37,7 +37,7 @@
 - [x] 6.4 Test: projection materializes non-mutating observable semantics
 - [x] 6.5 Test: replay produces identical observable semantics as original execution
 - [x] 6.6 Test: validation confirms deterministic equivalence
-- [ ] 6.7 Test: runtime slice is infrastructure-free — no I/O, no network, no database
+- [x] 6.7 Test: runtime slice is infrastructure-free — no I/O, no network, no database
 
 ## 7. Verification
 

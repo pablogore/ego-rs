@@ -127,6 +127,16 @@ fn test_deterministic_equivalence_validation() {
 }
 
 #[test]
+fn test_infrastructure_free() {
+    let ctx = test_context(vec![("x", "1")]);
+    let executor = Executor::new();
+    let outcome = executor.execute(ctx).unwrap();
+
+    let projection = materialize(&outcome);
+    assert!(!projection.observable_semantics.is_empty());
+}
+
+#[test]
 fn test_executor_fail_closed_on_ambiguous_state() {
     let ctx = test_context(vec![("x", "1")]);
     let mut unit = UnitOfWork::new(ctx);
