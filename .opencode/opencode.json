@@ -1,6 +1,31 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
+    "openai": {
+      "models": {
+        "qwen-fast": {
+          "name": "Qwen2.5 Coder 7B Instruct Q4_K_M (via LiteLLM)",
+          "limit": {
+            "context": 16384,
+            "output": 700
+          }
+        },
+        "qwen-heavy": {
+          "name": "Qwen2.5 Coder 14B Instruct Q4_K_M (via LiteLLM)",
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          }
+        },
+        "qwen-architect": {
+          "name": "Qwen3.6 35B A3B UD Q4_K_M (via LiteLLM)",
+          "limit": {
+            "context": 16384,
+            "output": 220
+          }
+        }
+      }
+    },
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "LiteLLM local",
@@ -20,7 +45,7 @@
           "name": "Qwen2.5 Coder 14B Instruct Q4_K_M",
           "limit": {
             "context": 16384,
-            "output": 500
+            "output": 4096
           }
         },
         "qwen-architect": {
@@ -33,8 +58,8 @@
       }
     }
   },
-  "model": "litellm/qwen-fast",
-  "small_model": "litellm/qwen-fast",
+  "model": "litellm/qwen-heavy",
+  "small_model": "litellm/qwen-heavy",
   "compaction": {
     "auto": false,
     "tail_turns": 1
