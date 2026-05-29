@@ -6,7 +6,7 @@ Implementation order: tasks MUST be completed in sequence (each task depends on 
 
 ### [ ] 1. Workspace setup
 
-#### [ ] 1.1 Add workspace members
+#### [x] 1.1 Add workspace members
 
 MODIFY
 
