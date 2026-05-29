@@ -20,6 +20,6 @@
 
 - [x] 3.1 Run `cargo test -p ego-domain` — all domain tests pass
 - [x] 3.2 Run `cargo clippy -p ego-domain -- -D warnings` — no warnings
-- [ ] 3.3 Verify `Actor` trait has exactly `type Message;` — no `fn receive`, no output, no effects
-- [ ] 3.4 Verify domain crate has no runtime dependencies (no tokio, no scheduler, no dispatch)
-- [ ] 3.5 Verify all public items have Rust docs
+- [x] 3.3 Verify `Actor` trait has exactly `type Message;` — no `fn receive`, no output, no effects
+- [x] 3.4 Verify domain crate has no runtime dependencies (no tokio, no scheduler, no dispatch)
+- [x] 3.5 Verify all public items have Rust docs
