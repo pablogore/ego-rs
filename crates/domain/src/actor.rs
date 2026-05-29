@@ -375,4 +375,10 @@ mod tests {
         let id2 = ActorId::new("name2").unwrap();
         assert_ne!(id1, id2);
     }
+
+    #[test]
+    fn lifecycle_terminal_states_distinct_from_running() {
+        assert_ne!(ActorLifecycleState::Stopped, ActorLifecycleState::Running);
+        assert_ne!(ActorLifecycleState::Failed, ActorLifecycleState::Running);
+    }
 }
