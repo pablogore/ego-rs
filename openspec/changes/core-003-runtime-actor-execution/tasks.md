@@ -21,7 +21,7 @@ Existing workspace members. Resolver. Shared dependencies.
 
 ---
 
-#### [ ] 1.2 Create `ego-runtime` crate scaffold
+#### [x] 1.2 Create `ego-runtime` crate scaffold
 
 CREATE
 
