@@ -309,6 +309,12 @@ mod tests {
     }
 
     #[test]
+    fn actor_id_macro_value() {
+        let id: &'static ActorId = actor_id!(my_actor);
+        assert_eq!(id.as_str(), "my_actor");
+    }
+
+    #[test]
     fn lifecycle_created_not_terminal() {
         assert!(!ActorLifecycleState::Created.is_terminal());
     }
