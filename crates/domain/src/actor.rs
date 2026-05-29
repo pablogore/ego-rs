@@ -58,7 +58,7 @@
 /// ```
 pub trait Actor {
     /// The message type this actor accepts and processes.
-    type Message: Send + 'static;
+    type Message;
 }
 
 /// A unique, location-transparent actor identifier.

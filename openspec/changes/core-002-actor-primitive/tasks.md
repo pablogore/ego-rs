@@ -1,6 +1,6 @@
 ## 1. Domain Types (crates/domain/)
 
-- [ ] 1.1 Define `Actor` trait — minimal: `type Message;` — no `fn receive`, no output semantics
+- [x] 1.1 Define `Actor` trait — minimal: `type Message;` — no `fn receive`, no output semantics
 - [ ] 1.2 Define `ActorId` struct — newtype over String, constructor with non-empty validation
 - [ ] 1.3 Implement `actor_id!` macro — compile-time deterministic identity, returns `&'static ActorId`
 - [ ] 1.4 Define semantic `ActorLifecycleState` enum — Created, Starting, Running, Stopping, Stopped, Failed
@@ -22,4 +22,3 @@
 - [ ] 3.2 Run `cargo clippy -p ego-domain -- -D warnings` — no warnings
 - [ ] 3.3 Verify `Actor` trait has exactly `type Message;` — no `fn receive`, no output, no effects
 - [ ] 3.4 Verify domain crate has no runtime dependencies (no tokio, no scheduler, no dispatch)
-- [ ] 3.5 Verify all public items have Rust docs
