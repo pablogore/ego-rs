@@ -6,7 +6,7 @@
 - [x] 1.4 Define semantic `ActorLifecycleState` enum — Created, Starting, Running, Stopping, Stopped, Failed
 - [x] 1.5 Define `SupervisionStrategy` enum — Restart, Stop, Escalate
 - [x] 1.6 Wire into `crates/domain/src/lib.rs` — `pub mod actor;`
-- [ ] 1.7 Add Rust docs (`///`) to all public items: `Actor`, `ActorId`, `actor_id!`, `ActorLifecycleState`, `SupervisionStrategy`
+- [x] 1.7 Add Rust docs (`///`) to all public items: `Actor`, `ActorId`, `actor_id!`, `ActorLifecycleState`, `SupervisionStrategy`
 
 ## 2. Domain Tests
 
