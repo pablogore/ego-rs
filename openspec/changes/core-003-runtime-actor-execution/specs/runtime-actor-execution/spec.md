@@ -21,7 +21,7 @@ Identifier representation changes affect only `execution.rs`.
 
 The system SHALL define an `ExecutionId` newtype that uniquely identifies a spawned execution unit within a runtime instance.
 
-`ExecutionId` SHALL implement `Clone`, `Debug`, `Eq`, `Hash`, `Send`, `Sync`.
+`ExecutionId` SHALL implement `Clone`, `Copy`, `Debug`, `Eq`, `Hash`, `Send`, `Sync`.
 
 `ExecutionId` SHALL provide a `new()` constructor that generates a unique identifier.
 
@@ -113,185 +113,42 @@ The system SHALL define `SendErrorKind` enum with these runtime-neutral variants
 
 Backend-specific error kinds (e.g. `MailboxFull`) MUST NOT appear in the core error type. Backends MAY define their own error types for backend-specific extensions.
 
-#### Scenario: Send to unknown id
-- **WHEN** `send` is called with an `ExecutionId` that has no running unit
-- **THEN** `SendError` is returned with `SendErrorKind::NotFound`
-- **AND** no panic or unwinding occurs
-
-#### Scenario: Send after shutdown
-- **WHEN** `send` is called after the runtime has shut down
-- **THEN** `SendError` is returned with `SendErrorKind::Closed`
-
 ---
 
-### Requirement: RuntimeHandle type
+### Requirement: SpawnError type
 
 owner crate:
 `ego-runtime`
 
 owner module:
-`runtime::handle`
+`runtime::failure`
 
 file:
-`crates/runtime/src/runtime/handle.rs`
+`crates/runtime/src/runtime/failure.rs`
 
 public types:
-`RuntimeHandle`
+`SpawnError`, `SpawnErrorKind`
 
 evolution:
-Handle capabilities change affects only `handle.rs`.
+Adding spawn error variants affects only `failure.rs`.
 
-The system SHALL define a `RuntimeHandle` that provides spawned execution units access to runtime operations scoped to the local unit.
+The system SHALL define a `SpawnError` struct returned when spawning an execution unit fails. It SHALL contain:
 
-`RuntimeHandle` SHALL expose:
+- `pub cause: SpawnErrorKind` — reason for failure
 
-- `fn id(&self) -> &ExecutionId`
-- `fn send<M: Send + 'static>(&self, msg: M) -> Result<(), SendError>`
-- `fn shutdown(&self)`
-- `fn state(&self) -> Option<ExecutionState>`
+`SpawnError` SHALL implement `Debug`, `Display`, `std::error::Error`.
 
-`RuntimeHandle` SHALL implement `Clone`, `Send`, `Sync`.
+The system SHALL define `SpawnErrorKind` enum with these variants:
 
-#### Scenario: Unit sends to itself
-- **WHEN** a spawned unit calls `handle.send(msg)`
-- **THEN** the message is queued for the unit's own sequential processing
+- `Closed` — runtime has shut down, cannot spawn new units
+- `Internal` — unrecoverable runtime internal error
 
-#### Scenario: Unit checks own state
-- **WHEN** a spawned unit calls `handle.state()`
-- **THEN** it receives the current `ExecutionState` (or `None` if untracked)
+`SpawnErrorKind` SHALL be `#[non_exhaustive]`.
 
----
-
-### Requirement: Runtime trait — abstraction contract
-
-owner crate:
-`ego-runtime`
-
-owner module:
-`runtime::runtime`
-
-file:
-`crates/runtime/src/runtime/runtime.rs`
-
-public types:
-`Runtime`
-
-evolution:
-Adding new methods (with default implementations) preserves backward compatibility. Changing existing method signatures is a breaking change.
-
-The system SHALL define a `Runtime` trait that is the common execution interface for all runtime backends. The Runtime trait IS the platform identity.
-
-The trait SHALL require `Send + Sync + 'static`.
-
-The trait SHALL define these methods:
-
-```
-fn spawn<F>(&self, f: F, name: Option<&str>) -> ExecutionId
-    where F: Future<Output = ()> + Send + 'static
-```
-
-Spawns an execution unit. Returns a unique `ExecutionId`. The `name` parameter is advisory — backends MAY use it for debugging, MAY ignore it.
-
-```
-fn send<M>(&self, id: &ExecutionId, msg: M) -> Result<(), SendError>
-    where M: Send + 'static
-```
-
-Routes a message to the execution unit identified by `id`. Messages are processed sequentially per unit. Returns `SendError` if delivery fails.
-
-```
-fn shutdown(&self, id: &ExecutionId)
-```
-
-Requests graceful termination of the execution unit. This is a signal — the unit MAY complete current work before terminating. The method returns immediately without awaiting termination.
-
-```
-fn state(&self, id: &ExecutionId) -> Option<ExecutionState>
-```
-
-Returns the lifecycle state of the execution unit, or `None` if the runtime does not track per-unit state.
-
-The trait SHALL provide a capability discovery mechanism:
-
-```
-fn capabilities(&self) -> Capabilities
-```
-
-Returns the set of optional capabilities the backend supports. Default implementation returns empty set.
-
-#### Scenario: Trait compiles as generic bound
-- **WHEN** a function accepts `R: Runtime` as a generic parameter
-- **THEN** the code compiles and all trait methods are callable on `R`
-
-#### Scenario: Spawning with name
-- **WHEN** `runtime.spawn(future, Some("worker-1"))` is called
-- **THEN** a new execution unit is created
-- **AND** the runtime MAY associate the name with the id for debugging
-
-#### Scenario: Shutdown is non-blocking
-- **WHEN** `shutdown` is called
-- **THEN** the method returns immediately without awaiting termination
-
-#### Scenario: Send after spawn
-- **WHEN** a unit is spawned and `send` is called with a message
-- **THEN** the message is delivered and processed sequentially by the target unit
-
----
-
-### Requirement: Sequential execution guarantee
-
-owner crate:
-`ego-runtime`
-
-owner module:
-`runtime::scheduler`
-
-file:
-`crates/runtime/src/runtime/scheduler.rs`
-
-evolution:
-Removing sequential guarantee is a breaking change to the Runtime contract.
-
-Every backend implementing `Runtime` SHALL process messages for a given execution unit sequentially in arrival order. There is no ordering guarantee across different execution units.
-
-#### Scenario: Messages processed in order
-- **WHEN** messages `[A, B, C]` are sent to the same unit in that order
-- **THEN** the unit processes `A`, then `B`, then `C`
-
-#### Scenario: No cross-unit ordering
-- **WHEN** two units receive messages from the same sender
-- **THEN** no ordering guarantee exists between the two units' processing
-
----
-
-### Requirement: Isolation guarantee
-
-owner crate:
-`ego-runtime`
-
-owner module:
-`runtime::isolation`
-
-file:
-`crates/runtime/src/runtime/isolation.rs`
-
-evolution:
-Weakening isolation is a breaking change to the Runtime contract.
-
-The runtime SHALL isolate execution units such that a failure in one unit does not affect other units.
-
-Each execution unit SHALL have an independent execution context.
-
-Unhandled panics or errors in a unit SHALL be caught by the runtime and result in `ExecutionState::Failed` for that unit only.
-
-The runtime SHALL remain operational after a single unit failure.
-
-#### Scenario: Unit failure does not cascade
-- **WHEN** an execution unit panics
-- **THEN** the panic is caught
-- **AND** the unit transitions to `Failed` state
-- **AND** all other units continue running
-- **AND** the runtime continues to accept `spawn` and `send` calls
+#### Scenario: Spawn after failure
+- **WHEN** `spawn` is called after the runtime has failed
+- **THEN** `SpawnError` is returned with `SpawnError { cause: SpawnErrorKind::Closed }`
+- **AND** no panic, no fake id, no noop occurs
 
 ---
 
@@ -309,16 +166,19 @@ file:
 evolution:
 Fail-closed semantics change affects `failure.rs` and may require updating all backends.
 
+**This is distinct from unit failure.** When a single execution unit fails (panics, error), the runtime survives — other units continue, spawn and send continue. Fail-closed applies ONLY to unrecoverable runtime-internal errors.
+
 On an unrecoverable runtime-internal error, the runtime SHALL fail closed:
 - SHALL transition all active execution units to `Failed` state
-- SHALL refuse new `spawn` calls
-- SHALL return `SendError::Closed` for all `send` calls
-- SHALL return `None` for all `state` calls
+- SHALL return `Err(SpawnError { cause: SpawnErrorKind::Closed })` for all subsequent `spawn` calls
+- SHALL return `SendError::Closed` for all subsequent `send` calls
+- SHALL return `None` for all subsequent `state` calls
+- No panic, no fake id, no noop
 
 #### Scenario: Runtime fails closed
 - **WHEN** a runtime-internal error occurs (e.g., scheduler failure, resource exhaustion)
 - **THEN** all units transition to `Failed`
-- **AND** subsequent `spawn` calls return immediately without creating a unit
+- **AND** subsequent `spawn` calls return `Err(SpawnError { cause: SpawnErrorKind::Closed })`
 - **AND** subsequent `send` calls return `SendErrorKind::Closed`
 
 ---
@@ -337,7 +197,7 @@ file:
 evolution:
 Adding backend-specific constraints to the trait is forbidden.
 
-The `Runtime` trait SHALL NOT expose backend-specific types, capabilities, or semantics. Any type, method, or trait bound that references a specific runtime backend (Tokio, Goakt, ProtoActor, Akka, etc.) is a violation.
+The `Runtime` trait SHALL NOT expose backend-specific types, features, or semantics. Any type, method, or trait bound that references a specific runtime backend (Tokio, Goakt, ProtoActor, Akka, etc.) is a violation.
 
 Backend-specific extensions SHALL live in backend crates, not in the `ego-runtime` crate.
 
@@ -347,34 +207,6 @@ Backend-specific extensions SHALL live in backend crates, not in the `ego-runtim
 - **AND** all Runtime trait methods behave according to their contract
 
 ---
-
-### Requirement: Capability discovery
-
-owner crate:
-`ego-runtime`
-
-owner module:
-`runtime::runtime`
-
-file:
-`crates/runtime/src/runtime/runtime.rs`
-
-public types:
-`Capabilities`
-
-evolution:
-Capability discovery evolves independently; adding new capabilities does not break existing backends.
-
-The system SHALL provide a `Capabilities` type and a capability discovery method on the `Runtime` trait with a default no-op implementation.
-
-Backends MAY override to declare support for optional capabilities (supervision, mailbox sizing, priority, actor lifecycle, etc.).
-
-Capabilities MUST NOT be required — all consumers MUST work with backends that declare no optional capabilities.
-
-#### Scenario: Capability absent
-- **WHEN** a backend does not declare a capability (e.g., supervision)
-- **THEN** code that requires supervision detects its absence
-- **AND** the code handles the absence gracefully (falls back, errors, or skips)
 
 ---
 
@@ -403,9 +235,9 @@ The system SHALL provide a `TokioRuntime` struct in `ego-runtime-tokio` that imp
 
 `TokioRuntime` SHALL implement `Runtime`:
 - `spawn`: delegates to tokio runtime
-- `send`: uses internal id-to-channel routing table
-- `shutdown`: sends stop signal via internal channel
-- `state`: tracks state in shared map, returns `Some(ExecutionState)` for tracked units
+- `send`: routes messages to target execution unit
+- `shutdown`: requests execution unit termination
+- `state`: returns execution unit state through implementation-defined tracking, returns `Some(ExecutionState)` for tracked units
 
 `TokioRuntime` SHALL provide sequential execution per unit (messages dispatched to a unit are processed in order).
 
@@ -517,8 +349,8 @@ The system SHALL provide a `NullRuntime` struct (in `#[cfg(test)]`) that impleme
 
 `NullRuntime` SHALL:
 - Return distinct `ExecutionId` for each `spawn` call
-- Track spawned units in a `HashMap<ExecutionId, ExecutionState>`
-- Implement `send` by looking up the unit and discarding the message
+- Track spawned units in an internal state registry
+- Implement `send` by looking up the unit and storing the message for test assertion (test double — does not process messages)
 - Implement `shutdown` by marking the unit as `Terminated`
 - Implement `state` by returning the tracked state
 
@@ -554,8 +386,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# No required dependencies. Runtime trait is dependency-free.
+uuid = { version = "1", features = ["v4"] }
 ```
+
+`uuid` is a foundational utility dependency (id generation), NOT a runtime/backend coupling.
+The crate has ZERO RUNTIME/BACKEND DEPENDENCIES.
 
 ---
 
@@ -585,7 +420,11 @@ The following requirements from the previous CORE-003 spec are REMOVED and MUST 
 
 - ActorSystem concept — replaced by `Runtime` trait
 - Actor handle types — removed; not part of core contract
-- Mailbox type — removed; mailbox semantics are optional backend capability
-- Supervision type — removed; supervision semantics are optional backend capability
+- Mailbox type — removed; mailbox semantics are optional backend concern
+- Supervision type — removed; supervision semantics are optional backend concern
 - MailboxFull error variant — removed; `SendErrorKind` uses runtime-neutral `NotFound` / `Closed`
 - Old communication guarantees (FIFO, at-most-once, message immutability) — replaced by Runtime trait contract
+- `spawn() -> ExecutionId` — replaced by `spawn() -> Result<ExecutionId, SpawnError>` for fail-closed consistency
+- `spawn(Future)` without handle injection — replaced by `spawn(FnOnce(RuntimeHandle) -> Future)` for RuntimeHandle injection
+- `dyn Runtime` in RuntimeHandle — RuntimeHandle uses closure-based internal structure; `dyn Runtime` is impossible (Runtime is not object-safe)
+- Strong scheduling guarantees — replaced by "reasonable forward progress / SHOULD avoid starvation"

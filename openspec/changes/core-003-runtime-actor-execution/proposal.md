@@ -4,7 +4,7 @@ Previous CORE-003 spec modeled `ActorSystem` as the runtime entry point. This wa
 
 ego.rs is NOT an actor framework. It is NOT an actor-first system. It provides a runtime abstraction contract as its platform identity. Actor frameworks are optional backend implementations that integrate through a shared runtime interface — they are integrations, not the platform.
 
-`ActorSystem` MUST NOT be the platform entry point. The `Runtime` trait replaces it as the public contract. Actor semantics (handle types, mailbox patterns, supervision strategies) are optional backend capabilities implemented behind the Runtime interface, not core requirements.
+`ActorSystem` MUST NOT be the platform entry point. The `Runtime` trait replaces it as the public contract. Actor semantics (handle types, mailbox patterns, supervision strategies) are optional backend features implemented behind the Runtime interface, not core requirements.
 
 Tokio is the Default runtime engine, not the platform identity. Tokio MUST remain hidden behind the abstraction. The public API MUST be backend-neutral.
 
@@ -42,7 +42,7 @@ TO: `CORE-003: Runtime Execution Abstraction`
 └──────────────────┘ └──────────────────┘ └──────────┘
 ```
 
-The Runtime trait IS the platform. Actor concepts are implementation details of specific backends, exposed through capability discovery.
+The Runtime trait IS the platform. Actor concepts are implementation details of specific backends.
 
 ## What Changes
 
@@ -69,10 +69,14 @@ responsibility:
 Runtime abstraction contract — backend-neutral execution interface.
 
 dependencies:
-(none — foundational crate)
+`uuid = { version = "1", features = ["v4"] }` — foundational utility for `ExecutionId`
 
 forbidden dependencies:
 tokio, goakt, protoactor, akka, persistence, transport
+
+dependency rationale:
+`uuid` is a foundational utility dependency (unique id generation), NOT a runtime coupling.
+The `runtime` crate has zero RUNTIME/BACKEND dependencies.
 
 ---
 
@@ -100,7 +104,11 @@ file:
 `layers.toml`
 
 change:
-Add `ego-runtime` and `ego-runtime-tokio` entries at `domain` layer (or appropriate layer consistent with dependency rules).
+Add entries:
+```toml
+"ego-runtime"      = "foundation"
+"ego-runtime-tokio" = "infrastructure"
+```
 
 do not change:
 Existing layer definitions. Existing dependency rules.
@@ -131,7 +139,7 @@ Existing workspace members. Resolver. Shared dependencies.
 - No mailbox types, actor handle types, or actor handle abstractions in core contract
 - ActorSystem, mailbox, and supervision types from old spec are REMOVED — not ported
 
-## New Capabilities
+## New Features
 
 - `runtime-execution-abstraction`: Runtime trait with spawn/send/shutdown/state semantics, backend-neutral vocabulary, sequential execution guarantee, isolation guarantee, fail-closed behavior
 - `tokio-runtime-engine`: TokioRuntime implementing Runtime trait, default engine
@@ -139,12 +147,15 @@ Existing workspace members. Resolver. Shared dependencies.
 ## Dependency Boundaries
 
 ```
-ego-runtime-tokio ──depends on──▶ ego-runtime ──depends on──▶ (none)
+ego-runtime-tokio ──depends on──▶ ego-runtime ──depends on──▶ uuid (utility only)
                                     │
                               forbidden deps:
                               tokio, goakt, protoactor,
                               akka, persistence, transport
 ```
+
+`uuid` is a foundational utility dependency (id generation), NOT a runtime/backend coupling.
+The `runtime` crate has zero RUNTIME/BACKEND dependencies.
 
 ## Implementation Order
 
