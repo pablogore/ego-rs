@@ -58,8 +58,8 @@
       }
     }
   },
-  "model": "litellm/qwen-fast",
-  "small_model": "litellm/qwen-fast",
+  "model": "litellm/qwen-heavy",
+  "small_model": "litellm/qwen-heavy",
   "compaction": {
     "auto": false,
     "tail_turns": 1
