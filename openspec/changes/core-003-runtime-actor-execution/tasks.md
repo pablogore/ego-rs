@@ -4,9 +4,9 @@ Implementation order: tasks MUST be completed in sequence (each task depends on 
 
 ---
 
-### 1. Workspace setup
+### [ ] 1. Workspace setup
 
-#### 1.1 Add workspace members
+#### [x] 1.1 Add workspace members
 
 MODIFY
 
@@ -21,7 +21,7 @@ Existing workspace members. Resolver. Shared dependencies.
 
 ---
 
-#### 1.2 Create `ego-runtime` crate scaffold
+#### [ ] 1.2 Create `ego-runtime` crate scaffold
 
 CREATE
 
@@ -39,20 +39,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 ```
 
 responsibility:
-Runtime abstraction crate — zero required dependencies.
+Runtime abstraction crate — uuid is a foundational utility dependency (id generation), NOT a runtime/backend coupling. Zero runtime/backend dependencies.
 
 dependencies:
-(none)
+`uuid` (utility only)
 
 forbidden dependencies:
 tokio, goakt, protoactor, akka, persistence, transport
 
 ---
 
-#### 1.3 Create `ego-runtime-tokio` crate scaffold
+#### [ ] 1.3 Create `ego-runtime-tokio` crate scaffold
 
 CREATE
 
@@ -85,7 +86,7 @@ goakt, protoactor, akka, persistence, transport
 
 ---
 
-#### 1.4 Create runtime module directory structure
+#### [ ] 1.4 Create runtime module directory structure
 
 CREATE
 
@@ -108,9 +109,9 @@ Module scaffold for the runtime abstraction crate.
 
 ---
 
-### 2. Vocabulary types
+### [ ] 2. Vocabulary types
 
-#### 2.1 Create runtime/mod.rs
+#### [ ] 2.1 Create runtime/mod.rs
 
 CREATE
 
@@ -133,7 +134,7 @@ Module declarations for the `runtime` module.
 
 ---
 
-#### 2.2 ExecutionId type
+#### [ ] 2.2 ExecutionId type
 
 CREATE
 
@@ -147,14 +148,14 @@ file:
 `crates/runtime/src/runtime/execution.rs`
 
 implement:
-`ExecutionId` newtype wrapping `Uuid`. Constructor `new()` generates a random `Uuid`. Implement `Clone`, `Debug`, `Eq`, `Hash`, `Send`, `Sync`.
+`ExecutionId` newtype wrapping `Uuid`. Constructor `new()` generates a random `Uuid` (v4). Implement `Clone`, `Copy`, `Debug`, `Eq`, `Hash`, `Send`, `Sync`.
 
 responsibility:
 Unique identifier for spawned execution units. Backend-neutral — no framework-specific fields.
 
 ---
 
-#### 2.3 ExecutionState enum
+#### [ ] 2.3 ExecutionState enum
 
 CREATE
 
@@ -175,7 +176,7 @@ Lifecycle state of an execution unit. Backend-neutral lifecycle model.
 
 ---
 
-#### 2.4 SendError and SendErrorKind
+#### [ ] 2.4 SendError, SendErrorKind, SpawnError, SpawnErrorKind
 
 CREATE
 
@@ -191,15 +192,17 @@ file:
 implement:
 `SendError` struct with `id: ExecutionId` and `cause: SendErrorKind`. `SendErrorKind` enum with `NotFound`, `Closed`. Add `#[non_exhaustive]` to `SendErrorKind`. Implement `Debug`, `Display`, `std::error::Error` for `SendError`.
 
+Add `SpawnError` struct with `pub cause: SpawnErrorKind`. `SpawnErrorKind` enum with `Closed`, `Internal`. Add `#[non_exhaustive]` to both. Implement `Debug`, `Display`, `std::error::Error` for both.
+
 Must NOT include:
 - `MailboxFull` variant (actor-specific, not runtime-neutral)
 
 responsibility:
-Error returned when message delivery fails. Runtime-neutral error kinds only.
+Error types for message delivery failure and spawn failure. Runtime-neutral error kinds only.
 
 ---
 
-#### 2.5 RuntimeHandle type
+#### [ ] 2.5 RuntimeHandle type
 
 CREATE
 
@@ -213,16 +216,40 @@ file:
 `crates/runtime/src/runtime/handle.rs`
 
 implement:
-`RuntimeHandle` struct with methods `id()`, `send(msg)`, `shutdown()`, `state()`. Implement `Clone`, `Send`, `Sync`. Wraps `ExecutionId` and a sender to the runtime's routing layer.
+`RuntimeHandle` struct with closure-based internal structure. MUST NOT store `dyn Runtime` (Runtime is not object-safe — generic methods).
+
+Internal model:
+```rust
+pub struct RuntimeHandle {
+    id: ExecutionId,
+    send_self_fn: Arc<dyn Fn(Box<dyn Any + Send>) -> Result<(), SendError> + Send + Sync>,
+    shutdown_fn: Arc<dyn Fn() + Send + Sync>,
+    state_fn: Arc<dyn Fn() -> Option<ExecutionState> + Send + Sync>,
+}
+```
+
+Public methods: `id()`, `send_self(msg)`, `shutdown()`, `state()`. Implement `Clone`, `Send`, `Sync`.
+
+`send_self` routes ONLY to the local execution unit (self-scoped). The `send_self_fn` closure is wired at spawn time to deliver messages to this unit — this is the token-based approach. `Any` boxing is an internal implementation detail, NOT exposed in the public generic API.
 
 responsibility:
-Scoped runtime access for spawned execution units.
+Scoped runtime access for spawned execution units (identity + lifecycle token). Closure-based to avoid impossible `dyn Runtime`.
+
+dependencies:
+`crate::runtime::execution::ExecutionId`
+`crate::runtime::lifecycle::ExecutionState`
+`crate::runtime::failure::SendError`
+`std::sync::Arc`
+`std::any::Any`
+
+forbidden dependencies:
+tokio, goakt, protoactor, akka
 
 ---
 
-### 3. Runtime trait and semantics
+### [ ] 3. Runtime trait and semantics
 
-#### 3.1 Runtime trait definition
+#### [ ] 3.1 Runtime trait definition
 
 CREATE
 
@@ -239,12 +266,19 @@ implement:
 ```rust
 use crate::runtime::execution::ExecutionId;
 use crate::runtime::lifecycle::ExecutionState;
-use crate::runtime::failure::SendError;
+use crate::runtime::failure::{SendError, SpawnError};
+use crate::runtime::handle::RuntimeHandle;
 use std::future::Future;
 
 pub trait Runtime: Send + Sync + 'static {
-    fn spawn<F>(&self, f: F, name: Option<&str>) -> ExecutionId
-    where F: Future<Output = ()> + Send + 'static;
+    fn spawn<F, Fut>(
+        &self,
+        f: F,
+        name: Option<&str>,
+    ) -> Result<ExecutionId, SpawnError>
+    where
+        F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static;
 
     fn send<M>(&self, id: &ExecutionId, msg: M) -> Result<(), SendError>
     where M: Send + 'static;
@@ -252,24 +286,6 @@ pub trait Runtime: Send + Sync + 'static {
     fn shutdown(&self, id: &ExecutionId);
 
     fn state(&self, id: &ExecutionId) -> Option<ExecutionState>;
-}
-```
-
-Also add:
-```rust
-#[derive(Clone, Debug, Default)]
-pub struct Capabilities(u64);
-
-impl Capabilities {
-    pub const fn empty() -> Self { Self(0) }
-    pub const fn new(bits: u64) -> Self { Self(bits) }
-}
-```
-
-Add capability discovery method to Runtime trait with default impl:
-```rust
-fn capabilities(&self) -> Capabilities {
-    Capabilities::empty()
 }
 ```
 
@@ -283,7 +299,7 @@ forbidden:
 
 ---
 
-#### 3.2 Isolation module
+#### [ ] 3.2 Isolation module
 
 CREATE
 
@@ -322,7 +338,7 @@ Documents the isolation guarantee contract.
 
 ---
 
-#### 3.3 Scheduler module
+#### [ ] 3.3 Scheduler module
 
 CREATE
 
@@ -343,9 +359,9 @@ Module-level documentation defining the scheduling contract:
 ///
 /// ## Contract
 ///
-/// - Execution units are scheduled fairly.
-/// - No single unit can starve others.
-/// - Cross-unit ordering is not guaranteed.
+/// - Runtime backends MUST provide reasonable forward progress.
+/// - Backends SHOULD avoid starvation.
+/// - Cross-unit fairness is implementation-defined.
 /// - Within a single unit, messages are processed sequentially in arrival order.
 ```
 
@@ -356,7 +372,7 @@ Documents the scheduling contract.
 
 ---
 
-#### 3.4 lib.rs exports
+#### [ ] 3.4 lib.rs exports
 
 CREATE
 
@@ -376,7 +392,7 @@ pub mod runtime;
 pub use runtime::runtime::Runtime;
 pub use runtime::execution::ExecutionId;
 pub use runtime::lifecycle::ExecutionState;
-pub use runtime::failure::{SendError, SendErrorKind};
+pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;
 ```
 
@@ -388,9 +404,9 @@ forbidden:
 
 ---
 
-### 4. Tokio runtime backend
+### [ ] 4. Tokio runtime backend
 
-#### 4.1 TokioRuntime struct — Runtime impl
+#### [ ] 4.1 TokioRuntime struct — Runtime impl
 
 CREATE
 
@@ -401,18 +417,18 @@ file:
 `crates/runtime-tokio/src/lib.rs`
 
 implement:
-`TokioRuntime` struct wrapping `tokio::runtime::Runtime`. Include internal routing table: `Arc<Mutex<HashMap<ExecutionId, (ExecutionState, mpsc::Sender<Box<dyn Any + Send>>)>>>`.
+`TokioRuntime` struct wrapping `tokio::runtime::Runtime`. Include an internal routing mechanism for message dispatch, mapping `ExecutionId` to deliverable units.
 
 Implement `Runtime` trait:
-- `spawn`: spawn future on tokio runtime, register id in routing table, create per-unit `mpsc` channel for sequential message processing
-- `send`: look up id in routing table, send message via channel
-- `shutdown`: send stop signal, mark state as `Draining`
-- `state`: return current state from routing table
+- `spawn`: register execution unit, construct `RuntimeHandle` with `send_self_fn` wired to deliver messages to this unit, `shutdown_fn` to request termination, `state_fn` to query state, call factory closure `f(handle)` to create unit future, wrap unit future with sequential message processing, spawn wrapped future on tokio runtime, return `Ok(ExecutionId)`
+- `send`: route message to target unit identified by `ExecutionId`
+- `shutdown`: signal target unit to drain and terminate
+- `state`: return current lifecycle state
 
 Ensure:
-- Sequential execution: per-unit channel processes messages in FIFO order
-- Isolation: wrap each spawned unit in a panic boundary (`catch_unwind` or task-local error handling)
-- Fail-closed: on runtime internal error, drain all units and reject new work
+- Sequential execution: messages delivered to a unit are processed one at a time in arrival order
+- Isolation: execution unit panics MUST be caught and result in `ExecutionState::Failed` for that unit only, without cascading to other units
+- Fail-closed: on runtime internal error, return `Err(SpawnError { cause: SpawnErrorKind::Closed })` from spawn, drain all units, reject new work
 
 forbidden dependencies:
 goakt, protoactor, akka, persistence, transport
@@ -422,7 +438,7 @@ Default Tokio-backed runtime implementation with sequential execution, isolation
 
 ---
 
-#### 4.2 TokioRuntimeBuilder
+#### [ ] 4.2 TokioRuntimeBuilder
 
 CREATE
 
@@ -445,7 +461,7 @@ Configuration API for `TokioRuntime`.
 
 ---
 
-#### 4.3 DefaultRuntime alias
+#### [ ] 4.3 DefaultRuntime alias
 
 CREATE
 
@@ -465,9 +481,9 @@ Convenience alias and default constructor. Lives in `ego-runtime-tokio` to avoid
 
 ---
 
-### 5. Integration
+### [ ] 5. Integration
 
-#### 5.1 Update layers.toml
+#### [ ] 5.1 Update layers.toml
 
 MODIFY
 
@@ -477,19 +493,18 @@ file:
 change:
 Add entries:
 ```toml
-"ego-runtime"      = "domain"
-"ego-runtime-tokio" = "domain"
+"ego-runtime"      = "foundation"
+"ego-runtime-tokio" = "infrastructure"
 ```
-(or appropriate layer level consistent with existing rules)
 
 do not change:
 Existing layer definitions. Dependency direction rules.
 
 ---
 
-### 6. Verification
+### [ ] 6. Verification
 
-#### 6.1 Runtime trait contract tests
+#### [ ] 6.1 Runtime trait contract tests
 
 CREATE
 
@@ -504,25 +519,26 @@ location:
 
 implement `NullRuntime`:
 - Returns distinct `ExecutionId` for each `spawn` call
-- Tracks spawned units in `HashMap<ExecutionId, ExecutionState>`
-- `send` looks up the unit and discards the message
+- Tracks spawned units in an internal state registry
+- `send` stores received messages for test assertion
 - `shutdown` sets state to `Terminated`
 - `state` returns tracked state
 
 tests:
-- `test_spawn_returns_unique_id`: spawn twice, verify ids differ
+- `test_spawn_returns_unique_id`: spawn twice via `spawn(factory, None).unwrap()`, verify ids differ
+- `test_spawn_after_shutdown_returns_error`: spawn after runtime shutdown, expect `Err(SpawnError { cause: SpawnErrorKind::Closed })`
+- `test_spawn_after_failure_returns_internal_error`: trigger runtime failure, spawn, expect `Err(SpawnError { cause: SpawnErrorKind::Internal })`
 - `test_send_to_unknown_id_returns_error`: send to non-existent id, expect `SendError`
 - `test_send_to_closed_returns_error`: shutdown then send, expect `SendError`
-- `test_shutdown_terminates_unit`: spawn, shutdown, verify state transitions
-- `test_failure_isolation`: spawn unit that panics, verify other units unaffected
-- `test_capability_discovery_default`: verify default capabilities are empty
+- `test_shutdown_terminates_unit`: `spawn(factory, None).unwrap()`, shutdown, verify state transitions
+- `test_failure_isolation`: `spawn(factory, None).unwrap()` a unit that panics, verify other units `spawn(...).unwrap()` unaffected
 
 responsibility:
 Verify Runtime trait contract semantics regardless of backend.
 
 ---
 
-#### 6.2 TokioRuntime integration tests
+#### [ ] 6.2 TokioRuntime integration tests
 
 CREATE
 
@@ -533,21 +549,26 @@ file:
 `crates/runtime-tokio/tests/tokio_runtime_test.rs`
 
 tests:
-- `test_multi_threaded_default`: create default TokioRuntime, spawn unit, verify state
-- `test_current_thread`: create current-thread TokioRuntime, spawn, verify
-- `test_send_message`: spawn unit, send message, verify delivery and processing
-- `test_sequential_delivery`: send multiple messages to same unit, verify order
-- `test_failure_isolation`: spawn unit that panics, verify other units unaffected
-- `test_shutdown`: spawn unit, shutdown, verify termination
-- `test_configured_worker_threads`: build with 4 workers, verify
-- `test_fail_closed`: trigger internal error, verify runtime refuses new work
+- `test_multi_threaded_default`: create default TokioRuntime, `spawn(factory, None).unwrap()`, verify state
+- `test_current_thread`: create current-thread TokioRuntime, `spawn(factory, None).unwrap()`, verify
+- `test_spawn_after_failure_returns_error`: trigger internal error, verify `spawn` returns `Err(SpawnError { cause: SpawnErrorKind::Closed })`
+- `test_send_message`: `spawn(factory, None).unwrap()`, send message, verify delivery and processing
+- `test_sequential_delivery`: `spawn(factory, None).unwrap()`, send multiple messages to same unit, verify order
+- `test_failure_isolation`: `spawn(factory, None).unwrap()` unit that panics, verify other units `spawn(...).unwrap()` unaffected
+- `test_shutdown`: `spawn(factory, None).unwrap()`, shutdown, verify termination
+- `test_configured_worker_threads`: build with 4 workers, `spawn(factory, None).unwrap()`, verify
+- `test_fail_closed`: trigger internal error, verify spawn returns `Err(...)` and send returns `Err(...)`
 
 responsibility:
 Integration tests for TokioRuntime against the full Runtime contract.
 
 ---
 
-#### 6.3 Workspace verification
+#### [ ] 6.3 Workspace verification
+
+VERIFY
+
+commands:
 
 ```bash
 cargo check --workspace
@@ -555,5 +576,9 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-responsibility:
-Full workspace compilation and test pass.
+acceptance criteria:
+
+- workspace compiles without errors
+- all tests pass
+- clippy produces no warnings
+- no regressions in existing workspace members

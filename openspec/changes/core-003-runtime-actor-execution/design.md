@@ -45,7 +45,7 @@ crates/
 │       ├── lib.rs               — re-exports public API
 │       └── runtime/
 │           ├── mod.rs           — module declarations
-│           ├── runtime.rs       — Runtime trait definition, capability discovery
+│           ├── runtime.rs       — Runtime trait definition
 │           ├── execution.rs     — ExecutionId, spawn semantics
 │           ├── lifecycle.rs     — ExecutionState, lifecycle semantics
 │           ├── scheduler.rs     — Scheduling contract
@@ -84,9 +84,15 @@ crates/
 
 ```rust
 pub trait Runtime: Send + Sync + 'static {
-    /// Spawn an execution unit.
-    fn spawn<F>(&self, f: F, name: Option<&str>) -> ExecutionId
-    where F: Future<Output = ()> + Send + 'static;
+    /// Spawn an execution unit with handle injection.
+    fn spawn<F, Fut>(
+        &self,
+        f: F,
+        name: Option<&str>,
+    ) -> Result<ExecutionId, SpawnError>
+    where
+        F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static;
 
     /// Route a message to an execution unit.
     fn send<M>(&self, id: &ExecutionId, msg: M) -> Result<(), SendError>
@@ -102,7 +108,10 @@ pub trait Runtime: Send + Sync + 'static {
 
 ### Execution contract
 
-- `spawn` creates an addressable execution unit identified by `ExecutionId`
+- ## Backend Adapter Model
+- `spawn` takes a `FnOnce(RuntimeHandle)` that constructs the execution future — the runtime constructs the `RuntimeHandle`, injects it, then executes the returned future
+- `spawn` returns `Result<ExecutionId, SpawnError>` — fails with `SpawnErrorKind::Closed` if runtime has shut down
+- The runtime internally maintains message delivery state per spawned unit, enabling `handle.send_self(msg)` to route messages to the local unit. Remote routing is performed via `Runtime::send(id, msg)`.
 - The spawned future runs until completion or until `shutdown` is called
 - Each unit processes messages sequentially (in-order delivery per unit)
 - No ordering guarantee across different execution units
@@ -112,15 +121,17 @@ pub trait Runtime: Send + Sync + 'static {
 States: `Active` → `Draining` → `Terminated` | `Failed`
 
 - `Active`: unit is running and can receive messages
-- `Draining`: shutdown requested, completing in-flight work, stops accepting new messages
+- `Draining`: shutdown requested, completing in-flight work, stops accepting new messages. Draining does not guarantee eventual `Terminated` — if the unit's handler hangs, the unit MAY remain in `Draining` permanently. Backends SHOULD make reasonable efforts to complete draining.
 - `Terminated`: completed successfully
 - `Failed`: terminated due to unrecoverable error
 
 ### Scheduling contract
 
-- Units are scheduled fairly; no single unit can starve others
+- Runtime backends MUST provide reasonable forward progress
+- Backends SHOULD avoid starvation
+- Cross-unit fairness is implementation-defined
+- Within a single unit, messages are processed sequentially in arrival order
 - Backends MAY provide priority scheduling as an extension (not in core trait)
-- Scheduling is implementation-defined; core trait does not mandate specific scheduler
 
 ### Isolation contract
 
@@ -129,18 +140,27 @@ States: `Active` → `Draining` → `Terminated` | `Failed`
 - Unhandled panics in a unit MUST be caught and result in `Failed` state only for that unit
 - The runtime MUST remain operational when a single unit fails
 
-### Failure contract
+### Failure contract — two distinct modes
 
-- The runtime SHALL fail closed: on unrecoverable internal error, shutdown all units and refuse new work
-- `send` to a non-existent or terminated id returns `SendError`
-- `send` to a closed runtime returns `SendError`
+**UNIT FAILURE** (single execution unit fails):
+- The runtime SHALL survive: other units continue running
+- Unit state transitions to `Failed`
+- `spawn` and `send` continue to work for unaffected units
+- No cascading failure
+
+**RUNTIME INTERNAL FAILURE** (unrecoverable runtime-internal error):
+- The runtime SHALL fail closed: shutdown all units and refuse new work
+- All units transition to `Failed`
+- `spawn` returns `Err(SpawnError { cause: SpawnErrorKind::Closed })` — no panic, no fake id, no noop
+- `send` to any id returns `SendError`
+- `state` returns `None`
 - All runtime errors are non-panicking (return values, not unwinding)
 
 ## Backend Adapter Model
 
 Each backend crate implements `Runtime` for its type:
 
-- **TokioRuntime**: wraps `tokio::runtime::Runtime`, uses internal routing table for message dispatch
+- **TokioRuntime**: wraps `tokio::runtime::Runtime`, routes messages to execution units
 - **GoaktRuntime**: wraps Goakt actor system, maps native actor refs to `ExecutionId`
 - **ProtoActorRuntime**: wraps ProtoActor PID, maps to `ExecutionId`
 - **AkkaRuntime**: wraps Akka native ref, maps to `ExecutionId`
@@ -151,17 +171,6 @@ Actor framework backends integrate by:
 3. Adapting their message routing to the `send` contract
 4. Translating their lifecycle model to `ExecutionState`
 
-## Optional Capabilities
-
-These capabilities MAY exist in backend implementations but MUST NOT be required by the core `Runtime` trait:
-
-- **Mailbox semantics**: backends MAY implement bounded/unbounded mailboxes; core `send` does not specify buffering
-- **Supervision semantics**: backends MAY implement restart policies; core `shutdown` is a signal, not a directive
-- **Actor lifecycle**: backends MAY expose actor-specific lifecycle hooks as backend-specific extensions
-- **Priority scheduling**: backends MAY prioritize messages; core trait provides no priority mechanism
-- **Timers/delays**: backends MAY expose timer capabilities as backend-specific APIs
-
-All optional capabilities are discoverable through the capability discovery mechanism on the Runtime trait.
 
 ## Design Decisions
 
@@ -173,25 +182,29 @@ Alternatives considered:
 - GAT `type Handle<M>`: over-engineering for v1, couples trait to message types
 - Caller-provided id: shifts id generation burden, inconsistent across backends
 
-### Decision 2: `spawn` accepts a future, not an actor trait
+### Decision 2: `spawn` takes FnOnce(RuntimeHandle) -> Future
 
-`spawn` takes `Future<Output = ()> + Send + 'static`. Actor-backed runtimes wrap their actor creation in a future. Task-based runtimes spawn directly. No `Actor` trait in the platform API.
+`spawn` takes `FnOnce(RuntimeHandle) -> Future<Output = ()>`. The runtime constructs the `RuntimeHandle`, injects it into the closure, then executes the returned future. This allows units to receive their scoped handle at creation time. Returns `Result<ExecutionId, SpawnError>` to support fail-closed behavior. No `Actor` trait in the platform API.
 
 ### Decision 3: Message sending is a Runtime operation
 
-`send` is on `Runtime`, not on the spawned unit. The runtime knows how to route messages. Backends implement routing internally (channel, mailbox, direct call). This keeps the trait minimal and backend-neutral.
+`send` is on `Runtime`, not on the spawned unit. The runtime knows how to route messages. Backends implement routing internally (implementation-defined transport). This keeps the trait minimal and backend-neutral.
 
 ### Decision 4: State query is optional
 
 `state()` returns `Option<ExecutionState>`. Backends that track lifecycle return `Some`. Simple backends return `None`. Prevents forcing state tracking on all implementations.
 
-### Decision 5: RuntimeHandle is injected into spawned futures
+### Decision 5: RuntimeHandle scoped access (closure-based)
 
-Spawned units receive a `RuntimeHandle` scoped to the local unit. This allows units to communicate and self-manage without access to the full `Runtime` trait. `RuntimeHandle` exposes `id()`, `send()`, `shutdown()`, `state()`.
+Spawned units receive a `RuntimeHandle` scoped to the local unit. This token provides: identity (`id()`), self-send (`send_self(msg)`), and lifecycle control (`shutdown()`, `state()`).
+
+`send_self` is generic (`send_self<M: Send + 'static>`). The `send_self_fn` closure is wired at spawn time to deliver messages to this unit; boxing is an internal detail hidden from the caller.
+
+RuntimeHandle uses closure-based internals for all operations, avoiding `dyn Runtime` (impossible because `Runtime` is generic and not object-safe). Remote routing uses `Runtime::send(id, msg)`.
 
 ### Decision 6: DefaultRuntime lives in runtime-tokio, not runtime
 
-`DefaultRuntime` aliases `TokioRuntime` in the `runtime-tokio` crate. Avoids circular dependency: `runtime-tokio` depends on `runtime` for the trait; `DefaultRuntime` is defined where the implementation lives. The `runtime` crate has zero dependencies and zero features.
+`DefaultRuntime` aliases `TokioRuntime` in the `runtime-tokio` crate. Avoids circular dependency: `runtime-tokio` depends on `runtime` for the trait; `DefaultRuntime` is defined where the implementation lives. The `runtime` crate has `uuid` (utility only) and zero runtime/backend dependencies.
 
 ### Decision 7: Sequential execution per unit
 
@@ -205,9 +218,13 @@ Unhandled errors in one unit MUST NOT affect other units. The runtime catches pa
 
 ```
 ego-runtime (crates/runtime):
-  dependencies:    (none — foundational crate)
+  dependencies:    uuid = { version = "1", features = ["v4"] } (utility only)
   dev-dependencies: (none)
   forbidden:       tokio, goakt, protoactor, akka, persistence, transport
+
+  uuid is a foundational utility dependency (id generation),
+  NOT a runtime/backend coupling.
+  The runtime crate has ZERO RUNTIME/BACKEND DEPENDENCIES.
 
 ego-runtime-tokio (crates/runtime-tokio):
   dependencies:    ego-runtime, tokio
@@ -224,12 +241,15 @@ Existing crates (domain, application, etc.):
 
 - `ActorSystem` SHALL NOT be the platform entry point
 - Actor handle types SHALL NOT be in the core contract
-
+- Mailbox types SHALL NOT be in the core contract
 - Supervision types SHALL NOT be in the core contract
 - No Tokio types in the `ego-runtime` crate
 - No framework-specific semantics in the `Runtime` trait
 - No assumption that all backends provide mailbox/supervision/actor behavior
 - No coupling between runtime abstraction and actor execution model
+- No mailbox-full error variant in core error types
+- RuntimeHandle MUST NOT store `dyn Runtime` (Runtime is not object-safe)
+- spawn contract MUST NOT return raw `ExecutionId` (must return `Result` for fail-closed)
 
 ## Risks / Trade-offs
 
