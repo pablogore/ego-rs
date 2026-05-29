@@ -361,4 +361,18 @@ mod tests {
         let cloned = original.clone();
         assert_eq!(original, cloned);
     }
+
+    #[test]
+    fn actor_id_equality_same_name() {
+        let id1 = ActorId::new("same_name").unwrap();
+        let id2 = ActorId::new("same_name").unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn actor_id_equality_different_name() {
+        let id1 = ActorId::new("name1").unwrap();
+        let id2 = ActorId::new("name2").unwrap();
+        assert_ne!(id1, id2);
+    }
 }

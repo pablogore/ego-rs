@@ -12,7 +12,7 @@
 
 - [x] 2.1 Test: `ActorId::new("valid")` succeeds, `ActorId::new("")` fails
 - [x] 2.2 Test: `actor_id!(my_actor)` produces `&'static ActorId` with value `"my_actor"`
-- [ ] 2.3 Test: `ActorId` equality — same name = same id, different name = different id
+- [x] 2.3 Test: `ActorId` equality — same name = same id, different name = different id
 - [ ] 2.4 Test: `ActorLifecycleState` terminal states (Stopped, Failed) are distinct from Running
 - [ ] 2.5 Test: `SupervisionStrategy` enum values are independent
 
