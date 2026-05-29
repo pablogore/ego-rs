@@ -20,7 +20,7 @@
           "name": "Qwen2.5 Coder 14B Instruct Q4_K_M",
           "limit": {
             "context": 16384,
-            "output": 500
+            "output": 4096
           }
         },
         "qwen-architect": {
