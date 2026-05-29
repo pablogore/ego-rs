@@ -381,4 +381,18 @@ mod tests {
         assert_ne!(ActorLifecycleState::Stopped, ActorLifecycleState::Running);
         assert_ne!(ActorLifecycleState::Failed, ActorLifecycleState::Running);
     }
+
+    #[test]
+    fn supervision_strategies_independent() {
+        let strategies = [
+            SupervisionStrategy::Restart,
+            SupervisionStrategy::Stop,
+            SupervisionStrategy::Escalate,
+        ];
+        for i in 0..strategies.len() {
+            for j in (i + 1)..strategies.len() {
+                assert_ne!(strategies[i], strategies[j]);
+            }
+        }
+    }
 }
