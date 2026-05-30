@@ -188,11 +188,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ego-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ego-domain",
+ "mockall",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ego-runtime-slice"
 version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "ego-runtime-tokio"
+version = "0.1.0"
+dependencies = [
+ "ego-runtime",
+ "tokio",
 ]
 
 [[package]]

@@ -53,7 +53,7 @@ tokio, goakt, protoactor, akka, persistence, transport
 
 ---
 
-#### [ ] 1.3 Create `ego-runtime-tokio` crate scaffold
+#### [x] 1.3 Create `ego-runtime-tokio` crate scaffold
 
 CREATE
 

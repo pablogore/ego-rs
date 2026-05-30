@@ -7,7 +7,6 @@ members = [
     "core/runtime-slice",
     "crates/runtime",
     "crates/runtime-tokio",
-    "crates/runtime",
 ]
 resolver = "2"
 
