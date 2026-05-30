@@ -210,7 +210,6 @@ dependencies = [
 name = "ego-runtime-tokio"
 version = "0.1.0"
 dependencies = [
- "ego-domain",
  "ego-runtime",
  "tokio",
 ]
