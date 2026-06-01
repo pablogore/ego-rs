@@ -2,7 +2,7 @@ use ego_domain::{ActorId, ActorLifecycleState};
 use std::fmt::Debug;
 
 /// The unique identifier for an execution.
-#[derive(Debug, Clone, PartialEq, Eq, Send, Sync)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionId(String);
 
 impl ExecutionId {
@@ -18,7 +18,7 @@ impl ExecutionId {
 }
 
 /// The state of an execution.
-#[derive(Debug, Clone, Send, Sync)]
+#[derive(Debug, Clone)]
 pub enum ExecutionState {
     /// Actor identity registered but not yet starting.
     Created,

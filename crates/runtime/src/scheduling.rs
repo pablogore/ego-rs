@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 /// The scheduling policy for actor execution.
-#[derive(Debug, Clone, Send, Sync)]
+#[derive(Debug, Clone)]
 pub enum SchedulingPolicy {
     /// The actor is scheduled to run immediately.
     Immediate,

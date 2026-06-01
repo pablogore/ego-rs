@@ -1,5 +1,0 @@
-When working with specs, always use the gov CLI:
-- gov plan <name> - create new spec
-- gov approve <SPEC-XXX> - approve spec
-- gov next <SPEC-XXX> - advance state
-- gov status <SPEC-XXX> - check status
