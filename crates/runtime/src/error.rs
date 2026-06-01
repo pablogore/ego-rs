@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 /// The error type for runtime operations.
-#[derive(Debug, Clone, Send, Sync)]
+#[derive(Debug, Clone)]
 pub enum RuntimeError {
     /// An error occurred while spawning an actor.
     SpawnError(String),

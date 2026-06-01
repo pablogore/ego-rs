@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 /// The isolation strategy for an actor.
-#[derive(Debug, Clone, Send, Sync)]
+#[derive(Debug, Clone)]
 pub enum Isolation {
     /// The actor runs in a separate thread.
     Thread,
