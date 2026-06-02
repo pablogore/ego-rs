@@ -11,4 +11,4 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-mockall = "0.12"
+mockall = "0.14.0"
