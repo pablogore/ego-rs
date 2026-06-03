@@ -1,3 +1,9 @@
+//! Hexagonal port traits for the application layer.
+//!
+//! Defines `CommandHandler` and `QueryHandler` — the ports that transport
+//! adapters (HTTP, gRPC) call and that application handlers implement.
+//! Both depend only on domain traits.
+
 use ego_domain::{Command, Query};
 
 /// Trait for command handlers in the application layer.

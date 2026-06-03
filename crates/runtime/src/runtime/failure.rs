@@ -1,3 +1,9 @@
+//! Typed failure modes for runtime operations.
+//!
+//! Defines `SendError` and `SpawnError` with associated `Kind` enums
+//! that provide structured error information for message send and
+//! execution spawn failures.
+
 use std::fmt;
 
 use crate::runtime::execution::ExecutionId;

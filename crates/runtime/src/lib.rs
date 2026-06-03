@@ -28,6 +28,7 @@
 //! | `handle` | RuntimeHandle for scoped access |
 //! | `scheduler` | Scheduling policies |
 //! | `isolation` | Isolation strategies |
+/// Runtime trait, execution identity, lifecycle, failure modes, and handle.
 pub mod runtime;
 
 pub use runtime::execution::ExecutionId;

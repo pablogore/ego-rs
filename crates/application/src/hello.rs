@@ -1,3 +1,9 @@
+//! Hello handler — reference implementation of a QueryHandler.
+//!
+//! Processes `HelloQuery` and returns a `HelloResponse` with a static
+//! greeting. Demonstrates the hexagonal flow: domain defines the query,
+//! application implements the handler.
+
 use ego_domain::hello::{HelloQuery, HelloResponse};
 
 use crate::ports::QueryHandler;

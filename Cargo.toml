@@ -3,6 +3,7 @@ members = [
     "crates/domain",
     "crates/application",
     "crates/infrastructure",
+    "crates/persistence",
     "crates/transport",
     "core/runtime-slice",
     "crates/runtime",

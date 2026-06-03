@@ -1,3 +1,9 @@
+//! Domain event trait.
+//!
+//! Defines `DomainEvent` — the contract for events in a CQRS / Event
+//! Sourcing system. Events are immutable, append-only records of
+//! state transitions.
+
 use chrono::{DateTime, Utc};
 
 /// Trait for domain events in a CQRS / Event Sourcing system.

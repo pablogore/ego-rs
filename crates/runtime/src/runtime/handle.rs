@@ -1,3 +1,9 @@
+//! Scoped execution handle.
+//!
+//! Provides `RuntimeHandle`, a closure-based handle that gives an execution
+//! self-access to send, shutdown, and state operations without requiring
+//! a `dyn Runtime` reference.
+
 use std::any::Any;
 use std::sync::Arc;
 
@@ -23,8 +29,16 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    /// Constructor and accessor methods for `RuntimeHandle`.
+
     /// Create a new `RuntimeHandle` with the given execution id and closure
     /// callbacks.
+    ///
+    /// # Arguments
+    /// * `id` — the execution id this handle wraps.
+    /// * `send` — closure that dispatches a message to this execution.
+    /// * `shutdown` — closure that requests graceful shutdown.
+    /// * `state` — closure that queries the execution's current state.
     pub fn new<F, S, St>(
         id: ExecutionId,
         send: F,
@@ -53,6 +67,10 @@ impl RuntimeHandle {
     ///
     /// The message is boxed internally and dispatched via the closure stored
     /// in this handle. No `dyn Runtime` is involved.
+    ///
+    /// # Errors
+    /// Returns `SendError::NotFound` if the execution no longer exists,
+    /// or `SendError::Closed` if it is not accepting messages.
     pub fn send_self<M>(&self, msg: M) -> Result<(), SendError>
     where
         M: Send + 'static,
@@ -61,11 +79,17 @@ impl RuntimeHandle {
     }
 
     /// Request graceful shutdown of this execution.
+    ///
+    /// Transitions the execution to `Draining` state. In-flight messages
+    /// are completed before final termination.
     pub fn shutdown(&self) {
         (self.shutdown)(&self.id)
     }
 
     /// Return the current state of this execution, if it exists.
+    ///
+    /// Returns `None` if the execution has not been spawned or has been
+    /// fully removed.
     pub fn state(&self) -> Option<ExecutionState> {
         (self.state)(&self.id)
     }

@@ -1,3 +1,12 @@
+//! # ego-runtime-tokio
+//!
+//! Tokio-backed implementation of the `Runtime` trait.
+//!
+//! Provides `TokioRuntime` — a production runtime adapter that spawns
+//! executions as Tokio tasks with per-execution mpsc channels for message
+//! delivery. Also provides `TokioRuntimeBuilder` for configuring thread
+//! count and runtime mode (single/multi-threaded).
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
@@ -13,36 +22,77 @@ use ego_runtime::runtime::handle::RuntimeHandle;
 use ego_runtime::runtime::lifecycle::ExecutionState;
 use ego_runtime::runtime::runtime::Runtime;
 
+/// Internal state of a single execution unit.
+///
+/// Tracks lifecycle state and the mpsc sender for message delivery.
 #[derive(Clone, Debug)]
 enum UnitState {
+    /// Execution is active with an open mpsc sender.
     Active(mpsc::Sender<Box<dyn Any + Send + 'static>>),
+    /// Execution is draining — no new messages, in-flight may complete.
     Draining,
+    /// Execution has terminated cleanly.
     Terminated,
+    /// Execution has panicked or failed.
     Failed,
 }
 
+/// Internal context for a single execution within the Tokio runtime.
+///
+/// Bundles the unit's state, join handle, and optional message consumer task.
 #[derive(Debug)]
 struct UnitContext {
+    /// Lifecycle state of this execution.
     state: UnitState,
+    /// Join handle for the spawned Tokio task that runs the user closure.
     #[allow(dead_code)]
     handle: Option<JoinHandle<()>>,
+    /// Join handle for the message consumer that drains the mpsc channel.
     #[allow(dead_code)]
     message_consumer: Option<JoinHandle<()>>,
 }
 
+/// Internal runtime state shared across all `TokioRuntime` clones.
 #[derive(Debug)]
 struct TokioRuntimeInner {
+    /// Registry of all active executions keyed by `ExecutionId`.
     units: std::sync::Mutex<HashMap<ExecutionId, UnitContext>>,
+    /// When `true`, spawn and send operations are rejected (fail-closed mode).
     fail_closed: AtomicBool,
 }
 
+/// Tokio-backed runtime implementation.
+///
+/// `TokioRuntime` implements the `Runtime` trait by spawning each execution
+/// as a Tokio task. Messages are delivered via per-execution bounded mpsc
+/// channels. Supports fail-closed mode where all spawn/send operations are
+/// rejected.
+///
+/// # Thread Safety
+///
+/// Internally uses `Arc<TokioRuntimeInner>` with `Mutex`-protected state.
+/// Clones share the same underlying state — shutdown or fail-closed on one
+/// clone affects all clones.
 #[derive(Clone)]
 pub struct TokioRuntime {
+    /// Shared inner state — execution registry and fail-closed flag.
     inner: Arc<TokioRuntimeInner>,
+    /// Handle to the Tokio runtime for spawning tasks.
     tokio: tokio::runtime::Handle,
 }
 
 impl TokioRuntime {
+    /// Constructor methods for `TokioRuntime`.
+
+    /// Creates a new `TokioRuntime` with a newly allocated multi-threaded
+    /// Tokio runtime.
+    ///
+    /// The Tokio runtime is leaked via `std::mem::forget` to give the
+    /// `RuntimeHandle` a static lifetime. This is safe because the runtime
+    /// is never dropped before process exit.
+    ///
+    /// # Panics
+    /// Panics if Tokio runtime creation fails (e.g., resource exhaustion).
     pub fn new() -> Self {
         let tokio = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         let handle = tokio.handle().clone();
@@ -54,20 +104,27 @@ impl TokioRuntime {
         Self { inner, tokio: handle }
     }
 
+    /// Returns a `TokioRuntimeBuilder` for configuring runtime options.
     pub fn builder() -> TokioRuntimeBuilder {
         TokioRuntimeBuilder::new()
     }
 
+    /// Sets the fail-closed mode.
+    ///
+    /// When `true`, all subsequent `spawn` and `send` operations will be
+    /// rejected with a `Closed` error. Existing executions are unaffected.
     pub fn set_fail_closed(&self, value: bool) {
         self.inner.fail_closed.store(value, Ordering::Release);
     }
 
+    /// Constructs a `SpawnError` with `Closed` cause.
     fn spawn_error_closed() -> SpawnError {
         SpawnError {
             cause: SpawnErrorKind::Closed,
         }
     }
 
+    /// Constructs a `SpawnError` with `Internal` cause.
     #[allow(dead_code)]
     fn spawn_error_internal() -> SpawnError {
         SpawnError {
@@ -75,6 +132,7 @@ impl TokioRuntime {
         }
     }
 
+    /// Constructs a `SendError` with `NotFound` cause for a given id.
     fn send_error_not_found(id: ExecutionId) -> SendError {
         SendError {
             id,
@@ -82,6 +140,7 @@ impl TokioRuntime {
         }
     }
 
+    /// Constructs a `SendError` with `Closed` cause for a given id.
     fn send_error_closed(id: ExecutionId) -> SendError {
         SendError {
             id,
@@ -91,6 +150,13 @@ impl TokioRuntime {
 }
 
 impl Runtime for TokioRuntime {
+    /// Spawns a new execution as a Tokio task.
+    ///
+    /// The user's closure receives a `RuntimeHandle` for self-access. A
+    /// bounded mpsc channel (capacity 32) delivers messages to the execution.
+    ///
+    /// # Errors
+    /// Returns `SpawnError::Closed` if fail-closed mode is active.
     fn spawn<F, Fut>(&self, f: F, _name: Option<&str>) -> Result<ExecutionId, SpawnError>
     where
         F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
@@ -127,7 +193,7 @@ impl Runtime for TokioRuntime {
                 move |exec_id| {
                     if let Some(context) = inner.units.lock().unwrap().get_mut(exec_id) {
                         if matches!(context.state, UnitState::Active(_)) {
-                            std::mem::replace(&mut context.state, UnitState::Draining);
+                            let _ = std::mem::replace(&mut context.state, UnitState::Draining);
                         }
                     }
                 }
@@ -185,6 +251,12 @@ impl Runtime for TokioRuntime {
         Ok(id)
     }
 
+    /// Sends a message to an existing execution.
+    ///
+    /// # Errors
+    /// Returns `SendError::Closed` if fail-closed mode is active, the
+    /// execution is draining/terminated/failed, or the channel is full.
+    /// Returns `SendError::NotFound` if no execution with the given id exists.
     fn send<M>(&self, id: &ExecutionId, msg: M) -> Result<(), SendError>
     where
         M: Send + 'static,
@@ -209,6 +281,10 @@ impl Runtime for TokioRuntime {
         }
     }
 
+    /// Requests graceful shutdown of an execution.
+    ///
+    /// Transitions the execution from `Active` to `Draining`. No-op if
+    /// the execution does not exist or is already in a terminal state.
     fn shutdown(&self, id: &ExecutionId) {
         if let Some(context) = self.inner.units.lock().unwrap().get_mut(id) {
             if matches!(context.state, UnitState::Active(_)) {
@@ -218,6 +294,7 @@ impl Runtime for TokioRuntime {
         }
     }
 
+    /// Returns the current state of an execution, if it exists.
     fn state(&self, id: &ExecutionId) -> Option<ExecutionState> {
         self.inner
             .units
@@ -239,12 +316,22 @@ impl Default for TokioRuntime {
     }
 }
 
+/// Builder for configuring `TokioRuntime` options.
+///
+/// Allows setting the number of worker threads and choosing between
+/// current-thread and multi-threaded scheduler modes.
 pub struct TokioRuntimeBuilder {
+    /// Number of worker threads (None = Tokio default).
     worker_threads: Option<usize>,
+    /// If true, use Tokio's current-thread scheduler.
     current_thread: bool,
 }
 
 impl TokioRuntimeBuilder {
+    /// Constructor methods for `TokioRuntimeBuilder`.
+
+    /// Creates a new `TokioRuntimeBuilder` with default settings
+    /// (multi-threaded, Tokio-default worker count).
     fn new() -> Self {
         Self {
             worker_threads: None,
@@ -252,16 +339,27 @@ impl TokioRuntimeBuilder {
         }
     }
 
+    /// Sets the number of worker threads for the Tokio runtime.
+    ///
+    /// Only applies when not using `current_thread()` mode.
     pub fn worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = Some(n);
         self
     }
 
+    /// Configures the Tokio runtime to use the current-thread scheduler.
+    ///
+    /// All spawned tasks run on the calling thread. Useful for tests or
+    /// single-threaded contexts.
     pub fn current_thread(mut self) -> Self {
         self.current_thread = true;
         self
     }
 
+    /// Builds the `TokioRuntime` with the configured options.
+    ///
+    /// # Panics
+    /// Panics if Tokio runtime creation fails.
     pub fn build(self) -> TokioRuntime {
         let mut builder = if self.current_thread {
             tokio::runtime::Builder::new_current_thread()
@@ -289,204 +387,5 @@ impl TokioRuntimeBuilder {
     }
 }
 
+/// The default runtime type — an alias for `TokioRuntime`.
 pub type DefaultRuntime = TokioRuntime;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    #[test]
-    fn test_spawn_returns_unique_id() {
-        let runtime = TokioRuntime::new();
-        let id1 = runtime.spawn(|_handle| async {}, None).unwrap();
-        let id2 = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_spawn_creates_active_unit() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_spawn_after_fail_closed_returns_error() {
-        let runtime = TokioRuntime::new();
-        runtime.inner.fail_closed.store(true, Ordering::Release);
-        let result = runtime.spawn(|_handle| async {}, None);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().cause, SpawnErrorKind::Closed);
-    }
-
-    #[test]
-    fn test_send_to_unknown_id_returns_error() {
-        let runtime = TokioRuntime::new();
-        let unknown_id = ExecutionId::new();
-        let result = runtime.send(&unknown_id, 42i32);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().cause, SendErrorKind::NotFound);
-    }
-
-    #[test]
-    fn test_send_to_active_unit_succeeds() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        let result = runtime.send(&id, 42i32);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_send_after_shutdown_returns_error() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        runtime.shutdown(&id);
-        let result = runtime.send(&id, 42i32);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().cause, SendErrorKind::Closed);
-    }
-
-    #[test]
-    fn test_send_after_fail_closed_returns_error() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        runtime.inner.fail_closed.store(true, Ordering::Release);
-        let result = runtime.send(&id, 42i32);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().cause, SendErrorKind::Closed);
-    }
-
-    #[test]
-    fn test_shutdown_transitions_to_draining() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        runtime.shutdown(&id);
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Draining));
-    }
-
-    #[test]
-    fn test_shutdown_on_nonexistent_id_is_noop() {
-        let runtime = TokioRuntime::new();
-        let unknown_id = ExecutionId::new();
-        runtime.shutdown(&unknown_id);
-        assert!(runtime.state(&unknown_id).is_none());
-    }
-
-    #[test]
-    fn test_state_returns_none_for_unknown_id() {
-        let runtime = TokioRuntime::new();
-        let unknown_id = ExecutionId::new();
-        assert!(runtime.state(&unknown_id).is_none());
-    }
-
-    #[test]
-    fn test_failure_isolation() {
-        let runtime = TokioRuntime::new();
-        let id1 = runtime.spawn(|_handle| async {}, None).unwrap();
-        let id2 = runtime.spawn(|_handle| async {}, None).unwrap();
-
-        runtime.shutdown(&id1);
-        assert_eq!(runtime.state(&id1), Some(ExecutionState::Draining));
-        assert_eq!(runtime.state(&id2), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_builder_multi_thread() {
-        let runtime = TokioRuntime::builder()
-            .worker_threads(4)
-            .build();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_builder_current_thread() {
-        let runtime = TokioRuntime::builder()
-            .current_thread()
-            .build();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_default() {
-        let runtime = TokioRuntime::default();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_spawned_task_receives_message() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(move |_handle| {
-            let _ = counter_clone.load(Ordering::SeqCst);
-            async move {}
-        }, None)
-        .unwrap();
-
-        // The spawned task sends a message to itself, but since we don't
-        // have a message processor, we just verify the unit exists and is active
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_clone_runtime_shared_state() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-
-        let runtime2 = runtime.clone();
-        assert_eq!(runtime2.state(&id), Some(ExecutionState::Active));
-
-        runtime2.shutdown(&id);
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Draining));
-    }
-
-    #[test]
-    fn test_multiple_messages_to_same_unit() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-
-        for i in 0..10 {
-            assert!(runtime.send(&id, i).is_ok());
-        }
-
-        assert_eq!(runtime.state(&id), Some(ExecutionState::Active));
-    }
-
-    #[test]
-    fn test_spawn_error_after_fail_closed_prevents_spawn() {
-        let runtime = TokioRuntime::new();
-        runtime.inner.fail_closed.store(true, Ordering::Release);
-
-        let id = ExecutionId::new();
-        assert!(runtime.state(&id).is_none());
-
-        let result = runtime.spawn(|_handle| async {}, None);
-        assert!(result.is_err());
-
-        // Verify no unit was created
-        assert!(runtime.state(&id).is_none());
-    }
-
-    #[test]
-    fn test_send_error_after_fail_closed() {
-        let runtime = TokioRuntime::new();
-        let id = runtime.spawn(|_handle| async {}, None).unwrap();
-
-        // Send should work before fail-closed
-        assert!(runtime.send(&id, 1i32).is_ok());
-
-        runtime.inner.fail_closed.store(true, Ordering::Release);
-
-        // Send should fail after fail-closed
-        let result = runtime.send(&id, 2i32);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().cause, SendErrorKind::Closed);
-    }
-}

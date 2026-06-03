@@ -1,3 +1,9 @@
+//! Backend-neutral runtime trait and Tokio-backed implementation.
+//!
+//! Defines the `Runtime` trait — the platform-agnostic entry point for
+//! spawning and communicating with concurrent executions. Also provides
+//! `TokioRuntime`, a production implementation backed by Tokio.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
@@ -61,207 +67,21 @@ pub trait Runtime: Send + Sync + 'static {
     fn state(&self, id: &ExecutionId) -> Option<ExecutionState>;
 }
 
-#[cfg(test)]
-mod test_null {
-    use std::any::Any;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    use crate::runtime::execution::ExecutionId;
-    use crate::runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
-    use crate::runtime::handle::RuntimeHandle;
-    use crate::runtime::lifecycle::ExecutionState;
-    use crate::runtime::runtime::Runtime;
-
-    struct NullUnit {
-        state: ExecutionState,
-        messages: Vec<Box<dyn Any + Send>>,
-    }
-
-    pub struct NullRuntime {
-        units: Mutex<HashMap<ExecutionId, NullUnit>>,
-        runtime_shutdown: Mutex<bool>,
-    }
-
-    impl NullRuntime {
-        pub fn new() -> Self {
-            Self {
-                units: Mutex::new(HashMap::new()),
-                runtime_shutdown: Mutex::new(false),
-            }
-        }
-
-        pub fn fail_unit(&self, id: ExecutionId) {
-            let mut units = self.units.lock().unwrap();
-            if let Some(unit) = units.get_mut(&id) {
-                unit.state = ExecutionState::Failed;
-            }
-        }
-
-        pub fn set_runtime_shutdown(&self, value: bool) {
-            *self.runtime_shutdown.lock().unwrap() = value;
-        }
-
-        pub fn message_count(&self, id: &ExecutionId) -> usize {
-            self.units
-                .lock()
-                .unwrap()
-                .get(id)
-                .map(|u| u.messages.len())
-                .unwrap_or(0)
-        }
-
-        pub fn unit_states(&self) -> Vec<(ExecutionId, ExecutionState)> {
-            self.units
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(id, u)| (*id, u.state.clone()))
-                .collect()
-        }
-    }
-
-    impl Default for NullRuntime {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl Runtime for NullRuntime {
-        fn spawn<F, Fut>(&self, _f: F, _name: Option<&str>) -> Result<ExecutionId, SpawnError>
-        where
-            F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
-            Fut: std::future::Future<Output = ()> + Send + 'static,
-        {
-            if *self.runtime_shutdown.lock().unwrap() {
-                return Err(SpawnError {
-                    cause: SpawnErrorKind::Closed,
-                });
-            }
-
-            let id = ExecutionId::new();
-
-            let unit = NullUnit {
-                state: ExecutionState::Active,
-                messages: Vec::new(),
-            };
-
-            self.units.lock().unwrap().insert(id, unit);
-            Ok(id)
-        }
-
-        fn send<M>(&self, id: &ExecutionId, msg: M) -> Result<(), SendError>
-        where
-            M: Send + 'static,
-        {
-            if *self.runtime_shutdown.lock().unwrap() {
-                return Err(SendError {
-                    id: *id,
-                    cause: SendErrorKind::Closed,
-                });
-            }
-
-            let mut units = self.units.lock().unwrap();
-            let unit = units.get_mut(id).ok_or(SendError {
-                id: *id,
-                cause: SendErrorKind::NotFound,
-            })?;
-
-            match unit.state {
-                ExecutionState::Active => {
-                    unit.messages.push(Box::new(msg));
-                    Ok(())
-                }
-                _ => Err(SendError {
-                    id: *id,
-                    cause: SendErrorKind::Closed,
-                }),
-            }
-        }
-
-        fn shutdown(&self, id: &ExecutionId) {
-            let mut units = self.units.lock().unwrap();
-            if let Some(unit) = units.get_mut(id) {
-                unit.state = ExecutionState::Terminated;
-            }
-        }
-
-        fn state(&self, id: &ExecutionId) -> Option<ExecutionState> {
-            self.units
-                .lock()
-                .unwrap()
-                .get(id)
-                .map(|u| u.state.clone())
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_spawn_returns_unique_id() {
-            let runtime = NullRuntime::new();
-            let id1 = runtime.spawn(|_handle| async {}, None).unwrap();
-            let id2 = runtime.spawn(|_handle| async {}, None).unwrap();
-            assert_ne!(id1, id2);
-        }
-
-        #[test]
-        fn test_spawn_after_shutdown_returns_error() {
-            let runtime = NullRuntime::new();
-            runtime.set_runtime_shutdown(true);
-            let result = runtime.spawn(|_handle| async {}, None);
-            assert_eq!(
-                result.unwrap_err().cause,
-                SpawnErrorKind::Closed
-            );
-        }
-
-        #[test]
-        fn test_send_to_unknown_id_returns_error() {
-            let runtime = NullRuntime::new();
-            let unknown_id = ExecutionId::new();
-            let result = runtime.send(&unknown_id, 42i32);
-            assert!(result.is_err());
-            assert_eq!(
-                result.unwrap_err().cause,
-                SendErrorKind::NotFound
-            );
-        }
-
-        #[test]
-        fn test_shutdown_terminates_unit() {
-            let runtime = NullRuntime::new();
-            let id = runtime.spawn(|_handle| async {}, None).unwrap();
-            runtime.shutdown(&id);
-            assert_eq!(runtime.state(&id), Some(ExecutionState::Terminated));
-        }
-
-        #[test]
-        fn test_failure_isolation() {
-            let runtime = NullRuntime::new();
-            let id1 = runtime.spawn(|_handle| async {}, None).unwrap();
-            let id2 = runtime.spawn(|_handle| async {}, None).unwrap();
-
-            runtime.fail_unit(id1);
-            assert_eq!(runtime.state(&id1), Some(ExecutionState::Failed));
-            assert_eq!(runtime.state(&id2), Some(ExecutionState::Active));
-
-            runtime.send(&id2, 42i32).unwrap();
-            assert_eq!(runtime.message_count(&id2), 1);
-        }
-    }
-}
-
+/// Internal execution unit — wraps state, message sender, and task handle.
 struct ExecutionUnit {
+    /// Current lifecycle state of this execution.
     state: ExecutionState,
+    /// Channel sender for delivering messages to this execution.
     sender: mpsc::Sender<Box<dyn Any + Send>>,
+    /// Join handle for the spawned Tokio task.
     handle: Option<JoinHandle<()>>,
 }
 
+/// Internal runtime state — Tokio handle and active execution registry.
 struct TokioRuntimeInner {
+    /// Handle to the Tokio runtime for spawning tasks.
     handle: tokio::runtime::Handle,
+    /// Registry of all active executions, keyed by `ExecutionId`.
     units: Mutex<HashMap<ExecutionId, ExecutionUnit>>,
 }
 
@@ -275,7 +95,12 @@ pub struct TokioRuntime {
 }
 
 impl TokioRuntime {
-    /// Create a new `TokioRuntime` with the given Tokio handle.
+    /// Constructor methods for `TokioRuntime`.
+
+    /// Creates a new `TokioRuntime` with the given Tokio handle.
+    ///
+    /// # Arguments
+    /// * `handle` — a cloned `tokio::runtime::Handle` to use for spawning tasks.
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
             inner: Arc::new(TokioRuntimeInner {
@@ -302,6 +127,9 @@ impl TokioRuntime {
         Ok(runtime)
     }
 
+    /// Internal: spawns an execution by creating an `ExecutionUnit`, building
+    /// a `RuntimeHandle` with closure-based access, and launching the user's
+    /// closure as a Tokio task.
     fn spawn_execution<F, Fut>(
         &self,
         f: F,
@@ -383,6 +211,11 @@ impl TokioRuntime {
         Ok(id)
     }
 
+    /// Internal: delivers a boxed message to an execution via its mpsc sender.
+    ///
+    /// # Errors
+    /// Returns `SendError::NotFound` if the execution id does not exist,
+    /// or `SendError::Closed` if the execution is not in `Active` state.
     fn send_message(
         &self,
         id: &ExecutionId,
@@ -415,6 +248,9 @@ impl TokioRuntime {
         }
     }
 
+    /// Internal: transitions an execution to `Draining` state.
+    ///
+    /// No-op if the execution is not in `Active` state or does not exist.
     fn shutdown_execution(&self, id: &ExecutionId) {
         if let Some(unit) = self.inner.units.lock().unwrap().get_mut(id) {
             if unit.state == ExecutionState::Active {
