@@ -13,3 +13,5 @@
 "ego-infrastructure" = "infrastructure"
 "ego-transport" = "transport"
 "runtime-slice" = "domain"
+"ego-runtime" = "foundation"
+"ego-runtime-tokio" = "infrastructure"

@@ -1,3 +1,14 @@
+//! Core domain types for the runtime-slice crate.
+//!
+//! Defines the fundamental building blocks of deterministic execution:
+//! slice identity, governed inputs, execution context, and outcome.
+//!
+//! # Purpose
+//! These types form the contract for governed execution. Every runtime
+//! slice has a unique identity, a declared set of deterministic inputs,
+//! and produces an observable outcome that can be validated for replay
+//! equivalence.
+
 use serde::{Deserialize, Serialize};
 
 /// A unique identifier for a runtime execution slice.
@@ -21,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub struct RuntimeSliceId(String);
 
 impl RuntimeSliceId {
+    /// Constructor and accessor for `RuntimeSliceId`.
     /// Creates a new [`RuntimeSliceId`] from a string-like value.
     ///
     /// # Errors
@@ -64,6 +76,7 @@ pub struct DeterministicInput {
 }
 
 impl DeterministicInput {
+    /// Constructor for `DeterministicInput` with key/value validation.
     /// Creates a new [`DeterministicInput`].
     ///
     /// # Errors
@@ -104,6 +117,7 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Constructor for `ExecutionContext` with non-empty input validation.
     /// Creates a new [`ExecutionContext`].
     ///
     /// # Errors
@@ -148,6 +162,7 @@ pub struct ExecutionOutcome {
 }
 
 impl ExecutionOutcome {
+    /// Constructor for `ExecutionOutcome` with non-empty semantics validation.
     /// Creates a new [`ExecutionOutcome`].
     ///
     /// # Errors

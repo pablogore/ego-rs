@@ -1,3 +1,8 @@
+//! CQRS query marker trait.
+//!
+//! Defines `Query` — the contract for read-only operations. Each query
+//! declares its `Output` type for type-safe handler resolution.
+
 use serde::Serialize;
 
 /// Trait for query types in a CQRS system.

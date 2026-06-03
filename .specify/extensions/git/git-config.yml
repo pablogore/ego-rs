@@ -1,0 +1,13 @@
+auto_commit:
+  default: false
+  after_specify:
+    enabled: true
+    message: "[Spec Kit] Add specification"
+  after_plan:
+    enabled: true
+    message: "[Spec Kit] Add implementation plan"
+  after_implement:
+    enabled: true
+    message: "[Spec Kit] Implement changes"
+  before_plan:
+    enabled: false

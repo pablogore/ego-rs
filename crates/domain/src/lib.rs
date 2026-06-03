@@ -26,14 +26,32 @@
 //! | `query` | `Query` trait with typed `Output` for reads |
 //! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `hello` | Example: `HelloQuery` / `HelloResponse` |
+//! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
+//! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
 
+/// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
+
+/// CQRS command marker trait.
 pub mod command;
+
+/// Domain event trait for event-sourced state.
 pub mod event;
+
+/// Example: HelloQuery / HelloResponse.
 pub mod hello;
+
+/// Observability port — SemanticEvent, Level, Observability trait.
+pub mod observability;
+
+/// Persistence SPI — EventStore, Repository, Snapshot, PersistenceError.
+pub mod persistence;
+
+/// CQRS query marker trait with typed Output.
 pub mod query;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use event::DomainEvent;
+pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;

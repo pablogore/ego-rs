@@ -87,25 +87,11 @@ pub trait Actor {
 /// assert_eq!(id.as_str(), "my_actor");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-/// A unique, location-transparent actor identifier.
-///
-/// Encodes nothing about network location, process, thread, or
-/// deployment topology. Resolution to a physical address is a
-/// runtime concern (CORE-003).
-///
-/// # Deterministic
-///
-/// Construction is fallible — empty names are rejected with
-/// [`ActorIdError::Empty`]. Once constructed, the identity is
-/// immutable and comparable by value.
-///
-/// # Fail-closed
-///
-/// `ActorId::new("")` returns `Err(ActorIdError::Empty)`.
-/// An actor with no name is invalid and MUST NOT be created.
 pub struct ActorId(String);
 
 impl ActorId {
+    /// Constructor and accessor methods for `ActorId`.
+
     /// Create a new `ActorId` with the given name.
     ///
     /// Returns `Err(ActorIdError::Empty)` if the name is empty
@@ -162,17 +148,6 @@ impl std::error::Error for ActorIdError {}
 /// let id: &'static ActorId = actor_id!(my_actor);
 /// assert_eq!(id.as_str(), "my_actor");
 /// ```
-/// Compile-time deterministic actor identity.
-///
-/// Produces a `&'static ActorId` at compile time. This ensures
-/// actor identities are deterministic — no runtime construction,
-/// no dynamic identity, no ambiguity.
-///
-/// # Deterministic
-///
-/// The same `actor_id!(name)` expression always produces the same
-/// `&'static ActorId` value. This is essential for replay and
-/// deterministic testing.
 #[macro_export]
 macro_rules! actor_id {
     ($name:ident) => {
@@ -219,6 +194,8 @@ pub enum ActorLifecycleState {
 }
 
 impl ActorLifecycleState {
+    /// Query methods for `ActorLifecycleState`.
+
     /// Returns `true` if this is a terminal state (Stopped or Failed).
     ///
     /// # Example

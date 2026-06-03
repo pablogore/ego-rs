@@ -3,6 +3,7 @@ members = [
     "crates/domain",
     "crates/application",
     "crates/infrastructure",
+    "crates/persistence",
     "crates/transport",
     "core/runtime-slice",
     "crates/runtime",
@@ -11,4 +12,4 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-mockall = "0.12"
+mockall = "0.14.0"

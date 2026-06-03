@@ -1,3 +1,9 @@
+//! Example: HelloQuery / HelloResponse.
+//!
+//! Reference implementation of a CQRS query flow. The domain defines
+//! the query and response types; the application layer provides the
+//! handler.
+
 use serde::{Deserialize, Serialize};
 
 use crate::query::Query;
