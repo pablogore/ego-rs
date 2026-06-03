@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: User description: "Define the persistence Service Provider Interface (SPI) as domain-owned contracts for event sourcing and aggregate persistence."
+**Input**: User description: "Define the persistence Service Provider Interface (SPI) as domain-owned contracts for event sourcing and aggregate persistence. Amendment: add event envelope with traceability metadata — events are wrapped in a standard envelope that preserves optional metadata (including correlation_id) through append and load. The envelope definition lives in the EventStore contract (StoredEvent<E>), not as SPI behavioral rules."
 
 ## User Scenarios & Testing
 
@@ -93,7 +93,7 @@ All persistence operations accept an optional `tenant_id`. When provided, same a
 
 ---
 
-### User Story 6 - Migration infrastructure (Priority: P3)
+### User Story 6 — Migration infrastructure (Priority: P3)
 
 Concrete persistence backends own schema evolution. Shared migration infrastructure supports versioned, idempotent, deterministic migrations with startup validation.
 
@@ -109,6 +109,23 @@ Concrete persistence backends own schema evolution. Shared migration infrastruct
 
 ---
 
+### User Story 7 — Events carry traceability metadata that ties them to their origin (Priority: P2)
+
+Each persisted event optionally carries metadata that identifies the command or external request that produced it. The EventStore operates on a standard event envelope that wraps the domain event with this metadata, and preserves it through append and load. This enables end-to-end tracing from command receipt through event persistence to downstream consumers.
+
+**Why this priority**: Traceability is essential for debugging, monitoring, and read-side processing. Without it, tracing an event back to its cause requires manual correlation or external systems.
+
+**Independent Test**: Append an event with traceability metadata. Load the event stream and verify the metadata is returned unchanged.
+
+**Acceptance Scenarios**:
+
+1. **Given** an event appended with traceability metadata, **When** the stream is loaded, **Then** the event is returned with the same metadata
+2. **Given** an event appended without traceability metadata, **When** the stream is loaded, **Then** the event is returned without additional metadata
+3. **Given** a batch of events with different metadata values, **When** loaded, **Then** each event preserves its individual metadata
+4. **Given** events appended before this feature was introduced, **When** loaded, **Then** they return without metadata (backward compatible)
+
+---
+
 ### Edge Cases
 
 - What happens when an aggregate stream contains millions of events — how is loading bounded?
@@ -118,6 +135,8 @@ Concrete persistence backends own schema evolution. Shared migration infrastruct
 - How does the system handle corrupted or unparseable event data in an existing stream?
 - What happens when a snapshot exists but the event stream since the snapshot is empty?
 - How does the `list_aggregate_ids` operation behave in a tenant with zero aggregates?
+- What happens when event envelope metadata exceeds reasonable size?
+- What happens if event metadata contains data incompatible with the storage backend?
 
 ## Requirements
 
@@ -140,6 +159,7 @@ Concrete persistence backends own schema evolution. Shared migration infrastruct
 - **FR-015 (Fail closed on missing tenant)**: When multi-tenant mode is active (`Some(tenant_id)` with empty/blank value), operations SHALL fail with `PersistenceError::MissingTenant`. When `tenant_id` is `None` (single-tenant mode), operations SHALL proceed without tenant scoping.
 - **FR-016 (Migrations)**: Concrete persistence implementations SHALL own their schema evolution with versioned, deterministic, idempotent migrations and startup validation.
 - **FR-017 (Production backend)**: The system SHALL provide at least one production-grade persistence backend that implements all SPI operations.
+- **FR-018 (Event Envelope)**: The EventStore SHALL operate on a standard event envelope that wraps domain events with optional metadata. The envelope and its contents SHALL be preserved through append and load without modification. The correlation_id in the envelope is exclusively a traceability link — see Semantic Boundaries below.
 
 ### Key Entities
 
@@ -148,6 +168,7 @@ Concrete persistence backends own schema evolution. Shared migration infrastruct
 - **Tenant**: An optional isolation boundary — when provided, all persistence operations are scoped to a single tenant. When `None`, the system operates in single-tenant mode.
 - **Snapshot**: A cached representation of aggregate state at a specific version for read optimization.
 - **Stream**: An ordered sequence of events for a single aggregate within a tenant.
+- **Event Envelope**: A wrapper around a domain event that carries optional metadata (including correlation_id for traceability). Preserved through storage and load without modification.
 
 ## Contract Invariants
 
@@ -158,6 +179,7 @@ The following behavioral guarantees apply to all SPI trait implementations.
 - Events appended to a stream MUST be loaded in the same order they were appended.
 - Snapshots MUST return the version with the highest version number on load.
 - Migrations MUST execute in monotonically increasing version order.
+- Event envelope metadata (wrapping domain events) MUST be preserved through append and load without modification.
 
 ### Atomicity
 
@@ -192,6 +214,65 @@ The following behavioral guarantees apply to all SPI trait implementations.
 - When `tenant_id` is `Some(id)`, implementations MUST guarantee that data written under one `tenant_id` is not observable under any other `tenant_id`.
 - When `tenant_id` is `None` (single-tenant mode), no tenant isolation is applied — all data shares a single default scope.
 - In multi-tenant mode, operations with an empty or absent `tenant_id` value MUST fail with `PersistenceError::MissingTenant`.
+
+### Correlation ID Semantic Boundaries
+
+The correlation_id is exclusively a traceability link. The following negative semantics define its boundaries:
+
+#### Security
+
+- correlation_id MUST NOT be used as an authentication or authorization mechanism.
+- correlation_id MUST NOT be treated as a secret, credential, or token.
+- correlation_id values MUST NOT be validated, signed, or encrypted by the persistence layer.
+- correlation_id MUST NOT influence access control decisions at any layer.
+
+#### Correctness
+
+- correlation_id presence or absence MUST NOT affect the success or failure of any persistence operation.
+- All persistence operations SHALL produce identical results for `Some(x)` and `None` correlation_id, except for the traceability field itself.
+
+#### Ordering
+
+- Event ordering is a function of stream version, not correlation_id.
+- If event A was appended before event B, A precedes B on load — regardless of correlation_id values.
+
+#### Deduplication
+
+- correlation_id is not an idempotency key. Two events with identical correlation_ids are two distinct events.
+- No SPI implementation SHALL suppress, skip, or overwrite an event based on its correlation_id.
+
+### Correlation Lifecycle
+
+The correlation_id lifecycle defines how traceability metadata flows through the system:
+
+- **Creation origin**: correlation_id originates in the command processing context (CommandContext). It is bound to command identity, not execution attempt.
+- **Propagation path**: correlation_id flows from CommandContext → Domain Events → EventStore → Loaded Events → Downstream Handlers. The EventStore passes the envelope through without inspection or modification.
+- **Retry survival**: All retries of the same logical command MUST use the identical correlation_id bound to the original command identity. correlation_id is scoped to the command, not any single execution attempt.
+- **No downstream regeneration**: Once set in the originating CommandContext, correlation_id MUST NOT be regenerated, replaced, or modified at any downstream layer. Causal propagation preserves the source event's correlation_id.
+- **Optionality (None)**: `correlation_id = None` is valid and means no traceability link exists. No layer SHALL auto-generate a correlation_id when `None` is provided.
+- **Downstream causality**: Causally-related downstream commands carry the source event's correlation_id. Independent causality chains use `None`.
+- The lifecycle contract is scoped by the [Correlation Scope Boundary](#correlation-scope-boundary) (spec 004) and subject to the [Correlation ID Semantic Boundaries](#correlation-id-semantic-boundaries) (spec 005).
+
+### Snapshot Trace Continuity
+
+Snapshots are a performance optimization and do not participate in the correlation_id lifecycle:
+
+- **Delta replay preservation**: Snapshot restore followed by delta event replay from the EventStore preserves all original correlation_ids. Delta events carry their correlation_ids unchanged.
+- **Trace equivalence**: Snapshot restore + delta replay produces a correlation_id trace chain identical to full stream replay for the overlapping version range.
+- **No trace leakage**: Pre-snapshot correlation_ids MUST NOT appear in delta events. Each delta event carries only its own correlation_id.
+- **Empty delta**: When the snapshot version equals the latest stream version (no delta events), restore succeeds with no trace data loss.
+- **Snapshot optionality**: Snapshot SHALL NOT define, store, or require correlation_id. Correlation_id is owned by the EventStore. Snapshot is correlation_id-free.
+- **No propagation requirement**: Snapshot contract SHALL NOT be required to propagate, preserve, or handle correlation_id in any way.
+
+### Correlation Scope Boundary
+
+The correlation_id ownership boundary is explicitly defined across persistence contracts:
+
+- **EventStore owns correlation_id**: The EventStore is the sole persistence contract that defines and carries correlation_id. The `StoredEvent<E>` envelope in the EventStore is the exclusive persistence carrier.
+- **Repository is correlation_id-agnostic**: Repository operations SHALL NOT accept, return, or reference correlation_id. The Repository trait is correlation_id-free by design.
+- **Snapshot is correlation_id-agnostic**: Snapshot operations SHALL NOT accept, return, or reference correlation_id. The Snapshot trait is correlation_id-free by design.
+- **No dual semantics**: Implementations MUST NOT introduce correlation_id semantics in Repository or Snapshot operations, even when sharing a backing store with the EventStore.
+- **Explicit documentation**: Each contract documents its relationship to correlation_id: EventStore owns it, Repository and Snapshot explicitly exclude it.
 
 ## Constraints
 
@@ -230,6 +311,7 @@ The following concerns are NOT addressed by this specification and belong in fut
 - **SC-002**: Tenant isolation is verifiable in under 5 minutes by writing the same aggregate ID in two tenants and confirming isolated reads. Single-tenant mode (`tenant_id` = `None`) is verifiable by performing the same operations without tenant scoping.
 - **SC-003**: All error variants (`NotFound`, `Conflict`, `MissingTenant`, `Internal`) are exercised by test scenarios with no implementation-specific dependencies.
 - **SC-004**: Contract invariants are validated by a shared contract test suite that any new backend implementation can run to prove compliance.
+- **SC-005**: An event appended with traceability metadata is returned with the same metadata on load. Verifiable by test.
 
 ## Assumptions
 
@@ -238,3 +320,4 @@ The following concerns are NOT addressed by this specification and belong in fut
 - Actor identity types are available for use as aggregate identifiers.
 - The initial focus is on the SPI definition only — concrete backends are not part of this spec.
 - Serialization support exists within the domain layer.
+- Event metadata (including correlation_id) is provided by the entity runtime — the SPI stores and returns the envelope as-is, without inspecting or validating its contents.

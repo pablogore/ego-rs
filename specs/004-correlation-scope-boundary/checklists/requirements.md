@@ -1,4 +1,4 @@
-# Specification Quality Checklist: Correlation ID Propagation
+# Specification Quality Checklist: Correlation Scope Boundary
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-06-03
@@ -31,7 +31,4 @@
 
 ## Notes
 
-- All items pass initial validation.
-- This is an amendment to the existing 001-persistence-spi spec, adding correlation_id propagation through the event envelope.
-- Changes: new User Story 7, FR-018, updated Key Entities, Contract Invariants, Success Criteria, and Assumptions.
-- Specification is ready for planning.
+All checklist items pass. Spec is ready for `/speckit.plan`.

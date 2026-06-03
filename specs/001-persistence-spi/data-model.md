@@ -15,6 +15,15 @@
 - **Identity**: By position within an aggregate stream (version number)
 - **Contract**: `DomainEvent` trait (defined in `crates/domain/src/event.rs`)
 - **Ordering**: Events are ordered by append sequence within a stream
+- **Correlation ID**: Optional `correlation_id: Option<String>` carried by the `StoredEvent<E>` wrapper. Ties the event to the command that produced it. Preserved through append and load without modification.
+
+### StoredEvent
+
+- **Description**: A wrapper around a `DomainEvent` that adds storage-level metadata
+- **Fields**: `event: E` (the domain event), `correlation_id: Option<String>` (optional command correlation)
+- **Purpose**: Allows the EventStore to propagate correlation_id without modifying the `DomainEvent` trait
+- **Backward compatibility**: Events without correlation_id use `StoredEvent { event, correlation_id: None }`
+- **Semantic boundaries**: correlation_id is NOT a security token, NOT required for persistence correctness, NOT used for ordering, NOT used for deduplication. It is exclusively a traceability link to the originating command.
 
 ### Tenant
 

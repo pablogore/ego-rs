@@ -39,7 +39,32 @@ cargo test -p ego-infrastructure -- --ignored
 
 **Expected**: Same contract tests as InMemory, passing against a PostgreSQL database.
 
-### 4. Multi-tenancy toggle verification
+### 4. Correlation ID propagation
+
+```rust
+// Verify correlation_id is preserved through append and load
+let mut store = InMemoryEventStore::new();
+
+// Event with correlation_id
+let event_with_cid = StoredEvent {
+    event: TestEvent::Created("order-1".into()),
+    correlation_id: Some("cmd-abc-123".into()),
+};
+store.append("agg-1", None, 0, vec![event_with_cid]).unwrap();
+let events = store.load("agg-1", None).unwrap();
+assert_eq!(events[0].correlation_id.as_deref(), Some("cmd-abc-123"));
+
+// Event without correlation_id (backward compatible)
+let event_without_cid = StoredEvent {
+    event: TestEvent::Updated("new-status".into()),
+    correlation_id: None,
+};
+store.append("agg-1", None, 1, vec![event_without_cid]).unwrap();
+let events = store.load("agg-1", None).unwrap();
+assert_eq!(events[1].correlation_id, None);
+```
+
+### 5. Multi-tenancy toggle verification
 
 ```rust
 // In-memory test demonstrating both modes

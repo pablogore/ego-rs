@@ -33,7 +33,16 @@ All NEEDS CLARIFICATION markers resolved during `/speckit.clarify`. The spec is 
 - **Rationale**: Already present in `ego-domain`, no new external dependencies required
 - **Alternatives considered**: Custom serialization trait — would add unnecessary complexity for v1
 
-### Decision 5: Migration infrastructure
+### Decision 5: Correlation ID per-event propagation
+
+- **Decision**: `StoredEvent<E>` wrapper carries `correlation_id: Option<String>`; EventStore append/load use `Vec<StoredEvent<E>>` instead of `Vec<E>`
+- **Rationale**: correlation_id is a storage concern, not a domain event field. Wrapping at the SPI boundary keeps `DomainEvent` trait pure while enabling per-event correlation.
+- **Alternatives considered**:
+  - Add to `DomainEvent` trait: Pollutes domain contract with infrastructure concern
+  - Per-batch correlation_id: Too coarse — different commands may batch produce events with different origins
+  - Separate correlation map: Adds indirection and atomicity concerns
+
+### Decision 6: Migration infrastructure
 
 - **Decision**: Shared migration infrastructure in `ego-infrastructure` (`MigrationRegistry`, `MigrationContext` trait); each backend owns its migration scripts
 - **Rationale**: Versioned, deterministic, idempotent migrations with startup validation — follows established patterns (Flyway, Diesel)

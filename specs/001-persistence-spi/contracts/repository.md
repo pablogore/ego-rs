@@ -35,3 +35,4 @@ See [Contract Invariants](../spec.md#contract-invariants) in spec.md for full be
 - `expected_version` enforces optimistic concurrency
 - `delete` makes aggregate inaccessible to subsequent `load` calls
 - `tenant_id = None` = single-tenant mode
+- correlation_id is NOT a Repository concern. Repository operations are correlation_id-agnostic. Correlation_id is exclusively owned by the EventStore.

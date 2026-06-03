@@ -29,3 +29,6 @@ See [Contract Invariants](../spec.md#contract-invariants) in spec.md for full be
 - `load_snapshot` returns the highest version snapshot or `None`
 - `save_snapshot` version tracks the aggregate version
 - No snapshot exists → `Ok(None)`, never an error
+- Snapshot does not carry correlation_id — trace continuity is maintained by EventStore delta replay
+- Snapshot SHALL NOT define, store, or require correlation_id. Correlation_id is an Event-only concept.
+- correlation_id is NOT a Snapshot concern. Snapshot operations are correlation_id-agnostic. Correlation_id is exclusively owned by the EventStore.

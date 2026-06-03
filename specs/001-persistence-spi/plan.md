@@ -6,7 +6,7 @@
 
 ## Summary
 
-Define the persistence SPI as domain-owned contracts (`EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits/types) in `ego-domain`. Concrete implementations (InMemory, PostgreSQL) live in `ego-infrastructure`. Multi-tenancy is optional — `tenant_id` is `Option<&str>` — enabling both single-tenant and multi-tenant modes. The SPI is runtime-neutral (no async, no Tokio in trait signatures).
+Define the persistence SPI as domain-owned contracts (`EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits/types) in `ego-domain`. Concrete implementations (InMemory, PostgreSQL) live in `ego-infrastructure`. Multi-tenancy is optional — `tenant_id` is `Option<&str>` — enabling both single-tenant and multi-tenant modes. Events optionally carry a `correlation_id` that ties them to the originating command, preserved through append and load. The SPI is runtime-neutral (no async, no Tokio in trait signatures).
 
 ## Technical Context
 
@@ -26,6 +26,9 @@ Define the persistence SPI as domain-owned contracts (`EventStore`, `Repository`
 
 **Constraints**: Runtime-neutral domain traits (no async), no database-specific types in SPI, infrastructure-owned migrations
 
+**Amendments**:
+- **Correlation ID (2026-06-03)**: Events optionally carry `correlation_id: Option<String>` propagated through the EventStore. Implemented via `StoredEvent<E>` wrapper in the domain SPI. All existing backends updated. New contract tests for correlation preservation and backward compatibility.
+
 **Scale/Scope**: Multi-crate workspace with domain, infrastructure, application, persistence crate layers
 
 ## Constitution Check
@@ -33,10 +36,10 @@ Define the persistence SPI as domain-owned contracts (`EventStore`, `Repository`
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
 **Result**: PASS — No violations detected.
-- §C (Spec Scope): Single capability — SPI contracts only. Backend implementations are deferred to separate specs per Out of Scope.
+- §C (Spec Scope): Single capability — SPI contracts only. Backend implementations are deferred to separate specs per Out of Scope. Correlation ID amendment stays within SPI scope.
 - §E (Architecture Freeze): Technology choices (crate names, frameworks) are in this design document, not spec.md — compliant.
-- §A (Anti Over-Engineering): Two-backend strategy justified by spec requirement for production + reference implementations. No speculative abstractions.
-- §D (Minimal Artifacts): Contracts/ and data-model.md pre-date constitution v2.0.0. Acceptable as legacy; future specs should inline.
+- §A (Anti Over-Engineering): `StoredEvent<E>` wrapper is the minimal addition needed for correlation_id propagation. No speculative abstractions.
+- §D (Minimal Artifacts): Contracts/, data-model.md, and tasks.md updated to reflect correlation_id addition — no new artifact categories.
 
 ## Project Structure
 

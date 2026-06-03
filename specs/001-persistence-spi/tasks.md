@@ -240,6 +240,59 @@ Phase 1 (Setup) → Phase 2 (Domain SPI) → Phase 3 (Contract Tests) → Phase 
 - [X] `InMemoryEventStore`, `InMemoryRepository`, `InMemorySnapshotStore` exist in `ego-infrastructure`
 - [X] Contract test suite validates ordering, atomicity, concurrency, consistency, error translation, empty-state behavior, tenant isolation per spec.md §Contract Invariants
 - [X] No PostgreSQL, migration, or schema evolution code exists in this spec's scope
+- [ ] `StoredEvent<E>` wrapper exists in `ego-domain::persistence`
+- [ ] EventStore trait uses `Vec<StoredEvent<E>>` for append/load
+- [ ] Correlation ID contract tests cover: preservation, None default, mixed batch
+
+---
+
+## Phase 6: Correlation ID Propagation (US7)
+
+**Purpose**: Add optional `correlation_id` to the event envelope through the `StoredEvent<E>` wrapper. Modify EventStore trait, InMemory and PostgreSQL backends, and add contract tests for correlation preservation.
+
+**Validation**: `cargo test -p ego-infrastructure` — all existing + new correlation tests pass.
+
+- [ ] T021 [P] [US7] Create StoredEvent<E> wrapper type in domain persistence
+      Action: Create
+      File: crates/domain/src/persistence/stored_event.rs
+      Section: pub struct StoredEvent<E>
+      Outcome: `StoredEvent<E>` struct with two fields — `event: E` and `correlation_id: Option<String>` — derives `Debug, Clone, PartialEq, Eq`; added to `persistence/mod.rs` re-exports. No `DomainEvent` trait constraint — `E` is generic.
+      Validation: `cargo check -p ego-domain` passes
+
+- [ ] T022 [P] [US7] Update EventStore trait signature to use StoredEvent<E>
+      Action: Modify
+      File: crates/domain/src/persistence/event_store.rs
+      Section: pub trait EventStore<E: DomainEvent>
+      Outcome: `append` accepts `Vec<StoredEvent<E>>` instead of `Vec<E>`; `load` returns `Result<Vec<StoredEvent<E>>` instead of `Result<Vec<E>>`. Trait bound `E: DomainEvent` unchanged.
+      Validation: `cargo check -p ego-domain` passes
+
+- [ ] T023 [P] [US7] Update InMemoryEventStore to store and return correlation_id
+      Action: Modify
+      File: crates/infrastructure/src/persistence/in_memory/event_store.rs
+      Section: InMemoryEventStore<E>
+      Outcome: Internal storage wraps events with correlation_id. `append` preserves each event's `correlation_id`; `load` returns events with their stored `correlation_id`. `list_aggregate_ids` unchanged (aggregate-level, not event-level).
+      Validation: `cargo check -p ego-infrastructure` passes
+
+- [ ] T024 [P] [US7] Add correlation_id contract tests to shared test suite
+      Action: Modify
+      File: crates/infrastructure/tests/common/mod.rs
+      Section: event_store_contract_tests()
+      Outcome: Three new test scenarios added to `event_store_contract_tests()`: 1) append with correlation_id → load returns same correlation_id, 2) append without correlation_id → load returns None, 3) batch append with mixed correlation_ids → each preserved individually. All run for any EventStore implementation.
+      Validation: `cargo test -p ego-infrastructure --test event_store_contract --no-run` compiles
+
+- [ ] T025 [P] [US7] Run full test suite with correlation_id changes
+      Action: Validate
+      File: workspace root
+      Section: test suite
+      Outcome: All existing contract tests plus new correlation_id tests pass for InMemoryEventStore.
+      Validation: `cargo test -p ego-infrastructure` — all tests pass
+
+- [ ] T026 [P] [US7] Update quickstart.md correlation propagation scenario
+      Action: Validate
+      File: specs/001-persistence-spi/quickstart.md
+      Section: §4
+      Outcome: quickstart.md §4 (Correlation ID propagation) compiles and runs correctly.
+      Validation: Manual verification — copy/paste quickstart §4 code into a test, compile and run
 
 ---
 

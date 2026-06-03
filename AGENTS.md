@@ -28,5 +28,5 @@ Execution behavior for coding agents operating in this repository. Focused on op
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current design:
-`specs/001-persistence-spi/plan.md`
+`specs/005-correlation-semantic-boundary/plan.md`
 <!-- SPECKIT END -->
