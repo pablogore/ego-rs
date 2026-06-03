@@ -23,10 +23,4 @@ Execution behavior for coding agents operating in this repository. Focused on op
 3. **`ARCHITECTURE.md`** — runtime architecture (layers, actors, CQRS/ES)
 4. **This file** — agent execution behavior (operational rules)
 
-## Current Plan
-
-<!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current design:
-`specs/002-correlation-lifecycle-contract/plan.md`
-<!-- SPECKIT END -->
+<!-- Current Plan section removed — no active feature spec -->
