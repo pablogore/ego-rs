@@ -8,20 +8,21 @@ Practical recipes for using the ego-rs framework.
 
 ### Project structure
 
-```text
-my-service/
-├── Cargo.toml          # depends on ego-domain, ego-application
-├── src/
-│   ├── domain/
-│   │   ├── mod.rs
-│   │   ├── commands.rs   # Command types
-│   │   ├── events.rs     # DomainEvent types
-│   │   └── queries.rs    # Query types
-│   ├── application/
-│   │   ├── mod.rs
-│   │   ├── handlers.rs   # CommandHandler + QueryHandler impls
-│   │   └── ports.rs      # External port traits
-│   └── main.rs
+```mermaid
+mindmap
+  root((my-service))
+    Cargo.toml
+    src
+      domain
+        mod.rs
+        commands.rs
+        events.rs
+        queries.rs
+      application
+        mod.rs
+        handlers.rs
+        ports.rs
+      main.rs
 ```
 
 ### Cargo.toml

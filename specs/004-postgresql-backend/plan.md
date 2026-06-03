@@ -39,30 +39,32 @@ Implement PostgreSQL backends for `EventStore`, `Repository`, and `Snapshot` tra
 
 ### Documentation (this feature)
 
-```text
-specs/004-postgresql-backend/
-├── spec.md              # Behavior, requirements, invariants
-├── plan.md              # This file (design decisions)
-└── tasks.md             # Phase 2 output (executable tasks)
+```mermaid
+mindmap
+  root((specs/004-postgresql-backend))
+    spec.md
+    plan.md
+    tasks.md
 ```
 
 ### Source Code (repository root)
 
-```text
-crates/infrastructure/src/
-├── lib.rs                       # module declarations + re-exports
-└── persistence/
-    ├── mod.rs                   # persistence module (updated: add postgresql)
-    ├── in_memory/               # existing in-memory implementations
-    │   ├── mod.rs
-    │   ├── event_store.rs
-    │   ├── repository.rs
-    │   └── snapshot.rs
-    └── postgresql/              # NEW: PostgreSQL implementations
-        ├── mod.rs
-        ├── event_store.rs       # PostgreSQLEventStore
-        ├── repository.rs        # PostgreSQLRepository
-        └── snapshot.rs          # PostgreSQLSnapshotStore
+```mermaid
+mindmap
+  root((crates/infrastructure/src))
+    lib.rs
+    persistence
+      mod.rs
+      in_memory
+        mod.rs
+        event_store.rs
+        repository.rs
+        snapshot.rs
+      postgresql
+        mod.rs
+        event_store.rs
+        repository.rs
+        snapshot.rs
 ```
 
 **Structure Decision**: Mirror the existing `in_memory/` module structure with a new `postgresql/` module. Each SPI trait gets its own file. No shared PostgreSQL utilities needed — each implementation is self-contained and minimal.

@@ -16,10 +16,12 @@ Describes ego-rs engineering structure, design conventions, and spec integration
 
 ### Dependency Direction
 
-```
-domain ← application ← infrastructure
-domain ← transport
-domain ← runtime
+```mermaid
+flowchart LR
+    infrastructure --> application
+    application --> domain
+    transport --> domain
+    runtime --> domain
 ```
 
 No layer may depend on a layer to its right in this chain. Violations are enforced by `layers.toml` and `scripts/verify-layers.sh`.

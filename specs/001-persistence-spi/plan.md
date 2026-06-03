@@ -42,37 +42,39 @@ Define the persistence SPI as domain-owned contracts (`EventStore`, `Repository`
 
 ### Documentation (this feature)
 
-```text
-specs/001-persistence-spi/
-├── plan.md              # This file (design decisions)
-├── research.md          # Phase 0 output — resolved unknowns
-├── data-model.md        # Phase 1 output — entity definitions
-├── quickstart.md        # Phase 1 output — validation guide
-├── contracts/           # Phase 1 output — interface contracts
-└── tasks.md             # Phase 2 output (/speckit.tasks command)
+```mermaid
+mindmap
+  root((specs/001-persistence-spi))
+    plan.md
+    research.md
+    data-model.md
+    quickstart.md
+    contracts
+    tasks.md
 ```
 
 ### Source Code (repository root)
 
-```text
-crates/domain/src/
-├── lib.rs                       # module declarations + re-exports
-└── persistence/
-    ├── mod.rs                   # persistence module
-    ├── event_store.rs           # EventStore trait
-    ├── repository.rs            # Repository trait
-    ├── snapshot.rs              # Snapshot trait
-    └── error.rs                 # PersistenceError enum
-
-crates/infrastructure/src/
-├── lib.rs                       # module declarations + re-exports
-└── persistence/
-    ├── mod.rs                   # persistence module
-    └── in_memory/
-        ├── mod.rs
-        ├── event_store.rs       # InMemoryEventStore
-        ├── repository.rs        # InMemoryRepository
-        └── snapshot.rs          # InMemorySnapshotStore
+```mermaid
+mindmap
+  root((Source Code))
+    crates/domain/src
+      lib.rs
+      persistence
+        mod.rs
+        event_store.rs
+        repository.rs
+        snapshot.rs
+        error.rs
+    crates/infrastructure/src
+      lib.rs
+      persistence
+        mod.rs
+        in_memory
+          mod.rs
+          event_store.rs
+          repository.rs
+          snapshot.rs
 ```
 
 **Structure Decision**: Multi-crate Rust workspace mirrors existing project layout. SPI traits live in `ego-domain`; implementations in `ego-infrastructure`, separated by backend. PostgreSQL backend and migration infrastructure are deferred to future specs.

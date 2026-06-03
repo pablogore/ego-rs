@@ -6,30 +6,18 @@ ego-rs is a **hexagonal, actor-oriented, deterministic** backend framework writt
 
 ## Layer Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│ transport                                    │
-│ HTTP, gRPC handlers → delegates to app layer │
-│ Depends on: application, domain              │
-└──────────────┬───────────────────────────────┘
-               │
-┌──────────────▼───────────────────────────────┐
-│ application                                  │
-│ Command handlers, query handlers, use cases  │
-│ Depends on: domain                           │
-└──────────────┬───────────────────────────────┘
-               │
-┌──────────────▼───────────────────────────────┐
-│ domain                                       │
-│ Actor trait, Command, Event, Query, ActorId  │
-│ Depends on: nothing internal                 │
-└──────────────────────────────────────────────┘
-               ▲
-┌──────────────┴───────────────────────────────┐
-│ infrastructure                               │
-│ In-memory adapters, persistence, observability│
-│ Depends on: application, domain              │
-└──────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    transport["transport<br/>HTTP, gRPC handlers<br/>Depends on: application, domain"]
+    application["application<br/>Command handlers, query handlers, use cases<br/>Depends on: domain"]
+    domain["domain<br/>Actor trait, Command, Event, Query, ActorId<br/>Depends on: nothing internal"]
+    infrastructure["infrastructure<br/>In-memory adapters, persistence, observability<br/>Depends on: application, domain"]
+
+    transport --> application
+    transport --> domain
+    application --> domain
+    infrastructure --> application
+    infrastructure --> domain
 ```
 
 ## Dependency Rules (enforced by `layers.toml` + `scripts/verify-layers.sh`)
