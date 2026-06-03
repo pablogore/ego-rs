@@ -34,7 +34,7 @@ A command handler fails mid-execution (e.g., concurrency conflict) and retries. 
 
 **Acceptance Scenarios**:
 
-1. **Given** a CorrelationContext with `correlation_id = "abc-123"`, **When** an append fails and the command is retried with the same context, **Then** the retried events also carry `correlation_id = "abc-123"`
+1. **Given** a CommandContext with `correlation_id = "abc-123"`, **When** an append fails and the command is retried with the same context, **Then** the retried events also carry `correlation_id = "abc-123"`
 2. **Given** a CommandContext with `correlation_id = "abc-123"`, **When** the same command is retried multiple times, **Then** every attempt's events carry the same `correlation_id`
 3. **Given** a CommandContext with `correlation_id = None`, **When** the command is retried, **Then** retried events also carry `correlation_id = None`
 
@@ -75,7 +75,7 @@ An external system sends a command without a correlation_id. The system accepts 
 
 - What happens when a downstream handler produces multiple new commands from a single event — do all carry the original correlation_id?
 - What happens when a retry occurs after partial event persistence (if the system permits non-atomic retry)?
-- How does the system behave when the correlation_id is an empty string (distinct from None)?
+- How does the system behave when the correlation_id is an empty string (distinct from None)? → Rejected at application boundary. The SPI receives either `Some(valid_string)` or `None`. Empty strings do not reach the persistence layer.
 - What happens when the correlation_id exceeds reasonable length limits?
 - What happens when a downstream handler creates a new causality chain (not causally related to the source event)?
 
@@ -84,7 +84,7 @@ An external system sends a command without a correlation_id. The system accepts 
 ### Functional Requirements
 
 - **FR-001 (Creation)**: The `correlation_id` SHALL originate in the command processing context at the point where a command is first received. The same `correlation_id` SHALL be used throughout the lifecycle of processing that command.
-- **FR-002 (Optionality)**: `correlation_id` SHALL be optional (`Option`-like). A value of `None` or equivalent SHALL mean "no traceability link" and SHALL NOT be replaced with an auto-generated value at any layer.
+- **FR-002 (Optionality)**: `correlation_id` SHALL be optional (`Option`-like). A value of `None` SHALL mean "no traceability link" and SHALL NOT be replaced with an auto-generated value at any layer. An empty-string correlation_id SHALL NOT be accepted — it is rejected at the application boundary before reaching the SPI.
 - **FR-003 (Retry survival)**: When a command is retried due to failure, the retry SHALL use the same `correlation_id` as the original attempt. The correlation_id is bound to the command identity, not the execution attempt.
 - **FR-004 (Causal propagation)**: When a downstream handler or consumer processes an event and produces a new command that is causally related to the source event, the new command's context SHALL carry the same `correlation_id` as the source event.
 - **FR-005 (No regeneration)**: No layer (persistence, infrastructure, application) SHALL generate, replace, or overwrite a `correlation_id`. The only valid operations are: pass-through (from CommandContext to EventStore) and propagate (from source event to new causally-related command).
@@ -97,6 +97,12 @@ An external system sends a command without a correlation_id. The system accepts 
 - **CorrelationId**: An opaque identifier (string) that links an event to the command that produced it. Optional — may be `None`.
 - **StoredEvent**: The event envelope that wraps a domain event with its `correlation_id`. Defined in the Persistence SPI.
 - **Downstream Handler**: Any component that consumes events and may produce new commands in response.
+
+## Clarifications
+
+### Session 2026-06-03
+
+- Q: Should an empty string correlation_id be treated as a valid opaque value, normalized to None, or rejected on input? → A: Rejected on input. Empty string correlation_id is caught at the application boundary before reaching the SPI. The SPI receives either `Some(valid_string)` or `None`.
 
 ## Contract Invariants
 

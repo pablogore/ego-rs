@@ -33,21 +33,21 @@
 
 **Validation**: Manual inspection — confirm each file exists and has not been modified yet.
 
-- [ ] T001 [P] Verify spec 001 spec.md exists and identify sections to update
+- [x] T001 [P] Verify spec 001 spec.md exists and identify sections to update
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: FR-018, Contract Invariants
       Outcome: FR-018 (Event Envelope) located; Contract Invariants section identified; assumption entries for correlation_id located
       Validation: `grep -n "FR-018" specs/001-persistence-spi/spec.md` returns a line
 
-- [ ] T002 [P] Verify spec 001 event-store contract exists
+- [x] T002 [P] Verify spec 001 event-store contract exists
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Critical Invariants
       Outcome: correlation_id entry found under Critical Invariants; section for semantic boundaries identified
       Validation: `grep -n "correlation_id" specs/001-persistence-spi/contracts/event-store.md` returns lines
 
-- [ ] T003 [P] Verify spec 001 data-model.md exists
+- [x] T003 [P] Verify spec 001 data-model.md exists
       Action: Validate
       File: specs/001-persistence-spi/data-model.md
       Section: StoredEvent
@@ -62,21 +62,21 @@
 
 **Validation**: All four "NOT" boundaries appear in each document.
 
-- [ ] T004 [US1] Add Correlation ID Semantic Boundaries section to spec 001 spec.md
+- [x] T004 [US1] Add Correlation ID Semantic Boundaries section to spec 001 spec.md
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — after Tenant Isolation
       Outcome: New "Correlation ID Semantic Boundaries" subsection with four sub-sections (Security, Correctness, Ordering, Deduplication). Each sub-section contains the relevant "MUST NOT" / "NOT" rules from spec 005 FR-001 through FR-004. FR-018 updated to reference semantic boundaries.
       Validation: `grep -c "Correlation ID Semantic Boundaries" specs/001-persistence-spi/spec.md` returns 1
 
-- [ ] T005 [US1] Add Correlation ID Semantic Boundaries section to event-store contract
+- [x] T005 [US1] Add Correlation ID Semantic Boundaries section to event-store contract
       Action: Modify
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — after Critical Invariants
       Outcome: New "Correlation ID Semantic Boundaries" section under Behavioral Contract with four "NOT" statements: NOT a security token, NOT required for correctness, NOT used for ordering, NOT used for deduplication.
       Validation: `grep -c "Semantic Boundaries" specs/001-persistence-spi/contracts/event-store.md` returns 1
 
-- [ ] T006 [US1] Add semantic boundaries note to data-model StoredEvent
+- [x] T006 [US1] Add semantic boundaries note to data-model StoredEvent
       Action: Modify
       File: specs/001-persistence-spi/data-model.md
       Section: StoredEvent
@@ -91,14 +91,14 @@
 
 **Validation**: `grep` searches confirm no security misuse.
 
-- [ ] T007 [US2] Audit codebase for correlation_id security misuse
+- [x] T007 [US2] Audit codebase for correlation_id security misuse
       Action: Validate
       File: workspace root (all crates)
       Section: N/A — security audit
       Outcome: Zero cases found where correlation_id is used for authentication, authorization, session management, or access control decisions
       Validation: `grep -rn "correlation_id" crates/ --include="*.rs" | grep -iv "test\|mock\|stored_event\|Option"` — no security-related hits
 
-- [ ] T008 [US2] Verify spec 001 contract tests do not use correlation_id for security
+- [x] T008 [US2] Verify spec 001 contract tests do not use correlation_id for security
       Action: Validate
       File: crates/infrastructure/tests/common/mod.rs (if exists)
       Section: event_store_contract_tests
@@ -111,14 +111,14 @@
 
 **Purpose**: Confirm event ordering invariants explicitly state correlation_id is not an ordering mechanism. Satisfies FR-003.
 
-- [ ] T009 [US3] Verify ordering invariants exclude correlation_id
+- [x] T009 [US3] Verify ordering invariants exclude correlation_id
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Ordering
       Outcome: Ordering subsection includes explicit statement that correlation_id does not influence event order
       Validation: `grep -A10 "### Ordering" specs/001-persistence-spi/spec.md | grep -c "correlation"` returns at least 1
 
-- [ ] T010 [US3] Verify event-store contract ordering invariant
+- [x] T010 [US3] Verify event-store contract ordering invariant
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — Semantic Boundaries
@@ -131,14 +131,14 @@
 
 **Purpose**: Confirm deduplication invariants explicitly state correlation_id is not a deduplication key. Satisfies FR-004.
 
-- [ ] T011 [US4] Verify deduplication invariants exclude correlation_id
+- [x] T011 [US4] Verify deduplication invariants exclude correlation_id
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Deduplication
       Outcome: Deduplication subsection includes explicit statement that correlation_id is not an idempotency key and multiple events MAY share the same correlation_id
       Validation: `grep -A10 "### Deduplication" specs/001-persistence-spi/spec.md | grep -c "correlation"` returns at least 1
 
-- [ ] T012 [US4] Verify event-store contract deduplication boundary
+- [x] T012 [US4] Verify event-store contract deduplication boundary
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — Semantic Boundaries
@@ -151,7 +151,7 @@
 
 **Purpose**: Ensure the correlation_id contract documents both positive and negative semantics in a consolidated section. Satisfies FR-005.
 
-- [ ] T013 [FR-005] Verify consolidated correlation_id contract documentation
+- [x] T013 [FR-005] Verify consolidated correlation_id contract documentation
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Correlation ID Semantic Boundaries
@@ -164,28 +164,28 @@
 
 **Purpose**: Execute the validation scenarios from quickstart.md to confirm all documentation updates are correct and consistent.
 
-- [ ] T014 Run quickstart.md Scenario 1 — verify negative semantics in spec 001 spec.md
+- [x] T014 Run quickstart.md Scenario 1 — verify negative semantics in spec 001 spec.md
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Correlation ID Semantic Boundaries
       Outcome: All four boundaries present (Security, Correctness, Ordering, Deduplication) with explicit "MUST NOT" / "NOT" language
       Validation: `grep "NOT" specs/001-persistence-spi/spec.md | grep -i "correlation" | wc -l` returns >= 4
 
-- [ ] T015 Run quickstart.md Scenario 2 — verify boundaries in event-store contract
+- [x] T015 Run quickstart.md Scenario 2 — verify boundaries in event-store contract
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Correlation ID Semantic Boundaries
       Outcome: Four "NOT" boundary statements present
       Validation: `grep "NOT" specs/001-persistence-spi/contracts/event-store.md | grep -i correlation | wc -l` returns >= 4
 
-- [ ] T016 Run quickstart.md Scenario 3 — verify boundaries in data-model
+- [x] T016 Run quickstart.md Scenario 3 — verify boundaries in data-model
       Action: Validate
       File: specs/001-persistence-spi/data-model.md
       Section: StoredEvent
       Outcome: StoredEvent includes semantic boundaries note with four "NOT" statements
       Validation: `grep "NOT" specs/001-persistence-spi/data-model.md | grep -i correlation | wc -l` returns >= 4
 
-- [ ] T017 Run quickstart.md Scenario 4 — verify no behavioral changes
+- [x] T017 Run quickstart.md Scenario 4 — verify no behavioral changes
       Action: Validate
       File: workspace root
       Section: test suite
@@ -226,15 +226,15 @@ Phase 1 (Foundational) → Phase 2 (US1 Documentation) → Phase 3 (US2 Security
 
 ## Definition of Done
 
-- [ ] `specs/001-persistence-spi/spec.md` has "Correlation ID Semantic Boundaries" section with four sub-sections
-- [ ] `specs/001-persistence-spi/contracts/event-store.md` has "Correlation ID Semantic Boundaries" section
-- [ ] `specs/001-persistence-spi/data-model.md` has semantic boundaries note on StoredEvent
-- [ ] FR-018 in spec 001 references correlation_id semantic boundaries
-- [ ] Codebase audit confirms correlation_id is never used for security decisions
-- [ ] Ordering and deduplication invariants explicitly exclude correlation_id
-- [ ] Correlation_id contract has both positive and negative semantics in a consolidated section
-- [ ] No code changes — `cargo test` passes with no changes to test suite
-- [ ] quickstart.md all scenarios pass
+- [x] `specs/001-persistence-spi/spec.md` has "Correlation ID Semantic Boundaries" section with four sub-sections
+- [x] `specs/001-persistence-spi/contracts/event-store.md` has "Correlation ID Semantic Boundaries" section
+- [x] `specs/001-persistence-spi/data-model.md` has semantic boundaries note on StoredEvent
+- [x] FR-018 in spec 001 references correlation_id semantic boundaries
+- [x] Codebase audit confirms correlation_id is never used for security decisions
+- [x] Ordering and deduplication invariants explicitly exclude correlation_id
+- [x] Correlation_id contract has both positive and negative semantics in a consolidated section
+- [x] No code changes — `cargo test` passes with no changes to test suite
+- [x] quickstart.md all scenarios pass
 
 ---
 

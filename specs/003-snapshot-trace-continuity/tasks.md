@@ -31,14 +31,14 @@
 
 **Purpose**: Read existing spec 001 documentation to confirm pre-modification state.
 
-- [ ] T001 [P] Verify spec 001 spec.md identifies Snapshot contract sections
+- [x] T001 [P] Verify spec 001 spec.md identifies Snapshot contract sections
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants, Key Entities, Requirements
       Outcome: Snapshot sections located; Snapshot entity description found; location for trace continuity invariants identified
       Validation: `grep -n "Snapshot\|snapshot" specs/001-persistence-spi/spec.md | head -5` returns lines
 
-- [ ] T002 [P] Verify spec 001 snapshot contract exists
+- [x] T002 [P] Verify spec 001 snapshot contract exists
       Action: Validate
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Trait Contract, Behavioral Contract
@@ -51,21 +51,21 @@
 
 **Purpose**: Add trace continuity invariants documenting that snapshot restore + delta replay preserves correlation_ids. Satisfies FR-001, FR-004, FR-005.
 
-- [ ] T003 [US1] Add trace continuity invariants to spec 001 spec.md
+- [x] T003 [US1] Add trace continuity invariants to spec 001 spec.md
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — new "Snapshot Trace Continuity" subsection
       Outcome: New "Snapshot Trace Continuity" subsection with invariants: (1) snapshot restore + delta replay preserves correlation_ids, (2) trace equivalence between snapshot+replay and full replay, (3) delta events carry original correlation_ids unchanged. Snapshot entity description updated to note correlation_id is out of scope.
       Validation: `grep -c "Trace Continuity\|trace continuity" specs/001-persistence-spi/spec.md` returns at least 1
 
-- [ ] T004 [US3] Add trace equivalence invariant
+- [x] T004 [US3] Add trace equivalence invariant
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Snapshot Trace Continuity
       Outcome: Trace equivalence invariant: snapshot restore + delta replay produces correlation_id chain identical to full stream replay for the overlapping version range.
       Validation: `grep "trace equival\|identical to\|overlapping" specs/001-persistence-spi/spec.md` returns at least 1 line
 
-- [ ] T005 [US1] Update snapshot contract with trace continuity guarantee
+- [x] T005 [US1] Update snapshot contract with trace continuity guarantee
       Action: Modify
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Behavioral Contract — Critical Invariants
@@ -78,14 +78,14 @@
 
 **Purpose**: Document that Snapshot MAY omit correlation_id. Satisfies FR-003.
 
-- [ ] T006 [US2] Document snapshot optionality in spec 001 spec.md
+- [x] T006 [US2] Document snapshot optionality in spec 001 spec.md
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Snapshot Trace Continuity
       Outcome: Explicit statement: "Snapshot SHALL NOT define, store, or require correlation_id. Correlation_id is owned by the EventStore. Snapshot is correlation_id-free."
       Validation: `grep "SHALL NOT\|correlation_id-free\|EventStore" specs/001-persistence-spi/spec.md | grep -i "snapshot"` returns at least 1 line
 
-- [ ] T007 [US2] Document snapshot optionality in snapshot contract
+- [x] T007 [US2] Document snapshot optionality in snapshot contract
       Action: Modify
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Behavioral Contract — Critical Invariants
@@ -98,21 +98,21 @@
 
 **Purpose**: Execute validation scenarios from quickstart.md.
 
-- [ ] T008 Run quickstart Scenario 1 — snapshot contract does not carry correlation_id
+- [x] T008 Run quickstart Scenario 1 — snapshot contract does not carry correlation_id
       Action: Validate
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Trait Contract
       Outcome: Snapshot trait signature confirmed without correlation_id parameter
       Validation: `grep "correlation_id" specs/001-persistence-spi/contracts/snapshot.md` exits 1 (no matches)
 
-- [ ] T009 Run quickstart Scenario 2 — trace continuity documented in spec 001
+- [x] T009 Run quickstart Scenario 2 — trace continuity documented in spec 001
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Snapshot Trace Continuity
       Outcome: Trace continuity section present with all invariants
       Validation: `grep -c "Trace Continuity\|trace continuity" specs/001-persistence-spi/spec.md` returns at least 1
 
-- [ ] T010 Run quickstart Scenario 4 — no behavioral changes
+- [x] T010 Run quickstart Scenario 4 — no behavioral changes
       Action: Validate
       File: workspace root
       Section: test suite
@@ -146,10 +146,10 @@ Phase 1 (Foundational) → Phase 2 (Trace Continuity) → Phase 3 (Optionality) 
 
 ## Definition of Done
 
-- [ ] `specs/001-persistence-spi/spec.md` has "Snapshot Trace Continuity" subsection under Contract Invariants
-- [ ] Trace continuity invariant: snapshot restore + delta replay preserves correlation_ids
-- [ ] Trace equivalence invariant: snapshot+replay matches full replay for overlapping range
-- [ ] Snapshot optionality documented: Snapshot does not carry correlation_id
-- [ ] `specs/001-persistence-spi/contracts/snapshot.md` updated with trace continuity guarantee
-- [ ] No code changes — `cargo test` passes
-- [ ] quickstart.md all scenarios pass
+- [x] `specs/001-persistence-spi/spec.md` has "Snapshot Trace Continuity" subsection under Contract Invariants
+- [x] Trace continuity invariant: snapshot restore + delta replay preserves correlation_ids
+- [x] Trace equivalence invariant: snapshot+replay matches full replay for overlapping range
+- [x] Snapshot optionality documented: Snapshot does not carry correlation_id
+- [x] `specs/001-persistence-spi/contracts/snapshot.md` updated with trace continuity guarantee
+- [x] No code changes — `cargo test` passes
+- [x] quickstart.md all scenarios pass

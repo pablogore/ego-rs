@@ -31,14 +31,14 @@
 
 **Purpose**: Read existing spec 001 documentation to confirm pre-modification state.
 
-- [ ] T001 [P] Verify spec 001 spec.md identifies sections for lifecycle contract
+- [x] T001 [P] Verify spec 001 spec.md identifies sections for lifecycle contract
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants
       Outcome: Contract Invariants section located; location for "Correlation Lifecycle" subsection identified
       Validation: `grep -n "Contract Invariants" specs/001-persistence-spi/spec.md` returns a line
 
-- [ ] T002 [P] Verify spec 001 event-store contract exists
+- [x] T002 [P] Verify spec 001 event-store contract exists
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Critical Invariants
@@ -53,28 +53,28 @@
 
 **Validation**: All lifecycle rules appear in the updated documents.
 
-- [ ] T003 [US1] Add correlation lifecycle creation origin invariant to spec 001 spec.md
+- [x] T003 [US1] Add correlation lifecycle creation origin invariant to spec 001 spec.md
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — new "Correlation Lifecycle" subsection
       Outcome: New "Correlation Lifecycle" subsection with invariants: (1) correlation_id originates in CommandContext, (2) flows from CommandContext → Events → EventStore, (3) bound to command identity, (4) MUST survive retries, (5) MUST NOT be regenerated downstream, (6) `None` is valid and not auto-generated. Cross-references spec 004 and 005.
       Validation: `grep -c "Correlation Lifecycle" specs/001-persistence-spi/spec.md` returns 1
 
-- [ ] T004 [US2] Add retry survival invariant to lifecycle section
+- [x] T004 [US2] Add retry survival invariant to lifecycle section
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Correlation Lifecycle
       Outcome: Retry survival invariant states: correlation_id is bound to command identity, not execution attempt. All retries of the same logical command use identical correlation_id.
       Validation: `grep "survive\|retry\|attempt" specs/001-persistence-spi/spec.md | grep -i "correlation"` returns at least 1 line
 
-- [ ] T005 [US3] Add downstream propagation invariant to lifecycle section
+- [x] T005 [US3] Add downstream propagation invariant to lifecycle section
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Correlation Lifecycle
       Outcome: Downstream propagation invariant states: causally-related downstream commands carry the source event's correlation_id. No regeneration. Independent causality chains use `None`.
       Validation: `grep "downstream\|propagat\|regenerat" specs/001-persistence-spi/spec.md | grep -i "correlation"` returns at least 1 line
 
-- [ ] T006 [P] [US1] Update event-store contract with lifecycle propagation invariant
+- [x] T006 [P] [US1] Update event-store contract with lifecycle propagation invariant
       Action: Modify
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — Critical Invariants
@@ -87,7 +87,7 @@
 
 **Purpose**: Document that `correlation_id = None` is valid and the system never auto-generates. Satisfies FR-002 (Optionality) from spec 002.
 
-- [ ] T007 [US4] Add None semantics to lifecycle section
+- [x] T007 [US4] Add None semantics to lifecycle section
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Correlation Lifecycle
@@ -100,28 +100,28 @@
 
 **Purpose**: Execute validation scenarios from quickstart.md to confirm all documentation updates are correct.
 
-- [ ] T008 Run quickstart Scenario 1 — verify lifecycle contract in spec 001 spec.md
+- [x] T008 Run quickstart Scenario 1 — verify lifecycle contract in spec 001 spec.md
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — Correlation Lifecycle
       Outcome: Four lifecycle rules present: creation origin, propagation path, retry survival, no downstream regeneration
       Validation: `grep -c "Correlation Lifecycle" specs/001-persistence-spi/spec.md` returns 1
 
-- [ ] T009 Run quickstart Scenario 2 — verify lifecycle propagation in event-store contract
+- [x] T009 Run quickstart Scenario 2 — verify lifecycle propagation in event-store contract
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — Critical Invariants
       Outcome: Lifecycle propagation invariant documented in event-store contract
       Validation: `grep "CommandContext\|lifecycle" specs/001-persistence-spi/contracts/event-store.md | grep -i "correlation"` returns at least 1 line
 
-- [ ] T010 Run quickstart Scenario 3 — verify cross-references to specs 004 and 005
+- [x] T010 Run quickstart Scenario 3 — verify cross-references to specs 004 and 005
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Correlation Lifecycle or Assumptions
       Outcome: Cross-references to Correlation Scope Boundary (004) and Correlation Semantic Boundary (005) present
       Validation: `grep "004\|005\|scope\|semantic" specs/001-persistence-spi/spec.md | grep -i "correlation"` returns at least 1 line
 
-- [ ] T011 Run quickstart Scenario 4 — no behavioral changes
+- [x] T011 Run quickstart Scenario 4 — no behavioral changes
       Action: Validate
       File: workspace root
       Section: test suite
@@ -155,10 +155,10 @@ Phase 1 (Foundational) → Phase 2 (Lifecycle Invariants) → Phase 3 (None Sema
 
 ## Definition of Done
 
-- [ ] `specs/001-persistence-spi/spec.md` has "Correlation Lifecycle" subsection under Contract Invariants
-- [ ] Four lifecycle rules documented: creation origin, propagation path, retry survival, no downstream regeneration
-- [ ] `correlation_id = None` semantics documented (valid, no auto-generation)
-- [ ] `specs/001-persistence-spi/contracts/event-store.md` has lifecycle propagation invariant
-- [ ] Cross-references to spec 004 and spec 005 present
-- [ ] No code changes — `cargo test` passes
-- [ ] quickstart.md all scenarios pass
+- [x] `specs/001-persistence-spi/spec.md` has "Correlation Lifecycle" subsection under Contract Invariants
+- [x] Four lifecycle rules documented: creation origin, propagation path, retry survival, no downstream regeneration
+- [x] `correlation_id = None` semantics documented (valid, no auto-generation)
+- [x] `specs/001-persistence-spi/contracts/event-store.md` has lifecycle propagation invariant
+- [x] Cross-references to spec 004 and spec 005 present
+- [x] No code changes — `cargo test` passes
+- [x] quickstart.md all scenarios pass

@@ -31,21 +31,21 @@
 
 **Purpose**: Read existing spec 001 documentation to confirm pre-modification state.
 
-- [ ] T001 [P] Verify spec 001 spec.md and identify sections for scope boundary
+- [x] T001 [P] Verify spec 001 spec.md and identify sections for scope boundary
       Action: Validate
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants, Key Entities
       Outcome: EventStore, Repository, Snapshot contract sections located; correlation_id mentions identified
       Validation: `grep -n "EventStore\|Repository\|Snapshot\|correlation_id" specs/001-persistence-spi/spec.md | head -10` returns lines
 
-- [ ] T002 [P] Verify spec 001 repository contract exists
+- [x] T002 [P] Verify spec 001 repository contract exists
       Action: Validate
       File: specs/001-persistence-spi/contracts/repository.md
       Section: Trait Contract, Behavioral Contract
       Outcome: Repository contract file found; trait signature confirmed without correlation_id
       Validation: `grep "correlation_id" specs/001-persistence-spi/contracts/repository.md` exits 1 (no matches)
 
-- [ ] T003 [P] Verify spec 001 snapshot contract exists
+- [x] T003 [P] Verify spec 001 snapshot contract exists
       Action: Validate
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Trait Contract, Behavioral Contract
@@ -60,28 +60,28 @@
 
 **Validation**: Each contract explicitly states its relationship to correlation_id.
 
-- [ ] T004 [US1] Add scope boundary section to spec 001 spec.md
+- [x] T004 [US1] Add scope boundary section to spec 001 spec.md
       Action: Modify
       File: specs/001-persistence-spi/spec.md
       Section: Contract Invariants — new "Correlation Scope Boundary" subsection
       Outcome: New "Correlation Scope Boundary" subsection stating: (1) EventStore owns correlation_id, (2) Repository is correlation_id-agnostic, (3) Snapshot is correlation_id-agnostic, (4) No operation outside EventStore SHALL accept or return correlation_id.
       Validation: `grep -c "Scope Boundary\|scope boundary" specs/001-persistence-spi/spec.md` returns at least 1
 
-- [ ] T005 [P] [US2] Add "not a concern" statement to repository contract
+- [x] T005 [P] [US2] Add "not a concern" statement to repository contract
       Action: Modify
       File: specs/001-persistence-spi/contracts/repository.md
       Section: Behavioral Contract — Critical Invariants
       Outcome: New invariant: "correlation_id is NOT a Repository concern. Repository operations are correlation_id-agnostic. Correlation_id is exclusively owned by the EventStore."
       Validation: `grep -c "correlation_id\|not a Repository concern\|correlation_id-agnostic" specs/001-persistence-spi/contracts/repository.md` returns at least 1
 
-- [ ] T006 [P] [US3] Add "not a concern" statement to snapshot contract
+- [x] T006 [P] [US3] Add "not a concern" statement to snapshot contract
       Action: Modify
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Behavioral Contract — Critical Invariants
       Outcome: New invariant: "correlation_id is NOT a Snapshot concern. Snapshot operations are correlation_id-agnostic. Correlation_id is exclusively owned by the EventStore."
       Validation: `grep -c "correlation_id\|not a Snapshot concern\|correlation_id-agnostic" specs/001-persistence-spi/contracts/snapshot.md` returns at least 1
 
-- [ ] T007 [US1] Add ownership statement to event-store contract
+- [x] T007 [US1] Add ownership statement to event-store contract
       Action: Modify
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract — Critical Invariants
@@ -94,28 +94,28 @@
 
 **Purpose**: Execute validation scenarios from quickstart.md.
 
-- [ ] T008 Run quickstart Scenario 1 — Repository states no correlation concern
+- [x] T008 Run quickstart Scenario 1 — Repository states no correlation concern
       Action: Validate
       File: specs/001-persistence-spi/contracts/repository.md
       Section: Behavioral Contract
       Outcome: Repository contract explicitly states correlation_id is not a concern
       Validation: `grep "not a Repository concern\|correlation_id-agnostic\|correlation_id" specs/001-persistence-spi/contracts/repository.md` returns at least 1 line
 
-- [ ] T009 Run quickstart Scenario 2 — Snapshot states no correlation concern
+- [x] T009 Run quickstart Scenario 2 — Snapshot states no correlation concern
       Action: Validate
       File: specs/001-persistence-spi/contracts/snapshot.md
       Section: Behavioral Contract
       Outcome: Snapshot contract explicitly states correlation_id is not a concern
       Validation: `grep "not a Snapshot concern\|correlation_id-agnostic\|correlation_id" specs/001-persistence-spi/contracts/snapshot.md` returns at least 1 line
 
-- [ ] T010 Run quickstart Scenario 3 — EventStore states ownership
+- [x] T010 Run quickstart Scenario 3 — EventStore states ownership
       Action: Validate
       File: specs/001-persistence-spi/contracts/event-store.md
       Section: Behavioral Contract
       Outcome: EventStore contract states ownership; Repository and Snapshot excluded
       Validation: `grep "exclusively owned\|owns\|owned" specs/001-persistence-spi/contracts/event-store.md | grep -i "correlation"` returns at least 1 line
 
-- [ ] T011 Run quickstart Scenario 4 — no behavioral changes
+- [x] T011 Run quickstart Scenario 4 — no behavioral changes
       Action: Validate
       File: workspace root
       Section: test suite
@@ -148,9 +148,9 @@ Phase 1 (Foundational) → Phase 2 (Scope Boundary) → Phase 3 (Validation)
 
 ## Definition of Done
 
-- [ ] `specs/001-persistence-spi/spec.md` has "Correlation Scope Boundary" subsection under Contract Invariants
-- [ ] `specs/001-persistence-spi/contracts/event-store.md` states correlation_id ownership
-- [ ] `specs/001-persistence-spi/contracts/repository.md` states correlation_id is not a concern
-- [ ] `specs/001-persistence-spi/contracts/snapshot.md` states correlation_id is not a concern
-- [ ] No code changes — `cargo test` passes
-- [ ] quickstart.md all scenarios pass
+- [x] `specs/001-persistence-spi/spec.md` has "Correlation Scope Boundary" subsection under Contract Invariants
+- [x] `specs/001-persistence-spi/contracts/event-store.md` states correlation_id ownership
+- [x] `specs/001-persistence-spi/contracts/repository.md` states correlation_id is not a concern
+- [x] `specs/001-persistence-spi/contracts/snapshot.md` states correlation_id is not a concern
+- [x] No code changes — `cargo test` passes
+- [x] quickstart.md all scenarios pass
