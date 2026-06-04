@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use tokio::runtime::Handle;
 
 use ego_domain::event::DomainEvent;
-use ego_domain::persistence::{EventStore, PersistenceError};
+use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
 /// Row returned from the events table.
 #[derive(FromRow)]
@@ -65,7 +65,7 @@ where
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
-        events: Vec<E>,
+        events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
@@ -96,8 +96,9 @@ where
 
         let new_version = current + events.len() as i64;
 
-        for (i, event) in events.iter().enumerate() {
+        for (i, stored) in events.iter().enumerate() {
             let event_version = current + (i as i64) + 1;
+            let event = &stored.event;
             self.block_on(async {
                 sqlx::query(
                     r#"INSERT INTO events (aggregate_id, tenant_id, version, event_type, payload, created_at)
@@ -122,7 +123,7 @@ where
         &self,
         aggregate_id: &str,
         tenant_id: Option<&str>,
-    ) -> Result<Vec<E>, PersistenceError> {
+    ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
             Some(t) => Some(t.to_string()),
@@ -149,9 +150,12 @@ where
             });
         }
 
-        let events: Result<Vec<E>, PersistenceError> = rows
+        let events: Result<Vec<StoredEvent<E>>, PersistenceError> = rows
             .into_iter()
-            .map(|row| (self.deserialize)(&row.event_type, row.payload))
+            .map(|row| {
+                let event = (self.deserialize)(&row.event_type, row.payload)?;
+                Ok(StoredEvent::without_correlation(event))
+            })
             .collect();
 
         events

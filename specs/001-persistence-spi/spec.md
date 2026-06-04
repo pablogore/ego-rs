@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-03
 
-**Status**: Draft
+**Status**: Archived (2026-06-04)
 
 **Input**: User description: "Define the persistence Service Provider Interface (SPI) as domain-owned contracts for event sourcing and aggregate persistence. Amendment: add event envelope with traceability metadata — events are wrapped in a standard envelope that preserves optional metadata (including correlation_id) through append and load. The envelope definition lives in the EventStore contract (StoredEvent<E>), not as SPI behavioral rules."
 

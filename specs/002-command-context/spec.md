@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-04
 
-**Status**: Revised (2026-06-04) — renamed to ExecutionContext following architectural review. Execution scope, not command scope.
+**Status**: Archived (2026-06-04)
 
 **Input**: User description: "Introduce a canonical Execution Context Runtime abstraction that provides the execution context across all eGo runtime implementations."
 

@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-04
 
-**Status**: Implemented (2026-06-04)
+**Status**: Archived (2026-06-04)
 
 **Input**: User specification: "Introduce a runtime-agnostic Effect API that represents the outcome of execution handlers."
 

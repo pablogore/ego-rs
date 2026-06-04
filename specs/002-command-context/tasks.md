@@ -101,11 +101,29 @@
 
 - [x] T012 Run `cargo test --workspace` to verify no regressions across all crates
 
-- [ ] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations (trait is domain-owned, handler code needs only `use ego_domain::ExecutionContext`)
+- [x] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations (trait is domain-owned, handler code needs only `use ego_domain::ExecutionContext`)
+
+  ```yaml
+  evidence:
+    command: cargo test -p ego-runtime
+    exit_code: 0
+  ```
+  trait defined in `crates/domain/src/context.rs`, re-exported from `ego_domain`. `test_trait_impl` demonstrates trait-object compatibility — handler code relies solely on `use ego_domain::context::ExecutionContext`.
 
 - [x] T014 Update `crates/runtime/src/lib.rs` exports if needed to maintain backward compatibility
 
-- [ ] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
+- [x] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
+
+  ```yaml
+  evidence:
+    command: cargo test -p ego-domain -p ego-runtime
+    exit_code: 0
+  ```
+  Scenario 1: `cargo build -p ego-domain` → success
+  Scenario 2: identity access → `test_identity_fields_round_trip`, `test_identity_fields_none` pass
+  Scenario 3: correlation access → `test_correlation_fields_round_trip`, `test_correlation_fields_none` pass
+  Scenario 4: metadata access → `test_metadata_populated`, `test_metadata_empty` pass
+  Scenario 5: runtime portability → `test_trait_impl` passes (18/18 tests pass)
 
 ---
 
