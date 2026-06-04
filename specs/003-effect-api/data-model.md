@@ -69,6 +69,17 @@ Effect<E, R, S> (enum)
             └── children: Vec<Effect<E, R, S>>
 ```
 
+### Interpretation Rules
+
+- Nested `Composed` values SHALL be recursively flattened before runtime interpretation.
+- Flattening preserves insertion order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list.
+- Nesting depth SHALL NOT alter execution semantics.
+- `NoEffect` children SHALL be discarded during flattening (they contribute no work).
+
+## Interpretation Error Model
+
+Effect interpretation errors are owned by the runtime layer (not `ego-domain`). See spec.md for the canonical `EffectInterpretationError` type and semantics.
+
 ## Cross-References
 
 - **Spec Requirements**: FR-001 through FR-011

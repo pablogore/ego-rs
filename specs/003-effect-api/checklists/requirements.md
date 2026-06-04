@@ -11,4 +11,4 @@
 - [ ] Effects are value types (Clone, Debug, PartialEq, Eq, Hash)
 - [x] Effect API is independent of ExecutionContext
 - [x] Deterministic testing without infrastructure
-- [ ] Exhaustive runtime interpretation
+- [x] Exhaustive runtime interpretation

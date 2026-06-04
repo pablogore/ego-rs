@@ -139,19 +139,46 @@ Keep `StateMutation(S)` as a first-class Effect variant, but define it as execut
 ## Decision 9: Nested Composed Flattening Semantics
 
 ### Decision
-The runtime MAY flatten nested Composed structures before interpretation. The Effect value type always preserves the handler's original structure; flattening is an internal runtime optimization.
+Runtime SHALL recursively flatten nested `Composed` structures before interpretation (canonical recursive flattening). The Effect value type always preserves the handler's original structure; flattening is a mandatory interpretation step applied after handler return but before effect execution.
 
 ### Rationale
-- Depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list — flattening does not change observable execution behavior
-- Each runtime chooses the strategy best suited to its execution model:
-  - Tokio-based runtimes may flatten for simple linear dispatch
-  - Actor runtimes may preserve hierarchy for actor-specific dispatch
-  - Workflow runtimes may preserve hierarchy for step/state correlation
-- Effect remains a pure value type — tests assert on the exact value, not the runtime's internal representation
-- The `and_then` combinator already flattens during composition (via `collect_children`); direct `compose()` preserves caller-provided structure
+- Canonical representation ensures deterministic behavior across all runtimes
+- Flattening preserves execution order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list
+- Simpler interpreters — always operate on a flat collection; no recursion needed at execution time
+- Simpler testing — no runtime-dependent behavior to account for
+- Simpler serialization — no nesting ambiguity
+- Nesting depth carries no semantic meaning; flattening is always safe
+- The `and_then` combinator already flattens during construction (via `collect_children`); direct `compose()` preserves caller-provided structure at the value level
 
 ### Alternatives Considered
 | Alternative | Rejected Because |
 |-------------|-----------------|
 | Preserve hierarchy exactly (Option A) | Restricts runtime optimization without behavioral benefit — runtime MUST walk nesting; cannot flatten even when linear dispatch would be simpler |
-| MUST flatten before interpretation (Option C) | Imposes flattening mandate on all runtimes, contradicting runtime-agnostic goals — Tokio, actor, and workflow runtimes each lose the freedom to choose their optimal strategy |
+| Runtime MAY flatten (Option B) | Creates ambiguity across runtimes — testing, serialization, and portability suffer when flattening is optional; runtime-specific behavior leaks into the contract |
+
+## Decision 10: Interpretation Error Model
+
+### Decision
+Runtime interpretation errors follow a canonical enum owned by the runtime layer. Every runtime SHALL explicitly evaluate every `Effect` variant. Unsupported variants SHALL return `EffectInterpretationError::UnsupportedEffect` instead of being silently ignored.
+
+### Rationale
+- Shared error contract ensures portable runtime behavior — handlers see the same error categories regardless of runtime
+- Runtime ownership preserves Effect API purity — no runtime concepts leak into domain types
+- Exhaustive evaluation requirement ensures no variant is silently dropped, which would produce incorrect behavior
+- Runtimes MAY extend the canonical set with additional variants for runtime-specific concerns (e.g., authorization)
+
+### Canonical Error Model
+```rust
+pub enum EffectInterpretationError {
+    UnsupportedEffect,
+    InvalidComposition,
+    ConflictingEffects,
+}
+```
+
+### Alternatives Considered
+| Alternative | Rejected Because |
+|-------------|-----------------|
+| Domain-owned error type (in `ego-domain`) | Leaks runtime concerns into the domain API — violates runtime-agnostic goal |
+| Free-form error strings per runtime | No portability — handlers cannot programmatically distinguish error categories across runtimes |
+| No error model (rely on panics) | Unacceptable for production — impossible for callers to handle or recover |
