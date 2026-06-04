@@ -32,6 +32,9 @@
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
 
+/// Effect value types describing execution outcomes.
+pub mod effect;
+
 /// CQRS command marker trait.
 pub mod command;
 
@@ -51,6 +54,7 @@ pub mod persistence;
 pub mod query;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
+pub use effect::{Effect, HandlerResult};
 pub use command::Command;
 pub use event::DomainEvent;
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
