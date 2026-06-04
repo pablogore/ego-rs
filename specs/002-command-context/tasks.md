@@ -23,11 +23,11 @@
 
 **Purpose**: Module scaffolding and crate configuration
 
-- [ ] T001 Create identity and correlation types (AggregateId, EntityId, TenantId, CorrelationId, CausationId, RequestId) following existing ActorId pattern, and Metadata type alias, in `crates/domain/src/context.rs`
+- [x] T001 Create identity and correlation types (AggregateId, EntityId, TenantId, CorrelationId, CausationId, RequestId) following existing ActorId pattern, and Metadata type alias, in `crates/domain/src/context.rs`
 
-- [ ] T002 [P] Add ego-domain dependency to `crates/runtime/Cargo.toml`
+- [x] T002 [P] Add ego-domain dependency to `crates/runtime/Cargo.toml`
 
-- [ ] T003 Add context module to `crates/domain/src/lib.rs` with `pub mod context` and re-exports
+- [x] T003 Add context module to `crates/domain/src/lib.rs` with `pub mod context` and re-exports
 
 **Checkpoint**: `cargo build -p ego-domain` succeeds. Identity types compile.
 
@@ -39,9 +39,9 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Define `ExecutionContext` trait in `crates/domain/src/context.rs` with seven read-only accessors: aggregate_id, entity_id, tenant_id, correlation_id, causation_id, request_id (all returning `Option<&...>`), and metadata (returning `&Metadata`). Trait uses `&self` exclusively — no `&mut self` methods. Follow contract in `contracts/execution_context.md`.
+- [x] T004 Define `ExecutionContext` trait in `crates/domain/src/context.rs` with seven read-only accessors: aggregate_id, entity_id, tenant_id, correlation_id, causation_id, request_id (all returning `Option<&...>`), and metadata (returning `&Metadata`). Trait uses `&self` exclusively — no `&mut self` methods. Follow contract in `contracts/execution_context.md`.
 
-- [ ] T005 Add unit tests for identity type construction (following existing patterns in `crates/domain/src/actor.rs`) in `crates/domain/src/context.rs`
+- [x] T005 Add unit tests for identity type construction (following existing patterns in `crates/domain/src/actor.rs`) in `crates/domain/src/context.rs`
 
 **Checkpoint**: `cargo build -p ego-domain` succeeds. `cargo test -p ego-domain` passes.
 
@@ -55,9 +55,9 @@
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Refactor `crates/runtime/src/context.rs` — remove local `CorrelationId` type (moved to domain), add identity fields (aggregate_id, entity_id, tenant_id) to the existing runtime context struct; implement domain `ExecutionContext` trait with identity accessor methods wired from struct fields
+- [x] T006 [US1] Refactor `crates/runtime/src/context.rs` — remove local `CorrelationId` type (moved to domain), add identity fields (aggregate_id, entity_id, tenant_id) to the existing runtime context struct; implement domain `ExecutionContext` trait with identity accessor methods wired from struct fields
 
-- [ ] T007 [P] [US1] Add identity integration tests in `crates/runtime/src/context.rs` verifying aggregate_id, entity_id, tenant_id round-trip correctly and absent fields return None
+- [x] T007 [P] [US1] Add identity integration tests in `crates/runtime/src/context.rs` verifying aggregate_id, entity_id, tenant_id round-trip correctly and absent fields return None
 
 **Checkpoint**: `cargo build -p ego-runtime` succeeds. `cargo test -p ego-runtime` passes. Identity access works end-to-end.
 
@@ -71,9 +71,9 @@
 
 ### Implementation for User Story 2
 
-- [ ] T008 [US2] Add correlation fields to runtime context struct in `crates/runtime/src/context.rs`; implement correlation accessor methods (`correlation_id`, `causation_id`, `request_id`) using domain `CorrelationId` type (migrate existing `correlation_id` field from local `CorrelationId` to domain `CorrelationId`)
+- [x] T008 [US2] Add correlation fields to runtime context struct in `crates/runtime/src/context.rs`; implement correlation accessor methods (`correlation_id`, `causation_id`, `request_id`) using domain `CorrelationId` type (migrate existing `correlation_id` field from local `CorrelationId` to domain `CorrelationId`)
 
-- [ ] T009 [P] [US2] Add correlation integration tests in `crates/runtime/src/context.rs` verifying all three correlation fields round-trip correctly and absent fields return None
+- [x] T009 [P] [US2] Add correlation integration tests in `crates/runtime/src/context.rs` verifying all three correlation fields round-trip correctly and absent fields return None
 
 **Checkpoint**: `cargo test -p ego-runtime` passes. Correlation access works.
 
@@ -87,9 +87,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T010 [US3] Add metadata field to runtime context struct in `crates/runtime/src/context.rs`; implement `metadata` accessor returning `&Metadata`
+- [x] T010 [US3] Add metadata field to runtime context struct in `crates/runtime/src/context.rs`; implement `metadata` accessor returning `&Metadata`
 
-- [ ] T011 [P] [US3] Add metadata integration tests in `crates/runtime/src/context.rs` verifying populated metadata and empty metadata cases
+- [x] T011 [P] [US3] Add metadata integration tests in `crates/runtime/src/context.rs` verifying populated metadata and empty metadata cases
 
 **Checkpoint**: `cargo test -p ego-runtime` passes. Metadata access works. MVP complete.
 
@@ -99,13 +99,13 @@
 
 **Purpose**: Validation, portability verification, and documentation updates
 
-- [ ] T012 Run `cargo test --workspace` to verify no regressions across all crates
+- [x] T012 Run `cargo test --workspace` to verify no regressions across all crates
 
-- [ ] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations
+- [x] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations (trait is domain-owned, handler code needs only `use ego_domain::ExecutionContext`)
 
-- [ ] T014 Update `crates/runtime/src/lib.rs` exports if needed to maintain backward compatibility
+- [x] T014 Update `crates/runtime/src/lib.rs` exports if needed to maintain backward compatibility
 
-- [ ] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
+- [x] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
 
 ---
 

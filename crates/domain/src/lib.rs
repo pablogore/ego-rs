@@ -32,6 +32,9 @@
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
 
+/// Execution context — identity, correlation, and metadata.
+pub mod context;
+
 /// Effect value types describing execution outcomes.
 pub mod effect;
 
@@ -54,6 +57,11 @@ pub mod persistence;
 pub mod query;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
+pub use context::{
+    AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
+    CorrelationIdError, EntityId, EntityIdError, ExecutionContext, Metadata, RequestId,
+    RequestIdError, TenantId, TenantIdError,
+};
 pub use effect::{Effect, HandlerResult};
 pub use command::Command;
 pub use event::DomainEvent;
