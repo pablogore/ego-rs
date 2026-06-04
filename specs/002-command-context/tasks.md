@@ -101,11 +101,11 @@
 
 - [x] T012 Run `cargo test --workspace` to verify no regressions across all crates
 
-- [x] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations (trait is domain-owned, handler code needs only `use ego_domain::ExecutionContext`)
+- [ ] T013 Verify runtime portability — confirm the same handler code works with different runtime configurations (trait is domain-owned, handler code needs only `use ego_domain::ExecutionContext`)
 
 - [x] T014 Update `crates/runtime/src/lib.rs` exports if needed to maintain backward compatibility
 
-- [x] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
+- [ ] T015 Run quickstart.md validation scenarios from `specs/002-command-context/quickstart.md`
 
 ---
 

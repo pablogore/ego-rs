@@ -51,4 +51,4 @@ pub use interpreter::{
     interpret_composed,
 };
 
-pub use context::CommandContext;
+pub use context::RuntimeExecutionContext;

@@ -3,12 +3,12 @@ use ego_domain::context::{
     TenantId,
 };
 
-/// Runtime implementation of the domain [`ExecutionContext`] trait.
+/// Default runtime implementation of the domain [`ExecutionContext`] trait.
 ///
 /// Carries identity, correlation, and metadata for the current execution.
 /// Constructed by the runtime from the incoming message or envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandContext {
+pub struct RuntimeExecutionContext {
     aggregate_id: Option<AggregateId>,
     entity_id: Option<EntityId>,
     tenant_id: Option<TenantId>,
@@ -18,7 +18,7 @@ pub struct CommandContext {
     metadata: Metadata,
 }
 
-impl CommandContext {
+impl RuntimeExecutionContext {
     pub fn new(
         aggregate_id: Option<AggregateId>,
         entity_id: Option<EntityId>,
@@ -40,7 +40,7 @@ impl CommandContext {
     }
 }
 
-impl ExecutionContext for CommandContext {
+impl ExecutionContext for RuntimeExecutionContext {
     fn aggregate_id(&self) -> Option<&AggregateId> {
         self.aggregate_id.as_ref()
     }
@@ -105,12 +105,12 @@ mod tests {
         m
     }
 
-    fn empty_context() -> CommandContext {
-        CommandContext::new(None, None, None, None, None, None, Metadata::new())
+    fn empty_context() -> RuntimeExecutionContext {
+        RuntimeExecutionContext::new(None, None, None, None, None, None, Metadata::new())
     }
 
-    fn full_context() -> CommandContext {
-        CommandContext::new(
+    fn full_context() -> RuntimeExecutionContext {
+        RuntimeExecutionContext::new(
             Some(test_aggregate_id()),
             Some(test_entity_id()),
             Some(test_tenant_id()),
