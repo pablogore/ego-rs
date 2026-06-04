@@ -42,7 +42,9 @@ impl RuntimeSliceId {
     pub fn new(value: impl Into<String>) -> Result<Self, RuntimeSliceError> {
         let value = value.into();
         if value.trim().is_empty() {
-            return Err(RuntimeSliceError::AmbiguousInput("runtime slice id is empty"));
+            return Err(RuntimeSliceError::AmbiguousInput(
+                "runtime slice id is empty",
+            ));
         }
         Ok(Self(value))
     }
@@ -82,10 +84,15 @@ impl DeterministicInput {
     /// # Errors
     ///
     /// Returns [`RuntimeSliceError::AmbiguousInput`] if the key is empty or whitespace.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Result<Self, RuntimeSliceError> {
+    pub fn new(
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, RuntimeSliceError> {
         let key = key.into();
         if key.trim().is_empty() {
-            return Err(RuntimeSliceError::AmbiguousInput("deterministic input key is empty"));
+            return Err(RuntimeSliceError::AmbiguousInput(
+                "deterministic input key is empty",
+            ));
         }
         Ok(Self {
             key,

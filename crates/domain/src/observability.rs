@@ -62,7 +62,6 @@ pub struct SemanticEvent {
 
 impl SemanticEvent {
     /// Constructors for `SemanticEvent`.
-
     /// Create a new `SemanticEvent`.
     ///
     /// Returns `Err` if `event_name` is empty or whitespace-only.
@@ -96,7 +95,14 @@ impl SemanticEvent {
         lifecycle_state: impl Into<String>,
         timestamp: impl Into<String>,
     ) -> Result<Self, SemanticEventError> {
-        Self::new(event_name, correlation_id, actor_id, lifecycle_state, timestamp, HashMap::new())
+        Self::new(
+            event_name,
+            correlation_id,
+            actor_id,
+            lifecycle_state,
+            timestamp,
+            HashMap::new(),
+        )
     }
 }
 
@@ -134,7 +140,6 @@ pub enum Level {
 
 impl Level {
     /// Severity methods for `Level`.
-
     /// Returns the numeric severity of this level (higher = more severe).
     pub fn severity(&self) -> u8 {
         match self {
@@ -267,7 +272,7 @@ mod tests {
     #[test]
     fn level_clone_copy() {
         let level = Level::Warn;
-        let cloned = level.clone();
+        let cloned = level;
         let copied = level;
         assert_eq!(level, cloned);
         assert_eq!(level, copied);

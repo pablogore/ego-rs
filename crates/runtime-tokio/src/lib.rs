@@ -83,7 +83,6 @@ pub struct TokioRuntime {
 
 impl TokioRuntime {
     /// Constructor methods for `TokioRuntime`.
-
     /// Creates a new `TokioRuntime` with a newly allocated multi-threaded
     /// Tokio runtime.
     ///
@@ -101,7 +100,10 @@ impl TokioRuntime {
             fail_closed: AtomicBool::new(false),
         });
         std::mem::forget(tokio);
-        Self { inner, tokio: handle }
+        Self {
+            inner,
+            tokio: handle,
+        }
     }
 
     /// Returns a `TokioRuntimeBuilder` for configuring runtime options.
@@ -177,11 +179,13 @@ impl Runtime for TokioRuntime {
                 let inner = Arc::clone(&inner);
                 move |exec_id, msg| {
                     let mut units = inner.units.lock().unwrap();
-                    let context = units.get_mut(exec_id).ok_or_else(|| Self::send_error_not_found(*exec_id))?;
+                    let context = units
+                        .get_mut(exec_id)
+                        .ok_or_else(|| Self::send_error_not_found(*exec_id))?;
                     match &context.state {
-                        UnitState::Active(t) => {
-                            t.try_send(Box::new(msg)).map_err(|_| Self::send_error_closed(*exec_id))
-                        }
+                        UnitState::Active(t) => t
+                            .try_send(Box::new(msg))
+                            .map_err(|_| Self::send_error_closed(*exec_id)),
                         UnitState::Draining => Err(Self::send_error_closed(*exec_id)),
                         UnitState::Terminated => Err(Self::send_error_closed(*exec_id)),
                         UnitState::Failed => Err(Self::send_error_closed(*exec_id)),
@@ -201,26 +205,28 @@ impl Runtime for TokioRuntime {
             {
                 let inner = Arc::clone(&inner);
                 move |exec_id| {
-                    inner.units.lock().unwrap().get(exec_id).map(|ctx| match &ctx.state {
-                        UnitState::Active(_) => ExecutionState::Active,
-                        UnitState::Draining => ExecutionState::Draining,
-                        UnitState::Terminated => ExecutionState::Terminated,
-                        UnitState::Failed => ExecutionState::Failed,
-                    })
+                    inner
+                        .units
+                        .lock()
+                        .unwrap()
+                        .get(exec_id)
+                        .map(|ctx| match &ctx.state {
+                            UnitState::Active(_) => ExecutionState::Active,
+                            UnitState::Draining => ExecutionState::Draining,
+                            UnitState::Terminated => ExecutionState::Terminated,
+                            UnitState::Failed => ExecutionState::Failed,
+                        })
                 }
             },
         );
 
         let tokio = self.tokio.clone();
 
-        let message_consumer = tokio.spawn(async move {
-            while let Some(_msg) = rx.recv().await {}
-        });
+        let message_consumer =
+            tokio.spawn(async move { while let Some(_msg) = rx.recv().await {} });
 
         let wrapped = async move {
-            let result = tokio
-                .spawn(async move { f(handle).await })
-                .await;
+            let result = tokio.spawn(async move { f(handle).await }).await;
 
             let mut guard = inner.units.lock().unwrap();
             let unit = guard.get_mut(&id).unwrap();
@@ -272,7 +278,8 @@ impl Runtime for TokioRuntime {
 
         match &context.state {
             UnitState::Active(tx) => {
-                tx.try_send(Box::new(msg)).map_err(|_| Self::send_error_closed(*id))?;
+                tx.try_send(Box::new(msg))
+                    .map_err(|_| Self::send_error_closed(*id))?;
                 Ok(())
             }
             UnitState::Draining => Err(Self::send_error_closed(*id)),
@@ -329,7 +336,6 @@ pub struct TokioRuntimeBuilder {
 
 impl TokioRuntimeBuilder {
     /// Constructor methods for `TokioRuntimeBuilder`.
-
     /// Creates a new `TokioRuntimeBuilder` with default settings
     /// (multi-threaded, Tokio-default worker count).
     fn new() -> Self {
@@ -373,7 +379,10 @@ impl TokioRuntimeBuilder {
             &mut builder
         };
 
-        let tokio = builder.enable_all().build().expect("failed to create tokio runtime");
+        let tokio = builder
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime");
         let handle = tokio.handle().clone();
         std::mem::forget(tokio);
 

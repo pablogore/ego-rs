@@ -118,3 +118,286 @@ A change is considered complete only when:
 - CI validation succeeds
 
 Failure to satisfy any requirement constitutes a governance violation.
+
+---
+
+# Deterministic Execution Governance
+
+## Rule 1: Single Source Of Truth
+
+There SHALL be exactly one active feature.
+
+The active feature SHALL be resolved only from:
+
+```text
+.speckit/state.yaml
+```
+
+Example:
+
+```yaml
+active_feature: 003-effect-api
+status: implementation
+```
+
+The following files MUST NOT be used to resolve the active feature:
+
+- AGENTS.md
+- README.md
+- plan.md
+- tasks.md
+
+These files are informational only.
+
+---
+
+## Rule 2: Executable Tasks
+
+Every task MUST contain:
+
+- exact file path
+- modification type
+- target symbol
+- expected outcome
+- validation criteria
+
+Required format:
+
+```markdown
+- [ ] T012
+
+  File:
+  crates/runtime/src/context.rs
+
+  Operation:
+  Modify
+
+  Symbol:
+  RuntimeExecutionContext
+
+  Expected Outcome:
+  Rename CommandContext to RuntimeExecutionContext
+
+  Validation:
+  cargo test -p runtime
+```
+
+Tasks lacking these fields are invalid.
+
+---
+
+## Rule 3: Evidence Required For Completion
+
+A task MUST NOT be marked [X] without evidence.
+
+Required evidence:
+
+```yaml
+evidence:
+  command: cargo test --workspace
+  exit_code: 0
+```
+
+Examples:
+
+```yaml
+evidence:
+  command: cargo test -p domain
+  exit_code: 0
+```
+
+```yaml
+evidence:
+  command: cargo clippy --workspace
+  exit_code: 0
+```
+
+Without evidence:
+
+```text
+[X]
+```
+
+is prohibited.
+
+---
+
+## Rule 4: Fail Closed Completion
+
+Implementation completion claims MUST be backed by evidence.
+
+Prohibited:
+
+- "Implementation complete"
+- "All tasks completed"
+- "Feature implemented"
+- "Ready to archive"
+
+unless evidence exists.
+
+Required:
+
+```text
+Task completion:
+T012 -> evidence present
+
+Task completion:
+T013 -> evidence missing
+
+Task status:
+Remain [ ]
+```
+
+---
+
+## Rule 5: Deterministic Workflow
+
+Speckit SHALL operate using explicit workflow stages.
+
+Allowed flow:
+
+```text
+/specify
+    ↓
+/clarify
+    ↓
+/plan
+    ↓
+/tasks
+    ↓
+/implement
+    ↓
+/review
+    ↓
+/archive
+```
+
+Commands MUST NOT regenerate previous artifacts unless explicitly requested.
+
+Example:
+
+```text
+/implement
+```
+
+MUST NOT regenerate:
+
+- spec.md
+- plan.md
+- tasks.md
+
+---
+
+## Rule 6: Implementation Ownership
+
+Implementation tasks MUST specify ownership.
+
+Required fields:
+
+```text
+Create
+Modify
+Refactor
+Delete
+```
+
+Examples:
+
+```text
+Operation: Create
+```
+
+```text
+Operation: Modify
+```
+
+```text
+Operation: Refactor
+```
+
+```text
+Operation: Delete
+```
+
+Generic descriptions are prohibited.
+
+---
+
+## Rule 7: Symbol-Level Precision
+
+Every implementation task MUST identify the target symbol.
+
+Examples:
+
+```text
+Struct:
+RuntimeExecutionContext
+```
+
+```text
+Trait:
+ExecutionContext
+```
+
+```text
+Enum:
+Effect
+```
+
+```text
+Function:
+flatten_effects
+```
+
+File-level instructions alone are insufficient.
+
+---
+
+## Rule 8: Archive Gate
+
+A feature SHALL NOT be archived unless:
+
+- all tasks are [X]
+- all tasks have evidence
+- coverage >= 85%
+- cargo test passes
+- cargo clippy passes
+- cargo fmt passes
+
+Archive readiness requires:
+
+```yaml
+archive_check:
+  tasks_complete: true
+  evidence_complete: true
+  coverage: >=85
+  tests_passed: true
+  clippy_passed: true
+  fmt_passed: true
+```
+
+---
+
+## Rule 9: Local Model Optimization
+
+Speckit SHALL prefer deterministic instructions over reasoning-heavy prompts.
+
+Prefer:
+
+```text
+Modify file X
+Update symbol Y
+Run validation Z
+```
+
+Avoid:
+
+```text
+Analyze
+Review
+Think deeply
+Explore alternatives
+Generate coverage map
+```
+
+unless explicitly executing /clarify.

@@ -23,17 +23,6 @@ Execution behavior for coding agents operating in this repository. Focused on op
 3. **`ARCHITECTURE.md`** — runtime architecture (layers, actors, CQRS/ES)
 4. **This file** — agent execution behavior (operational rules)
 
-<!-- Current Plan section removed — no active feature spec -->
+<!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
 
-<!-- SPECKIT START -->
-Current feature: Effect API
-Plan: specs/003-effect-api/plan.md
-Spec: specs/003-effect-api/spec.md
-Research: specs/003-effect-api/research.md
-Data Model: specs/003-effect-api/data-model.md
-Contracts: specs/003-effect-api/contracts/
-Quickstart: specs/003-effect-api/quickstart.md
-Tasks: specs/003-effect-api/tasks.md
-<!-- SPECKIT END -->
-
-Implementation status: Implemented
+<!-- Feature info: specs/003-effect-api/ -->

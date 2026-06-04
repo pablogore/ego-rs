@@ -120,7 +120,7 @@ Handlers return Effect values synchronously. Runtime interprets Effects asynchro
 ## Decision 8: StateMutation Semantics
 
 ### Decision
-Keep `StateMutation(S)` as a first-class Effect variant, but define it as execution-model specific. Runtimes MAY reject `StateMutation` for execution models that do not support direct state mutation.
+Keep `StateMutation(S)` as a first-class Effect variant, but define it as execution-model specific. Runtimes SHALL reject `StateMutation` during effect interpretation for execution models that do not support direct state mutation, returning `EffectInterpretationError::UnsupportedEffect`.
 
 ### Rationale
 - Event-sourced entities derive state from events — `StateMutation` is not applicable
@@ -129,6 +129,7 @@ Keep `StateMutation(S)` as a first-class Effect variant, but define it as execut
 - Workflows and sagas may not expose mutable state — runtime rejects `StateMutation`
 - Keeping the variant in the enum preserves exhaustiveness across all runtimes
 - Each runtime decides which variants are valid for its execution model
+- Rejection occurs during effect interpretation — compile-time rejection is impossible because `Effect` is a pure value type with no execution model type information; the handler does not know which runtime will interpret the `Effect` at compile time
 
 ### Alternatives Considered
 | Alternative | Rejected Because |

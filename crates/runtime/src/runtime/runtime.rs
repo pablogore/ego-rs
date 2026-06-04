@@ -39,11 +39,7 @@ pub trait Runtime: Send + Sync + 'static {
     /// The closure receives a `RuntimeHandle` for scoped self-access.
     /// Returns an `ExecutionId` that can be used to send messages or
     /// query the execution's state.
-    fn spawn<F, Fut>(
-        &self,
-        f: F,
-        name: Option<&str>,
-    ) -> Result<ExecutionId, SpawnError>
+    fn spawn<F, Fut>(&self, f: F, name: Option<&str>) -> Result<ExecutionId, SpawnError>
     where
         F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static;
@@ -68,6 +64,7 @@ pub trait Runtime: Send + Sync + 'static {
 }
 
 /// Internal execution unit — wraps state, message sender, and task handle.
+#[expect(dead_code)]
 struct ExecutionUnit {
     /// Current lifecycle state of this execution.
     state: ExecutionState,
@@ -96,7 +93,6 @@ pub struct TokioRuntime {
 
 impl TokioRuntime {
     /// Constructor methods for `TokioRuntime`.
-
     /// Creates a new `TokioRuntime` with the given Tokio handle.
     ///
     /// # Arguments
@@ -130,11 +126,7 @@ impl TokioRuntime {
     /// Internal: spawns an execution by creating an `ExecutionUnit`, building
     /// a `RuntimeHandle` with closure-based access, and launching the user's
     /// closure as a Tokio task.
-    fn spawn_execution<F, Fut>(
-        &self,
-        f: F,
-        _name: Option<&str>,
-    ) -> Result<ExecutionId, SpawnError>
+    fn spawn_execution<F, Fut>(&self, f: F, _name: Option<&str>) -> Result<ExecutionId, SpawnError>
     where
         F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -195,18 +187,14 @@ impl TokioRuntime {
 
         let join_handle = handle.spawn(task);
 
-        self.inner
-            .units
-            .lock()
-            .unwrap()
-            .insert(
-                id,
-                ExecutionUnit {
-                    state: ExecutionState::Active,
-                    sender,
-                    handle: Some(join_handle),
-                },
-            );
+        self.inner.units.lock().unwrap().insert(
+            id,
+            ExecutionUnit {
+                state: ExecutionState::Active,
+                sender,
+                handle: Some(join_handle),
+            },
+        );
 
         Ok(id)
     }
@@ -223,24 +211,18 @@ impl TokioRuntime {
     ) -> Result<(), SendError> {
         let (sender, state) = {
             let units = self.inner.units.lock().unwrap();
-            let unit = units
-                .get(id)
-                .ok_or(SendError {
-                    id: *id,
-                    cause: SendErrorKind::NotFound,
-                })?;
+            let unit = units.get(id).ok_or(SendError {
+                id: *id,
+                cause: SendErrorKind::NotFound,
+            })?;
             (unit.sender.clone(), unit.state.clone())
         };
 
         match state {
-            ExecutionState::Active => {
-                sender
-                    .try_send(msg)
-                    .map_err(|_| SendError {
-                        id: *id,
-                        cause: SendErrorKind::Closed,
-                    })
-            }
+            ExecutionState::Active => sender.try_send(msg).map_err(|_| SendError {
+                id: *id,
+                cause: SendErrorKind::Closed,
+            }),
             _ => Err(SendError {
                 id: *id,
                 cause: SendErrorKind::Closed,
@@ -261,11 +243,7 @@ impl TokioRuntime {
 }
 
 impl Runtime for TokioRuntime {
-    fn spawn<F, Fut>(
-        &self,
-        f: F,
-        name: Option<&str>,
-    ) -> Result<ExecutionId, SpawnError>
+    fn spawn<F, Fut>(&self, f: F, name: Option<&str>) -> Result<ExecutionId, SpawnError>
     where
         F: FnOnce(RuntimeHandle) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,

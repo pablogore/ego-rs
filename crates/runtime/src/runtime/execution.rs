@@ -18,7 +18,6 @@ pub struct ExecutionId(Uuid);
 
 impl ExecutionId {
     /// Constructor and accessor for `ExecutionId`.
-
     /// Creates a new `ExecutionId` with a randomly generated v4 UUID.
     pub fn new() -> Self {
         Self(Uuid::new_v4())

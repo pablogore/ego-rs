@@ -8,7 +8,7 @@
 - [x] Generic type parameters for event, reply, state (not coupled to DomainEvent)
 - [x] Composition via Composed variant (recursive)
 - [x] No runtime types in Effect definitions
-- [ ] Effects are value types (Clone, Debug, PartialEq, Eq, Hash)
+- [x] Effects are value types (Clone, Debug, PartialEq, Eq, Hash)
 - [x] Effect API is independent of ExecutionContext
 - [x] Deterministic testing without infrastructure
 - [x] Exhaustive runtime interpretation

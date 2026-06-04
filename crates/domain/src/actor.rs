@@ -91,7 +91,6 @@ pub struct ActorId(String);
 
 impl ActorId {
     /// Constructor and accessor methods for `ActorId`.
-
     /// Create a new `ActorId` with the given name.
     ///
     /// Returns `Err(ActorIdError::Empty)` if the name is empty
@@ -150,15 +149,14 @@ impl std::error::Error for ActorIdError {}
 /// ```
 #[macro_export]
 macro_rules! actor_id {
-    ($name:ident) => {
-        {
-            static ID: ::std::sync::LazyLock<$crate::actor::ActorId> = ::std::sync::LazyLock::new(|| {
+    ($name:ident) => {{
+        static ID: ::std::sync::LazyLock<$crate::actor::ActorId> =
+            ::std::sync::LazyLock::new(|| {
                 $crate::actor::ActorId::new(::std::stringify!($name))
                     .expect("actor_id! macro: invalid name")
             });
-            &*ID
-        }
-    };
+        &*ID
+    }};
 }
 
 /// Semantic lifecycle states for an actor.
@@ -195,7 +193,6 @@ pub enum ActorLifecycleState {
 
 impl ActorLifecycleState {
     /// Query methods for `ActorLifecycleState`.
-
     /// Returns `true` if this is a terminal state (Stopped or Failed).
     ///
     /// # Example
@@ -358,5 +355,4 @@ mod tests {
         assert_ne!(ActorLifecycleState::Stopped, ActorLifecycleState::Running);
         assert_ne!(ActorLifecycleState::Failed, ActorLifecycleState::Running);
     }
-
 }

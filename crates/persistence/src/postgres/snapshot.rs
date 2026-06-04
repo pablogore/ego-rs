@@ -11,6 +11,7 @@ use serde_json::Value;
 
 /// Row returned from the snapshots table.
 #[derive(FromRow)]
+#[expect(dead_code)]
 struct SnapshotRow {
     id: i64,
     aggregate_id: String,
@@ -27,13 +28,14 @@ pub struct PostgreSQLSnapshotStore {
 
 impl fmt::Debug for PostgreSQLSnapshotStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostgreSQLSnapshotStore").field("pool", &self.pool).finish()
+        f.debug_struct("PostgreSQLSnapshotStore")
+            .field("pool", &self.pool)
+            .finish()
     }
 }
 
 impl PostgreSQLSnapshotStore {
     /// Constructor and helper methods for `PostgreSQLSnapshotStore`.
-
     /// Create a new PostgreSQL snapshot store with the given connection pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -59,16 +61,19 @@ impl Snapshot for PostgreSQLSnapshotStore {
         };
 
         // Check if a snapshot exists for this aggregate
-        let existing_version: Option<i64> = self.block_on(async {
-            sqlx::query_scalar(
-                r#"SELECT version FROM snapshots WHERE aggregate_id = $1 AND tenant_id = $2"#,
-            )
-            .bind(aggregate_id)
-            .bind(tenant.clone())
-            .fetch_optional(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to query existing snapshot: {}", e)))?;
+        let existing_version: Option<i64> = self
+            .block_on(async {
+                sqlx::query_scalar(
+                    r#"SELECT version FROM snapshots WHERE aggregate_id = $1 AND tenant_id = $2"#,
+                )
+                .bind(aggregate_id)
+                .bind(tenant.clone())
+                .fetch_optional(&self.pool)
+                .await
+            })
+            .map_err(|e| {
+                PersistenceError::Internal(format!("failed to query existing snapshot: {}", e))
+            })?;
 
         // Only update if the new version is higher
         if let Some(existing) = existing_version {
@@ -108,18 +113,19 @@ impl Snapshot for PostgreSQLSnapshotStore {
             None => None,
         };
 
-        let row: Option<SnapshotRow> = self.block_on(async {
-            sqlx::query_as(
-                r#"SELECT id, aggregate_id, tenant_id, version, payload, created_at
+        let row: Option<SnapshotRow> = self
+            .block_on(async {
+                sqlx::query_as(
+                    r#"SELECT id, aggregate_id, tenant_id, version, payload, created_at
                    FROM snapshots WHERE aggregate_id = $1 AND tenant_id = $2
                    ORDER BY version DESC LIMIT 1"#,
-            )
-            .bind(aggregate_id)
-            .bind(tenant)
-            .fetch_optional(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to query snapshot: {}", e)))?;
+                )
+                .bind(aggregate_id)
+                .bind(tenant)
+                .fetch_optional(&self.pool)
+                .await
+            })
+            .map_err(|e| PersistenceError::Internal(format!("failed to query snapshot: {}", e)))?;
 
         Ok(row.map(|r| (r.version, r.payload)))
     }

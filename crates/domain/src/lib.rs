@@ -57,13 +57,13 @@ pub mod persistence;
 pub mod query;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
+pub use command::Command;
 pub use context::{
     AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
     CorrelationIdError, EntityId, EntityIdError, ExecutionContext, Metadata, RequestId,
     RequestIdError, TenantId, TenantIdError,
 };
 pub use effect::{Effect, HandlerResult};
-pub use command::Command;
 pub use event::DomainEvent;
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;

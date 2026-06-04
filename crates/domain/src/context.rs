@@ -37,11 +37,23 @@ macro_rules! id_type {
     };
 }
 
-id_type!(AggregateId, AggregateIdError, "aggregate_id must not be empty");
+id_type!(
+    AggregateId,
+    AggregateIdError,
+    "aggregate_id must not be empty"
+);
 id_type!(EntityId, EntityIdError, "entity_id must not be empty");
 id_type!(TenantId, TenantIdError, "tenant_id must not be empty");
-id_type!(CorrelationId, CorrelationIdError, "correlation_id must not be empty");
-id_type!(CausationId, CausationIdError, "causation_id must not be empty");
+id_type!(
+    CorrelationId,
+    CorrelationIdError,
+    "correlation_id must not be empty"
+);
+id_type!(
+    CausationId,
+    CausationIdError,
+    "causation_id must not be empty"
+);
 id_type!(RequestId, RequestIdError, "request_id must not be empty");
 
 /// Arbitrary key-value metadata attached to an execution context.
@@ -250,7 +262,15 @@ mod tests {
         let agg = AggregateId::new("agg-1").unwrap();
         let ent = EntityId::new("ent-1").unwrap();
         let ten = TenantId::new("ten-1").unwrap();
-        let ctx = TestContext::new(Some(agg.clone()), Some(ent.clone()), Some(ten.clone()), None, None, None, Metadata::new());
+        let ctx = TestContext::new(
+            Some(agg.clone()),
+            Some(ent.clone()),
+            Some(ten.clone()),
+            None,
+            None,
+            None,
+            Metadata::new(),
+        );
         assert_eq!(ctx.aggregate_id(), Some(&agg));
         assert_eq!(ctx.entity_id(), Some(&ent));
         assert_eq!(ctx.tenant_id(), Some(&ten));
@@ -269,7 +289,15 @@ mod tests {
         let corr = CorrelationId::new("corr-1").unwrap();
         let caus = CausationId::new("caus-1").unwrap();
         let req = RequestId::new("req-1").unwrap();
-        let ctx = TestContext::new(None, None, None, Some(corr.clone()), Some(caus.clone()), Some(req.clone()), Metadata::new());
+        let ctx = TestContext::new(
+            None,
+            None,
+            None,
+            Some(corr.clone()),
+            Some(caus.clone()),
+            Some(req.clone()),
+            Metadata::new(),
+        );
         assert_eq!(ctx.correlation_id(), Some(&corr));
         assert_eq!(ctx.causation_id(), Some(&caus));
         assert_eq!(ctx.request_id(), Some(&req));
@@ -310,8 +338,12 @@ mod tests {
         meta.insert("k".into(), "v".into());
 
         let ctx = TestContext::new(
-            Some(agg.clone()), Some(ent.clone()), Some(ten.clone()),
-            Some(corr.clone()), Some(caus.clone()), Some(req.clone()),
+            Some(agg.clone()),
+            Some(ent.clone()),
+            Some(ten.clone()),
+            Some(corr.clone()),
+            Some(caus.clone()),
+            Some(req.clone()),
             meta.clone(),
         );
 

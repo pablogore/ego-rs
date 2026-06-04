@@ -29,15 +29,9 @@ pub trait EventStore<E: DomainEvent> {
     /// Load all events for the given aggregate in the given tenant.
     ///
     /// Returns `PersistenceError::NotFound` if the aggregate stream does not exist.
-    fn load(
-        &self,
-        aggregate_id: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<Vec<E>, PersistenceError>;
+    fn load(&self, aggregate_id: &str, tenant_id: Option<&str>)
+        -> Result<Vec<E>, PersistenceError>;
 
     /// List all aggregate IDs known to this store, optionally scoped to a tenant.
-    fn list_aggregate_ids(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError>;
+    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError>;
 }

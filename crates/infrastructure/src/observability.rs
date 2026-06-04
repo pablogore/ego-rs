@@ -23,7 +23,7 @@ mod tests {
 
     #[test]
     fn noop_observation_discards_all() {
-        let noop = NoopObservability::default();
+        let noop = NoopObservability;
         let mut meta = HashMap::new();
         meta.insert("key".to_string(), "value".to_string());
         let event = SemanticEvent::new(
@@ -42,23 +42,15 @@ mod tests {
 
     #[test]
     fn noop_clone_default() {
-        let noop1 = NoopObservability::default();
+        let noop1 = NoopObservability;
         let noop2 = noop1.clone();
-        noop1.trace(SemanticEvent::without_metadata(
-            "test",
-            "c1",
-            "a1",
-            "Running",
-            "2025-01-01T00:00:00Z",
-        )
-        .unwrap());
-        noop2.trace(SemanticEvent::without_metadata(
-            "test",
-            "c2",
-            "a2",
-            "Running",
-            "2025-01-01T00:00:00Z",
-        )
-        .unwrap());
+        noop1.trace(
+            SemanticEvent::without_metadata("test", "c1", "a1", "Running", "2025-01-01T00:00:00Z")
+                .unwrap(),
+        );
+        noop2.trace(
+            SemanticEvent::without_metadata("test", "c2", "a2", "Running", "2025-01-01T00:00:00Z")
+                .unwrap(),
+        );
     }
 }
