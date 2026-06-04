@@ -26,14 +26,14 @@ Execution behavior for coding agents operating in this repository. Focused on op
 <!-- Current Plan section removed — no active feature spec -->
 
 <!-- SPECKIT START -->
-Current feature: Execution Context
-Plan: specs/002-command-context/plan.md
-Spec: specs/002-command-context/spec.md
-Research: specs/002-command-context/research.md
-Data Model: specs/002-command-context/data-model.md
-Contracts: specs/002-command-context/contracts/execution_context.md
-Quickstart: specs/002-command-context/quickstart.md
-Tasks: specs/002-command-context/tasks.md
+Current feature: Effect API
+Plan: specs/003-effect-api/plan.md
+Spec: specs/003-effect-api/spec.md
+Research: specs/003-effect-api/research.md
+Data Model: specs/003-effect-api/data-model.md
+Contracts: specs/003-effect-api/contracts/
+Quickstart: specs/003-effect-api/quickstart.md
+Tasks: specs/003-effect-api/tasks.md
 <!-- SPECKIT END -->
 
-Implementation status: In progress
+Implementation status: Planning
