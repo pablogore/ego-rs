@@ -12,6 +12,12 @@
 
 ExecutionContext intentionally owns only identity, correlation, and metadata. It does not own persistence, replies, scheduling, or observability. Execution handlers currently have no canonical mechanism to describe execution outcomes.
 
+## Clarifications
+
+### Session 2026-06-04
+
+- Q: Should StateMutation(S) be a first-class Effect variant? → A: Keep StateMutation(S) as execution-model specific. Runtimes MAY reject StateMutation for execution models that do not support direct state mutation (e.g., event-sourced, workflows, sagas).
+
 ## User Scenarios & Testing
 
 ### User Story 1 - Return reply (Priority: P1)
@@ -64,6 +70,7 @@ A developer needs to describe multiple outcomes (e.g., emit events AND reply) in
 - What happens when a handler returns an Effect the runtime cannot interpret? The runtime SHOULD reject with a clear error.
 - What happens when composition produces conflicting effects? The runtime SHOULD fail with a description of the conflict.
 - What happens when effects reference entities the handler does not own? The runtime SHOULD fail with an authorization error.
+- What happens when a handler returns StateMutation for an execution model that does not support direct state mutation? The runtime SHOULD reject with a clear error describing why StateMutation is unsupported for the given execution model.
 
 ## Requirements
 
@@ -85,7 +92,7 @@ A developer needs to describe multiple outcomes (e.g., emit events AND reply) in
 
 - **Effect**: A value type describing a desired execution outcome. Composable, runtime-neutral.
 - **NoEffect**: An effect describing no side effects.
-- **StateMutation\<S\>**: An effect describing a state change.
+- **StateMutation\<S\>**: An effect describing a state change. Execution-model specific — runtimes MAY reject StateMutation for models that do not support direct state mutation (e.g., event-sourced, workflows, sagas).
 - **EventEmission\<E\>**: An effect describing event emission.
 - **Reply\<R\>**: An effect describing a reply.
 - **Composed\<E, R, S\>**: An effect combining multiple outcomes.

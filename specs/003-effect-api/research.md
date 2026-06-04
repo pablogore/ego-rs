@@ -116,3 +116,22 @@ Handlers return Effect values synchronously. Runtime interprets Effects asynchro
 |-------------|-----------------|
 | Async handler returning Effect | Forces all handlers to be async; complicates testing |
 | Effect executes inline | No separation of description vs execution; untestable |
+
+## Decision 8: StateMutation Semantics
+
+### Decision
+Keep `StateMutation(S)` as a first-class Effect variant, but define it as execution-model specific. Runtimes MAY reject `StateMutation` for execution models that do not support direct state mutation.
+
+### Rationale
+- Event-sourced entities derive state from events — `StateMutation` is not applicable
+- Stateful entities mutate state directly — `StateMutation` is the natural description
+- CRUD entities replace state directly — `StateMutation` maps to the replace operation
+- Workflows and sagas may not expose mutable state — runtime rejects `StateMutation`
+- Keeping the variant in the enum preserves exhaustiveness across all runtimes
+- Each runtime decides which variants are valid for its execution model
+
+### Alternatives Considered
+| Alternative | Rejected Because |
+|-------------|-----------------|
+| Keep StateMutation as unconditional (Option A) | Forces event-sourced runtimes to support an irrelevant variant |
+| Remove StateMutation entirely (Option B) | Excludes stateful and CRUD entities from describing state changes |

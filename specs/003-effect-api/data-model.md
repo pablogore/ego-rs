@@ -20,7 +20,7 @@ The canonical effect type describing an execution outcome.
 | Variant | Inner Type | Description |
 |---------|------------|-------------|
 | `NoEffect` | — | No side effects. The handler completed without producing outcomes. |
-| `StateMutation(S)` | S | A state change. Carries the new state value. |
+| `StateMutation(S)` | S | A state change (execution-model specific). Carries the new state value. Runtimes MAY reject StateMutation for models that do not support direct state mutation. |
 | `EventEmission(Vec<E>)` | `Vec<E>` | One or more events to persist. Carries a vector of event payloads. |
 | `Reply(R)` | R | A reply to send back to the caller. Carries the reply value. |
 | `Composed(Vec<Effect<E, R, S>>)` | `Vec<Effect<E, R, S>>` | Multiple effects composed together. Contains a list of child effects. Recursive — children may themselves be Composed. |

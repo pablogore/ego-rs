@@ -4,11 +4,11 @@
 
 ## Checklist
 
-- [ ] Effect as enum with explicit variants (NoEffect, StateMutation, EventEmission, Reply, Composed)
-- [ ] Generic type parameters for event, reply, state (not coupled to DomainEvent)
-- [ ] Composition via Composed variant (recursive)
-- [ ] No runtime types in Effect definitions
+- [x] Effect as enum with explicit variants (NoEffect, StateMutation, EventEmission, Reply, Composed)
+- [x] Generic type parameters for event, reply, state (not coupled to DomainEvent)
+- [x] Composition via Composed variant (recursive)
+- [x] No runtime types in Effect definitions
 - [ ] Effects are value types (Clone, Debug, PartialEq, Eq, Hash)
-- [ ] Effect API is independent of ExecutionContext
-- [ ] Deterministic testing without infrastructure
+- [x] Effect API is independent of ExecutionContext
+- [x] Deterministic testing without infrastructure
 - [ ] Exhaustive runtime interpretation
