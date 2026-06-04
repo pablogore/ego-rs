@@ -32,6 +32,9 @@
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
 
+/// Execution context — identity, correlation, and metadata.
+pub mod context;
+
 /// Effect value types describing execution outcomes.
 pub mod effect;
 
@@ -53,9 +56,18 @@ pub mod persistence;
 /// CQRS query marker trait with typed Output.
 pub mod query;
 
+/// Execution envelope — transport-neutral payload, identity, correlation, and metadata carrier.
+pub mod envelope;
+
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
-pub use effect::{Effect, HandlerResult};
 pub use command::Command;
+pub use context::{
+    AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
+    CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
+    Metadata, RequestId, RequestIdError, TenantId, TenantIdError,
+};
+pub use envelope::ExecutionEnvelope;
+pub use effect::{Effect, HandlerResult};
 pub use event::DomainEvent;
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;

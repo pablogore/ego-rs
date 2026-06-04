@@ -23,17 +23,6 @@ Execution behavior for coding agents operating in this repository. Focused on op
 3. **`ARCHITECTURE.md`** — runtime architecture (layers, actors, CQRS/ES)
 4. **This file** — agent execution behavior (operational rules)
 
-<!-- Current Plan section removed — no active feature spec -->
+<!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
 
-<!-- SPECKIT START -->
-Current feature: Execution Envelope
-Plan: specs/004-execution-envelope/plan.md
-Spec: specs/004-execution-envelope/spec.md
-Research: specs/004-execution-envelope/research.md
-Data Model: specs/004-execution-envelope/data-model.md
-Contracts: specs/004-execution-envelope/contracts/envelope.md
-Quickstart: specs/004-execution-envelope/quickstart.md
-Tasks: specs/004-execution-envelope/tasks.md
-<!-- SPECKIT END -->
-
-Planning complete. Ready for implementation per tasks.md.
+<!-- Feature info: specs/004-execution-envelope/ -->
