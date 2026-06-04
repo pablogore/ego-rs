@@ -1,7 +1,6 @@
 mod common;
 
 use ego_domain::event::DomainEvent;
-use ego_domain::persistence::StoredEvent;
 use ego_infrastructure::persistence::in_memory::InMemoryEventStore;
 use serde_json::json;
 

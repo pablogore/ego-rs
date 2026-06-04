@@ -1,3 +1,5 @@
+#![expect(dead_code)]
+
 use ego_domain::event::DomainEvent;
 use ego_domain::persistence::{EventStore, PersistenceError, Repository, Snapshot, StoredEvent};
 use serde_json::json;
