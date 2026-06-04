@@ -22,6 +22,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | `runtime` | `Runtime` trait for platform abstraction |
+//! | `interpreter` | `EffectInterpreter` trait for effect execution |
 //! | `execution` | ExecutionId type |
 //! | `lifecycle` | ExecutionState enum |
 //! | `failure` | SendError and SpawnError types |
@@ -31,8 +32,18 @@
 /// Runtime trait, execution identity, lifecycle, failure modes, and handle.
 pub mod runtime;
 
+/// Effect interpreter — interprets `Effect` values by executing
+/// the described outcomes (replies, events, state mutations).
+pub mod interpreter;
+
 pub use runtime::execution::ExecutionId;
 pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;
 pub use runtime::lifecycle::ExecutionState;
 pub use runtime::runtime::Runtime;
+
+pub use interpreter::{
+    EffectInterpreter,
+    InterpretationError,
+    interpret_composed,
+};
