@@ -36,4 +36,4 @@ Quickstart: specs/002-command-context/quickstart.md
 Tasks: specs/002-command-context/tasks.md
 <!-- SPECKIT END -->
 
-Implementation status: 13 of 15 tasks marked [X]. T013 (runtime portability) and T015 (quickstart validation) pending.
+Implementation status: In progress
