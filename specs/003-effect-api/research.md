@@ -135,3 +135,23 @@ Keep `StateMutation(S)` as a first-class Effect variant, but define it as execut
 |-------------|-----------------|
 | Keep StateMutation as unconditional (Option A) | Forces event-sourced runtimes to support an irrelevant variant |
 | Remove StateMutation entirely (Option B) | Excludes stateful and CRUD entities from describing state changes |
+
+## Decision 9: Nested Composed Flattening Semantics
+
+### Decision
+The runtime MAY flatten nested Composed structures before interpretation. The Effect value type always preserves the handler's original structure; flattening is an internal runtime optimization.
+
+### Rationale
+- Depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list — flattening does not change observable execution behavior
+- Each runtime chooses the strategy best suited to its execution model:
+  - Tokio-based runtimes may flatten for simple linear dispatch
+  - Actor runtimes may preserve hierarchy for actor-specific dispatch
+  - Workflow runtimes may preserve hierarchy for step/state correlation
+- Effect remains a pure value type — tests assert on the exact value, not the runtime's internal representation
+- The `and_then` combinator already flattens during composition (via `collect_children`); direct `compose()` preserves caller-provided structure
+
+### Alternatives Considered
+| Alternative | Rejected Because |
+|-------------|-----------------|
+| Preserve hierarchy exactly (Option A) | Restricts runtime optimization without behavioral benefit — runtime MUST walk nesting; cannot flatten even when linear dispatch would be simpler |
+| MUST flatten before interpretation (Option C) | Imposes flattening mandate on all runtimes, contradicting runtime-agnostic goals — Tokio, actor, and workflow runtimes each lose the freedom to choose their optimal strategy |

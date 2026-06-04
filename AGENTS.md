@@ -36,4 +36,4 @@ Quickstart: specs/003-effect-api/quickstart.md
 Tasks: specs/003-effect-api/tasks.md
 <!-- SPECKIT END -->
 
-Implementation status: Planning
+Implementation status: Implemented

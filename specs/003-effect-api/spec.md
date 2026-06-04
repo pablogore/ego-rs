@@ -17,6 +17,7 @@ ExecutionContext intentionally owns only identity, correlation, and metadata. It
 ### Session 2026-06-04
 
 - Q: Should StateMutation(S) be a first-class Effect variant? → A: Keep StateMutation(S) as execution-model specific. Runtimes MAY reject StateMutation for execution models that do not support direct state mutation (e.g., event-sourced, workflows, sagas).
+- Q: What are the runtime semantics of nested Composed effects? → A: Runtime MAY flatten nested Composed structures before interpretation. The Effect value type always preserves the handler's original structure (tests assert on exact value). Flattening does not change execution order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list. Each runtime chooses the strategy best suited to its execution model.
 
 ## User Scenarios & Testing
 
