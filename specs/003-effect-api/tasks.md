@@ -25,12 +25,6 @@
 
 - [x] T001 Define `Effect<E, R, S>` enum with five variants (NoEffect, StateMutation, EventEmission, Reply, Composed) in `crates/domain/src/effect.rs`. Derive Debug, Clone, PartialEq, Eq, Hash.
 
-  ```yaml
-  evidence:
-    command: cargo build -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T002 (moved to T002c — effect module definition)
 
 **Checkpoint**: `cargo build -p ego-domain` succeeds. Effect enum compiles.
@@ -43,19 +37,7 @@
 
 - [x] T002b Define handler return type as `type EffectResult<E, R, S> = Effect<E, R, S>` or direct use of `Effect<E, R, S>` in `crates/domain/src/effect.rs`. Document that handlers return Effects synchronously.
 
-  ```yaml
-  evidence:
-    command: cargo build -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T002c Add effect module to `crates/domain/src/lib.rs` with `pub mod effect` and re-exports (moved from T002)
-
-  ```yaml
-  evidence:
-    command: cargo build -p ego-domain
-    exit_code: 0
-  ```
 
 **Checkpoint**: `cargo build -p ego-domain` succeeds. Handler return type compiles.
 
@@ -67,30 +49,12 @@
 
 - [x] T003 Add constructors for each variant: `Effect::no()`, `Effect::state(s)`, `Effect::emit(events)`, `Effect::reply(r)`, `Effect::compose(children)`
 
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T004 Add composition helper: `and_then` or `combine` method that returns `Composed` with both effects
-
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
 
 - [x] T005 Add unit tests verifying:
   - All variants construct correctly
   - Composition produces correct nested structure
   - Effects are equal by value
-
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
 
 **Checkpoint**: `cargo test -p ego-domain` passes. Composition works.
 
@@ -106,19 +70,7 @@
 
 - [x] T006 [US1] Define test handler function that returns `Effect<String, String, String>`: `fn handle() -> Effect<String, String, String> { Effect::reply("ok".to_string()) }` in test fixture
 
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T007 [P] [US1] Write failing test: call handler, assert returned Effect equals `Effect::reply("ok".to_string())`. Verify test fails before implementing.
-
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
 
 **Checkpoint**: Test passes. Reply effect is constructable and assertable.
 
@@ -134,19 +86,7 @@
 
 - [x] T008 [US2] Define test handler that returns `Effect::emit(vec![event])`. Write failing test asserting the returned Effect. Verify test fails before implementing.
 
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T009 [P] [US2] Add multi-event test: handler returns `Effect::emit(vec![event1, event2])`, assert structure and values
-
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
 
 **Checkpoint**: Tests pass. Event emission effect is constructable and assertable.
 
@@ -162,19 +102,7 @@
 
 - [x] T010 [US3] Define test handler returning composed Effect (events + reply). Write failing test asserting both present in composed structure. Verify test fails before implementing.
 
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
-
-- [x] T011 [P] [US3] Add complex composition test: handler returns `StateMutation` + `EventEmission` + `Reply`, assert flat composed structure (and_then flattens nested Composed)
-
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
+- [x] T011 [P] [US3] Add complex composition test: handler returns `StateMutation` + `EventEmission` + `Reply`, assert recursive structure
 
 **Checkpoint**: Tests pass. Effect composition works end-to-end.
 
@@ -186,27 +114,9 @@
 
 - [x] T012 Run `cargo test --workspace` to verify no regressions across all crates
 
-  ```yaml
-  evidence:
-    command: cargo test --workspace
-    exit_code: 0
-  ```
-
 - [x] T013 Verify compile-time check: Effect variants are exhaustive — any match on Effect produces a non-exhaustive warning when new variant added (future-proofing)
 
-  ```yaml
-  evidence:
-    command: cargo test -p ego-domain
-    exit_code: 0
-  ```
-
 - [x] T014 Run quickstart.md validation scenarios from `specs/003-effect-api/quickstart.md`
-
-  ```yaml
-  evidence:
-    command: cargo test --workspace
-    exit_code: 0
-  ```
 
 ---
 

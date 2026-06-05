@@ -40,7 +40,7 @@ pub enum Effect<E, R, S> {
 
 2. **Runtime implementations** MAY:
    - Add additional execution guarantees (ordering, transactional boundaries, idempotency)
-   - Reject effects the runtime cannot interpret with a clear error during effect interpretation
+   - Reject effects the runtime cannot interpret with a clear error
 
 3. **Entities (execution models)**:
    - Define concrete E, R, S types appropriate to the model

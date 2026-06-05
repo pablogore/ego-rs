@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
+use crate::envelope::ExecutionEnvelope;
+
 // ---------------------------------------------------------------------------
 // Identity types
 // ---------------------------------------------------------------------------
 
 macro_rules! id_type {
     ($name:ident, $error:ident, $msg:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         pub struct $name(String);
 
         impl $name {
@@ -76,6 +78,86 @@ pub trait ExecutionContext {
     fn causation_id(&self) -> Option<&CausationId>;
     fn request_id(&self) -> Option<&RequestId>;
     fn metadata(&self) -> &Metadata;
+}
+
+// ---------------------------------------------------------------------------
+// DomainExecutionContext — concrete domain-owned implementation
+// ---------------------------------------------------------------------------
+
+/// Domain-owned concrete implementation of [`ExecutionContext`].
+///
+/// Constructed from [`ExecutionEnvelope`] to provide identity, correlation,
+/// and metadata to execution handlers without runtime dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainExecutionContext {
+    aggregate_id: Option<AggregateId>,
+    entity_id: Option<EntityId>,
+    tenant_id: Option<TenantId>,
+    correlation_id: Option<CorrelationId>,
+    causation_id: Option<CausationId>,
+    request_id: Option<RequestId>,
+    metadata: Metadata,
+}
+
+impl DomainExecutionContext {
+    /// Construct a `DomainExecutionContext` directly from fields.
+    pub fn new(
+        aggregate_id: Option<AggregateId>,
+        entity_id: Option<EntityId>,
+        tenant_id: Option<TenantId>,
+        correlation_id: Option<CorrelationId>,
+        causation_id: Option<CausationId>,
+        request_id: Option<RequestId>,
+        metadata: Metadata,
+    ) -> Self {
+        Self {
+            aggregate_id,
+            entity_id,
+            tenant_id,
+            correlation_id,
+            causation_id,
+            request_id,
+            metadata,
+        }
+    }
+}
+
+impl ExecutionContext for DomainExecutionContext {
+    fn aggregate_id(&self) -> Option<&AggregateId> {
+        self.aggregate_id.as_ref()
+    }
+    fn entity_id(&self) -> Option<&EntityId> {
+        self.entity_id.as_ref()
+    }
+    fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
+    }
+    fn correlation_id(&self) -> Option<&CorrelationId> {
+        self.correlation_id.as_ref()
+    }
+    fn causation_id(&self) -> Option<&CausationId> {
+        self.causation_id.as_ref()
+    }
+    fn request_id(&self) -> Option<&RequestId> {
+        self.request_id.as_ref()
+    }
+    fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+}
+
+impl<P> From<ExecutionEnvelope<P>> for DomainExecutionContext {
+    fn from(envelope: ExecutionEnvelope<P>) -> Self {
+        Self {
+            aggregate_id: envelope.aggregate_id,
+            entity_id: envelope.entity_id,
+            tenant_id: envelope.tenant_id,
+            correlation_id: envelope.correlation_id,
+            causation_id: envelope.causation_id,
+            request_id: envelope.request_id,
+            metadata: envelope.metadata,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -368,5 +450,89 @@ mod tests {
         let ctx = TestContext::new(None, None, None, None, None, None, Metadata::new());
         let trait_obj: &dyn ExecutionContext = &ctx;
         assert!(trait_obj.metadata().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ExecutionEnvelope → DomainExecutionContext conversion tests
+    // -----------------------------------------------------------------------
+
+    use crate::envelope::ExecutionEnvelope;
+
+    fn full_envelope() -> ExecutionEnvelope<String> {
+        let mut meta = Metadata::new();
+        meta.insert("key1".into(), "val1".into());
+        ExecutionEnvelope {
+            payload: "test".into(),
+            aggregate_id: Some(AggregateId::new("agg-001").unwrap()),
+            entity_id: Some(EntityId::new("ent-001").unwrap()),
+            tenant_id: Some(TenantId::new("ten-001").unwrap()),
+            correlation_id: Some(CorrelationId::new("corr-001").unwrap()),
+            causation_id: Some(CausationId::new("caus-001").unwrap()),
+            request_id: Some(RequestId::new("req-001").unwrap()),
+            metadata: meta,
+        }
+    }
+
+    #[test]
+    fn envelope_to_context_identity_fields() {
+        let envelope = full_envelope();
+        let ctx: DomainExecutionContext = envelope.into();
+        assert_eq!(ctx.aggregate_id(), Some(&AggregateId::new("agg-001").unwrap()));
+        assert_eq!(ctx.entity_id(), Some(&EntityId::new("ent-001").unwrap()));
+        assert_eq!(ctx.tenant_id(), Some(&TenantId::new("ten-001").unwrap()));
+    }
+
+    #[test]
+    fn envelope_to_context_correlation_fields() {
+        let envelope = full_envelope();
+        let ctx: DomainExecutionContext = envelope.into();
+        assert_eq!(ctx.correlation_id(), Some(&CorrelationId::new("corr-001").unwrap()));
+        assert_eq!(ctx.causation_id(), Some(&CausationId::new("caus-001").unwrap()));
+        assert_eq!(ctx.request_id(), Some(&RequestId::new("req-001").unwrap()));
+    }
+
+    #[test]
+    fn envelope_to_context_metadata() {
+        let envelope = full_envelope();
+        let ctx: DomainExecutionContext = envelope.into();
+        assert_eq!(ctx.metadata().get("key1").unwrap(), "val1");
+    }
+
+    #[test]
+    fn envelope_to_context_all_none() {
+        let envelope = ExecutionEnvelope::<String> {
+            payload: "test".into(),
+            aggregate_id: None,
+            entity_id: None,
+            tenant_id: None,
+            correlation_id: None,
+            causation_id: None,
+            request_id: None,
+            metadata: Metadata::new(),
+        };
+        let ctx: DomainExecutionContext = envelope.into();
+        assert_eq!(ctx.aggregate_id(), None);
+        assert_eq!(ctx.entity_id(), None);
+        assert_eq!(ctx.tenant_id(), None);
+        assert_eq!(ctx.correlation_id(), None);
+        assert_eq!(ctx.causation_id(), None);
+        assert_eq!(ctx.request_id(), None);
+        assert!(ctx.metadata().is_empty());
+    }
+
+    #[test]
+    fn envelope_to_context_is_read_only() {
+        let envelope = full_envelope();
+        let ctx: DomainExecutionContext = envelope.into();
+        let _ = ctx.aggregate_id();
+        let _ = ctx.metadata();
+    }
+
+    #[test]
+    fn envelope_to_context_trait_object() {
+        let envelope = full_envelope();
+        let ctx: DomainExecutionContext = envelope.into();
+        let trait_obj: &dyn ExecutionContext = &ctx;
+        assert_eq!(trait_obj.aggregate_id(), Some(&AggregateId::new("agg-001").unwrap()));
     }
 }

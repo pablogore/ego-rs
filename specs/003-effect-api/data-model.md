@@ -20,7 +20,7 @@ The canonical effect type describing an execution outcome.
 | Variant | Inner Type | Description |
 |---------|------------|-------------|
 | `NoEffect` | — | No side effects. The handler completed without producing outcomes. |
-| `StateMutation(S)` | S | A state change (execution-model specific). Carries the new state value. Runtimes SHALL reject StateMutation during effect interpretation for models that do not support direct state mutation, returning `EffectInterpretationError::UnsupportedEffect`. |
+| `StateMutation(S)` | S | A state change. Carries the new state value. |
 | `EventEmission(Vec<E>)` | `Vec<E>` | One or more events to persist. Carries a vector of event payloads. |
 | `Reply(R)` | R | A reply to send back to the caller. Carries the reply value. |
 | `Composed(Vec<Effect<E, R, S>>)` | `Vec<Effect<E, R, S>>` | Multiple effects composed together. Contains a list of child effects. Recursive — children may themselves be Composed. |
@@ -68,17 +68,6 @@ Effect<E, R, S> (enum)
     └── Composed<E, R, S>
             └── children: Vec<Effect<E, R, S>>
 ```
-
-### Interpretation Rules
-
-- Nested `Composed` values SHALL be recursively flattened before runtime interpretation.
-- Flattening preserves insertion order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list.
-- Nesting depth SHALL NOT alter execution semantics.
-- `NoEffect` children SHALL be discarded during flattening (they contribute no work).
-
-## Interpretation Error Model
-
-Effect interpretation errors are owned by the runtime layer (not `ego-domain`). See spec.md for the canonical `EffectInterpretationError` type and semantics.
 
 ## Cross-References
 

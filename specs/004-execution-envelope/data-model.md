@@ -14,7 +14,7 @@ A transport-neutral carrier for execution input.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `payload` | `P` | The input message (command, event, workflow message, etc.) |
+| `payload` | `P` | The input message. Always present — payload-less execution models use `ExecutionEnvelope<()>` where `()` is Rust's zero-sized type. |
 | `aggregate_id` | `Option<AggregateId>` | Aggregate identity, if available |
 | `entity_id` | `Option<EntityId>` | Entity identity, if available |
 | `tenant_id` | `Option<TenantId>` | Tenant identity, if available |
@@ -27,19 +27,31 @@ A transport-neutral carrier for execution input.
 
 **State Transitions**: None. The envelope is immutable after construction.
 
-**Derives**: Debug, Clone, PartialEq, Eq.
+**Derives**: Debug, Clone, PartialEq, Eq, Serialize, Deserialize.
 
 ### ExecutionContext Construction
 
+`ExecutionContext` is a trait — it cannot directly implement `From`. Instead, conversion is owned by concrete implementations:
+
+**Domain-owned (infallible, no runtime deps):**
+
 ```rust
-impl<P> From<ExecutionEnvelope<P>> for ExecutionContext {
+impl<P> From<ExecutionEnvelope<P>> for DomainExecutionContext {
     fn from(envelope: ExecutionEnvelope<P>) -> Self {
-        // Map envelope fields to context fields
+        Self {
+            aggregate_id: envelope.aggregate_id,
+            entity_id: envelope.entity_id,
+            tenant_id: envelope.tenant_id,
+            correlation_id: envelope.correlation_id,
+            causation_id: envelope.causation_id,
+            request_id: envelope.request_id,
+            metadata: envelope.metadata,
+        }
     }
 }
 ```
 
-Alternatively, a method on the runtime struct:
+**Runtime-owned (named constructor):**
 
 ```rust
 impl RuntimeExecutionContext {
@@ -79,9 +91,9 @@ ExecutionEnvelope<P>
     └── metadata: Metadata
     │
     ▼ constructs
-ExecutionContext (002 trait)
+DomainExecutionContext (002 concrete impl of ExecutionContext trait)
     │
-    ▼ passed to
+    ▼ passed to handler as &dyn ExecutionContext
 ExecutionHandler
     │
     ▼ returns

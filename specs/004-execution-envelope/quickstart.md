@@ -52,7 +52,17 @@ cargo test -p ego-runtime -- envelope_to_runtime_context
 
 **Expected**: Runtime context returns all fields set on the envelope.
 
-### Scenario 5: No Infrastructure
+### Scenario 5: Serialization Round-Trip
+
+Verify envelope survives serde serialization/deserialization:
+
+```bash
+cargo test -p ego-domain -- envelope_serde_roundtrip
+```
+
+**Expected**: `ExecutionEnvelope<String>` with all fields set survives serde JSON round-trip. All identity, correlation, and metadata values preserved.
+
+### Scenario 6: No Infrastructure
 
 Verify no external infrastructure is required:
 

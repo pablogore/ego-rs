@@ -107,6 +107,70 @@ Forbidden:
 
 ---
 
+## Principle: Functional Programming
+
+The codebase SHALL prefer functional programming techniques where practical.
+
+Guidelines:
+
+- Functions are first-class citizens
+- Prefer pure functions
+- Prefer immutable data
+- Minimize shared mutable state
+- Minimize side effects
+- Side effects SHOULD be isolated at system boundaries
+- Prefer composition over inheritance
+- Prefer explicit inputs and outputs over hidden dependencies
+
+Preferred:
+
+```rust
+fn calculate_total(items: &[Item]) -> Money
+```
+
+Avoid:
+
+```rust
+struct CartService {
+    state: RefCell<State>,
+}
+```
+
+unless mutable state is required by the runtime model.
+
+---
+
+## Principle: Deterministic Business Logic
+
+Business logic MUST be deterministic.
+
+Avoid:
+
+- Hidden global state
+- Current time lookups inside domain logic
+- Random number generation inside domain logic
+- Network access inside domain logic
+
+Inject dependencies instead.
+
+---
+
+## Principle: Rustdoc Documentation
+
+All public Rust APIs MUST include rustdoc documentation.
+
+Requirements:
+
+- Public structs
+- Public enums
+- Public traits
+- Public functions
+- Public modules
+
+Documentation MUST explain purpose and usage.
+
+---
+
 ## Compliance
 
 A change is considered complete only when:
@@ -401,3 +465,4 @@ Generate coverage map
 ```
 
 unless explicitly executing /clarify.
+>>>>>>> origin/develop

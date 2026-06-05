@@ -45,6 +45,10 @@ pub use runtime::handle::RuntimeHandle;
 pub use runtime::lifecycle::ExecutionState;
 pub use runtime::runtime::Runtime;
 
-pub use interpreter::{interpret_composed, EffectInterpreter, InterpretationError};
+pub use interpreter::{
+    EffectInterpreter,
+    InterpretationError,
+    interpret_composed,
+};
 
 pub use context::RuntimeExecutionContext;

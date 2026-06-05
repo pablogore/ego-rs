@@ -12,7 +12,7 @@ Define a canonical `Effect` enum hierarchy in `ego-domain` that represents execu
 
 **Execution model support**: The generic type parameters (E = event, R = reply, S = state) make Effect usable by event-sourced entities, stateful entities, CRUD entities, workflows, sagas, and projections without modification. No DomainEvent bound required.
 
-**Composition semantics**: Effects compose via the `Composed` variant, which holds a `Vec<Effect<E, R, S>>`. Composition is recursive — any Effect variant may appear as a child. The runtime SHALL recursively flatten nested `Composed` structures before interpretation (canonical recursive flattening). Flattening preserves execution order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list. The `and_then` combinator already flattens during construction; direct `compose()` preserves caller-provided structure. Combinators such as `and_then` or `combine` provide ergonomic construction.
+**Composition semantics**: Effects compose via the `Composed` variant, which holds a `Vec<Effect<E, R, S>>`. Composition is recursive — any Effect variant may appear as a child. The runtime processes children in insertion order. Combinators such as `and_then` or `combine` provide ergonomic construction.
 
 ## Technical Context
 

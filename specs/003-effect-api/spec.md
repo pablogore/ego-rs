@@ -4,20 +4,13 @@
 
 **Created**: 2026-06-04
 
-**Status**: Archived (2026-06-04)
+**Status**: Implemented (2026-06-04)
 
 **Input**: User specification: "Introduce a runtime-agnostic Effect API that represents the outcome of execution handlers."
 
 ## Problem
 
 ExecutionContext intentionally owns only identity, correlation, and metadata. It does not own persistence, replies, scheduling, or observability. Execution handlers currently have no canonical mechanism to describe execution outcomes.
-
-## Clarifications
-
-### Session 2026-06-04
-
-- Q: Should StateMutation(S) be a first-class Effect variant? → A: Keep StateMutation(S) as execution-model specific. Runtimes SHALL reject StateMutation during effect interpretation for execution models that do not support direct state mutation (e.g., event-sourced, workflows, sagas), returning `EffectInterpretationError::UnsupportedEffect`. Handlers in any model MAY construct `StateMutation` — rejection is deferred to runtime interpretation.
-- Q: What are the runtime semantics of nested Composed effects? → A: Runtime SHALL recursively flatten nested Composed structures before interpretation (canonical recursive flattening). The Effect value type always preserves the handler's original structure (tests assert on exact value). Flattening does not change execution order — depth-first traversal of the unflattened tree produces identical leaf order to linear iteration of the flattened list. Nesting depth SHALL NOT alter execution semantics. The `and_then` combinator already flattens during construction; direct `compose()` preserves caller-provided structure.
 
 ## User Scenarios & Testing
 
@@ -68,35 +61,9 @@ A developer needs to describe multiple outcomes (e.g., emit events AND reply) in
 
 ### Edge Cases
 
-- What happens when a handler returns an Effect the runtime cannot interpret? The runtime SHALL return `EffectInterpretationError::UnsupportedEffect`.
-- What happens when composition produces conflicting effects? The runtime SHALL return `EffectInterpretationError::ConflictingEffects`.
-- What happens when effects reference entities the handler does not own? The runtime MAY reject — this is beyond the canonical error model and runtime-specific.
-- What happens when a handler returns StateMutation for an execution model that does not support direct state mutation? The runtime SHALL return `EffectInterpretationError::UnsupportedEffect` with an explanation that StateMutation is unsupported for the given model.
-- What happens when a runtime receives nested Composed effects? The runtime SHALL recursively flatten the composition before interpretation. Nesting depth SHALL NOT alter execution semantics.
-
-### Interpretation Error Model
-
-Effect interpretation errors are owned by the runtime layer. Every runtime SHALL explicitly evaluate every `Effect` variant — unsupported variants SHALL NOT be silently ignored.
-
-The canonical error type:
-
-```rust
-pub enum EffectInterpretationError {
-    /// Runtime does not support a specific effect variant.
-    UnsupportedEffect,
-    /// Composition violates runtime rules (e.g., empty Composed).
-    InvalidComposition,
-    /// Mutually incompatible effects (e.g., multiple replies in a single-reply runtime).
-    ConflictingEffects,
-}
-```
-
-**Ownership**: This type is defined in the runtime layer, not in `ego-domain`. Runtimes MAY extend with additional error variants as needed.
-
-**Semantics**:
-- `UnsupportedEffect` — returned when the runtime does not implement a specific variant (e.g., `StateMutation` in an event-sourced runtime).
-- `InvalidComposition` — returned when a `Composed` or composed structure violates runtime rules (e.g., empty `Composed` where prohibited).
-- `ConflictingEffects` — returned when multiple effects in the same composition are mutually incompatible (e.g., two `Reply` values when the runtime allows only one).
+- What happens when a handler returns an Effect the runtime cannot interpret? The runtime SHOULD reject with a clear error.
+- What happens when composition produces conflicting effects? The runtime SHOULD fail with a description of the conflict.
+- What happens when effects reference entities the handler does not own? The runtime SHOULD fail with an authorization error.
 
 ## Requirements
 
@@ -118,7 +85,7 @@ pub enum EffectInterpretationError {
 
 - **Effect**: A value type describing a desired execution outcome. Composable, runtime-neutral.
 - **NoEffect**: An effect describing no side effects.
-- **StateMutation\<S\>**: An effect describing a state change. Execution-model specific — runtimes SHALL reject StateMutation during effect interpretation for models that do not support direct state mutation (e.g., event-sourced, workflows, sagas), returning `EffectInterpretationError::UnsupportedEffect`.
+- **StateMutation\<S\>**: An effect describing a state change.
 - **EventEmission\<E\>**: An effect describing event emission.
 - **Reply\<R\>**: An effect describing a reply.
 - **Composed\<E, R, S\>**: An effect combining multiple outcomes.

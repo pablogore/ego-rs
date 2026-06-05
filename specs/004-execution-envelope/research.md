@@ -22,13 +22,15 @@ Define `ExecutionEnvelope<P>` as a generic struct (not a trait).
 ## Decision 2: Payload as Generic Parameter
 
 ### Decision
-Envelope carries payload as a type parameter `P`. The envelope struct is `ExecutionEnvelope<P>`.
+Envelope carries payload as a type parameter `P`. The envelope struct is `ExecutionEnvelope<P>`. Payload is **mandatory** — `payload: P`, never `Option<P>`.
 
 ### Rationale
 - Payload type varies per execution model (command, event, workflow message, etc.)
 - Generic parameter preserves type safety without boxing
 - Runtime crates monomorphize for their specific payload types
 - Domain types stay pure — no serde::Value or Box<dyn Any> needed
+- **Payload-less execution models use `ExecutionEnvelope<()>`**: `()` is Rust's idiomatic zero-sized type for "no data." This avoids Option branching on every payload access while still supporting signal-only use cases (saga triggers, projection rebuild signals, etc.)
+- `Option<P>` was rejected: it forces every consumer to match/unwrap, weakens the contract that an envelope always carries a payload (FR-002), and adds serialization complexity for the `None` variant
 
 ### Alternatives Considered
 | Alternative | Rejected Because |
@@ -36,19 +38,23 @@ Envelope carries payload as a type parameter `P`. The envelope struct is `Execut
 | Box<dyn Any> | Loses type safety; forces downcasting in every handler |
 | serde_json::Value | Forces all payloads through JSON; couples envelope to serialization |
 
-## Decision 3: Context Construction via From Trait
+## Decision 3: Context Construction Ownership
 
 ### Decision
-Implement `From<ExecutionEnvelope<P>>` for the runtime's ExecutionContext struct (or a `ExecutionContext::from_envelope` constructor).
+`DomainExecutionContext` (domain-owned concrete type) implements `From<ExecutionEnvelope<P>>`. Runtime implementations use named constructors (e.g. `RuntimeExecutionContext::from_envelope()`).
 
 ### Rationale
+- `ExecutionContext` is a trait — it cannot directly implement `From`
+- `DomainExecutionContext` lives in `ego-domain` alongside `ExecutionEnvelope` — no runtime deps required
 - `From` trait is idiomatic Rust for infallible conversions
-- The envelope has all fields needed to construct context — no fallible conversion required
-- Handlers receive `&dyn ExecutionContext`, so the conversion happens at the runtime boundary
+- Runtime implementations are free to add their own envelope-to-context conversion as a named method (e.g. `from_envelope()`)
+- Handlers receive `&dyn ExecutionContext`, so the conversion happens before handler dispatch
 
 ### Alternatives Considered
 | Alternative | Rejected Because |
 |-------------|-----------------|
+| `From<ExecutionEnvelope<P>>` for `ExecutionContext` (trait) | Impossible — traits cannot implement `From` |
+| `RuntimeExecutionContext` implements `From<ExecutionEnvelope<P>>` | Would force runtime `From` dependency; named `from_envelope()` is already implemented and preferred |
 | Envelope implements ExecutionContext directly | Envelope carries payload — context should not expose payload; violates single responsibility |
 | Manual field copying | More boilerplate than From trait; no safety benefit |
 
@@ -69,29 +75,36 @@ Define `ExecutionEnvelope` in `ego-domain` alongside `ExecutionContext` (002 typ
 | `ego-runtime` | Runtime would own the carrier contract, violating domain ownership pattern |
 | New crate | Unnecessary — contradicts "avoid duplicate modules" rule |
 
-## Decision 5: Serialization Independence
+## Decision 5: Serialization Strategy
 
 ### Decision
-ExecutionEnvelope does not define a serialization format. Transport layers convert between wire format and ExecutionEnvelope.
+ExecutionEnvelope derives serde `Serialize + Deserialize` traits. The transport layer selects the specific wire format.
 
 ### Rationale
-- HTTP may use JSON, gRPC may use protobuf, in-process uses direct construction
-- A serialization constraint would couple the envelope to a specific transport
-- Transport adapters already exist in `crates/transport` — they serialize/deserialize at the boundary
+- serde is Rust's standard serialization framework — it defines traits (`Serialize`, `Deserialize`), not a wire format
+- Deriving serde traits makes the envelope serializable by any serde-compatible format (JSON, MessagePack, protobuf via serde, etc.)
+- The transport layer still owns the format decision — HTTP may use JSON, gRPC may use protobuf
+- User Story 3 requires round-trip testing, which needs serde derives
+- Without derives, every runtime would need its own serialization wrapper — violates "avoid duplicate modules"
+- serde is ubiquitous in the Rust ecosystem; adding it as a dependency to `ego-domain` is standard practice
 
 ### Alternatives Considered
 | Alternative | Rejected Because |
 |-------------|-----------------|
-| Derive Serialize/Deserialize on envelope (always) | OK to derive, but not required — transport may need custom serialization |
-| Enforce JSON | Breaks gRPC and binary protocol use cases |
+| No serde derives | Blocks US-3 round-trip testing; forces each runtime to duplicate serialization logic |
+| Enforce a specific format (e.g., JSON) | Breaks gRPC and binary protocol use cases; couples envelope to format |
 
-## Decision 6: Reuse Existing Runtime Struct
+## Decision 6: Runtime Type — RuntimeExecutionContext
 
 ### Decision
-The existing `crates/runtime/src/context.rs` CommandContext struct is refactored to accept `ExecutionEnvelope` for construction and implement the domain `ExecutionContext` trait.
+The runtime crate provides `RuntimeExecutionContext` with a named `from_envelope()` constructor. This exists alongside the domain's `DomainExecutionContext` which uses the `From` trait.
+
+Both types implement the `ExecutionContext` trait but serve different roles:
+- `DomainExecutionContext`: domain-owned, infallible conversion from envelope via `From`, used when no runtime-specific behavior is needed
+- `RuntimeExecutionContext`: runtime-owned, named constructor `from_envelope()`, may carry runtime-specific lifecycle or observability concerns
 
 ### Rationale
 - "Patch over rewrite" — the existing struct has working tests and functionality
 - Adding an envelope-based constructor is additive, not breaking
-- The struct gains identity, correlation, and metadata fields from the envelope
-- Follows the same approach as 002 Decision 4 (refactoring existing struct)
+- Two concrete implementations of one trait is idiomatic Rust; no duplication of conversion logic
+- Follows the same approach as 002 (refactoring existing struct)

@@ -2,6 +2,7 @@ use ego_domain::context::{
     AggregateId, CausationId, CorrelationId, EntityId, ExecutionContext, Metadata, RequestId,
     TenantId,
 };
+use ego_domain::envelope::ExecutionEnvelope;
 
 /// Default runtime implementation of the domain [`ExecutionContext`] trait.
 ///
@@ -36,6 +37,23 @@ impl RuntimeExecutionContext {
             causation_id,
             request_id,
             metadata,
+        }
+    }
+
+    /// Construct a [`RuntimeExecutionContext`] from an [`ExecutionEnvelope`].
+    ///
+    /// Identity, correlation, and metadata fields are mapped directly from the
+    /// envelope. The envelope payload is consumed but not stored — ownership
+    /// passes through to the caller for handler dispatch.
+    pub fn from_envelope<P>(envelope: ExecutionEnvelope<P>) -> Self {
+        Self {
+            aggregate_id: envelope.aggregate_id,
+            entity_id: envelope.entity_id,
+            tenant_id: envelope.tenant_id,
+            correlation_id: envelope.correlation_id,
+            causation_id: envelope.causation_id,
+            request_id: envelope.request_id,
+            metadata: envelope.metadata,
         }
     }
 }
@@ -197,5 +215,112 @@ mod tests {
         let trait_obj: &dyn ExecutionContext = &ctx;
         assert_eq!(trait_obj.aggregate_id(), Some(&test_aggregate_id()));
         assert!(trait_obj.metadata().contains_key("key1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ExecutionEnvelope → RuntimeExecutionContext integration tests
+    // -----------------------------------------------------------------------
+
+    fn full_envelope() -> ExecutionEnvelope<String> {
+        let mut meta = Metadata::new();
+        meta.insert("key1".into(), "val1".into());
+        ExecutionEnvelope {
+            payload: "test-payload".into(),
+            aggregate_id: Some(test_aggregate_id()),
+            entity_id: Some(test_entity_id()),
+            tenant_id: Some(test_tenant_id()),
+            correlation_id: Some(test_correlation_id()),
+            causation_id: Some(test_causation_id()),
+            request_id: Some(test_request_id()),
+            metadata: meta,
+        }
+    }
+
+    #[test]
+    fn from_envelope_identity_fields() {
+        let ctx = RuntimeExecutionContext::from_envelope(full_envelope());
+        assert_eq!(ctx.aggregate_id(), Some(&test_aggregate_id()));
+        assert_eq!(ctx.entity_id(), Some(&test_entity_id()));
+        assert_eq!(ctx.tenant_id(), Some(&test_tenant_id()));
+    }
+
+    #[test]
+    fn from_envelope_correlation_fields() {
+        let ctx = RuntimeExecutionContext::from_envelope(full_envelope());
+        assert_eq!(ctx.correlation_id(), Some(&test_correlation_id()));
+        assert_eq!(ctx.causation_id(), Some(&test_causation_id()));
+        assert_eq!(ctx.request_id(), Some(&test_request_id()));
+    }
+
+    #[test]
+    fn from_envelope_metadata() {
+        let ctx = RuntimeExecutionContext::from_envelope(full_envelope());
+        assert_eq!(ctx.metadata().get("key1").unwrap(), "val1");
+    }
+
+    #[test]
+    fn from_envelope_all_none() {
+        let envelope = ExecutionEnvelope::<String> {
+            payload: "test".into(),
+            aggregate_id: None,
+            entity_id: None,
+            tenant_id: None,
+            correlation_id: None,
+            causation_id: None,
+            request_id: None,
+            metadata: Metadata::new(),
+        };
+        let ctx = RuntimeExecutionContext::from_envelope(envelope);
+        assert_eq!(ctx.aggregate_id(), None);
+        assert_eq!(ctx.entity_id(), None);
+        assert_eq!(ctx.tenant_id(), None);
+        assert_eq!(ctx.correlation_id(), None);
+        assert_eq!(ctx.causation_id(), None);
+        assert_eq!(ctx.request_id(), None);
+        assert!(ctx.metadata().is_empty());
+    }
+
+    #[test]
+    fn from_envelope_different_payload_types() {
+        let string_envelope = ExecutionEnvelope::<String> {
+            payload: "hello".into(),
+            aggregate_id: None,
+            entity_id: None,
+            tenant_id: None,
+            correlation_id: None,
+            causation_id: None,
+            request_id: None,
+            metadata: Metadata::new(),
+        };
+        let ctx = RuntimeExecutionContext::from_envelope(string_envelope);
+        assert!(ctx.metadata().is_empty());
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct Cmd;
+        let cmd_envelope = ExecutionEnvelope::<Cmd> {
+            payload: Cmd,
+            aggregate_id: None,
+            entity_id: None,
+            tenant_id: None,
+            correlation_id: None,
+            causation_id: None,
+            request_id: None,
+            metadata: Metadata::new(),
+        };
+        let ctx = RuntimeExecutionContext::from_envelope(cmd_envelope);
+        assert!(ctx.metadata().is_empty());
+    }
+
+    #[test]
+    fn from_envelope_round_trip() {
+        let envelope = full_envelope();
+        let ctx = RuntimeExecutionContext::from_envelope(envelope);
+        assert_eq!(ctx.aggregate_id(), Some(&test_aggregate_id()));
+        assert_eq!(ctx.entity_id(), Some(&test_entity_id()));
+        assert_eq!(ctx.tenant_id(), Some(&test_tenant_id()));
+        assert_eq!(ctx.correlation_id(), Some(&test_correlation_id()));
+        assert_eq!(ctx.causation_id(), Some(&test_causation_id()));
+        assert_eq!(ctx.request_id(), Some(&test_request_id()));
+        assert_eq!(ctx.metadata().get("key1").unwrap(), "val1");
     }
 }

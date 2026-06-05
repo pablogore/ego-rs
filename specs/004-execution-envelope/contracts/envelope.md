@@ -10,6 +10,7 @@ Domain-owned carrier transporting payload, identity, correlation, and metadata i
 
 ```rust
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 use crate::context::{AggregateId, EntityId, TenantId, CorrelationId, CausationId, RequestId};
 
 /// Transport-neutral carrier for execution input.
@@ -20,9 +21,12 @@ use crate::context::{AggregateId, EntityId, TenantId, CorrelationId, CausationId
 /// # Type parameters
 ///
 /// - `P`: Payload type — determined by the execution model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionEnvelope<P> {
     /// The input message payload.
+    ///
+    /// Always present — payload-less execution models use `ExecutionEnvelope<()>`
+    /// where `()` is Rust's zero-sized type, never `Option<P>`.
     pub payload: P,
     /// Aggregate identity, if available.
     pub aggregate_id: Option<AggregateId>,
@@ -51,6 +55,7 @@ pub struct ExecutionEnvelope<P> {
 2. **Runtime implementations** MUST:
    - Accept `ExecutionEnvelope<P>` for ExecutionContext construction
    - Map envelope fields to ExecutionContext accessors
+   - Use `DomainExecutionContext::from(envelope)` for domain-owned conversion or provide their own named constructor (e.g. `from_envelope()`)
 
 3. **Entities (execution models)**:
    - Choose payload type `P` appropriate to the model
@@ -58,7 +63,7 @@ pub struct ExecutionEnvelope<P> {
 
 ## Derives
 
-ExecutionEnvelope MUST derive: `Debug, Clone, PartialEq, Eq`
+ExecutionEnvelope MUST derive: `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`
 
 ## Testability
 
