@@ -25,4 +25,6 @@ Execution behavior for coding agents operating in this repository. Focused on op
 
 <!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
 
-<!-- Feature info: specs/004-execution-envelope/ -->
+<!-- SPECKIT START -->
+<!-- Feature: 004-execution-envelope | Plan: specs/004-execution-envelope/plan.md -->
+<!-- SPECKIT END -->
