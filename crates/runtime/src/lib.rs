@@ -36,6 +36,9 @@ pub mod runtime;
 /// the described outcomes (replies, events, state mutations).
 pub mod interpreter;
 
+/// Runtime implementation of execution context — identity, correlation, metadata.
+pub mod context;
+
 pub use runtime::execution::ExecutionId;
 pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;
@@ -47,3 +50,5 @@ pub use interpreter::{
     InterpretationError,
     interpret_composed,
 };
+
+pub use context::RuntimeExecutionContext;

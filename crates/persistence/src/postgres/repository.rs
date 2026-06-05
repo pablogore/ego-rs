@@ -10,6 +10,7 @@ use ego_domain::persistence::{PersistenceError, Repository};
 
 /// Row returned from the aggregates table.
 #[derive(FromRow)]
+#[expect(dead_code)]
 struct AggregateRow {
     aggregate_id: String,
     tenant_id: Option<String>,
@@ -29,13 +30,14 @@ pub struct PostgreSQLRepository<A, F> {
 
 impl<A, F> fmt::Debug for PostgreSQLRepository<A, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostgreSQLRepository").field("pool", &self.pool).finish()
+        f.debug_struct("PostgreSQLRepository")
+            .field("pool", &self.pool)
+            .finish()
     }
 }
 
 impl<A, F> PostgreSQLRepository<A, F> {
     /// Constructor and helper methods for `PostgreSQLRepository`.
-
     /// Create a new PostgreSQL repository with the given connection pool and deserializer.
     pub fn new(pool: PgPool, deserialize: F) -> Self {
         Self {
@@ -68,8 +70,9 @@ where
             None => None,
         };
 
-        let payload = serde_json::to_value(&aggregate)
-            .map_err(|e| PersistenceError::Internal(format!("failed to serialize aggregate: {}", e)))?;
+        let payload = serde_json::to_value(&aggregate).map_err(|e| {
+            PersistenceError::Internal(format!("failed to serialize aggregate: {}", e))
+        })?;
 
         let is_new: bool = self.block_on(async {
             sqlx::query_scalar(
@@ -83,16 +86,19 @@ where
         .map_err(|e| PersistenceError::Internal(format!("failed to check existence: {}", e)))?;
 
         if !is_new {
-            let current_version: Option<i64> = self.block_on(async {
-                sqlx::query_scalar(
+            let current_version: Option<i64> = self
+                .block_on(async {
+                    sqlx::query_scalar(
                     r#"SELECT version FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#,
                 )
                 .bind(aggregate_id)
                 .bind(&tenant)
                 .fetch_optional(&self.pool)
                 .await
-            })
-            .map_err(|e| PersistenceError::Internal(format!("failed to query current version: {}", e)))?;
+                })
+                .map_err(|e| {
+                    PersistenceError::Internal(format!("failed to query current version: {}", e))
+                })?;
 
             let current = current_version.unwrap_or(0);
             if current != expected_version {
@@ -126,33 +132,30 @@ where
         Ok(new_version)
     }
 
-    fn load(
-        &self,
-        aggregate_id: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<A, PersistenceError> {
+    fn load(&self, aggregate_id: &str, tenant_id: Option<&str>) -> Result<A, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
             Some(t) => Some(t.to_string()),
             None => None,
         };
 
-        let row: AggregateRow = self.block_on(async {
-            sqlx::query_as(
-                r#"SELECT aggregate_id, tenant_id, version, payload, updated_at
+        let row: AggregateRow = self
+            .block_on(async {
+                sqlx::query_as(
+                    r#"SELECT aggregate_id, tenant_id, version, payload, updated_at
                    FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#,
-            )
-            .bind(aggregate_id)
-            .bind(&tenant)
-            .fetch_one(&self.pool)
-            .await
-        })
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => PersistenceError::NotFound {
-                aggregate_id: aggregate_id.to_string(),
-            },
-            _ => PersistenceError::Internal(format!("failed to query aggregate: {}", e)),
-        })?;
+                )
+                .bind(aggregate_id)
+                .bind(&tenant)
+                .fetch_one(&self.pool)
+                .await
+            })
+            .map_err(|e| match e {
+                sqlx::Error::RowNotFound => PersistenceError::NotFound {
+                    aggregate_id: aggregate_id.to_string(),
+                },
+                _ => PersistenceError::Internal(format!("failed to query aggregate: {}", e)),
+            })?;
 
         (self.deserialize)(row.payload)
     }
@@ -168,16 +171,17 @@ where
             None => None,
         };
 
-        let deleted = self.block_on(async {
-            sqlx::query(
-                r#"DELETE FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#,
-            )
-            .bind(aggregate_id)
-            .bind(&tenant)
-            .execute(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to delete aggregate: {}", e)))?;
+        let deleted = self
+            .block_on(async {
+                sqlx::query(r#"DELETE FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#)
+                    .bind(aggregate_id)
+                    .bind(&tenant)
+                    .execute(&self.pool)
+                    .await
+            })
+            .map_err(|e| {
+                PersistenceError::Internal(format!("failed to delete aggregate: {}", e))
+            })?;
 
         if deleted.rows_affected() == 0 {
             return Err(PersistenceError::NotFound {

@@ -11,7 +11,8 @@ use crate::runtime::execution::ExecutionId;
 use crate::runtime::failure::SendError;
 use crate::runtime::lifecycle::ExecutionState;
 
-type SendFn = Arc<dyn Fn(&ExecutionId, Box<dyn Any + Send + 'static>) -> Result<(), SendError> + Send + Sync>;
+type SendFn =
+    Arc<dyn Fn(&ExecutionId, Box<dyn Any + Send + 'static>) -> Result<(), SendError> + Send + Sync>;
 type ShutdownFn = Arc<dyn Fn(&ExecutionId) + Send + Sync>;
 type StateFn = Arc<dyn Fn(&ExecutionId) -> Option<ExecutionState> + Send + Sync>;
 
@@ -30,7 +31,6 @@ pub struct RuntimeHandle {
 
 impl RuntimeHandle {
     /// Constructor and accessor methods for `RuntimeHandle`.
-
     /// Create a new `RuntimeHandle` with the given execution id and closure
     /// callbacks.
     ///
@@ -39,14 +39,12 @@ impl RuntimeHandle {
     /// * `send` — closure that dispatches a message to this execution.
     /// * `shutdown` — closure that requests graceful shutdown.
     /// * `state` — closure that queries the execution's current state.
-    pub fn new<F, S, St>(
-        id: ExecutionId,
-        send: F,
-        shutdown: S,
-        state: St,
-    ) -> Self
+    pub fn new<F, S, St>(id: ExecutionId, send: F, shutdown: S, state: St) -> Self
     where
-        F: Fn(&ExecutionId, Box<dyn Any + Send + 'static>) -> Result<(), SendError> + Send + Sync + 'static,
+        F: Fn(&ExecutionId, Box<dyn Any + Send + 'static>) -> Result<(), SendError>
+            + Send
+            + Sync
+            + 'static,
         S: Fn(&ExecutionId) + Send + Sync + 'static,
         St: Fn(&ExecutionId) -> Option<ExecutionState> + Send + Sync + 'static,
     {

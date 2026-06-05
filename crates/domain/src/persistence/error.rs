@@ -11,7 +11,12 @@ pub enum PersistenceError {
     NotFound { aggregate_id: String },
 
     /// Optimistic concurrency conflict: expected version does not match actual.
-    #[error("conflict for aggregate '{}': expected version {}, actual version {}", aggregate_id, expected, actual)]
+    #[error(
+        "conflict for aggregate '{}': expected version {}, actual version {}",
+        aggregate_id,
+        expected,
+        actual
+    )]
     Conflict {
         aggregate_id: String,
         expected: i64,

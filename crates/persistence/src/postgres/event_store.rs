@@ -8,10 +8,11 @@ use sqlx::PgPool;
 use tokio::runtime::Handle;
 
 use ego_domain::event::DomainEvent;
-use ego_domain::persistence::{EventStore, PersistenceError};
+use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
 /// Row returned from the events table.
 #[derive(FromRow)]
+#[expect(dead_code)]
 struct EventRow {
     aggregate_id: String,
     tenant_id: Option<String>,
@@ -32,13 +33,14 @@ pub struct PostgreSQLEventStore<E, F> {
 
 impl<E, F> fmt::Debug for PostgreSQLEventStore<E, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostgreSQLEventStore").field("pool", &self.pool).finish()
+        f.debug_struct("PostgreSQLEventStore")
+            .field("pool", &self.pool)
+            .finish()
     }
 }
 
 impl<E, F> PostgreSQLEventStore<E, F> {
     /// Constructor and helper methods for `PostgreSQLEventStore`.
-
     /// Create a new PostgreSQL event store with the given connection pool and deserializer.
     pub fn new(pool: PgPool, deserialize: F) -> Self {
         Self {
@@ -63,7 +65,7 @@ where
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
-        events: Vec<E>,
+        events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
@@ -94,8 +96,9 @@ where
 
         let new_version = current + events.len() as i64;
 
-        for (i, event) in events.iter().enumerate() {
+        for (i, stored) in events.iter().enumerate() {
             let event_version = current + (i as i64) + 1;
+            let event = &stored.event;
             self.block_on(async {
                 sqlx::query(
                     r#"INSERT INTO events (aggregate_id, tenant_id, version, event_type, payload, created_at)
@@ -120,25 +123,26 @@ where
         &self,
         aggregate_id: &str,
         tenant_id: Option<&str>,
-    ) -> Result<Vec<E>, PersistenceError> {
+    ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
             Some(t) => Some(t.to_string()),
             None => None,
         };
 
-        let rows: Vec<EventRow> = self.block_on(async {
-            sqlx::query_as(
-                r#"SELECT aggregate_id, tenant_id, version, event_type, payload, created_at
+        let rows: Vec<EventRow> = self
+            .block_on(async {
+                sqlx::query_as(
+                    r#"SELECT aggregate_id, tenant_id, version, event_type, payload, created_at
                    FROM events WHERE aggregate_id = $1 AND tenant_id = $2
                    ORDER BY version ASC"#,
-            )
-            .bind(aggregate_id)
-            .bind(&tenant)
-            .fetch_all(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to query events: {}", e)))?;
+                )
+                .bind(aggregate_id)
+                .bind(&tenant)
+                .fetch_all(&self.pool)
+                .await
+            })
+            .map_err(|e| PersistenceError::Internal(format!("failed to query events: {}", e)))?;
 
         if rows.is_empty() {
             return Err(PersistenceError::NotFound {
@@ -146,35 +150,38 @@ where
             });
         }
 
-        let events: Result<Vec<E>, PersistenceError> = rows
+        let events: Result<Vec<StoredEvent<E>>, PersistenceError> = rows
             .into_iter()
-            .map(|row| (self.deserialize)(&row.event_type, row.payload))
+            .map(|row| {
+                let event = (self.deserialize)(&row.event_type, row.payload)?;
+                Ok(StoredEvent::without_correlation(event))
+            })
             .collect();
 
         events
     }
 
-    fn list_aggregate_ids(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
         let tenant = match tenant_id {
             Some("") => None,
             Some(t) => Some(t.to_string()),
             None => None,
         };
 
-        let rows: Vec<(String,)> = self.block_on(async {
-            sqlx::query_as(
-                r#"SELECT DISTINCT aggregate_id FROM events
+        let rows: Vec<(String,)> = self
+            .block_on(async {
+                sqlx::query_as(
+                    r#"SELECT DISTINCT aggregate_id FROM events
                    WHERE tenant_id = $1
                    ORDER BY aggregate_id"#,
-            )
-            .bind(tenant)
-            .fetch_all(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to query aggregate ids: {}", e)))?;
+                )
+                .bind(tenant)
+                .fetch_all(&self.pool)
+                .await
+            })
+            .map_err(|e| {
+                PersistenceError::Internal(format!("failed to query aggregate ids: {}", e))
+            })?;
 
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }

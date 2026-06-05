@@ -29,11 +29,7 @@ pub trait Repository<A> {
     /// Load an aggregate by ID.
     ///
     /// Returns `PersistenceError::NotFound` if the aggregate does not exist.
-    fn load(
-        &self,
-        aggregate_id: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<A, PersistenceError>;
+    fn load(&self, aggregate_id: &str, tenant_id: Option<&str>) -> Result<A, PersistenceError>;
 
     /// Delete an aggregate by ID.
     fn delete(

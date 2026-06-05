@@ -63,7 +63,7 @@ pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use context::{
     AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
-    CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
+   CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
     Metadata, RequestId, RequestIdError, TenantId, TenantIdError,
 };
 pub use envelope::ExecutionEnvelope;

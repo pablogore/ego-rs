@@ -4,8 +4,8 @@
 //! snapshots. Snapshots enable fast reconstruction without replaying all
 //! events.
 
-use serde_json::Value;
 use crate::persistence::PersistenceError;
+use serde_json::Value;
 
 /// Trait for saving and loading aggregate snapshots.
 ///

@@ -16,10 +16,7 @@ use crate::types::ExecutionOutcome;
 /// # Arguments
 /// * `a` — first execution outcome.
 /// * `b` — second execution outcome (produced from identical inputs).
-pub fn validate_deterministic_equivalence(
-    a: &ExecutionOutcome,
-    b: &ExecutionOutcome,
-) -> bool {
+pub fn validate_deterministic_equivalence(a: &ExecutionOutcome, b: &ExecutionOutcome) -> bool {
     a.slice_id == b.slice_id && a.observable_semantics == b.observable_semantics
 }
 
@@ -33,9 +30,6 @@ pub fn validate_deterministic_equivalence(
 /// # Arguments
 /// * `original` — the original execution outcome.
 /// * `replay` — the replayed execution outcome.
-pub fn validate_replay_equivalence(
-    original: &ExecutionOutcome,
-    replay: &ExecutionOutcome,
-) -> bool {
+pub fn validate_replay_equivalence(original: &ExecutionOutcome, replay: &ExecutionOutcome) -> bool {
     original == replay
 }

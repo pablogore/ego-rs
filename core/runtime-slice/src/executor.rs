@@ -40,7 +40,10 @@ impl LifecycleState {
     ///
     /// Terminal states reject further execution attempts.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, LifecycleState::Completed(_) | LifecycleState::Failed(_))
+        matches!(
+            self,
+            LifecycleState::Completed(_) | LifecycleState::Failed(_)
+        )
     }
 }
 

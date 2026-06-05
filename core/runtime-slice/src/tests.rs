@@ -1,9 +1,7 @@
 use crate::executor::{Executor, LifecycleState, UnitOfWork};
 use crate::projection::{is_non_mutating, materialize};
 use crate::types::{DeterministicInput, ExecutionContext, RuntimeSliceId};
-use crate::validation::{
-    validate_deterministic_equivalence, validate_replay_equivalence,
-};
+use crate::validation::{validate_deterministic_equivalence, validate_replay_equivalence};
 
 fn test_slice_id() -> RuntimeSliceId {
     RuntimeSliceId::new("test-slice").unwrap()
