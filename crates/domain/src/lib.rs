@@ -39,6 +39,9 @@ pub mod context;
 pub mod effect;
 
 /// CQRS command marker trait.
+/// Idempotency key for safe external effect retry.
+pub mod idempotency;
+
 pub mod command;
 
 /// Domain event trait for event-sourced state.
@@ -67,7 +70,8 @@ pub use context::{
     Metadata, RequestId, RequestIdError, TenantId, TenantIdError,
 };
 pub use envelope::ExecutionEnvelope;
-pub use effect::{Effect, HandlerResult};
+pub use effect::{Effect, ExternalEffectDescription, HandlerResult};
+pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use event::DomainEvent;
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;

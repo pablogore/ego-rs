@@ -107,12 +107,38 @@ mod tests {
                         .push(format!("StateMutation({})", s));
                     Ok(())
                 }
+                Effect::ExternalEffects(effects) => {
+                    let count = effects.len();
+                    self.dispatched
+                        .lock()
+                        .unwrap()
+                        .push(format!("ExternalEffects({})", count));
+                    Ok(())
+                }
                 Effect::Composed(children) => {
                     self.dispatched.lock().unwrap().push("Composed".into());
                     interpret_composed(self, children.clone()).await
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_external_effects_returns_ok() {
+        use ego_domain::idempotency::IdempotencyKey;
+
+        let interp = RecordingInterpreter::new();
+        let ik = IdempotencyKey::new("uow-1:0").unwrap();
+        let ext = ego_domain::effect::ExternalEffectDescription {
+            idempotency_key: ik,
+            effect_type: "http_post".to_string(),
+            payload: vec![],
+            destination: "https://api.example.com".to_string(),
+        };
+        let effect = Effect::external(vec![ext]);
+        let result = interp.interpret(effect).await;
+        assert!(result.is_ok());
+        assert_eq!(interp.take_effects(), vec!["ExternalEffects(1)"]);
     }
 
     #[tokio::test]
