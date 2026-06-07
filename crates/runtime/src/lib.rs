@@ -39,6 +39,9 @@ pub mod interpreter;
 /// Runtime implementation of execution context — identity, correlation, metadata.
 pub mod context;
 
+/// Read side projection runtime — scheduling, backpressure, and batch execution.
+pub mod read_side;
+
 pub use runtime::execution::ExecutionId;
 pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;

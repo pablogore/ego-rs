@@ -1,3 +1,31 @@
+use crate::idempotency::IdempotencyKey;
+
+/// A description of a single external effect to be dispatched after commit.
+///
+/// External effects are described during handler execution (as an [`Effect`]
+/// variant), collected in the commit payload, and dispatched **after** the
+/// atomic commit succeeds. Handlers MUST NOT call external systems directly.
+///
+/// # Fields
+///
+/// - `idempotency_key`: derived from the UoW identity and effect index.
+///   The external system uses this key to detect and reject duplicate dispatches.
+/// - `effect_type`: a short string identifying the kind of effect
+///   (e.g. `"http_post"`, `"kafka_publish"`, `"email"`).
+/// - `payload`: serialized input for the external call.
+/// - `destination`: the target (URL, topic, address, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalEffectDescription {
+    /// Idempotency key for safe retry.
+    pub idempotency_key: IdempotencyKey,
+    /// Kind of external effect (e.g. `"http_post"`, `"kafka_publish"`).
+    pub effect_type: String,
+    /// Serialized payload for the external call.
+    pub payload: Vec<u8>,
+    /// Target destination (URL, topic, address, etc.).
+    pub destination: String,
+}
+
 /// A value type describing a desired execution outcome.
 ///
 /// Effects are returned from execution handlers and interpreted by runtime crates.
@@ -18,6 +46,10 @@ pub enum Effect<E, R, S> {
     EventEmission(Vec<E>),
     /// A reply to send back to the caller.
     Reply(R),
+    /// One or more external effects to dispatch after the commit succeeds.
+    /// Handlers describe these effects; the runtime dispatches them after
+    /// the atomic commit.
+    ExternalEffects(Vec<ExternalEffectDescription>),
     /// Multiple effects composed together. Composition is recursive —
     /// children may themselves be `Composed`.
     Composed(Vec<Effect<E, R, S>>),
@@ -42,6 +74,15 @@ impl<E, R, S> Effect<E, R, S> {
     /// A reply to send back to the caller.
     pub fn reply(reply: R) -> Self {
         Effect::Reply(reply)
+    }
+
+    /// One or more external effects to dispatch after commit.
+    ///
+    /// Handlers describe external effects as intents. The runtime collects
+    /// them in the commit payload and dispatches them **after** the atomic
+    /// commit succeeds. Handlers MUST NOT call external systems directly.
+    pub fn external(effects: Vec<ExternalEffectDescription>) -> Self {
+        Effect::ExternalEffects(effects)
     }
 
     /// Multiple effects composed together.
@@ -256,11 +297,21 @@ mod tests {
     /// forcing the developer to handle the new variant.
     #[test]
     fn effect_match_is_exhaustive() {
+        use crate::idempotency::IdempotencyKey;
+
+        let ik = IdempotencyKey::new("test-key").unwrap();
+        let ext = ExternalEffectDescription {
+            idempotency_key: ik,
+            effect_type: "http_post".to_string(),
+            payload: vec![1, 2, 3],
+            destination: "https://example.com/api".to_string(),
+        };
         let cases: Vec<TestEffect> = vec![
             TestEffect::no(),
             TestEffect::state("s".to_string()),
             TestEffect::emit(vec!["e".to_string()]),
             TestEffect::reply("r".to_string()),
+            TestEffect::external(vec![ext]),
             TestEffect::compose(vec![TestEffect::no()]),
         ];
         for effect in cases {
@@ -269,6 +320,7 @@ mod tests {
                 Effect::StateMutation(_) => {}
                 Effect::EventEmission(_) => {}
                 Effect::Reply(_) => {}
+                Effect::ExternalEffects(_) => {}
                 Effect::Composed(_) => {}
             }
         }

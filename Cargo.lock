@@ -324,11 +324,20 @@ dependencies = [
 name = "ego-domain"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "mockall",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "ego-event-adapter"
+version = "0.1.0"
+dependencies = [
+ "ego-domain",
 ]
 
 [[package]]

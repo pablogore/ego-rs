@@ -14,19 +14,13 @@ use ego_domain::{Command, Query};
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ego_domain::Command;
+/// ```rust
 /// use ego_application::ports::CommandHandler;
 ///
-/// struct CreateUserHandler;
+/// // This shows the pattern - actual implementation would depend on specific command type
+/// struct MyCommandHandler;
 ///
-/// impl CommandHandler<CreateUser> for CreateUserHandler {
-///     type Error = String;
-///     fn handle(&self, cmd: &CreateUser) -> Result<(), Self::Error> {
-///         // validate, save, publish events...
-///         Ok(())
-///     }
-/// }
+/// // impl CommandHandler<SomeCommandType> for MyCommandHandler { ... }
 /// ```
 pub trait CommandHandler<C: Command> {
     /// The error type returned on handler failure.
@@ -43,19 +37,13 @@ pub trait CommandHandler<C: Command> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use ego_domain::Query;
+/// ```rust
 /// use ego_application::ports::QueryHandler;
 ///
-/// struct GetUserHandler;
+/// // This shows the pattern - actual implementation would depend on specific query type
+/// struct MyQueryHandler;
 ///
-/// impl QueryHandler<GetUser> for GetUserHandler {
-///     type Error = String;
-///     fn handle(&self, query: &GetUser) -> Result<UserProfile, Self::Error> {
-///         // fetch from read model...
-///         Ok(UserProfile { name: "Alice".into() })
-///     }
-/// }
+/// // impl QueryHandler<SomeQueryType> for MyQueryHandler { ... }
 /// ```
 pub trait QueryHandler<Q: Query> {
     /// The error type returned on handler failure.
