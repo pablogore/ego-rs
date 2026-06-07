@@ -9,6 +9,7 @@ members = [
     "crates/runtime",
     "crates/runtime-tokio",
     "crates/event-adapter",
+    "crates/persistent-entity",
 ]
 resolver = "2"
 

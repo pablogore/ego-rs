@@ -372,6 +372,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ego-persistent-entity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ego-domain",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ego-runtime"
 version = "0.1.0"
 dependencies = [

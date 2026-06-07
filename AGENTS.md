@@ -26,5 +26,5 @@ Execution behavior for coding agents operating in this repository. Focused on op
 <!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
 
 <!-- SPECKIT START -->
-<!-- Feature: 005-read-side-projections | Plan: specs/005-read-side-projections/plan.md -->
+<!-- Feature: 006-persistent-entity-runtime | Plan: specs/006-persistent-entity-runtime/plan.md -->
 <!-- SPECKIT END -->
