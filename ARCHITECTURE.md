@@ -71,6 +71,12 @@ The runtime layer owns:
 
 All framework primitives are deterministic by default. Randomness, wall-clock time, and external I/O are injected through explicit ports — never implicit behavior.
 
+### Immutability By Default
+
+All domain data structures are immutable values. Changes produce new commands, events, or state instances — never in-place mutation. Event stores are append-only. Read-side projections derive from immutable event streams.
+
+**Authority:** `.speckit/constitution.md` §8 — "Immutability By Default" and "Functional Programming". These rules are defined and enforced by the Constitution, not duplicated here.
+
 ### Fail-Closed
 
 Ambiguous states produce rejection, never silent continuation. Unknown inputs, undefined transitions, and partial failures are explicit errors.

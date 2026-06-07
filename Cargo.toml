@@ -8,8 +8,10 @@ members = [
     "core/runtime-slice",
     "crates/runtime",
     "crates/runtime-tokio",
+    "crates/event-adapter",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 mockall = "0.14.0"
+async-trait = "0.1"

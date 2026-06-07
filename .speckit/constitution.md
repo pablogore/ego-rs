@@ -379,6 +379,14 @@ FORBIDDEN:
 - Global mutable state
 - Hardcoded infrastructure dependencies
 
+### Immutability By Default
+
+All domain data structures MUST be treated as immutable values. Changes are represented through new commands, new events, or new state instances — never in-place mutation. The framework SHALL prefer value replacement over in-place mutation.
+
+- **Event stores** MUST be append-only. Existing events MUST NOT be modified or deleted.
+- **Read-side projections** MUST be derived from immutable event streams.
+- **Any mutable structure** requires explicit justification in the design document.
+
 ### Functional Programming
 
 The codebase SHALL prefer functional programming techniques where practical.
@@ -503,6 +511,13 @@ The following constitute hard failures. Detection MUST halt execution immediatel
 - Commit rolled back after external effect dispatched. (Violates EE-R5)
 - Worker or Session dispatching external effects. (Violates EE-R6)
 
+### Immutability Violations
+
+- Domain data structure mutated in-place instead of creating a new instance. (Violates §8 Immutability By Default)
+- Event store entry modified or deleted after append. (Violates §8 Immutability By Default)
+- Read-side projection derived from a mutable source. (Violates §8 Immutability By Default)
+- Mutable structure introduced without documented justification in the design document. (Violates §8 Immutability By Default)
+
 ### Governance Violations
 
 - Task completion claimed without evidence.
@@ -544,6 +559,7 @@ Each constitution rule belongs to exactly ONE primary enforcement layer. The pri
 | EE-R2 | Effects persisted atomically with commit | Compile-time + Test | Type system + contract tests |
 | EE-R3 | Idempotency key required | Compile-time | Type-system (required field) |
 | EE-R4-E6 | Dispatch ownership, retry safety, commit immutability | Runtime + Test | BatchExecutor post-commit dispatch + fault injection tests |
+| IM-R1-4 | Domain data immutability, append-only stores, immutable projections, mutable justification | CI + Test | detect-violations.sh + design document audit |
 
 ### Conflict Resolution
 

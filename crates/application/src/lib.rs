@@ -21,11 +21,7 @@
 //! Application handlers are tested with mock ports. No real database,
 //! network, or filesystem.
 
-/// Reference hello handler — implements QueryHandler<HelloQuery>.
-pub mod hello;
-
 /// Hexagonal port traits — CommandHandler, QueryHandler.
 pub mod ports;
 
-pub use hello::HelloHandler;
 pub use ports::*;

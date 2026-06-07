@@ -47,7 +47,7 @@ struct UnitContext {
     /// Join handle for the spawned Tokio task that runs the user closure.
     #[allow(dead_code)]
     handle: Option<JoinHandle<()>>,
-    /// Join handle for the message consumer that drains the mpsc channel.
+    /// Join the handle for the message consumer that drains the mpsc channel.
     #[allow(dead_code)]
     message_consumer: Option<JoinHandle<()>>,
 }

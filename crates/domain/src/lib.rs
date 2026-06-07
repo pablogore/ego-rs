@@ -25,7 +25,17 @@
 //! | `event` | `DomainEvent` trait for event-sourced state |
 //! | `query` | `Query` trait with typed `Output` for reads |
 //! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
-//! | `hello` | Example: `HelloQuery` / `HelloResponse` |
+//! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
+//! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
+//! 
+//! ## Modules
+//! 
+//! | Module | Purpose |
+//! |--------|---------|
+//! | `command` | `Command` marker trait for mutating operations |
+//! | `event` | `DomainEvent` trait for event-sourced state |
+//! | `query` | `Query` trait with typed `Output` for reads |
+//! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
 
@@ -48,8 +58,6 @@ pub mod command;
 pub mod event;
 
 /// Example: HelloQuery / HelloResponse.
-pub mod hello;
-
 /// Observability port — SemanticEvent, Level, Observability trait.
 pub mod observability;
 
@@ -61,6 +69,9 @@ pub mod query;
 
 /// Execution envelope — transport-neutral payload, identity, correlation, and metadata carrier.
 pub mod envelope;
+
+/// Read side projection engine — processors, sessions, runners, and storage SPIs.
+pub mod read_side;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
