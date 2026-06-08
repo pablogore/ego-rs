@@ -3,8 +3,6 @@ use crate::persistent_entity::PersistentEntity;
 use crate::command_context::CommandContext;
 use crate::error::EntityError;
 use crate::testing::{TestCommand, TestEvent, TestState};
-use ego_domain::DomainEvent;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct TestEntity;
@@ -92,32 +90,7 @@ impl PersistentEntity for TestEntity {
     }
 }
 
-impl DomainEvent for TestEvent {
-    fn aggregate_id(&self) -> &str {
-        // For test purposes, we'll return a static string
-        "test-aggregate"
-    }
 
-    fn event_type(&self) -> &str {
-        match self {
-            TestEvent::Incremented(_) => "TestEvent.Incremented",
-            TestEvent::Decremented(_) => "TestEvent.Decremented",
-        }
-    }
-
-    fn payload(&self) -> &serde_json::Value {
-        // For test purposes, we'll return a static value
-        &serde_json::Value::Null
-    }
-
-    fn occurred_at(&self) -> &chrono::DateTime<chrono::Utc> {
-        // For test purposes, we'll return a static time
-        // This is a workaround for the temporary value issue
-        // We need to create a static DateTime for testing purposes
-        static TIME: std::sync::OnceLock<DateTime<Utc>> = std::sync::OnceLock::new();
-        TIME.get_or_init(|| Utc::now())
-    }
-}
 
 // Remove the DomainEvent implementation for TestEntity since it's not an event
 // The TestEntity is a PersistentEntity, not a DomainEvent

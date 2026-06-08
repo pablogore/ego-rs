@@ -10,7 +10,7 @@ use crate::runtime::{EntityRuntime, RuntimeConfig};
 use crate::scheduler::Scheduler;
 use crate::snapshot::{SnapshotStrategy, PeriodicSnapshotStrategy};
 
-pub struct EntityRuntimeBuilder<E: DomainEvent> {
+pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> {
     mailbox_capacity: usize,
     concurrency_budget: usize,
     passivation_timeout: std::time::Duration,
@@ -90,10 +90,10 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 
     pub fn build(self) -> EntityRuntime<E> {
-        let _event_store = self.event_store.unwrap_or_else(|| {
+        let event_store = self.event_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemoryEventStore::new())
         });
-        let _snapshot_store = self.snapshot_store.unwrap_or_else(|| {
+        let snapshot_store = self.snapshot_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemorySnapshotStore::new())
         });
         let publisher = self.publisher.unwrap_or_else(|| {

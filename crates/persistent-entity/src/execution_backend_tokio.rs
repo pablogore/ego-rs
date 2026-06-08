@@ -56,7 +56,7 @@ impl ExecutionBackend for SyncTestBackend {
     where
         C: Send + Sync + serde::Serialize + 'static,
         E: Send + Sync + Clone + serde::Serialize + 'static,
-        S: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+        S: Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     {
         TokioExecutionBackend.execute(entity, state, command, context)
     }
