@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use ego_persistent_entity::builder::EntityRuntimeBuilder;
-use ego_persistent_entity::command_context::CommandContext;
-use ego_persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
-use ego_persistent_entity::snapshot::NoSnapshot;
-use ego_persistent_entity::testing::test_helpers::{
-    TestCommand, TestEvent, TestEntity, TestState,
-};
+use persistent_entity::command_context::CommandContext;
+use persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
+use persistent_entity::snapshot::NoSnapshot;
+use persistent_entity::testing::{create_test_context, TestEntityRef};
+use persistent_entity::test_entity::TestEntity;
+use persistent_entity::testing::{TestCommand, TestEvent, TestState};
 
 mod common;
 
@@ -14,9 +13,9 @@ mod common;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_runtime() -> Arc<ego_persistent_entity::runtime::EntityRuntime<TestEvent>> {
+fn build_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
     Arc::new(
-        EntityRuntimeBuilder::new()
+        persistent_entity::builder::EntityRuntimeBuilder::new()
             .passivation_timeout(std::time::Duration::from_secs(3600))
             .snapshot_strategy(Arc::new(NoSnapshot))
             .build(),
@@ -24,9 +23,9 @@ fn build_runtime() -> Arc<ego_persistent_entity::runtime::EntityRuntime<TestEven
 }
 
 fn build_fast_passivation_runtime(
-) -> Arc<ego_persistent_entity::runtime::EntityRuntime<TestEvent>> {
+) -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
     Arc::new(
-        EntityRuntimeBuilder::new()
+        persistent_entity::builder::EntityRuntimeBuilder::new()
             .passivation_timeout(std::time::Duration::from_millis(50))
             .snapshot_strategy(Arc::new(NoSnapshot))
             .build(),

@@ -1,12 +1,12 @@
-# Feature Specification: Persistent Entity Runtime and SDK
+# CORE-006 Persistent Entity Runtime (Canonical)
 
 **Feature**: `006-persistent-entity-runtime`
-
 **Created**: 2026-06-07
-
 **Status**: Draft
 
-**Input**: User description: "CORE-006 Persistent Entity Runtime & SDK — Event-sourced persistent entity abstraction inspired by Lagom Framework, with actor-per-entity execution, bounded FIFO mailbox, single-writer guarantees, snapshot support, optimistic concurrency, event publication, and Postgres as source of truth."
+**CONSOLIDATION NOTICE**: This specification is the SINGLE CANONICAL SOURCE OF TRUTH for CORE-006. All previously separate specifications — 006-execution-unit-runtime, 006-hook-execution-graph-model, 006-gap-analysis-and-architecture-debt — have been merged into this document. No alternative or conflicting runtime definitions exist. The priority order for conflict resolution is: (1) Persistent Entity Runtime, (2) ExecutionUnit Model, (3) Hook Execution Graph Model, (4) Gap Analysis (informational only).
+
+**Resolution of Key Conflicts**: The ExecutionUnit specification previously defined a reactive pipeline model that excluded actor lifecycle, mailbox ownership, and per-entity processes. In the canonical model, these concepts ARE part of the container (Actor Per Entity), while the ExecutionUnit represents the pure computation aspect (handler + applier) running inside that container. See Section 2 for the integrated model.
 
 ## Clarifications
 
@@ -233,11 +233,9 @@ In addition to the above, the following are FORBIDDEN:
 - **MailboxFull Error**: Error returned when a command is sent to an entity whose mailbox has reached capacity. The caller must handle backpressure.
 - **ReentrancyNotAllowed Error**: Error returned when a command handler attempts to send a command to its own entity.
 
-## Entity Runtime Execution Model
+## Canonical Specification Sections
 
-This section defines the single coherent execution model for the entity runtime, resolving all behavioral ambiguities and serving as the authoritative reference for implementation.
-
-### 1. Execution Model: Actor Per Entity
+### Section 1: Core Runtime Model
 
 Each persistent entity is modeled as a logical actor with exclusive ownership of its execution context:
 
@@ -248,7 +246,7 @@ Each persistent entity is modeled as a logical actor with exclusive ownership of
 - **Concurrency budget** — the runtime enforces a global concurrency limit on how many entity tasks may be actively processing at once. This is a scheduling throttle (not a pool of shared workers). Idle entity tasks parked on their mailbox receiver do not count toward the limit. The limit prevents resource exhaustion while allowing all entities to remain resident with zero scheduling overhead when idle. **Scheduling**: best-effort FIFO with anti-starvation guarantee — entities are generally processed in arrival order, but the scheduler MAY reorder to prevent starvation; every pending entity MUST eventually get a slot under sustained load. The slot selection policy is implementation-defined with the no-starvation constraint.
 - **Single-writer guarantee** is enforced by the dedicated task: only one task can access the entity's state at any time, and the task processes commands sequentially. The mailbox IS the single-writer lock.
 
-### 2. Mailbox Model: Bounded FIFO
+**Mailbox Model: Bounded FIFO**
 
 - **Queue semantics** — each entity's mailbox is a bounded FIFO queue backed by a Tokio mpsc channel. Commands are delivered in arrival order and processed sequentially by the entity's dedicated task.
 - **Bounded capacity** — the mailbox (Tokio mpsc channel) has a configurable maximum capacity. If the mailbox is full, the sender receives a MailboxFull error immediately (synchronous rejection via `try_send`). This provides built-in backpressure.
@@ -257,7 +255,82 @@ Each persistent entity is modeled as a logical actor with exclusive ownership of
 - **Mailbox lifecycle** — the mailbox (mpsc channel) is created when the entity task is spawned (first command after passivation or initial load). The task loops on the receiver; the sender handle is stored in the entity registry. When the entity passivates, the task completes and the receiver is dropped. Commands sent after passivation trigger a new task spawn with a fresh mailbox.
 - **Sender interaction** — the EntityRef API holds a clone of the mpsc sender handle and submits the command via `try_send`. If the mailbox is full, `try_send` fails immediately (MailboxFull error). If the entity is PASSIVATED (no task running), the sender handle is stale — the runtime detects this, spawns a new task with a fresh mailbox, and retries the send.
 
-### 3. Entity Lifecycle Model
+### Section 2: ExecutionUnit Model
+
+The ExecutionUnit is the pure computation aspect of entity behavior, running inside the Actor Per Entity container. The canonical model resolves the previous conflict between the reactive ExecutionUnit specification (which excluded lifecycle, mailbox, and per-entity processes) and the actor-per-entity model by separating concerns: the container provides lifecycle, mailbox, and passivation; the ExecutionUnit provides the deterministic computation semantics.
+
+**ExecutionUnit Definition**
+
+An ExecutionUnit encapsulates the stateless, deterministic computation that transforms commands and state into events and new state. It is the developer-authored behavior that runs inside the actor container:
+
+- **Command handler**: `(state, command, context) -> (events | error)` — a pure function that, given the current entity state, an incoming command, and the command context, produces zero or more domain events or returns an error.
+- **Event applier**: `(state, event) -> state` — a pure function that, given the current entity state and a committed event, produces the next entity state.
+
+**ExecutionUnit Invariants**
+
+- An ExecutionUnit MUST be stateless between invocations. No mutable state persists across command handling calls. The entity state is passed in and the new state is returned.
+- An ExecutionUnit MUST be fully deterministic. Given identical (state, command, context), the handler MUST produce identical (events | error). Given identical (state, event), the applier MUST produce identical state.
+- An ExecutionUnit MUST be fully replayable from event history. Replaying the same event sequence from the same snapshot MUST produce identical state.
+- An ExecutionUnit MUST NOT own lifecycle or mailbox. Lifecycle management (RECOVERING, ACTIVE, PASSIVATING, PASSIVATED, FAILED) is a container concern.
+- An ExecutionUnit MUST NOT maintain internal execution loops. The receive-process-receive loop is a container concern.
+- An ExecutionUnit is invoked by the container; it does not invoke itself or schedule its own execution.
+
+**ExecutionUnit Container Relationship**
+
+The Actor Per Entity container and the ExecutionUnit form a layered architecture:
+
+| Concern | Provided By |
+|---------|-------------|
+| Command dispatch (mailbox, receive loop) | Actor Per Entity container |
+| Lifecycle state machine (RECOVERING → ACTIVE → etc.) | Actor Per Entity container |
+| Passivation (drain, freeze, serialize) | Actor Per Entity container |
+| Single-writer guarantee | Actor Per Entity container (mailbox) |
+| Concurrency budget enforcement | Scheduler (Section 3) |
+| Command handling logic | ExecutionUnit |
+| Event application logic | ExecutionUnit |
+| Determinism and replay correctness | ExecutionUnit |
+| Side-effect prohibition (Handler Safety Contract) | ExecutionUnit |
+
+**Forbidden Concepts**
+
+The following are CONTAINER concerns, NOT ExecutionUnit concerns:
+
+- Actor loops as execution primitive — the container owns the receive-process loop, not the ExecutionUnit
+- Per-entity long-lived processes — lifecycle is managed by the container
+- Mailbox ownership per ExecutionUnit — the container owns the mailbox; the ExecutionUnit is invoked by the container, not by mailbox messages
+- Internal entity schedulers — scheduling is a runtime-level concern (Section 3)
+
+### Section 3: Scheduler Model
+
+The Scheduler is the runtime component that manages the concurrency budget and activation of entity actors.
+
+**Scheduler Role**
+
+- The Scheduler consumes activation triggers and decides which entity actor to activate.
+- The Scheduler ensures ordering per entity (mailbox model) — within a single entity, the mailbox guarantees FIFO processing. The Scheduler does not reorder commands within an entity.
+- The Scheduler enforces the concurrency budget: a configurable limit on concurrently processing entities. This limits how many entity actor tasks are actively executing commands at any given time.
+- Idle entity tasks parked on their mailbox receiver do not count toward the concurrency budget. The budget applies to active command processing, not task existence.
+
+**Scheduling Policy**
+
+- **Best-effort FIFO with anti-starvation guarantee**: entities are generally activated in arrival order, but the scheduler MAY reorder to prevent starvation.
+- **Every pending entity MUST eventually get a slot under sustained load.** The slot selection policy is implementation-defined with the constraint that no entity may be starved indefinitely.
+- Weighted or priority-based fairness is NOT guaranteed by the runtime layer.
+- Scheduling is a resource throttle, not a correctness mechanism. The scheduler does not affect execution semantics, command ordering within an entity, or determinism guarantees.
+
+**Single-Writer Guarantee**
+
+- The single-writer guarantee (at most one command execution per entity at any time) is enforced by the dedicated task + mailbox, NOT by the scheduler.
+- The scheduler controls how many entities are processing concurrently, but does not control which command within an entity is processed next — that is the mailbox's responsibility.
+
+**Activation Flow**
+
+1. A command arrives targeting an entity.
+2. If the entity has an active actor, the command is enqueued in the entity's mailbox.
+3. If the entity is PASSIVATED or does not exist, the runtime creates a new actor (spawns a task, transitions to RECOVERING, enqueues the command in a new mailbox).
+4. If the concurrency budget is saturated, the scheduler delays new task activation until capacity frees up. Commands enqueued in existing mailboxes are processed normally (the entity is already active). Only newly spawned entities may be delayed.
+
+### Section 4: Persistent Entity Lifecycle
 
 Each entity transitions through the following states during its lifetime:
 
@@ -291,30 +364,108 @@ Each entity transitions through the following states during its lifetime:
 - ACTIVE → FAILED: triggered by an irrecoverable error during command execution.
 - FAILED → RECOVERING: triggered by explicit recovery request or runtime restart.
 
-### 4. Failure Determinism Model
+**Passivation Interaction (Irreversible Drain)**
 
-This section defines the single coherent failure model for the entity runtime: Strict Event Sourcing.
+- **Passivation trigger**: Passivation is triggered by the runtime's passivation policy (inactivity timeout, memory pressure, explicit administrative request). The policy is configured at the runtime level, not per entity.
+- **Atomic mailbox freeze on entry**: When the entity transitions to PASSIVATING, the mailbox sender handles are atomically removed from the entity registry. Any concurrent or subsequent `try_send` from an EntityRef finds no handle and resolves immediately with EntityPassivating error. This freeze is the first step of the state transition — there is no window where a new command could be accepted after PASSIVATING is entered.
+- **Drain existing commands**: The entity's dedicated task continues running. It completes the current command (if any), then processes any commands already in the mailbox in FIFO order. No new commands can arrive (mailbox is frozen), so the drain is bounded and deterministic.
+- **Shutdown**: After the mailbox is empty and the current command completes:
+  1. The in-memory state is serialized (if needed for snapshot).
+  2. The entity is registered as PASSIVATED in the passivation registry (entity triple + last known stream version).
+  3. The Tokio task completes; the mailbox receiver is dropped, closing the channel permanently.
+- **Command during PASSIVATED**: If a command arrives after passivation is complete, the EntityRef detect the stale sender handle (channel closed). The runtime looks up the entity in the passivation registry, spawns a new task with a fresh mailbox (mpsc channel), transitions the entity to RECOVERING, and delivers the command. This is transparent to the caller — the EntityRef API abstracts the recovery.
+- **Reactivation safety (single-flight)**: The single-actor invariant (exactly one task per entity triple) is a strict runtime guarantee. Reactivation is **single-flight per entity**: at most one activation process may be in-flight at any time. When a command arrives and the entity is PASSIVATED, the runtime atomically marks the entity as pending-reactivation and spawns the task. Any concurrent command arriving during this window MUST be redirected to the in-flight activation — it MUST NOT trigger a separate spawn attempt. The guard mechanism (registry CAS, per-entity lock, single-flight pattern, or equivalent) is implementation-defined; only the outcome (exactly-once actor creation per transition window) is mandatory. Stale sender handle detection and registry synchronization are purely internal implementation details, not part of the semantic model.
+- **No passivation cancellation**: PASSIVATING → ACTIVE does not exist. Once an entity enters PASSIVATING, it always proceeds to PASSIVATED. Reactivation always goes through PASSIVATED → RECOVERING → ACTIVE. This eliminates all race conditions around command arrival during the drain window.
+- **Zero command loss guarantee**: Every command that arrives before the mailbox freeze is drained and processed. Every command that arrives after the freeze is returned to the sender as EntityPassivating error — the command is not lost, the sender must retry. At no point is a command silently dropped.
+- **Passivation is not blocking**: the runtime does not wait synchronously for passivation to complete. Passivation is an asynchronous background operation. The entity's task completes asynchronously after the mailbox drains.
 
-#### 4.1 Failure Classification
+### Section 5: Hook Execution Graph Model
 
-Failures are classified into exactly two categories:
+This section defines the execution model for the Speckit hook system. This is a SPECKIT TOOLING concern, not part of the entity runtime. It is included in this canonical specification to consolidate all CORE-006-related specifications into a single document.
 
-**A) Deterministic Business Errors** — part of the event-sourced model, reproducible during replay, derived from events/state/command:
-- Handler returns an error (business rule violation, e.g., insufficient balance)
-- Event applier returns an error (bug in event applier)
-- VersionConflict (optimistic concurrency check)
-- These are deterministic: given the same (state, command, context), the same error is produced.
+**Hook Execution Graph Definition**
 
-**B) Non-Deterministic Runtime Failures** — infrastructure or runtime issues, NOT part of the event model, NOT replayed:
-- Storage I/O error (EventStore unavailable)
-- Snapshot I/O error
-- EventPublisher SPI failure
-- Handler panic (non-determinism, bug, memory corruption)
-- These are non-deterministic: they depend on external system state and may not reproduce on replay.
+- Hook execution is a Directed Acyclic Graph (DAG).
+- Each hook is a node in the graph.
+- Dependencies between hooks are represented as edges.
+- Root node is feature initialization.
+- Terminal node is feature-ready.
 
-#### 4.2 Failure Timing Semantics
+**Graph Constraints**
 
-**Event Store Consistency Contract**: The event stream is ALWAYS the single source of truth. Once an event is persisted, it is irrevocably committed. Committed events are NEVER invalidated, rolled back, or skipped. "Persist then fail" is possible — the event is committed even if subsequent processing fails.
+- The graph MUST NOT contain cycles.
+- No hook may depend on a downstream hook.
+- feature-ready MUST be a terminal node.
+- Execution MUST follow a topological order derived from the DAG.
+- No implicit ordering is allowed.
+
+**Execution Rules**
+
+- Each hook MUST declare its dependencies explicitly.
+- Each hook MUST execute only once per feature lifecycle.
+- Each hook MUST be isolated from downstream triggers.
+- Once a hook executes, it MUST NOT be re-entered within the same feature lifecycle.
+
+**Feature-Ready Semantics**
+
+- feature-ready is defined as a terminal DAG node.
+- feature-ready is a non-executable trigger — it is a completion marker only.
+- feature-ready MUST NOT emit new hooks.
+- feature-ready MUST NOT trigger the /specify pipeline.
+- feature-ready MUST NOT re-enter the execution graph.
+
+**Loop Prevention Guarantee**
+
+- No recursive /specify invocation from any hook.
+- No chain reaction between feature-* hooks.
+- No implicit re-execution of the specification engine.
+- The specification pipeline terminates deterministically: specify → feature generation → validation → feature-ready → STOP.
+
+**Edge Cases**
+
+- Hook with circular dependency: MUST be rejected at definition time.
+- Multiple hooks with same dependency: MUST be handled by topological sorting.
+- Hook that attempts to re-execute after completion: MUST be ignored.
+- Extension hook with condition that evaluates to false: MUST be skipped.
+- Hook with no dependencies: MUST be treated as a root node.
+
+### Section 6: Event Sourcing & Persistence
+
+**Event Stream Consistency Contract**
+
+Once an event is persisted, it is irrevocably committed. Committed events are NEVER invalidated, rolled back, or skipped. "Persist then fail" is possible — the event is committed even if subsequent processing fails. The event stream is always the single source of truth.
+
+**Command Lifecycle and Persistence Ordering (FR-004)**
+
+The framework MUST handle the full lifecycle for each command in this exact order:
+
+1. Load/recover state
+2. Execute command and generate events
+3. Persist events atomically (snapshot NOT included in this atomic unit)
+4. Apply events to in-memory state
+5. Store snapshot if needed (after event commit — outside the atomic transaction)
+6. Publish events via EventPublisher SPI
+7. Return the response
+
+Snapshot storage failure MUST NOT roll back the already-committed events.
+
+**Optimistic Concurrency (FR-008)**
+
+Event persistence MUST use optimistic concurrency control based on expected stream version. If the expected version does not match the current version, the persistence MUST fail with a version conflict error.
+
+**Event Publication (FR-009)**
+
+Events MUST be published to downstream consumers only after successful event commit. The framework MUST define an EventPublisher SPI (trait contract) that decouples publication from the core runtime. Under no circumstance may events be published before persistence confirms. Concrete publisher implementations are outside the scope of CORE-006.
+
+**Event Irrevocability (FR-026)**
+
+Once an event is persisted, it MUST be considered irrevocably committed. No subsequent failure (apply error, snapshot error, publication error, restart) MAY roll back, invalidate, or skip a committed event.
+
+**Version Integrity (FR-028)**
+
+Stream version MUST start at 0 (no events) and MUST equal the count of committed events. Events in the stream MUST be contiguous (no version gaps). Version MUST be incremented atomically with event commit. The runtime MUST NOT maintain a version separate from the persisted event store.
+
+**Failure Timing Semantics — Persistence Context**
 
 | Stage | Failure | Event committed? | Entity state | Retry policy |
 |-------|---------|-----------------|--------------|--------------|
@@ -335,58 +486,11 @@ Failures are classified into exactly two categories:
 - If the event is NOT committed, the command is retried or discarded — no partial state exists.
 - At no point does a committed event become conditionally applied. The event stream is the exclusive source of truth.
 
-#### 4.3 Replay Semantics
-
-Recovery replay follows Strict Event Sourcing:
-
-- Replay reproduces ALL prior state transitions deterministically, including those that produced business errors during the original execution.
-- Every committed event is visited in order. The event applier is invoked for each event.
-- If an event applier has a bug, recovery reproduces the exact same applier failure — this is by design, surfacing the bug immediately.
-- Replay does NOT execute command handlers, produce new events, trigger publications, or perform side effects. Only event appliers run (FR-012).
-- Replay is idempotent: replaying the same event stream from the same snapshot produces identical state.
-- There is no concept of "skipping" or "marking unapplied" a committed event.
-
-#### 4.4 Entity Recovery After Failure
-
-- FAILED → RECOVERING is triggered ON-DEMAND: by explicit admin request, runtime restart, or deployment of a code fix. There is NO automatic retry loop.
-- Recovery loads the most recent snapshot (if any) and replays ALL events committed after that snapshot in order.
-- Snapshots are optional: if no snapshot exists, recovery replays from the beginning of the event stream.
-- If recovery fails (e.g., applier bug persists), the entity returns to FAILED. Admin must fix the code and trigger a new recovery attempt.
-- Failed commands during recovery: commands that were in the mailbox when the entity entered FAILED remain queued (discarded only for handler panics). After successful recovery → ACTIVE, they are processed normally.
-- Recovery does not re-execute command handlers. It only reconstructs state via event appliers.
-
-#### 4.5 Concurrency During Recovery
-
-- Commands arriving while an entity is RECOVERING are queued in the mailbox.
-- The mailbox MUST accept commands during recovery (it is created before recovery begins).
-- Commands are processed in FIFO order after the entity transitions to ACTIVE.
-- Recovery itself is single-threaded and non-concurrent.
-
-#### 4.6 Concurrency Across Entities
-
-- Different entities execute concurrently with no synchronization between them. Each entity has its own dedicated task.
-- The runtime enforces a global concurrency budget (maximum number of entity tasks actively processing). This is a scheduling throttle, not a pool of shared workers. If the budget is saturated, the runtime delays spawning new entity tasks until capacity frees up. Mailbox sends to unspawned entities succeed (the sender handle exists via the entity registry), but processing begins only when the budget allows. **Scheduling**: best-effort FIFO with anti-starvation guarantee — entities are generally admitted in arrival order, but the scheduler MAY reorder to prevent starvation. Every pending entity MUST eventually get a slot under sustained load.
-
-### 5. Passivation Interaction (Irreversible Drain)
-
-- **Passivation trigger**: Passivation is triggered by the runtime's passivation policy (inactivity timeout, memory pressure, explicit administrative request). The policy is configured at the runtime level, not per entity.
-- **Atomic mailbox freeze on entry**: When the entity transitions to PASSIVATING, the mailbox sender handles are atomically removed from the entity registry. Any concurrent or subsequent `try_send` from an EntityRef finds no handle and resolves immediately with EntityPassivating error. This freeze is the first step of the state transition — there is no window where a new command could be accepted after PASSIVATING is entered.
-- **Drain existing commands**: The entity's dedicated task continues running. It completes the current command (if any), then processes any commands already in the mailbox in FIFO order. No new commands can arrive (mailbox is frozen), so the drain is bounded and deterministic.
-- **Shutdown**: After the mailbox is empty and the current command completes:
-  1. The in-memory state is serialized (if needed for snapshot).
-  2. The entity is registered as PASSIVATED in the passivation registry (entity triple + last known stream version).
-  3. The Tokio task completes; the mailbox receiver is dropped, closing the channel permanently.
-- **Command during PASSIVATED**: If a command arrives after passivation is complete, the EntityRef detect the stale sender handle (channel closed). The runtime looks up the entity in the passivation registry, spawns a new task with a fresh mailbox (mpsc channel), transitions the entity to RECOVERING, and delivers the command. This is transparent to the caller — the EntityRef API abstracts the recovery.
-- **Reactivation safety (single-flight)**: The single-actor invariant (exactly one task per entity triple) is a strict runtime guarantee. Reactivation is **single-flight per entity**: at most one activation process may be in-flight at any time. When a command arrives and the entity is PASSIVATED, the runtime atomically marks the entity as pending-reactivation and spawns the task. Any concurrent command arriving during this window MUST be redirected to the in-flight activation — it MUST NOT trigger a separate spawn attempt. The guard mechanism (registry CAS, per-entity lock, single-flight pattern, or equivalent) is implementation-defined; only the outcome (exactly-once actor creation per transition window) is mandatory. Stale sender handle detection and registry synchronization are purely internal implementation details, not part of the semantic model.
-- **No passivation cancellation**: PASSIVATING → ACTIVE does not exist. Once an entity enters PASSIVATING, it always proceeds to PASSIVATED. Reactivation always goes through PASSIVATED → RECOVERING → ACTIVE. This eliminates all race conditions around command arrival during the drain window.
-- **Zero command loss guarantee**: Every command that arrives before the mailbox freeze is drained and processed. Every command that arrives after the freeze is returned to the sender as EntityPassivating error — the command is not lost, the sender must retry. At no point is a command silently dropped.
-- **Passivation is not blocking**: the runtime does not wait synchronously for passivation to complete. Passivation is an asynchronous background operation. The entity's task completes asynchronously after the mailbox drains.
-
-## Versioning & Snapshot Consistency Model
+**Versioning & Snapshot Consistency Model**
 
 This section defines the single coherent versioning and snapshot model: Zero-Based, Last-Applied Version.
 
-### 6.1 Version Semantics
+**Version Semantics**
 
 - **Version start**: Version starts at **0**, representing the initial state before any events exist. When a creation command persists the first event, the stream transitions from version 0 to version 1.
 - **Version = committed event count**: The stream version is the total number of committed events for that entity. Version N means "N events have been committed."
@@ -394,7 +498,7 @@ This section defines the single coherent versioning and snapshot model: Zero-Bas
 - **Zero-event commands**: Do NOT advance version (FR-019). The stream version after a zero-event command is identical to before it.
 - **Version gaps**: Version gaps are FORBIDDEN. Events in an entity's stream MUST be contiguous: (seq 1, seq 2, seq 3, ...). A gap (e.g., seq 1, seq 3) is a stream corruption and MUST be detected during recovery.
 
-### 6.2 Snapshot Version Alignment
+**Snapshot Version Alignment**
 
 - **Snapshot represents last applied event version**: A snapshot stored at version V represents the entity state after applying all events from seq 1 through seq V inclusive.
 - **Snapshot metadata**: Each snapshot MUST store the stream version it represents (the "last applied" version). This allows the runtime to know exactly which events to replay after loading the snapshot.
@@ -406,7 +510,7 @@ This section defines the single coherent versioning and snapshot model: Zero-Bas
   5. After all events replayed, the reconstructed state is authoritative.
 - **No snapshot case**: If no snapshot exists, V = 0. All events are replayed from the beginning of the stream.
 
-### 6.3 Event Stream + Snapshot Consistency
+**Event Stream + Snapshot Consistency**
 
 - **Snapshots are pure optimization**: The event stream is ALWAYS the authoritative source of truth. Snapshots MAY be safely ignored or deleted — recovery falls back to full replay from version 0. No correctness requirement depends on snapshots existing.
 - **Stale snapshot**: A snapshot at version V where events exist at version > V is not "stale" — it is simply older than the latest events. Recovery correctly replays events > V. This is the normal and expected case.
@@ -414,7 +518,7 @@ This section defines the single coherent versioning and snapshot model: Zero-Bas
 - **Corrupted snapshot**: The snapshot load fails (I/O error, deserialization error). Recovery falls back to full replay from version 0. The entity transitions through RECOVERING normally. No correctness impact — only a performance impact (longer recovery).
 - **Snapshot version > latest event version**: This is a corruption or inconsistency. The snapshot claims version V but the event stream has fewer than V events. The runtime MUST treat this as a stream integrity error: discard the snapshot, fall back to full replay.
 
-### 6.4 Recovery Determinism
+**Recovery Determinism**
 
 - Recovery ALWAYS produces identical state given the same event stream and snapshot (if used). This is guaranteed by:
   - Events are immutable once committed.
@@ -427,62 +531,231 @@ This section defines the single coherent versioning and snapshot model: Zero-Bas
   - Recovery replays events in a single thread with no concurrent access.
 - Version gaps are FORBIDDEN and detected during recovery.
 
-### 6.5 Failure Interaction with Versioning
+**Failure Interaction with Versioning**
 
 - **Command fails before persistence**: No event committed. Version unchanged. Entity stays ACTIVE (or transitions to FAILED for runtime errors). Next command retries or is discarded.
 - **Persistence succeeds but apply fails**: Event committed. Version advanced (event seq N). Entity → FAILED. On recovery, event N is replayed and the apply failure is reproduced deterministically. Version remains advanced — committed events are NEVER reverted.
 - **Response fails after commit**: Event committed. Version advanced. Entity stays ACTIVE (apply completed). The caller sees a timeout/error. On retry, the caller provides the expected version from before the commit — the store rejects with VersionConflict because the version has advanced. The caller must refresh state and retry with the current version.
 - **Version is strictly tied to the event store**: The runtime never tracks a version that diverges from the persisted event count. The authoritative version is always read from the event store during recovery. There is no "runtime version" separate from "persisted version." This eliminates dual-version ambiguity.
 
-## Out of Scope
+### Section 7: Determinism Guarantees
 
-### ❌ 1. Cluster Sharding
+All entity operations MUST be deterministic given the same inputs. Command results, produced events, and final state MUST be reproducible during replay. The Handler Safety Contract defines the specific prohibitions.
 
-CORE-006 does NOT include distributed entity placement across nodes, shard allocation, or rebalancing.
+**Handler Safety Contract**
 
-**Reason**: Entity placement across nodes is a clustering concern, deferred to future work (CORE-007).
+All command handlers, event appliers, and recovery replay logic MUST behave as deterministic functions:
 
-### ❌ 2. Distributed Execution
+```
+(state, command, context) -> (events | error)   // command handler
+(state, event) -> state                          // event applier
+```
 
-CORE-006 does NOT include algorithms or infrastructure for deciding which node hosts which entity.
+**Forbidden in handlers and appliers:**
 
-**Reason**: Single-node entity runtime must work before distribution can be considered.
+- Reading system clock or wall-clock time
+- Generating random numbers
+- Network calls (HTTP, gRPC, sockets)
+- Filesystem access (read or write)
+- Thread spawning or concurrency primitives
+- Accessing global mutable state
+- Direct infrastructure calls (databases, message brokers)
+- Triggering workflows
+- Modifying external infrastructure
 
-### ❌ 3. Message Brokers and Event Streaming
+**During recovery replay**, the following are additionally FORBIDDEN:
 
-CORE-006 does NOT include Kafka, NATS, RabbitMQ, or any message broker integration.
+- Emitting new events
+- Triggering event publication
+- Executing side effects of any kind
+- Invoking external services
 
-**Reason**: Event publication is abstract — concrete broker integration is the responsibility of the deployment layer.
+**CI guard**: The project SHOULD incorporate automated CI validation to detect known non-determinism patterns (clock access, random generation, network calls). The CI guard is a development aid; the architectural contract defined by this specification remains the source of truth.
 
-### ❌ 4. Transport Layer
+**Replay Semantics**
 
-CORE-006 does NOT define or require gRPC, REST, GraphQL, or any specific transport protocol.
+Recovery replay follows Strict Event Sourcing:
 
-**Reason**: The entity runtime is transport-agnostic by design. Protocol bindings are separate concerns.
+- Replay reproduces ALL prior state transitions deterministically, including those that produced business errors during the original execution.
+- Every committed event is visited in order. The event applier is invoked for each event.
+- If an event applier has a bug, recovery reproduces the exact same applier failure — this is by design, surfacing the bug immediately.
+- Replay does NOT execute command handlers, produce new events, trigger publications, or perform side effects. Only event appliers run (FR-012).
+- Replay is idempotent: replaying the same event stream from the same snapshot produces identical state.
+- There is no concept of "skipping" or "marking unapplied" a committed event.
 
-### ❌ 5. Workflows and Sagas
+**Determinism Across Invocations**
 
-CORE-006 does NOT implement long-running transactions, compensation logic, or multi-entity orchestration patterns.
+- The ExecutionUnit (command handler + event applier) MUST produce identical output given identical input. This is the fundamental determinism guarantee.
+- The Actor Per Entity container enforces sequential command processing, eliminating race conditions within a single entity. No interleaving of command execution, event application, or snapshot operations occurs.
+- Recovery determinism is guaranteed by: events are immutable once committed, event appliers are deterministic functions, and events are replayed in strict sequence order.
 
-**Reason**: These are higher-level patterns built on top of the entity runtime, not part of it.
+### Section 8: System Boundary Rules
 
-### ❌ 6. Remote Actor Communication
+The following capabilities are explicitly OUT OF SCOPE for CORE-006:
 
-CORE-006 does NOT provide remote actor protocols, location-transparent references, or wire protocols for inter-node entity communication.
+**❌ 1. Cluster Sharding**
 
-**Reason**: All entity communication is in-process. Remote communication is a separate concern.
+CORE-006 does NOT include distributed entity placement across nodes, shard allocation, or rebalancing. Entity placement across nodes is a clustering concern, deferred to future work (CORE-007).
 
-### ❌ 7. Replication
+**❌ 2. Distributed Execution**
 
-CORE-006 does NOT replicate entity state across nodes for fault tolerance or read scaling.
+CORE-006 does NOT include algorithms or infrastructure for deciding which node hosts which entity. Single-node entity runtime must work before distribution can be considered.
 
-**Reason**: Replication is an infrastructure concern outside the entity runtime scope.
+**❌ 3. Message Brokers and Event Streaming**
 
-### ❌ 8. Service Registration and Discovery
+CORE-006 does NOT include Kafka, NATS, RabbitMQ, or any message broker integration. Event publication is abstract — concrete broker integration is the responsibility of the deployment layer.
 
-CORE-006 does NOT provide service registration, health checks, or endpoint discovery.
+**❌ 4. Transport Layer**
 
-**Reason**: Deployment and discovery are infrastructure concerns.
+CORE-006 does NOT define or require gRPC, REST, GraphQL, or any specific transport protocol. The entity runtime is transport-agnostic by design. Protocol bindings are separate concerns.
+
+**❌ 5. Workflows and Sagas**
+
+CORE-006 does NOT implement long-running transactions, compensation logic, or multi-entity orchestration patterns. These are higher-level patterns built on top of the entity runtime, not part of it.
+
+**❌ 6. Remote Actor Communication**
+
+CORE-006 does NOT provide remote actor protocols, location-transparent references, or wire protocols for inter-node entity communication. All entity communication is in-process. Remote communication is a separate concern.
+
+**❌ 7. Replication**
+
+CORE-006 does NOT replicate entity state across nodes for fault tolerance or read scaling. Replication is an infrastructure concern outside the entity runtime scope.
+
+**❌ 8. Service Registration and Discovery**
+
+CORE-006 does NOT provide service registration, health checks, or endpoint discovery. Deployment and discovery are infrastructure concerns.
+
+**Forbidden Execution Concepts**
+
+The following concepts are explicitly FORBIDDEN in the ExecutionUnit model (they are CONTAINER concerns):
+
+- Actor loops as execution primitive — the container owns the receive-process loop
+- Per-entity long-lived processes — lifecycle is managed by the container
+- Mailbox ownership per ExecutionUnit — the container owns the mailbox
+- Internal entity schedulers — scheduling is a runtime-level concern (Section 3)
+
+**Read-Side Prohibition**
+
+Read-side projections MUST consume only persisted events. Direct updates of read models from entity command handlers are FORBIDDEN (FR-010).
+
+### Section 9: Failure Model
+
+This section defines the single coherent failure model for the entity runtime: Strict Event Sourcing.
+
+#### 9.1 Failure Classification
+
+Failures are classified into exactly two categories:
+
+**A) Deterministic Business Errors** — part of the event-sourced model, reproducible during replay, derived from events/state/command:
+- Handler returns an error (business rule violation, e.g., insufficient balance)
+- Event applier returns an error (bug in event applier)
+- VersionConflict (optimistic concurrency check)
+- These are deterministic: given the same (state, command, context), the same error is produced.
+
+**B) Non-Deterministic Runtime Failures** — infrastructure or runtime issues, NOT part of the event model, NOT replayed:
+- Storage I/O error (EventStore unavailable)
+- Snapshot I/O error
+- EventPublisher SPI failure
+- Handler panic (non-determinism, bug, memory corruption)
+- These are non-deterministic: they depend on external system state and may not reproduce on replay.
+
+#### 9.2 Failure Timing Semantics
+
+**Event Store Consistency Contract**: The event stream is ALWAYS the single source of truth. Once an event is persisted, it is irrevocably committed. Committed events are NEVER invalidated, rolled back, or skipped. "Persist then fail" is possible — the event is committed even if subsequent processing fails.
+
+The full failure timing table is documented in Section 6 (Event Sourcing & Persistence).
+
+#### 9.3 Replay Semantics
+
+Recovery replay follows Strict Event Sourcing:
+
+- Replay reproduces ALL prior state transitions deterministically, including those that produced business errors during the original execution.
+- Every committed event is visited in order. The event applier is invoked for each event.
+- If an event applier has a bug, recovery reproduces the exact same applier failure — this is by design, surfacing the bug immediately.
+- Replay does NOT execute command handlers, produce new events, trigger publications, or perform side effects. Only event appliers run (FR-012).
+- Replay is idempotent: replaying the same event stream from the same snapshot produces identical state.
+- There is no concept of "skipping" or "marking unapplied" a committed event.
+
+#### 9.4 Entity Recovery After Failure
+
+- FAILED → RECOVERING is triggered ON-DEMAND: by explicit admin request, runtime restart, or deployment of a code fix. There is NO automatic retry loop.
+- Recovery loads the most recent snapshot (if any) and replays ALL events committed after that snapshot in order.
+- Snapshots are optional: if no snapshot exists, recovery replays from the beginning of the event stream.
+- If recovery fails (e.g., applier bug persists), the entity returns to FAILED. Admin must fix the code and trigger a new recovery attempt.
+- Failed commands during recovery: commands that were in the mailbox when the entity entered FAILED remain queued (discarded only for handler panics). After successful recovery → ACTIVE, they are processed normally.
+- Recovery does not re-execute command handlers. It only reconstructs state via event appliers.
+
+#### 9.5 Concurrency During Recovery
+
+- Commands arriving while an entity is RECOVERING are queued in the mailbox.
+- The mailbox MUST accept commands during recovery (it is created before recovery begins).
+- Commands are processed in FIFO order after the entity transitions to ACTIVE.
+- Recovery itself is single-threaded and non-concurrent.
+
+#### 9.6 Concurrency Across Entities
+
+- Different entities execute concurrently with no synchronization between them. Each entity has its own dedicated task.
+- The runtime enforces a global concurrency budget (maximum number of entity tasks actively processing). This is a scheduling throttle, not a pool of shared workers. If the budget is saturated, the runtime delays spawning new entity tasks until capacity frees up. Mailbox sends to unspawned entities succeed (the sender handle exists via the entity registry), but processing begins only when the budget allows. **Scheduling**: best-effort FIFO with anti-starvation guarantee — entities are generally admitted in arrival order, but the scheduler MAY reorder to prevent starvation. Every pending entity MUST eventually get a slot under sustained load.
+
+### Section 10: Known Architecture Debt
+
+This section documents unresolved architectural gaps, risks, and missing formal guarantees required for production-grade determinism. These are INFORMATIONAL — they do not block implementation but must be resolved before production deployment.
+
+| # | Gap | Category | Severity | Description |
+|---|-----|----------|----------|-------------|
+| 1 | Execution Authority Is Implicit | Concurrency | Critical | No single explicit authority coordinates scheduling decisions, execution triggering, and replay vs live execution routing. Multiple components may trigger execution independently, risking duplicate ExecutionUnit execution under concurrency and inconsistent ordering between scheduler and replay engine. **Spec fix in progress**: [execution-authority/](execution-authority/) sub-specification defines the Actor as the sole Execution Authority per entity. |
+| 2 | Scheduler vs Replay Execution Overlap | Determinism | Critical | No strict separation exists between real-time event-driven execution and historical replay execution. Replay may be interpreted as live execution, causing duplicated ExecutionUnit execution and inconsistent state reconstruction. **Addressed by execution-authority sub-spec**: Both replay and live execution are gated by the same Execution Authority (Actor), eliminating the possibility of separate execution paths. |
+| 3 | ExecutionUnit Identity Model Underdefined | Semantic | High | ExecutionUnit is defined as pure computation, but instance identity is not formally defined, versioning semantics are implicit, and execution deduplication strategy is missing. This affects correctness under retry/replay. **Spec fix in progress**: [execution-unit-identity/](execution-unit-identity/) sub-specification defines the ExecutionKey as `hash(entity_id, command, state_version)`, computed externally by the Actor. ExecutionUnit remains identity-agnostic. |
+| 4 | Backend Partially Coupled to Execution Semantics | Integration | High | Although ExecutionRuntime is pluggable, current design leaks Tokio execution assumptions, task-based lifecycle semantics, and implicit async loop behavior. This limits portability to alternative runtimes (yoke.rs, WASM, distributed workers). **Spec fix in progress**: [execution-backend/](execution-backend/) sub-specification defines the formal ExecutionBackend contract, decoupling ExecutionUnit from runtime implementation and requiring determinism across all backends. |
+| 5 | Concurrency and Scheduling Policy Undefined | Concurrency | Critical | Scheduler does not formally define fairness model, ordering guarantees across entities, starvation prevention strategy, or retry/backoff semantics. This affects system-wide determinism under load and potential starvation of low-frequency entities. **Spec fix in progress**: [execution-authority/](execution-authority/) sub-specification clarifies that the Scheduler proposes activation only — it does NOT execute, own state, or guarantee ordering. Ordering is the exclusive responsibility of the Actor (Execution Authority). |
+| 6 | Failure Boundary Between Domain and Runtime Is Fuzzy | Determinism | Critical | Failure classification is not fully formalized between domain-level deterministic failures and runtime-level non-deterministic failures. This risks inconsistent recovery behavior, duplicate retry paths, and ambiguous state transitions between FAILED/RECOVERING. **Partially addressed**: The execution-authority sub-specification clarifies that the Actor (Execution Authority) is the sole owner of execution decisions, which narrows the failure boundary — domain failures are ExecutionUnit errors, runtime failures are Actor lifecycle failures. |
+
+**Systemic Impact**: CORE-006 is functionally complete in execution model definition, but lacks strict coordination authority, formal scheduling semantics, replay/live separation guarantees, and a complete execution identity model. These gaps affect production determinism, distributed scaling correctness, and backend portability guarantees.
+
+**Next Architectural Step** (optional): Introduce a formal Execution Authority + Scheduling Contract Layer, ONLY if moving toward production-grade distributed execution.
+
+### Section 11: Future Extensions Boundary
+
+The following capabilities are explicitly deferred to future work and define the boundary between CORE-006 and subsequent modules:
+
+**Cluster Sharding and Distributed Execution (CORE-007 boundary)**
+
+- Distributed entity placement across nodes
+- Shard allocation and rebalancing algorithms
+- Multi-node entity placement and migration
+- These require a single-node runtime to be proven stable first.
+
+**Reactive Pipeline Model (future evolution, NOT current architecture)**
+
+The reactive pipeline model — Event Stream → Scheduler → ExecutionUnit → Runtime Backend → Event Store → Projections — represents a potential future evolution of the architecture. It is NOT the current architecture. The canonical model is Actor Per Entity with ExecutionUnit as the pure computation aspect inside the actor container. The reactive pipeline model may inform future work on distributed execution but does not change the current design.
+
+**Distributed Backend Support**
+
+- Kafka workers as an alternative execution backend
+- yoke.rs runtime backend
+- WASM-based execution for sandboxed entities
+- These are future backend implementations behind the pluggable backend abstraction.
+
+**Multi-Node Entity Placement and Rebalancing**
+
+- Entity migration between nodes
+- Consistent hashing for entity distribution
+- Automatic rebalancing on node failure/join
+- Requires cluster sharding infrastructure (CORE-007).
+
+**Remote Actor Communication Protocols**
+
+- Location-transparent entity references
+- Wire protocols for inter-node entity communication
+- Remote message serialization and deserialization
+- All entity communication in CORE-006 is in-process. Remote communication is a separate concern.
+
+**Replication for Fault Tolerance**
+
+- Entity state replication across nodes
+- Read replicas for query scaling
+- Consensus-based write quorums
+- Replication is an infrastructure concern outside the entity runtime scope.
 
 ## Success Criteria *(mandatory)*
 

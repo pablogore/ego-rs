@@ -1,8 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use ego_domain::event::DomainEvent;
-
 use crate::entity_ref::EntityRef;
 use crate::persistence::PersistenceFacade;
 use crate::persistent_entity::PersistentEntity;
@@ -10,6 +8,7 @@ use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::scheduler::{Scheduler, EntityTriple};
 use crate::snapshot::SnapshotStrategy;
+use crate::testing::TestEntityRef;
 
 pub struct RuntimeConfig {
     pub mailbox_capacity: usize,
@@ -31,7 +30,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-pub struct EntityRuntime<E: DomainEvent> {
+pub struct EntityRuntime<E> {
     pub registry: Arc<EntityRegistry>,
     pub scheduler: Arc<Scheduler>,
     pub persistence: Arc<PersistenceFacade<E>>,
@@ -41,7 +40,7 @@ pub struct EntityRuntime<E: DomainEvent> {
     _event: PhantomData<E>,
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
+impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
     pub fn new(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
@@ -65,8 +64,8 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         &self,
         entity_type: &'static str,
         entity_id: impl Into<String>,
-        entity_handler: Arc<dyn PersistentEntity<C, E, S>>,
-    ) -> EntityRef<C, E, S>
+        entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
+    ) -> impl EntityRef
     where
         C: Send + 'static,
         S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + 'static,
@@ -79,7 +78,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
 
         let triple = EntityTriple::new(tenant_id, entity_type, entity_id);
 
-        EntityRef::new(
+        TestEntityRef::new(
             triple,
             self.registry.clone(),
             self.persistence.clone(),

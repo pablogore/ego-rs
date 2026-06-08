@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use ego_persistent_entity::command_context::CommandContext;
-use ego_persistent_entity::error::EntityError;
-use ego_persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
-use ego_persistent_entity::runtime::EntityRuntime;
-use ego_persistent_entity::testing::test_helpers::{TestCommand, TestEvent, TestState};
+use persistent_entity::command_context::CommandContext;
+use persistent_entity::error::EntityError;
+use persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
+use persistent_entity::runtime::EntityRuntime;
+use persistent_entity::testing::{TestCommand, TestEvent, TestState};
 
 /// Send `count` concurrent Increment commands to an entity.
 /// Spawns one tokio task per command, each creating its own EntityRef.

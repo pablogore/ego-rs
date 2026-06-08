@@ -1,33 +1,11 @@
-//! Passivation policy and registry for persistent entities.
-//!
-//! This module handles entity passivation policies and maintains a registry of active entities.
-
-use crate::error::EntityError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// A registry for tracking active entities.
-#[derive(Debug)]
+/// A registry for managing active entities.
 pub struct EntityRegistry {
     /// The active entities.
     active_entities: Arc<Mutex<HashMap<String, EntityHandle>>>,
-}
-
-/// A handle to an active entity.
-#[derive(Debug)]
-pub struct EntityHandle {
-    /// The sender for communicating with the entity.
-    pub sender: tokio::sync::mpsc::UnboundedSender<Command>,
-}
-
-/// A command that can be sent to an entity.
-#[derive(Debug)]
-pub enum Command {
-    /// A command to process.
-    ProcessCommand(Box<dyn Send + Sync>),
-    /// A command to passivate the entity.
-    Passivate,
 }
 
 impl EntityRegistry {
@@ -42,9 +20,9 @@ impl EntityRegistry {
     pub async fn get_active_sender(
         &self,
         entity_id: &str,
-    ) -> Result<Option<EntityHandle>, EntityError> {
+    ) -> Option<EntityHandle> {
         let active_entities = self.active_entities.lock().await;
-        Ok(active_entities.get(entity_id).cloned())
+        active_entities.get(entity_id).cloned()
     }
 
     /// Register an active entity.
@@ -52,16 +30,31 @@ impl EntityRegistry {
         &self,
         entity_id: String,
         handle: EntityHandle,
-    ) -> Result<(), EntityError> {
+    ) -> Result<(), ()> {
         let mut active_entities = self.active_entities.lock().await;
         active_entities.insert(entity_id, handle);
         Ok(())
     }
 
-    /// Remove an active entity.
-    pub async fn remove_active(&self, entity_id: &str) -> Result<(), EntityError> {
+    /// Unregister an active entity.
+    pub async fn unregister_active(&self, entity_id: &str) -> Result<(), ()> {
         let mut active_entities = self.active_entities.lock().await;
         active_entities.remove(entity_id);
         Ok(())
     }
+}
+
+/// A handle to an active entity.
+#[derive(Clone)]
+pub struct EntityHandle {
+    /// The entity's state.
+    pub state: Option<String>,
+}
+
+/// A message that can be sent to an entity.
+pub enum EntityMessage {
+    /// A command to process.
+    ProcessCommand(Box<dyn Send + Sync + 'static>),
+    /// A message to handle.
+    HandleMessage(Box<dyn Send + Sync + 'static>),
 }
