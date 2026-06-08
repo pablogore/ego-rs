@@ -6,6 +6,9 @@ use crate::error::EntityError;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
+/// Type alias for erased command results.
+pub type CommandErasedResult = Box<dyn Send>;
+
 /// A bounded FIFO mailbox for commands.
 #[derive(Debug, Clone)]
 pub struct BoundedMailbox<T> {

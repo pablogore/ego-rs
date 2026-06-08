@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ego_domain::event::DomainEvent;
+use ego_domain::DomainEvent;
 use ego_domain::persistence::EventStore;
 
 use crate::persistence::PersistenceFacade;
@@ -8,7 +8,7 @@ use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::runtime::{EntityRuntime, RuntimeConfig};
 use crate::scheduler::Scheduler;
-use crate::snapshot::{SnapshotStrategy, SnapshotEveryN};
+use crate::snapshot::{SnapshotStrategy, PeriodicSnapshotStrategy};
 
 pub struct EntityRuntimeBuilder<E: DomainEvent> {
     mailbox_capacity: usize,
@@ -20,6 +20,7 @@ pub struct EntityRuntimeBuilder<E: DomainEvent> {
     snapshot_strategy: Option<Arc<dyn SnapshotStrategy>>,
     single_tenant_mode: bool,
     tenant_id: String,
+    registry: Option<Arc<EntityRegistry>>,
 }
 
 impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRuntimeBuilder<E> {
@@ -34,6 +35,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             snapshot_strategy: None,
             single_tenant_mode: true,
             tenant_id: String::new(),
+            registry: None,
         }
     }
 
@@ -82,18 +84,23 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         self
     }
 
+    pub fn with_registry(mut self, registry: Arc<EntityRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
     pub fn build(self) -> EntityRuntime<E> {
-        let event_store = self.event_store.unwrap_or_else(|| {
+        let _event_store = self.event_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemoryEventStore::new())
         });
-        let snapshot_store = self.snapshot_store.unwrap_or_else(|| {
+        let _snapshot_store = self.snapshot_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemorySnapshotStore::new())
         });
         let publisher = self.publisher.unwrap_or_else(|| {
             Arc::new(crate::testing::NoopPublisher::new())
         });
         let snapshot_strategy = self.snapshot_strategy.unwrap_or_else(|| {
-            Arc::new(SnapshotEveryN::new(100))
+            Arc::new(PeriodicSnapshotStrategy::new(100))
         });
 
         let config = RuntimeConfig {
@@ -104,11 +111,14 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             tenant_id: self.tenant_id,
         };
 
-        let persistence = PersistenceFacade::new(event_store, snapshot_store);
+        let persistence = PersistenceFacade::new();
+        
+        // Use the provided registry or create a new one
+        let registry = self.registry.unwrap_or_else(|| Arc::new(EntityRegistry::new()));
 
         EntityRuntime::new(
-            Arc::new(EntityRegistry::new()),
-            Arc::new(Scheduler::new(self.concurrency_budget)),
+            registry.clone(),
+            Arc::new(Scheduler::new(registry.clone())),
             Arc::new(persistence),
             publisher,
             config,

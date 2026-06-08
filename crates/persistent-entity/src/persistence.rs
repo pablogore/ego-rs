@@ -3,15 +3,17 @@
 //! This module provides a basic persistence facade for entity data.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::marker::PhantomData;
 
-/// A simple persistence facade.
+/// A facade for persistence operations.
 #[derive(Debug)]
 pub struct PersistenceFacade<E> {
     /// The stored data.
+    #[allow(dead_code)]
     data: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    _event: std::marker::PhantomData<E>,
+    /// Phantom data for type parameter.
+    _event: PhantomData<E>,
 }
 
 impl<E> PersistenceFacade<E> {
@@ -19,7 +21,7 @@ impl<E> PersistenceFacade<E> {
     pub fn new() -> Self {
         Self {
             data: Arc::new(Mutex::new(HashMap::new())),
-            _event: std::marker::PhantomData,
+            _event: PhantomData,
         }
     }
 

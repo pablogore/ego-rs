@@ -62,6 +62,20 @@ pub trait PersistentEntity: Send + Sync + Debug {
         context: &CommandContext,
     ) -> Result<Vec<Self::Event>, EntityError>;
 
+    /// Apply a single event to update the entity state.
+    ///
+    /// # Arguments
+    /// * `state` - The current state of the entity
+    /// * `event` - The event to apply
+    ///
+    /// # Returns
+    /// * `Result<Self::State, EntityError>` - The updated state
+    async fn apply_event(
+        &self,
+        state: &Self::State,
+        event: &Self::Event,
+    ) -> Result<Self::State, EntityError>;
+
     /// Apply events to update the entity state.
     ///
     /// # Arguments
