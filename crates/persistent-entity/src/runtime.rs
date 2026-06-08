@@ -1,3 +1,8 @@
+//! Runtime orchestration for the persistent entity system.
+//!
+//! Provides the top-level [`EntityRuntime`] that wires together scheduling,
+//! persistence, publishing, and snapshot management.
+
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -11,11 +16,20 @@ use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use crate::testing::TestEntityRef;
 
+/// Configuration for the entity runtime.
+///
+/// Controls mailbox capacity, concurrency budget, passivation timeout,
+/// and tenant isolation settings.
 pub struct RuntimeConfig {
+    /// Maximum number of commands queued per mailbox.
     pub mailbox_capacity: usize,
+    /// Maximum number of concurrently active actors.
     pub concurrency_budget: usize,
+    /// Duration of inactivity before entity passivation.
     pub passivation_timeout: std::time::Duration,
+    /// When true, all entities share the default tenant scope.
     pub single_tenant_mode: bool,
+    /// Tenant identifier used when single_tenant_mode is false.
     pub tenant_id: String,
 }
 
@@ -31,18 +45,30 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Top-level runtime that orchestrates entity lifecycle, scheduling, and persistence.
+///
+/// Owns shared references to registry, persistence, scheduler, publisher,
+/// and snapshot strategy. Creates entity references for command dispatch.
 pub struct EntityRuntime<E> {
+    /// Shared entity registry.
     pub registry: Arc<EntityRegistry>,
+    /// Shared scheduler for activation suggestions.
     pub scheduler: Arc<Scheduler>,
+    /// Shared persistence facade.
     pub persistence: Arc<PersistenceFacade<E>>,
+    /// Shared event publisher.
     pub publisher: Arc<dyn EventPublisher<E>>,
+    /// Runtime configuration.
     pub config: RuntimeConfig,
+    /// Snapshot strategy.
     pub snapshot_strategy: Arc<dyn SnapshotStrategy>,
+    /// Scheduler event sender for lifecycle events.
     pub event_sender: SchedulerEventSender,
     _event: PhantomData<E>,
 }
 
 impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
+    /// Creates a new [`EntityRuntime`] with the given components.
     pub fn new(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
@@ -64,6 +90,9 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
         }
     }
 
+    /// Returns an [`EntityRef`] for sending commands to the identified entity.
+    ///
+    /// Creates a [`TestEntityRef`] wired to the runtime's shared components.
     pub fn entity_ref<C, S>(
         &self,
         entity_type: &'static str,
@@ -93,10 +122,12 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
         )
     }
 
+    /// Returns the number of currently active entities.
     pub async fn active_count(&self) -> usize {
         self.registry.active_count().await
     }
 
+    /// Returns the number of passivated entities.
     pub async fn passivated_count(&self) -> usize {
         self.registry.passivated_count().await
     }

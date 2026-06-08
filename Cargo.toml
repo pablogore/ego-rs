@@ -10,6 +10,7 @@ members = [
     "crates/runtime-tokio",
     "crates/event-adapter",
     "crates/persistent-entity",
+    "crates/ego-scheduler",
 ]
 resolver = "2"
 
