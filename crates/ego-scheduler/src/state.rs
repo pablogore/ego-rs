@@ -1,61 +1,79 @@
-//! Scheduler state management.
+//! Deterministic projection state.
+//!
+//! # Ownership
+//! SchedulerState is a pure data container, not a runtime engine.
+//! Owned and mutated exclusively by the Scheduler pipeline.
+//!
+//! # Invariants
+//! - I1: Pure function of observed stream f(observed_stream)
+//! - I2: Single-stream model — tracks one entity at a time
+//! - I4: ReplayBuffer excluded from PartialEq; non-semantic
+//!
+//! # Failure Semantics
+//! - `apply()` is pure — no side effects, no entity switch detection
 
-use std::collections::{HashMap, VecDeque};
-use crate::event::SchedulerEventEnvelope;
-use crate::types::EntityTriple;
-use crate::gap::GapInfo;
+use std::collections::VecDeque;
+use crate::event_bus::{EntityTriple, SchedulerEventEnvelope};
 
-/// The deterministic projection state of the scheduler.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Deterministic projection state of the scheduler.
+/// Single-stream model: tracks exactly one entity's projection at a time (I2).
+#[derive(Debug, Clone)]
 pub struct SchedulerState {
-    /// Total number of events consumed.
+    /// Lifetime count across all entities (I7: allowed policy input).
     pub total_events_consumed: u64,
-
-    /// The last sequence ID observed.
+    /// Most recent sequence_id of the currently projected entity. Resets on entity switch (I2).
     pub last_sequence_id: Option<u64>,
-
-    /// Per-actor sequence tracking.
-    pub actor_sequences: HashMap<EntityTriple, u64>,
-
-    /// Detected gaps in sequence IDs.
-    pub detected_gaps: Vec<GapInfo>,
-
-    /// Replay buffer for diagnostics (bounded to 1024).
-    pub replay_buffer: VecDeque<SchedulerEventEnvelope>,
+    /// Gap count for the current entity's stream segment. Resets on entity switch (I2).
+    pub detected_gaps: u64,
+    /// Most recent advisory suggestion (I7: allowed policy input).
+    pub last_suggestion: Option<EntityTriple>,
+    /// Optional snapshot hash for integrity.
+    pub state_hash: Option<[u8; 32]>,
+    /// Bounded diagnostic buffer (1024). Non-semantic — excluded from PartialEq (I4).
+    pub replay_buffer: VecDeque<(u64, SchedulerEventEnvelope)>,
 }
 
 impl SchedulerState {
-    /// Creates a new, empty scheduler state.
+    /// Creates a new empty SchedulerState.
     pub fn new() -> Self {
         Self {
             total_events_consumed: 0,
             last_sequence_id: None,
-            actor_sequences: HashMap::new(),
-            detected_gaps: Vec::new(),
-            replay_buffer: VecDeque::with_capacity(1024),
+            detected_gaps: 0,
+            last_suggestion: None,
+            state_hash: None,
+            replay_buffer: VecDeque::new(),
         }
     }
 
-    /// Applies an event to the scheduler state.
-    pub fn apply_event(&mut self, envelope: &SchedulerEventEnvelope) {
+    /// Pure projection function: (Event, S) → S (I1).
+    /// Performs state transformation only — no entity switch detection,
+    /// no reset logic beyond field updates, no orchestration.
+    pub fn apply(&mut self, envelope: &SchedulerEventEnvelope) {
         self.total_events_consumed += 1;
-        
-        // Update last sequence ID
         self.last_sequence_id = Some(envelope.sequence_id);
-        
-        // Update actor sequence
-        let last_seq = self.actor_sequences.get(&envelope.source_actor).copied().unwrap_or(0);
-        if envelope.sequence_id != last_seq + 1 {
-            // Gap detected
-            let gap_info = GapInfo::new(last_seq, envelope.sequence_id, envelope.source_actor.clone());
-            self.detected_gaps.push(gap_info);
-        }
-        self.actor_sequences.insert(envelope.source_actor.clone(), envelope.sequence_id);
-        
-        // Update replay buffer (bounded to 1024)
+
         if self.replay_buffer.len() >= 1024 {
             self.replay_buffer.pop_front();
         }
-        self.replay_buffer.push_back(envelope.clone());
+        self.replay_buffer.push_back((envelope.sequence_id, envelope.clone()));
+    }
+}
+
+/// Manual PartialEq excludes replay_buffer (I4).
+/// Two states with identical semantic fields are equivalent regardless of buffer content.
+impl PartialEq for SchedulerState {
+    fn eq(&self, other: &Self) -> bool {
+        self.total_events_consumed == other.total_events_consumed
+            && self.last_sequence_id == other.last_sequence_id
+            && self.detected_gaps == other.detected_gaps
+            && self.last_suggestion == other.last_suggestion
+            && self.state_hash == other.state_hash
+    }
+}
+
+impl Default for SchedulerState {
+    fn default() -> Self {
+        Self::new()
     }
 }

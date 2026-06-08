@@ -1,492 +1,236 @@
 # CORE-007 Reactive Scheduler & Deterministic Projection Engine
 
 **Feature**: `core-007-reactive-scheduler-deterministic-projection-engine`
-**Created**: 2026-06-08
 **Status**: Draft
 
 ## Clarifications
 
 ### Session 2026-06-08
 
-- Q: What is the default DropPolicy for the bounded event bus — lossy or lossless? → A: Hybrid — default is lossless (Block policy), but lossy mode (DropNewest) can be explicitly enabled per deployment. Lossless mode uses backpressure signaling to the Actor when the buffer approaches capacity, with a configurable high-water mark that triggers blocking only before overflow is imminent.
-- Q: Should the replay_buffer be treated as a deterministic source of truth or a diagnostic window? → A: Diagnostic only — the replay buffer is best-effort, used for debugging and recent-history verification. It is NOT a source of truth for full state reconstruction (see Section 7.0 Canonical Determinism Definition).
-- Q: Should event_id use UUID v4 (random) or deterministic hash (SHA-256)? → A: Deterministic hash (SHA-256 of canonical event payload) — event_id is an identity annotation layer, NOT part of the determinism proof. Determinism is a function of the event stream sequence, not of event_id values.
-- Q: What observability signals should the Scheduler expose? → A: Core metrics bundle — event consumption rate (events/sec), total_events_consumed, detected_gaps, last_sequence_id, suggestion produced/consumed ratio.
-- Q: What should CORE-007 do when it detects gaps in the event stream? → A: Option A — Observability Only (Passive Model). Gaps are detected and recorded; system continues normally; no recovery attempt. External recovery is an optional extension outside CORE-007 scope.
-- Q: What is the formal invariant for observed stream dependency? → A: Observed stream is the ONLY source of determinism. Loss, truncation, or partial view are intrinsic system properties. Classification: hard invariant.
-- Q: What is the formal global ordering model? → A: Per-actor ordering only is a hard invariant. No global ordering will ever exist. Classification: hard invariant.
-- Q: What is the recovery boundary? → A: CORE-007 MUST remain non-self-healing. Recovery is strictly external responsibility. Classification: hard invariant.
-- Q: How should semantic naming model risk be resolved? → A: Option A — keep current names; add a dedicated "Semantic Model Clarification" section documenting correct semantic reinterpretation. Classification: non-functional architectural risk only.
+- Q: How should determinism factors be categorized (DropPolicy vs concurrency vs others)? → A: Merge DropPolicy into the §4 canonical rule text: "Determinism is SchedulerState = f(observed_stream) where observed_stream ≡ all events surviving DropPolicy." Keep all other factors as "not inputs to f." No tier restructuring.
+- Q: How should "completeness" be handled in the spec? → A: Remove "completeness" entirely. Replace with explicit positive framing: the observed stream is authoritative. The system has no concept of a "full stream" of all emitted events; only the post-DropPolicy stream exists from the scheduler's perspective.
+- Q: (user-directed) ReplayBuffer, ordering, advisory-only, and concurrency semantics → A: Four-fold: (1) ReplayBuffer is strictly diagnostic-only — must never be used for state reconstruction, determinism validation, or recovery; differences in buffer content MUST NOT affect state equivalence. (2) Ordering is strictly per-entity — no cross-entity ordering exists or is inferred; each entity stream is fully isolated; sequence_id MUST NOT be compared across entities. (3) Scheduler outputs are strictly advisory — suggest_activation is NOT a command; execution authority belongs exclusively to CORE-006; Scheduler must not influence execution directly or indirectly. (4) Concurrency is an implementation detail only — correctness is defined over sequential application of the observed event stream; internal execution order may vary without affecting final state; the system MUST be equivalent to a single-threaded deterministic execution.
+- Q: Is SchedulerState per-entity map-based or single-stream? → A: Single-stream. Flat fields track the currently projected entity. last_sequence_id and detected_gaps are per-actor scoped within the current projection context. SchedulerState represents projection of one entity stream at a time; state resets when the observed stream switches entities. No cross-entity state is retained between projection cycles.
+- Q: What is the event bus ownership model? → A: Single consumer, multi-producer, Scheduler-owns-bus. Scheduler creates channel via event_bus_channel(), holds SchedulerEventReceiver for its lifetime (single consumer). SchedulerEventSender is Clone — clones distributed to CORE-006 actors (multi-producer). Dropping Scheduler closes channel; senders get SendError.
+- Q: (user-directed) Which SchedulerState fields may SchedulingPolicy access? → A: Policy MUST depend only on allowed semantic fields: `total_events_consumed` and `last_suggestion`. Forbidden fields: `replay_buffer` (diagnostic-only), `detected_gaps` (gap tracking, not decision-relevant), `last_sequence_id` (per-actor scoped, resets on entity switch), `state_hash` (integrity, not decision-relevant). Policy is a pure function over valid inputs only.
+- Q: Should gap types be distinguished or treated uniformly? → A: Uniform treatment (no distinction). All gaps are treated identically — single `detected_gaps` counter, no per-cause classification. The scheduler cannot and does not distinguish DropPolicy loss from sequence discontinuity; such distinction would require knowledge of events outside the observed stream boundary.
+- Q: Is RoundRobin fairness event-driven or entity-driven? → A: Event-driven. Cursor = `total_events_consumed % pending.len()`. Every consumed event advances the cursor regardless of which entity emitted it. Under skewed event distributions, high-event-rate entities dominate cursor positions. This is deterministic and predictable — not a defect. Advisory-only output (I3) means consumer may ignore suggestion.
+- Q: (user-directed) What is SchedulerState's role — pure reducer or runtime engine? → A: SchedulerState is a PURE REDUCER OUTPUT — a deterministic projection artifact (data structure), NOT a runtime engine. apply() is a pure function (Event × SchedulerState → SchedulerState). All orchestration logic (bus drain, event loop, policy evaluation, suggestion output) lives in Scheduler, not SchedulerState.
+- Q: (user-directed) Event bus behavior under high concurrency and DropPolicy → A: `try_send` is fire-and-forget — SendError is final (no retry). Each `try_send` is atomic per-event (no batch send). Ordering guarantees apply only to successfully enqueued events. DropPolicy applies strictly at enqueue time, not post-send. No retry orchestration exists in Scheduler.
+- Q: (user-directed) Final pre-implementation consistency — 8 fixes applied → A: (1) SchedulerState pure reducer only — apply() does NO entity switch detection or reset logic beyond field updates. (2) Entity switch detection explicitly Scheduler-owned: `current_active_entity != event.source_actor` check before apply(). (3) RoundRobin uses BTreeSet (deterministic iteration); HashSet forbidden. (4) Bus semantics: concurrency does not define behavior, only arrival order after DropPolicy defines observed_stream. (5) ReplayBuffer write-only from Scheduler, read-only for diagnostics. (6) Gap detection triggered in Scheduler, SchedulerState stores counters only, no causal inference. (7) Policy inputs sealed — total_events_consumed and last_suggestion only. (8) No implicit assumptions — observed_stream is sole reality, DropPolicy defines stream boundary.
+- Q: (user-directed) Scheduler pipeline decomposition → A: Scheduler refactored into a thin orchestration pipeline of 6 pure internal components: EventIngestor (drain only), EntityRouter (entity switch detection only), StateReducer (wraps SchedulerState::apply, pure), GapDetector (structural only: sequence_id != last + 1), PolicyEvaluator (calls suggest_activation only), SuggestionEmitter (writes last_suggestion only). Scheduler itself becomes composition-only — no business logic. All invariants I1-I7 unchanged. Zero behavior change.
+- Q: (user-directed) Pipeline drift guard → A: Scheduler is a FIXED orchestration shell — it MUST NOT evolve. Forbidden: entity switch logic, gap detection, policy evaluation, conditional branching, derived values, state interpretation, module logic duplication. Allowed: function composition, data passing, execution order. Each responsibility lives in exactly one pipeline module. If logic appears in Scheduler beyond function calls: STOP and refactor immediately.
 
 ---
 
 ## 1. Objective
 
-Design and formalize a reactive scheduling layer (CORE-007) that operates above CORE-006 runtime.
+CORE-007 observes CORE-006 execution events via a bounded bus, maintains a deterministic projection state, and produces **advisory** activation suggestions via a pure SchedulingPolicy function.
 
-CORE-007 is **not** an execution system. It is a deterministic, event-driven projection engine that:
-
-- Observes CORE-006 execution events
-- Maintains a deterministic scheduling state
-- Produces activation suggestions (not commands)
-- Remains fully decoupled from execution authority
-
----
-
-## 2. Core Principles
-
-### P1 — Actor is Execution Authority (CORE-006 Invariant)
-
-- Only the Actor executes commands
-- The Scheduler MUST NEVER execute or block execution
-- Command dispatch flows through the CORE-006 runtime, not through CORE-007
-
-### P2 — Reactive-only Scheduler Model
-
-- The Scheduler is purely event-driven
-- The Scheduler does **not** poll any state
-- The Scheduler reacts **only** to events emitted by CORE-006 actors
-
-### P3 — Deterministic Projection
-
-Given identical **observed** event streams:
-
-- The resulting `SchedulerState` MUST be identical
-- The `suggest_activation` output MUST be identical
-- Determinism depends only on stream contents, not on event_id, not on loss configuration, and not on the replay buffer
-
-### P4 — No Control Authority
-
-The Scheduler MUST NOT:
-
-- Block Actor execution
-- Mutate Actor state
-- Enforce scheduling decisions
-- Act as a gatekeeper for command dispatch
+Core properties:
+- Reactive-only (no polling)
+- Advisory output (no execution authority)
+- Non-self-healing (recovery is external)
+- Determined solely by the observed event stream
 
 ---
 
-## 3. System Boundary
+## 2. Data Model
 
-### CORE-006 (Runtime Layer) — Responsible for:
+### 2.1 SchedulerEventEnvelope
 
-- Command execution and validation
-- Entity state transitions
-- Domain event emission
-- Mailbox management and bounded queuing
-- Actor lifecycle (activation, passivation, recovery)
-
-### CORE-007 (Reactive Layer) — Responsible for:
-
-- Consuming CORE-006 execution events via bounded event bus
-- Reconstructing scheduling state from event stream
-- Running deterministic policy evaluation
-- Producing activation suggestions (advisory only)
-
-### 3.3 Observability Signals
-
-The Scheduler MUST expose the following core metrics for operational monitoring:
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `scheduler.events.consumed.total` | Counter (u64) | Lifetime count of consumed events |
-| `scheduler.events.consumed.rate` | Gauge (f64) | Event consumption rate (events/sec) |
-| `scheduler.events.gaps.total` | Counter (u64) | Cumulative detected gaps |
-| `scheduler.events.last_sequence_id` | Gauge (i64) | Sequence ID of the most recent consumed event |
-| `scheduler.suggestions.produced` | Counter (u64) | Number of activation suggestions emitted |
-| `scheduler.suggestions.consumed` | Counter (u64) | Number of suggestions accepted by the runtime |
-
----
-
-## 4. Core Data Model
-
-### 4.1 SchedulerEventEnvelope
-
-Each event flowing from CORE-006 to CORE-007 MUST include:
+Events flowing from CORE-006 to CORE-007:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event_id` | SHA-256 hash of canonical payload | Deterministic identity annotation for the event. Enables idempotent event reference and cross-referencing. NOT part of the determinism proof — determinism depends on event stream sequence, not event_id values |
-| `sequence_id` | u64 (monotonic per Actor) | Ordering identifier, no gaps within an Actor stream |
-| `event_type` | Enum | Classification of the event (ExecutionCompleted, RecoveryCompleted, etc.) |
-| `payload` | Structured data | Event-specific fields (entity triple, state version, timestamps) |
-| `source_actor` | EntityTriple | The Actor that emitted this event |
+| `event_id` | `[u8; 32]` | SHA-256 of canonical payload. Identity annotation — not part of determinism |
+| `sequence_id` | `u64` | Monotonic per Actor. **Per-actor scoped** — never compared across entities. No cross-entity ordering exists or is inferred. Each entity stream is fully isolated |
+| `event_type` | `EventType` | `ExecutionCompleted` or `RecoveryCompleted` |
+| `payload` | `SchedulerEvent` | Event-specific fields (entity, state_version) |
+| `source_actor` | `EntityTriple` | The emitting Actor |
 
-### 4.2 SchedulerState
+### 2.2 SchedulerState
 
-The Scheduler maintains a deterministic projection state:
+Deterministic projection maintained by the Scheduler. **Single-stream model**: SchedulerState tracks exactly one entity's projection at a time. `last_sequence_id` and `detected_gaps` are per-actor scoped within the current projection context — they reflect the currently projected entity, not an aggregate of all entities. When the observed stream switches entities, per-entity tracking resets for the new entity. No cross-entity state is retained between projection cycles.
+
+**SchedulerState is a pure reducer output — a deterministic projection artifact (data structure), NOT a runtime engine.** The `apply()` method is a pure function: `(Event, SchedulerState) → SchedulerState`. It performs state transformation only — no I/O, no bus interaction, no policy evaluation, no scheduling decisions, no entity switch detection, no reset logic beyond field updates. All orchestration logic (bus drain, event loop, policy evaluation, suggestion output, per-entity reset coordination) belongs to the `Scheduler` struct (`scheduler.rs`), not SchedulerState.
+
+**Entity switch detection is Scheduler-owned**: The Scheduler detects entity switches via `current_active_entity != event.source_actor` BEFORE calling `apply()`. On entity switch, the Scheduler resets per-entity scoped fields externally (sets `last_sequence_id` to the new entity's sequence, resets `detected_gaps`). `apply()` receives the already-reset state — SchedulerState MUST NOT self-detect entity changes or self-trigger resets.
+
+Fields split into two independent categories:
+
+**Semantic fields** (participate in determinism and `suggest_activation`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `total_events_consumed` | u64 | Lifetime count of processed events |
-| `last_sequence_id` | Option\<u64\> | Sequence ID of the most recent event consumed |
-| `detected_gaps` | u64 | Cumulative count of detected sequence gaps |
-| `replay_buffer` | VecDeque\<(u64, SchedulerEvent)\> | Bounded diagnostic buffer of recent events (capacity: 1024). Best-effort, used for debugging and verification only. NOT a source of truth for full state reconstruction |
-| `last_suggestion` | Option\<EntityTriple\> | The most recent activation suggestion produced |
-| `state_hash` | Option\<[u8; 32]\> | Optional cryptographic snapshot hash for state integrity verification |
-
-### 4.3 SchedulingPolicy
-
-A pure function:
-
-```
-suggest_activation(state: SchedulerState, pending_entities: Set<EntityTriple>) -> Option<EntityTriple>
-```
-
-**Constraints**:
-
-- No side effects — pure computation only
-- No time dependency — output depends solely on inputs
-- MUST be deterministic — identical inputs produce identical outputs
-- MUST complete within bounded time
-
----
-
-## 5. Event Flow Model
-
-### 5.1 Core Actor Flow (CORE-006)
-
-```
-Command received ──► Actor executes ──► State updated ──► Event emitted
-```
-
-This is the CORE-006 execution path. CORE-007 does not modify this flow.
-
-### 5.2 Reactive Event Flow (CORE-007)
-
-```
-Event received ──► Scheduler updates SchedulerState ──► Policy evaluation ──► Suggestion emitted (advisory)
-```
-
-This flow is decoupled from Actor execution. The Scheduler processes events asynchronously and produces suggestions that the runtime may choose to accept or ignore.
-
-### 5.3 Combined Flow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  CORE-006 Runtime                                               │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐ │
-│  │ Command  │──▶│  Actor   │──▶│  State   │──▶│   Event Bus  │─┼──▶ domain events
-│  │ Receive  │   │ Execute  │   │  Update  │   │  (bounded)   │ │
-│  └──────────┘   └──────────┘   └──────────┘   └──────┬───────┘ │
-│                                                       │         │
-└───────────────────────────────────────────────────────┼─────────┘
-                                                        │
-                                                        ▼
-                                        ┌───────────────────────────┐
-                                        │  CORE-007 Reactive Layer  │
-                                        │  ┌─────────────────────┐  │
-                                        │  │  SchedulerState     │  │
-                                        │  │  (deterministic     │  │
-                                        │  │   projection)       │  │
-                                        │  └─────────┬───────────┘  │
-                                        │            ▼              │
-                                        │  ┌─────────────────────┐  │
-                                        │  │  SchedulingPolicy   │  │
-                                        │  │  (pure function)    │  │
-                                        │  └─────────┬───────────┘  │
-                                        │            ▼              │
-                                        │  ┌─────────────────────┐  │
-                                        │  │  Suggestion         │  │
-                                        │  │  (advisory only)    │  │
-                                        │  └─────────────────────┘  │
-                                        └───────────────────────────┘
-```
-
----
-
-## 6. Backpressure Model
-
-### 6.1 Bounded Capacity
-
-The event bus connecting CORE-006 to CORE-007 MUST have bounded capacity. Default: 4096 events.
-
-### 6.2 Drop Policy
-
-The event bus supports a configurable drop policy. **Default is lossless (`Block`).** A lossy mode (`DropNewest`) can be explicitly enabled per deployment.
-
-| Policy | Behavior | Use Case |
-|--------|----------|----------|
-| `Block` **(default)** | The sender blocks until buffer space is available. A configurable high-water mark (default: 90%) triggers blocking before overflow. | Deployments prioritizing completeness of the observed event stream |
-| `DropNewest` (opt-in) | The incoming event is silently dropped; counter increments. Actor execution is never blocked. | High-throughput deployments that accept degraded suggestion quality for zero Actor impact |
-| `DropOldest` (opt-in) | The oldest buffered event is evicted; the newest is accepted | Systems that favor completeness over recency |
-
-### 6.3 Gap Detection
-
-When events are dropped, regardless of policy:
-
-- `detected_gaps` counter MUST increment
-- The gap range MUST be logged at debug level
-- The Actor execution path MUST NOT be affected
-
----
-
-## 7. Determinism Model (Canonical Definition)
-
-CORE-007's determinism guarantee is defined by a single unified model that cleanly separates event identity, event loss, and replay semantics from the core determinism claim.
-
-### 7.0 Canonical Determinism Definition
-
-**HARD INVARIANT**: Determinism = a pure function of the **observed event stream** only. The observed stream is the ONE AND ONLY source of determinism.
-
-```
-invariant determinism_property:
-  given identical observed streams E1 and E2
-    → SchedulerState(E1) == SchedulerState(E2)
-    → suggest_activation(SchedulerState(E1)) == suggest_activation(SchedulerState(E2))
-```
-
-**Corollary**: Loss, truncation, or partial view are intrinsic system properties. Determinism is defined over whatever event sequence the Scheduler actually observes; completeness is a separate concern.
-
-The following are **independent** of the determinism proof:
-
-| Dimension | Relationship to Determinism |
-|-----------|----------------------------|
-| **Event loss** | Loss affects **completeness**, NOT determinism. Two Schedulers observing the same subsequence will produce identical state for that subsequence, regardless of whether events were lost upstream |
-| **Event identity (event_id)** | event_id is an **identity annotation layer**, not part of the determinism function. Determinism depends on event payloads and sequence order, not on hash values |
-| **Replay buffer** | The buffer is a **diagnostic snapshot window**, not a determinism source. The determinism guarantee is proven via the event stream projection function, not via buffer contents |
-
-### 7.1 Event Stream → SchedulerState
-
-Given two identical observed event streams (same events, same sequence, same order), the SchedulerState MUST be identical regardless of:
-
-- Wall-clock timing differences
-- System load variations
-- Processing order of concurrent events from different Actors
-
-### 7.2 SchedulerState → Suggestion
-
-Given two identical SchedulerState snapshots, `suggest_activation` MUST produce identical output.
-
-### 7.3 Replay Invariant (Diagnostic Only)
-
-Replaying the last N events (from the replay buffer) on a fresh SchedulerState MUST reconstruct the same state for those N events as the original processing produced. This holds for any N up to the replay buffer capacity. This is a **diagnostic invariant** — it verifies that the projection function is deterministic for the buffer contents but does NOT guarantee full-state reconstruction from process start. The replay buffer is NOT part of the determinism proof.
-
----
-
-## 8. Gap Handling Model
-
-**Gap Behavior Model**: Observability Only (Passive Model) — gaps are detected, recorded, and exposed via metrics. The system never attempts recovery or emits recovery signals. External gap recovery is strictly outside CORE-007 scope. This is an architectural invariant — see Section 14.3.
-
-### 8.1 Detection
-
-The Scheduler MUST:
-
-- Detect missing `sequence_id` values in the consumed event stream
-- Track gap ranges (start_seq, end_seq) for observability
-- Expose metrics via the core bundle defined in Section 3.3 (`scheduler.events.gaps.total`, `scheduler.events.last_sequence_id`)
-
-### 8.2 Recovery (Hard Invariant)
-
-The Scheduler MUST **not** attempt automatic recovery from gaps, emit structured recovery signals, or participate in recovery orchestration. Gap recovery is strictly an external responsibility that operates outside the CORE-007 reactive loop. This is a hard architectural invariant — not a configurable behavior and not an extension point within CORE-007.
-
-### 8.3 Behavior Under Gaps
-
-When gaps are detected, the Scheduler:
-
-- Continues operating normally (does not pause or degrade)
-- Uses available state to produce best-effort suggestions
-- Logs gap information for external monitoring
-
----
-
-## 9. Non-Goals
-
-CORE-007 MUST NOT:
-
-- Execute commands in place of Actors
-- Control the Actor lifecycle (activation, passivation, recovery)
-- Enforce scheduling decisions (suggestions are advisory)
-- Own or manage mailboxes
-- Replace any part of the CORE-006 runtime
-- Provide persistence for scheduling state (state is ephemeral and reconstructable)
-- Act as a gatekeeper for command dispatch
-- Implement automatic gap recovery
-- Emit structured recovery signals (observability is the boundary; recovery orchestration is strictly external)
-
----
-
-## 10. User Scenarios & Testing
-
-### User Story 1 — Reactive Scheduling (Priority: P1)
-
-A runtime operator observes that the Scheduler produces activation suggestions based on observed execution events. The suggestions follow the configured policy and are reproducible given the same event sequence.
-
-**Acceptance Scenarios**:
-
-1. **Given** an active CORE-006 runtime with entities processing commands, **When** the Actor emits `ExecutionCompleted` events, **Then** the Scheduler consumes them and updates SchedulerState.
-2. **Given** a SchedulerState that has consumed events, **When** `suggest_activation` is called, **Then** it returns a valid `EntityTriple` or `None`.
-3. **Given** identical event streams fed to two Scheduler instances, **When** both process all events, **Then** their SchedulerState is identical.
-
-### User Story 2 — Backpressure Under Load (Priority: P2)
-
-Under load, the event bus applies the configured drop policy. The default lossless mode provides backpressure; the opt-in lossy mode drops events without blocking Actors. The Scheduler detects and reports gaps in both modes.
-
-**Acceptance Scenarios**:
-
-1. **Given** an event bus with capacity 10 and `DropNewest` policy, **When** 100 events are emitted faster than the Scheduler consumes them, **Then** the Scheduler observes `detected_gaps > 0`.
-2. **Given** a `DropNewest` policy, **When** the buffer is full, **Then** new events are dropped and the Actor execution is not blocked.
-3. **Given** the default `Block` policy, **When** the buffer exceeds the high-water mark (90%), **Then** the sender blocks until buffer space is available, and no events are lost.
-
-### User Story 3 — Diagnostic Replay Verification (Priority: P3)
-
-An operator replays recent events from the replay buffer to verify the last N events' correctness. Full state reconstruction uses the CORE-006 persistence layer, not the buffer.
-
-**Acceptance Scenarios**:
-
-1. **Given** a populated replay buffer, **When** the last N events are replayed on a fresh SchedulerState, **Then** the resulting state for those N events matches the original.
-2. **Given** a replay buffer bounded to 1024 events, **When** more than 1024 events are consumed, **Then** only the most recent 1024 are retained (buffer is diagnostic, not authoritative).
-
-### User Story 4 — Gap Detection and Monitoring (Priority: P3)
-
-An operator monitors system metrics and observes gap information when events are dropped.
-
-**Acceptance Scenarios**:
-
-1. **Given** a running Scheduler, **When** events are dropped, **Then** `detected_gaps` increments and gap range information is logged.
-2. **Given** a Scheduler with gaps, **When** `suggest_activation` is called, **Then** it still produces a suggestion based on available state.
-
----
-
-## 11. Success Criteria
-
-| Criterion | Metric | Verification |
-|-----------|--------|--------------|
-| Fully event-driven | The Scheduler processes events only; no polling exists | Code review confirms zero polling loops or timer-based reads |
-| Deterministic projection | Identical observed event streams produce identical SchedulerState | Automated test with two Scheduler instances fed same event sequence; test passes regardless of loss configuration, event_id strategy, or replay buffer state |
-| Bounded memory | Event bus capacity is configured and enforced (both default Block and opt-in DropNewest) | Test with overflow in DropNewest mode: events are dropped, memory does not grow unbounded. Block mode: sender pauses, buffer never exceeds capacity |
-| Actor isolation | Actor execution throughput is identical with and without Scheduler load | Measure command throughput with/without event bus producer load |
-| Stable suggestions | Same SchedulerState + same pending set = same suggestion | Property-based test across 1000 random inputs |
-| CORE-006 unchanged | No modifications required in CORE-006 execution path | Diff analysis: CORE-006 files are unmodified |
-
----
-
-## 12. Dependencies
-
-| Dependency | Type | Description |
-|------------|------|-------------|
-| CORE-006 Runtime | Hard | CORE-007 consumes events emitted by CORE-006 actors |
-| SchedulerEventEnvelope format | Contract | The event envelope contract defines the interface between CORE-006 emission and CORE-007 consumption |
-| Bounded event bus | Infrastructure | The channel/bus connecting the layers must support bounded capacity and configurable drop policy |
-
----
-
-## 13. Assumptions
-
-1. **HARD INVARIANT**: Events are ordered per-Actor stream only. No global ordering exists across Actors at the CORE-007 level and none will be introduced. Cross-Actor ordering is not guaranteed
-2. The replay buffer is ephemeral — lost on process restart; only the last N events are available for replay
-3. **HARD INVARIANT**: CORE-007 is non-self-healing. Gap recovery is strictly external (see Section 14.3)
-4. The Scheduler runs in the same process as the CORE-006 runtime (not a separate service)
-
----
-
-## 14. Architectural Boundary Model
-
-This section defines the definitive architectural boundary model for CORE-007. Each dimension is classified as **hard invariant** — intentional, non-negotiable design property — not a gap, risk, or extension point.
-
-### 14.1 Observed Stream Dependency — HARD INVARIANT
-
-**Statement**: Determinism is defined exclusively over the observed event stream. The Scheduler makes no claim about completeness, and loss does not degrade the deterministic guarantee.
-
-**Classification**: Hard invariant (not configurable, not an extension point, not a gap).
-
-**Implications**:
-- No "degraded determinism mode" exists — determinism is always unconditional over whatever events are observed
-- Completeness tracking (gaps, metrics) is orthogonal to the determinism proof
-- Future extensions that introduce replay-based state recovery operate outside CORE-007's determinism model
-
-### 14.2 Global Ordering Model — HARD INVARIANT
-
-**Statement**: CORE-007 operates under per-Actor ordering only. No global ordering will ever exist within CORE-007.
-
-**Classification**: Hard invariant (not an extension point, not a future CORE-007 feature).
-
-**Implications**:
-- The Scheduler processes events from different Actors in an unspecified order
-- `suggest_activation` is defined over the per-Actor partial order, not a total order
-- Cross-Actor causal ordering, if needed, must be provided by a separate layer above CORE-007
-- This invariant simplifies the state projection function (no vector clocks, no causal tracking)
-
-### 14.3 Recovery Boundary — HARD INVARIANT
-
-**Statement**: CORE-007 is non-self-healing. Recovery from gaps, loss, or state divergence is strictly an external responsibility.
-
-**Classification**: Hard invariant (not an extension point within CORE-007; external extensions are permitted).
-
-**Implications**:
-- The Scheduler exposes gap observability (metrics, logs) for external consumption
-- The Scheduler never initiates, requests, or participates in recovery operations
-- The replay buffer exists for diagnostic verification only — not for recovery seeding
-- External recovery (e.g., CORE-008+) may reconstruct SchedulerState from persisted CORE-006 events, but this operates outside CORE-007 boundaries
-
----
-
-## 15. Semantic Dual Layer Model
-
-**Classification**: Non-functional architectural interpretation model only. No determinism or invariants are modified by this section.
-
-CORE-007 MUST be interpreted under two independent semantic layers:
-
-| Layer | Role | Normativity |
+| `total_events_consumed` | `u64` | Lifetime count across all entities. Aggregate diagnostic — no ordering semantics |
+| `last_sequence_id` | `Option<u64>` | Most recent `sequence_id` of the currently projected entity. Per-actor scoped within the current projection cycle. Resets when the observed stream switches to a different entity. Never compared across entities |
+| `detected_gaps` | `u64` | Gap count for the currently projected entity's contiguous stream segment. Per-actor scoped within the current projection cycle. Resets when the observed stream switches entities |
+| `last_suggestion` | `Option<EntityTriple>` | Most recent advisory suggestion |
+| `state_hash` | `Option<[u8; 32]>` | Optional snapshot hash for integrity |
+
+**Diagnostic field** (non-semantic — no behavioral role):
+
+| Field | Type | Description |
 |-------|------|-------------|
-| **Semantic Layer** (Canonical) | Defines system behavior, invariants, and architecture | **NORMATIVE** — single source of truth |
-| **Lexical Layer** (Historical) | Provides names used in code and documentation | **NON-NORMATIVE** — does not define behavior |
+| `replay_buffer` | `VecDeque<(u64, SchedulerEvent)>` | Bounded (1024), ephemeral, lost on restart. Diagnostic-only: debugging, post-mortem. **Never used for reconstruction, determinism validation, or recovery** |
 
-### 15.1 Semantic Layer — Canonical (NORMATIVE)
+### 2.3 SchedulingPolicy
 
-This is the only layer that defines system behavior. It includes:
+Pure function:
 
-- Determinism Model (Section 7.0): `function(observed_event_stream)` — hard invariant
-- SchedulerState projection rules (Section 4.2): pure function, no side effects
-- SchedulingPolicy contract (Section 4.3): pure function, bounded time, deterministic
-- Event Flow semantics (Section 5): reactive-only, no polling, advisory output
-- Gap handling invariants (Section 8): passive detection, no recovery
-- Backpressure semantics (Section 6): bounded bus, hybrid Block/Drop policy
-- Architectural boundaries (Sections 2, 14): P1–P4, three hard invariants
+```
+suggest_activation(state: &SchedulerState, pending: &BTreeSet<EntityTriple>) -> Option<EntityTriple>
+```
 
-**Rule**: Only this layer defines system truth. It is immutable and independent of names.
+Constraints:
+- Pure — no side effects, no wall-clock dependency
+- Deterministic — identical inputs produce identical output. **RoundRobin MUST operate on a deterministic ordered collection** (`BTreeSet<EntityTriple>` or `Vec<EntityTriple>` sorted before use). Iteration over `HashSet` is forbidden for scheduling decisions — `HashSet` iteration order is non-deterministic in Rust
+- Bounded time — O(pending) or better
+- `pending` is an **unordered set** — policies select by entity identity, never by cross-entity `sequence_id`. No cross-entity ordering exists or is inferred. The collection implementation MUST provide deterministic iteration order for the same set of entities
+- Output is **advisory only** — `suggest_activation` is NOT a command; the Scheduler MUST NOT influence execution directly or indirectly. Execution authority belongs exclusively to CORE-006
+- **Field access scope** — Policy MAY only read from `state`:
+  - ✅ `total_events_consumed` (aggregate counter, valid for cursor-based policies like RoundRobin)
+  - ✅ `last_suggestion` (previous suggestion, valid for deduplication or rotation)
+  - ❌ `replay_buffer` (diagnostic-only, no behavioral role — I4)
+  - ❌ `detected_gaps` (gap tracking, not decision-relevant)
+  - ❌ `last_sequence_id` (per-actor scoped, resets on entity switch — not globally meaningful)
+  - ❌ `state_hash` (integrity, not decision-relevant)
+- Policy MUST NOT depend on any forbidden field. Violation breaks determinism purity
+- **Fairness model**: RoundRobin is event-driven — the cursor advances on every consumed event (`total_events_consumed % pending.len()`), not per suggestion emitted. Under skewed event distributions (one entity emits many more events than others), high-event-rate entities occupy more cursor positions. This is deterministic and predictable, not a fairness defect. The advisory-only output (I3) means the consumer may accept or ignore any suggestion. Alternative fairness models (entity-driven, weighted) can be implemented as custom `SchedulingPolicy` implementations within the same field-access constraints
 
-### 15.2 Lexical Layer — Historical (NON-NORMATIVE)
+---
 
-This layer provides the names used in code and documentation. It carries forward legacy scheduling terminology but does NOT define behavior.
+## 3. Event Flow
 
-| Term | Lexical Form | Semantic Interpretation (What it IS) |
-|------|-------------|--------------------------------------|
-| **Scheduler** | Code name for the projection engine | A **deterministic event stream projection engine** that maintains state and produces advisory suggestions. Never executes, blocks, or enforces |
-| **SchedulingPolicy** | Code name for the activation function | A **pure function** that, given projected state and pending entities, returns an advisory suggestion. The runtime may accept or ignore |
-| **ReplayBuffer** | Code name for the diagnostic window | A **bounded diagnostic window** over recent events. NOT a source of truth for state reconstruction (see Section 7.0, Section 14.1) |
-| **GapDetection** | Code name for the passive monitor | A **passive observability monitor** that detects missing sequence IDs, records them, and continues. No recovery action is ever initiated (see Section 14.3) |
+```
+CORE-006: Command → Actor executes → State updated → Event emitted
+                     CORE-007 reads via bounded bus (never modifies CORE-006)
+CORE-007: Event received → SchedulerState updated → Policy evaluated → Suggestion (advisory)
+```
 
-**Rules**:
-- This layer does NOT define behavior
-- This layer cannot modify invariants
-- This layer exists solely for code compatibility and continuity
+Execution authority belongs exclusively to CORE-006. CORE-007's `suggest_activation` output is strictly advisory — it is never a command, and Scheduler MUST NOT influence execution directly or indirectly.
 
-### 15.3 Semantic Priority Rule (Hard Interpretation Invariant)
+---
 
-> **En caso de conflicto entre niveles, la capa Semántica (15.1) prevalece sobre la capa Léxica (15.2).**
+## 4. Determinism
 
-> In case of conflict between layers, the Semantic Layer (15.1) prevails over the Lexical Layer (15.2).
+**CANONICAL RULE**:
 
-This is an architectural invariant about interpretation priority: no lexical name can modify, override, or contradict the behavior defined by the semantic layer.
+```
+Determinism = SchedulerState = f(observed_stream)
+where observed_stream ≡ all events that survive DropPolicy
+```
 
-**Corollary**: Any reader encountering a term from the Lexical Layer MUST interpret it through the Semantic Layer definition. The name is a label, not a specification.
+```
+Given identical observed streams E1 and E2 (post-DropPolicy):
+  → SchedulerState(E1) == SchedulerState(E2)
+  → suggest_activation(SchedulerState(E1)) == suggest_activation(SchedulerState(E2))
+```
 
-### 15.4 Invariant Preservation
+The observed stream — defined as the event sequence after DropPolicy has been applied — is the **sole** input to determinism. DropPolicy is **part of the stream definition**: it determines which events comprise the observed stream, and is not a factor that violates or conditions determinism.
 
-This entire section is documentation-only. It does not change:
+**Factors that are NOT inputs to f** (do not affect SchedulerState):
+- Internal execution order and concurrency scheduling — concurrency is an implementation detail only. Correctness is defined over sequential application of the observed event stream. Internal execution order MAY vary without affecting final state. The system MUST be equivalent to a single-threaded deterministic execution
+- `event_id` values (identity annotation, not behavioral)
+- Replay buffer — diagnostic-only; never used for state reconstruction, determinism validation, or recovery. ReplayBuffer differences MUST NOT affect equivalence of SchedulerState
+- Event loss — DropPolicy-dropped events define the stream boundary; the scheduler has no concept of, and no access to, pre-DropPolicy events. The observed stream is authoritative. Loss is not a correctness defect
+- System load, CPU contention, wall-clock timing (may affect *when* events are processed, never *what* SchedulerState results)
 
-- The hard invariants defined in Section 14
-- The determinism model defined in Section 7.0
-- The system boundaries defined in Section 3
-- The non-goals defined in Section 9
-- The user stories or success criteria defined in Sections 10–11
+**No hidden "full stream" assumption**: The scheduler receives and processes only what the bus delivers after DropPolicy. Events that never arrive (due to DropPolicy or any other cause) are outside the system boundary. The scheduler is neither aware of nor dependent on them. There is no ideal "complete" stream against which the observed stream is measured.
 
-### 15.5 Rationale for Name Retention
+**No ReplayBuffer as truth source**: The replay buffer is strictly diagnostic — a bounded, ephemeral window for debugging and post-mortem analysis only. It carries zero semantic weight. Two SchedulerState instances with identical semantic fields are equivalent regardless of ReplayBuffer content. ReplayBuffer has no code path to state reconstruction, determinism validation, or recovery.
 
-| Factor | Assessment |
-|--------|------------|
-| **Code churn risk** | Full rename would touch 7+ documents, all contracts, all tasks, all planned source files |
-| **Architectural clarity** | The dual-layer model makes interpretation explicit without renaming |
-| **Downstream alignment** | CORE-006 already uses "Scheduler" — aligned naming reduces cross-layer confusion |
-| **Reader burden** | A single clarification section is lower cost than learning an entirely new vocabulary |
+**Concurrency is an implementation detail**: Correctness is defined over sequential application of the observed event stream. Any concurrent or parallel processing MUST produce the same SchedulerState as sequential processing. Internal execution order may vary; the system MUST be equivalent to a single-threaded deterministic execution. No dependency on async runtime ordering semantics (Tokio or equivalent).
+
+---
+
+## 5. Backpressure & DropPolicy
+
+Event bus: bounded capacity (default 4096). Configurable drop policy:
+
+| Policy | Behavior |
+|--------|----------|
+| `Block` (default) | Sender blocks until space available. High-water mark at 90%. |
+| `DropNewest` | Incoming event silently dropped; counter incremented |
+| `DropOldest` | Oldest buffered event evicted; newest accepted |
+
+**DropPolicy is fully deterministic**: Given identical event arrival order, buffer capacity, and policy config, the same events are dropped on every execution. Load, CPU, concurrency timing affect *whether* drops occur — never *which* events are dropped.
+
+### 5.1 Bus Ownership & Lifecycle
+
+- **Channel creation**: The Scheduler creates the bounded channel via `event_bus_channel()`, receiving the `(SchedulerEventSender, SchedulerEventReceiver)` pair
+- **Single consumer**: The Scheduler owns the `SchedulerEventReceiver` exclusively for its entire lifetime. No other component may receive from the bus. This prevents double consumption
+- **Multi-producer**: `SchedulerEventSender` is `Clone`. Clones are distributed to CORE-006 actors. Each actor independently sends events via `try_send()`. The channel remains open as long as the Scheduler holds the receiver — dropping all sender clones does not close the channel
+- **Shutdown**: When the Scheduler is dropped, the receiver is dropped, closing the channel. Subsequent `try_send()` calls return `SendError`. Senders detect closure and stop emitting. No explicit shutdown coordinator is required
+- **No fan-out**: There is exactly one event bus and one consumer. Multiple Scheduler instances (if any) each have their own independent bus
+
+### 5.2 Send Semantics
+
+- **Fire-and-forget**: `try_send()` is non-blocking. `SendError` is final — no retry mechanism exists in Scheduler or bus. The caller (CORE-006 actor) is responsible for any retry logic, but retry is not required or expected
+- **Atomic per-event**: Each `try_send()` call is atomic — either the event is fully enqueued or it is not. No partial or batch send. Ordering is per-send: if `try_send(A)` succeeds before `try_send(B)` is called, A appears before B in the channel
+- **Ordering scope**: Ordering guarantees apply only to successfully enqueued events. Events dropped by `DropNewest` or `DropOldest` are never observed by the Scheduler and carry no ordering semantics
+- **DropPolicy at enqueue time**: DropPolicy is evaluated strictly at the moment `try_send()` is called. If the buffer is full, the policy determines whether the incoming event is dropped (`DropNewest`), an old event is evicted (`DropOldest`), or the sender blocks (`Block`). No post-send adjustment or retry orchestration exists
+- **No retry orchestration**: The Scheduler never orchestrates retries. It only drains events from the receiver. The bus has no retry buffer, dead-letter queue, or backpressure propagation beyond channel closure
+
+---
+
+## 6. Gap Handling
+
+- Gaps detected when consumed `sequence_id` != last `+ 1` within the currently projected entity's contiguous stream segment
+- When the observed stream switches entities, `last_sequence_id` resets — gap tracking starts fresh for the new entity. No cross-entity gap inference
+- Gaps may arise from DropPolicy drops or from sequence discontinuities; the scheduler treats all gaps uniformly — no gap-type classification, no per-cause metrics, no attribution. The scheduler cannot distinguish gap causes: such distinction would require knowledge of events outside the observed stream boundary. All gaps result in identical behavior: increment `detected_gaps`, log, continue
+- On gap: increment `detected_gaps`, log at debug, continue normally
+- No recovery attempted. No recovery signals emitted. Recovery is strictly external.
+- Event loss (dropped events, missing sequence numbers) does NOT break determinism — it is part of the observed stream definition
+
+---
+
+## 7. User Scenarios
+
+### US1 — Reactive Scheduling (P1) 🎯 MVP
+Events consumed → state updated → policy evaluated → advisory suggestion produced.
+- Determinism: two instances fed identical streams → identical state
+
+### US2 — Control Plane Isolation (P1)
+CORE-006 execution path is independent of CORE-007 output. Suggestions are advisory only.
+
+### US3 — Per-Actor Ordering Only (P1)
+`sequence_id` values never compared across entities. `pending` is unordered. Policy selection by entity identity, not cross-entity sequence.
+
+### US4 — Backpressure (P2)
+DropNewest drops without blocking Actor. Block prevents loss. DropPattern deterministic under identical arrival order.
+
+### US5 — Diagnostic Replay (P3)
+Replay buffer bounded to 1024. Diagnostic inspection only — never reconstruction.
+
+### US6 — Gap Detection (P3)
+Gaps detected per-actor. Metrics exposed. System continues under gaps.
+
+---
+
+## 8. Success Criteria
+
+CORE-007 is complete when:
+1. Two instances fed identical observed streams produce identical semantic state
+2. `suggest_activation` is a pure, deterministic function (property-tested, 1000 inputs)
+3. DropPattern matches identical arrival order under any load
+4. Zero polling loops exist (code review)
+5. Zero cross-entity `sequence_id` comparisons exist
+6. Replay buffer has zero code paths for reconstruction/recovery
+7. Concurrent drain = sequential drain equivalence
+8. CORE-006 files are unmodified (`git diff` empty)
+
+---
+
+## 9. Consolidated Invariants
+
+| # | Invariant | Where Enforced |
+|---|-----------|---------------|
+| I1 | **Determinism**: SchedulerState = f(observed_stream) only, where observed_stream ≡ events surviving DropPolicy. Internal execution order, concurrency scheduling, replay buffer, event_id, system load are not inputs to f. SchedulerState is a pure reducer (data structure); `apply()` is a pure function (Event × S → S). Orchestration lives in Scheduler, not SchedulerState | §2.2, §4, SchedulerState::apply |
+| I2 | **Per-entity ordering**: `sequence_id` scoped to entity stream. Never compared across entities. No cross-entity ordering exists or is inferred. Each entity stream is fully isolated. `pending` is unordered. SchedulerState tracks one entity at a time; state resets on entity switch | §2.1, §2.2, §2.3, scheduler drain loop |
+| I3 | **No execution authority**: CORE-007 output is purely advisory. `suggest_activation` is NOT a command. Scheduler MUST NOT influence execution directly or indirectly. Execution authority belongs exclusively to CORE-006 | §2.3, §3, trait contract |
+| I4 | **ReplayBuffer is non-semantic**: Diagnostic-only. Never used for reconstruction, determinism validation, or recovery. ReplayBuffer differences MUST NOT affect SchedulerState equivalence. Two states with different buffers are semantically equivalent | §2.2, visibility restricted |
+| I5 | **Deterministic DropPolicy**: Drop outcomes depend only on event arrival order + buffer capacity + policy type. Load/concurrency affect timing only | §5, `try_send` impl |
+| I6 | **Single-consumer bus**: Scheduler owns SchedulerEventReceiver exclusively (no double consumption). SchedulerEventSender is Clone (multi-producer). Dropping Scheduler closes channel. One consumer per bus — no fan-out | §5.1, event bus factory |
+| I7 | **Policy field access**: `suggest_activation` MAY only read `total_events_consumed` and `last_suggestion` from `state`. MUST NOT read `replay_buffer`, `detected_gaps`, `last_sequence_id`, or `state_hash`. Policy is a pure function over allowed inputs only | §2.3, trait contract |

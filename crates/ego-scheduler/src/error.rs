@@ -1,23 +1,21 @@
-//! Error types for the scheduler crate.
+//! Scheduler error types.
+//!
+//! # Ownership
+//! Errors are produced by the event bus and consumed by callers.
+//!
+//! # Invariants
+//! - `BusFull`: returned when bounded channel is full under Block policy
+//! - `ChannelClosed`: returned when receiver is dropped
 
 use thiserror::Error;
 
-/// Errors that can occur within the scheduler.
+/// Errors that can occur in scheduler operations.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum SchedulerError {
-    /// The event bus is full and cannot accept new events.
+    /// Event bus is at capacity under Block policy.
     #[error("Event bus is full")]
-    EventBusFull,
-
-    /// A gap was detected in the sequence of events.
-    #[error("Gap detected in sequence: {start}..{end}")]
-    GapDetected { start: u64, end: u64 },
-
-    /// An invalid sequence ID was encountered.
-    #[error("Invalid sequence ID: expected {expected}, got {actual}")]
-    InvalidSequence { expected: u64, actual: u64 },
-
-    /// A state hash mismatch occurred.
-    #[error("State hash mismatch")]
-    StateHashMismatch,
+    BusFull,
+    /// Channel has been closed (receiver dropped).
+    #[error("Channel closed")]
+    ChannelClosed,
 }

@@ -19,13 +19,29 @@
 /// - `pending_entities` is the set of entities eligible for activation
 /// - The returned entity MUST be a member of `pending_entities` (if `pending_entities` is non-empty)
 /// - Returns `None` if and only if `pending_entities` is empty
+///
+/// # Advisory-Only Semantics
+/// - Output is strictly advisory — `suggest_activation` is NOT a command
+/// - Policy MUST NOT influence execution directly or indirectly
+/// - Execution authority belongs exclusively to CORE-006
 pub trait SchedulingPolicy: Send + Sync {
     /// Given the current scheduler state and a set of pending entities,
     /// suggest which entity to activate next.
+    ///
+    /// # Allowed State Fields
+    /// Policy MAY read from `state`:
+    /// - `total_events_consumed` (aggregate event counter)
+    /// - `last_suggestion` (previous activation suggestion)
+    ///
+    /// Policy MUST NOT read from:
+    /// - `replay_buffer` (diagnostic-only, I4)
+    /// - `detected_gaps` (gap tracking, not decision-relevant)
+    /// - `last_sequence_id` (per-actor scoped, resets on entity switch)
+    /// - `state_hash` (integrity hash, not decision-relevant)
     fn suggest_activation(
         &self,
         state: &SchedulerState,
-        pending_entities: &HashSet<EntityTriple>,
+        pending_entities: &BTreeSet<EntityTriple>,
     ) -> Option<EntityTriple>;
 }
 ```
@@ -36,7 +52,9 @@ pub trait SchedulingPolicy: Send + Sync {
 
 ### RoundRobin
 
-Selects entities in round-robin order. The cursor is stored in `SchedulerState` (projected from event count). Deterministic — cursor advances based on consumed event count, not wall-clock time.
+Selects entities in round-robin order. The cursor is derived from `state.total_events_consumed` — every consumed event advances the cursor, regardless of which entity emitted it. Deterministic — cursor advances based on consumed event count, not wall-clock time.
+
+**Fairness model**: Event-driven. Under skewed event distributions (one entity emits many more events than others), high-event-rate entities occupy more cursor positions and are suggested more frequently. This is deterministic and predictable — not a fairness defect. Suggestions are advisory-only (I3); the consumer may accept or ignore any suggestion. For entity-driven or weighted fairness, implement a custom `SchedulingPolicy`.
 
 ```rust
 pub struct RoundRobin;
@@ -45,10 +63,10 @@ impl SchedulingPolicy for RoundRobin {
     fn suggest_activation(
         &self,
         state: &SchedulerState,
-        pending_entities: &HashSet<EntityTriple>,
+        pending_entities: &BTreeSet<EntityTriple>,
     ) -> Option<EntityTriple> {
-        // Sort pending_entities deterministically, then index by
-        // state.total_events_consumed % pending_entities.len()
+        // BTreeSet provides deterministic iteration order — no sorting needed.
+        // Index by state.total_events_consumed % pending_entities.len()
     }
 }
 ```

@@ -66,7 +66,11 @@ CORE-007 will replicate this pattern with its own event types.
 ## 7. Testing Strategy
 
 - **Unit tests**: Pure function tests for `SchedulerState::apply()`, `RoundRobin::suggest_activation()`
-- **Determinism tests**: Two Scheduler instances fed identical event sequences → identical state
-- **Backpressure tests**: Overflow behavior for `Block` and `DropNewest` policies
-- **Gap detection tests**: Detectable gaps from event stream with missing sequence_ids
+- **Determinism tests**: Two instances fed identical observed streams → identical state (I1)
+- **Backpressure tests**: Overflow for `Block`, `DropNewest`, `DropOldest` with deterministic drop patterns (I5)
+- **Gap detection tests**: Missing sequence_ids detected per-actor; system continues (spec §6)
+- **Concurrency tests**: Concurrent drain = sequential drain equivalence (I1)
+- **Per-entity scoping tests**: No cross-entity sequence_id comparison (I2)
+- **Replay buffer tests**: Bounded to 1024; non-semantic — never reconstruction (I4)
+- **Control plane tests**: CORE-006 has zero dependency on CORE-007 output (I3)
 - **Integration tests**: End-to-end event → Scheduler → suggestion flow

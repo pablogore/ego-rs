@@ -1,31 +1,33 @@
-//! Metrics collection for the scheduler.
+//! Observability layer using tracing macros.
+//!
+//! # Invariants
+//! - Metrics are purely diagnostic — no behavioral role
+//! - All events logged at debug/info level
+//! - No metric is used for scheduling decisions (I7)
 
-/// Metrics collected by the scheduler.
-#[derive(Debug, Clone, Default)]
-pub struct SchedulerMetrics {
-    /// Total number of events consumed.
-    pub total_events_consumed: u64,
-    
-    /// Total number of gaps detected.
-    pub total_gaps_detected: u64,
-    
-    /// Total number of suggestions made.
-    pub total_suggestions_made: u64,
+use tracing::{info, debug};
+
+/// Logs an event consumption at debug level.
+pub fn log_event_consumed(total: u64) {
+    debug!(total_events_consumed = total, "Event consumed");
 }
 
-impl SchedulerMetrics {
-    /// Increment the event consumption counter.
-    pub fn increment_events_consumed(&mut self) {
-        self.total_events_consumed += 1;
-    }
-    
-    /// Increment the gap detection counter.
-    pub fn increment_gaps_detected(&mut self) {
-        self.total_gaps_detected += 1;
-    }
-    
-    /// Increment the suggestion counter.
-    pub fn increment_suggestions_made(&mut self) {
-        self.total_suggestions_made += 1;
-    }
+/// Logs an activation suggestion at info level.
+pub fn log_suggestion(entity: &str) {
+    info!(suggested_entity = %entity, "Activation suggestion produced");
+}
+
+/// Logs a gap detection at debug level.
+pub fn log_gap_detected(gap_count: u64, entity: &str) {
+    debug!(detected_gaps = gap_count, source_actor = %entity, "Gap detected in event stream");
+}
+
+/// Logs a DropNewest event at debug level.
+pub fn log_drop_newest() {
+    debug!("Event dropped (DropNewest policy)");
+}
+
+/// Logs a DropOldest event at debug level.
+pub fn log_drop_oldest() {
+    debug!("Oldest event evicted (DropOldest policy)");
 }

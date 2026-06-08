@@ -6,33 +6,44 @@
 
 ## Summary
 
-Design and implement a reactive scheduling layer (CORE-007) that observes CORE-006 execution events via a bounded event bus, maintains a deterministic SchedulerState, and produces advisory activation suggestions via a pure SchedulingPolicy function. The Scheduler is reactive-only (no polling), non-authoritative (suggestions are advisory), and non-self-healing (recovery is external). Three hard architectural invariants govern observed-stream determinism, per-actor ordering, and strictly external recovery.
+Implement a reactive scheduling layer (CORE-007) that observes CORE-006 execution events via a bounded event bus, maintains a deterministic SchedulerState, and produces advisory activation suggestions via a pure SchedulingPolicy function. The Scheduler is reactive-only (no polling), non-authoritative (advisory output), and non-self-healing (recovery is external).
+
+**Core Invariants** (7 total — see spec §9):
+1. **I1 Determinism**: SchedulerState = f(observed_stream) only, where observed_stream ≡ events surviving DropPolicy
+2. **I2 Per-entity ordering**: sequence_id never compared across entities; single-stream model — SchedulerState tracks one entity at a time
+3. **I3 No execution authority**: output is advisory; `suggest_activation` is NOT a command; CORE-006 never depends on it
+4. **I4 ReplayBuffer non-semantic**: diagnostic-only; never reconstruction or recovery; buffer differences do not affect state equivalence
+5. **I5 Deterministic DropPolicy**: drop decisions depend only on arrival order + capacity + policy
+6. **I6 Single-consumer bus**: Scheduler owns receiver exclusively (no double consumption); sender is Clone (multi-producer); dropping Scheduler closes channel
+7. **I7 Policy field access**: `suggest_activation` may only read `total_events_consumed` and `last_suggestion` from state; must not read diagnostic or per-actor-scoped fields
 
 ## Technical Context
 
 **Language/Version**: Rust 2021 edition (stable)
 
-**Primary Dependencies**: `ego-domain` (ActorId, EntityId, TenantId, DomainEvent), `tokio` (bounded sync channel for event bus), `tracing` (observability), `thiserror` (error types). **`EntityTriple` does not exist in `ego-domain` yet** — will be defined within the `ego-scheduler` crate (see research.md for rationale).
+**Primary Dependencies**: `ego-domain` (ActorId, EntityId, TenantId, DomainEvent), `tokio` (bounded sync channel, `Notify`), `tracing` (observability), `thiserror` (error types). `EntityTriple` defined within `ego-scheduler` crate.
 
-**Storage**: In-memory only — SchedulerState is ephemeral and reconstructable from event stream (per spec §9). No persistence.
+**Storage**: In-memory only — SchedulerState is ephemeral and reconstructable from event stream. ReplayBuffer is non-semantic diagnostic only.
 
-**Testing**: `cargo test` (unit + integration), property-based testing for deterministic projection (two instances fed same events → identical state)
+**Testing**: `cargo test`, property-based determinism testing (identical streams → identical state), concurrent-vs-sequential equivalence, DropPolicy determinism under varying load.
 
-**Target Platform**: Same as ego-runtime — Linux/macOS server
+**Target Platform**: Linux/macOS server (same as ego-runtime)
 
-**Project Type**: Library crate within Rust workspace (`crates/ego-scheduler`)
+**Project Type**: Library crate (`crates/ego-scheduler`)
 
-**Performance Goals**: Scheduler processing is sub-millisecond per event (pure state projection). Policy evaluation MUST complete within bounded time (per spec §4.3). Actor execution throughput MUST be identical with/without Scheduler load (per spec §11).
+**Performance Goals**: Sub-millisecond per event (pure state projection). Policy evaluation O(pending). Actor throughput unaffected by Scheduler.
 
-**Constraints**:
-- MUST NOT modify CORE-006 execution path (P1 — Actor is execution authority)
-- MUST NOT poll (P2 — reactive only)
-- Determinism depends only on observed event stream (P3 — hard invariant)
-- MUST NOT block Actor execution or enforce scheduling decisions (P4)
-- Event bus MUST have bounded capacity (default 4096)
-- No self-healing (hard invariant per §14.3)
+**Concurrency Model**: Concurrency is an implementation detail only — correctness is defined over sequential application of the observed event stream. Any concurrent processing MUST be equivalent to a single-threaded deterministic execution. No dependency on async runtime ordering semantics (Tokio or equivalent). Tokio may be used as the runtime but correctness MUST NOT depend on its scheduling behavior.
 
-**Scale/Scope**: Per-Actor partial ordering only. No global ordering (hard invariant per §14.2). Event bus bounded to 4096 events. Replay buffer bounded to 1024 events.
+**Scale/Scope**: Per-actor ordering only. Event bus 4096 events. Replay buffer 1024 events.
+
+**Bus Semantics**: `try_send()` is fire-and-forget — SendError is final, no retry orchestration. Each send is atomic per-event (no batch). Ordering guarantees apply only to successfully enqueued events. DropPolicy evaluated strictly at enqueue time. Scheduler never orchestrates retries — it only drains.
+
+**SchedulerState Role**: Pure reducer output — a data structure, not a runtime engine. `apply()` is pure: `(Event, S) → S`. Entity switch detection (`current_entity != event.source_actor`) and per-entity field resets performed by Scheduler BEFORE calling `apply()`. Orchestration (bus drain, event loop, policy evaluation, per-entity reset) lives in `Scheduler`, not `SchedulerState`.
+
+**Scheduler Architecture**: Decomposed into a deterministic pipeline of 6 pure components. Scheduler (`scheduler.rs`) is a thin orchestrator — composition only, no business logic. Pipeline order: EventIngestor → EntityRouter → StateReducer → GapDetector → PolicyEvaluator → SuggestionEmitter. Each stage is independently testable.
+
+**Policy Collection**: RoundRobin uses `BTreeSet<EntityTriple>` for deterministic iteration order. `HashSet` iteration is non-deterministic in Rust and forbidden for scheduling decisions. `pending` collection type is `BTreeSet` at the trait level.
 
 ## Constitution Check
 
@@ -40,20 +51,26 @@ Design and implement a reactive scheduling layer (CORE-007) that observes CORE-0
 
 | Gate | Status | Rationale |
 |------|--------|-----------|
-| TDD mandatory (Red-Green-Refactor) | PASS | Tests can be written before implementation; projection is pure function |
-| Coverage >= 85% | PASS | Pure projection functions are exhaustively testable; policy evaluation is deterministic |
-| Mock-based isolation | PASS | Event bus abstraction allows isolated SchedulerState tests |
-| Deterministic tests | PASS | Core invariant: identical observed streams → identical state — directly testable |
-| No circular dependency | PASS | CORE-007 depends on CORE-006 events; CORE-006 depends on nothing from CORE-007 |
-| Immutability by default | PASS | SchedulerState is updated via pure projection (new state, no mutation) |
-| Patch over rewrite | PASS | New crate does not modify existing CORE-006 code |
-| No infrastructure in domain | PASS | CORE-007 is operational layer, not domain |
+| TDD mandatory | PASS | Pure projection functions are exhaustively testable |
+| Coverage >= 85% | PASS | Deterministic functions, property-testable |
+| Mock-based isolation | PASS | Event bus abstraction enables isolated tests |
+| Deterministic tests | PASS | I1: identical streams → identical state |
+| No circular dependency | PASS | CORE-007 depends on CORE-006; never reverse |
+| Immutability by default | PASS | Pure projection — new state, no mutation |
+| Patch over rewrite | PASS | New crate; no existing code modified |
+| No infrastructure in domain | PASS | Foundation layer, not domain |
+| Per-entity scoping | PASS | I2: single-stream model; no cross-entity comparisons |
+| Advisory-only output | PASS | I3: no execution authority; suggest_activation is NOT a command |
+| No concurrency non-determinism | PASS | I1: sequential equivalence required; concurrency is implementation detail only |
+| Single-consumer bus | PASS | I6: Scheduler owns receiver exclusively; no double consumption |
+| Policy field isolation | PASS | I7: policy reads only allowed fields; no diagnostic or per-actor-scoped field access |
+| Pipeline drift guard | PASS | Scheduler is fixed orchestration shell — no domain logic, no branching, composition only. Each responsibility in exactly one module. Drift detection: if logic appears in Scheduler beyond function calls → STOP and refactor |
 
-No violations. All gates pass without justification.
+No violations.
 
 ## Project Structure
 
-### Documentation (this feature)
+### Documentation
 
 ```text
 specs/007-reactive-scheduler-projection/
@@ -63,27 +80,35 @@ specs/007-reactive-scheduler-projection/
 ├── quickstart.md        # Phase 1 output
 ├── contracts/           # Phase 1 output
 ├── spec.md              # Feature specification
-└── tasks.md             # Phase 2 output (/speckit.tasks)
+└── tasks.md             # Phase 2 output
 ```
 
-### Source Code (repository root)
+### Source Code
 
 ```text
 crates/ego-scheduler/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs                # Public API: Scheduler, SchedulerState, SchedulingPolicy
-    ├── scheduler.rs          # Core Scheduler: event consumption, state projection
-    ├── state.rs              # SchedulerState: deterministic projection state
-    ├── policy.rs             # SchedulingPolicy trait + built-in RoundRobin
-    ├── event_bus.rs          # Bounded event bus (tokio sync channel wrapper)
-    ├── metric.rs             # Observability metrics (counters, gauges)
-    ├── error.rs              # Scheduler error types
-    └── gap.rs                # Gap detection logic
+    ├── lib.rs                # Public API
+    ├── scheduler.rs          # Scheduler: thin pipeline orchestrator (composition only, no business logic)
+    │                         #   Pipeline stages: ingest → route → reduce → detect → evaluate → emit
+    ├── scheduler/
+    │   ├── ingest.rs         # EventIngestor: drains event bus only, returns Vec<BusItem>
+    │   ├── route.rs          # EntityRouter: detects entity switch (current != event.source_actor), resets per-entity fields
+    │   ├── reduce.rs         # StateReducer: wraps SchedulerState::apply() — pure function, no branching
+    │   ├── detect.rs         # GapDetector: structural only — sequence_id != last + 1 → increment counter
+    │   ├── evaluate.rs       # PolicyEvaluator: calls SchedulingPolicy::suggest_activation — no side effects
+    │   └── emit.rs           # SuggestionEmitter: writes last_suggestion only, no logic
+    ├── state.rs              # SchedulerState: deterministic projection
+    ├── policy.rs             # SchedulingPolicy trait + RoundRobin
+    ├── event_bus.rs          # Bounded bus with deterministic DropPolicy
+    ├── metric.rs             # Observability (counters, gauges)
+    ├── error.rs              # SchedulerError types
+    └── gap.rs                # GapInfo type (used by detect.rs)
 ```
 
-**Structure Decision**: New `crates/ego-scheduler` library crate. Follows existing workspace conventions (see `crates/runtime/` for reference). Layer assignment = `foundation` (same as `ego-runtime`). Must update `Cargo.toml` workspace members, `layers.toml`, and `scripts/verify-layers.sh`.
+**Layer**: `foundation` (same as `ego-runtime`). Register in workspace `Cargo.toml`, `layers.toml`, `scripts/verify-layers.sh`.
 
 ## Complexity Tracking
 
-No constitution violations. Table omitted.
+No constitution violations.
