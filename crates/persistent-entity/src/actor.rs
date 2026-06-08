@@ -94,21 +94,17 @@ where
                     match result {
                         Ok(envelope) => {
                             self.execute_command(envelope).await;
-                            if self.lifecycle.is_active() && !self.lifecycle.is_passivated() {
+                            if !self.lifecycle.is_active() {
                                 break;
                             }
                         }
                         Err(_) => {
-                            // Mailbox closed, break the loop
                             break;
                         }
                     }
                 }
                 _ = tokio::time::sleep(timeout) => {
-                    // Check if we should passivate based on timeout
-                    if self.lifecycle.is_active() {
-                        break;
-                    }
+                    break;
                 }
             }
         }

@@ -118,8 +118,10 @@ impl DomainEvent for TestEvent {
     }
 
     fn occurred_at(&self) -> &DateTime<Utc> {
-        static OCCURRED_AT: OnceLock<DateTime<Utc>> = OnceLock::new();
-        OCCURRED_AT.get_or_init(|| Utc::now())
+        // Per-call timestamp. Box::leak is acceptable in test-only code
+        // to satisfy the `&DateTime<Utc>` return type without storing a
+        // timestamp on the enum variant.
+        Box::leak(Box::new(Utc::now()))
     }
 }
 

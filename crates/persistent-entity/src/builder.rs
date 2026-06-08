@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use ego_domain::DomainEvent;
-use ego_domain::persistence::EventStore;
 
 use crate::persistence::PersistenceFacade;
 use crate::publisher::EventPublisher;
@@ -14,8 +13,6 @@ pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeO
     mailbox_capacity: usize,
     concurrency_budget: usize,
     passivation_timeout: std::time::Duration,
-    event_store: Option<Box<dyn EventStore<E> + Send>>,
-    snapshot_store: Option<Box<dyn ego_domain::persistence::Snapshot + Send>>,
     publisher: Option<Arc<dyn EventPublisher<E>>>,
     snapshot_strategy: Option<Arc<dyn SnapshotStrategy>>,
     single_tenant_mode: bool,
@@ -29,8 +26,6 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             mailbox_capacity: 1000,
             concurrency_budget: 10000,
             passivation_timeout: std::time::Duration::from_secs(300),
-            event_store: None,
-            snapshot_store: None,
             publisher: None,
             snapshot_strategy: None,
             single_tenant_mode: true,
@@ -59,16 +54,6 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         self
     }
 
-    pub fn with_event_store(mut self, store: Box<dyn EventStore<E> + Send>) -> Self {
-        self.event_store = Some(store);
-        self
-    }
-
-    pub fn with_snapshot_store(mut self, store: Box<dyn ego_domain::persistence::Snapshot + Send>) -> Self {
-        self.snapshot_store = Some(store);
-        self
-    }
-
     pub fn with_publisher(mut self, publisher: Arc<dyn EventPublisher<E>>) -> Self {
         self.publisher = Some(publisher);
         self
@@ -90,12 +75,6 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 
     pub fn build(self) -> EntityRuntime<E> {
-        let _event_store = self.event_store.unwrap_or_else(|| {
-            Box::new(crate::testing::InMemoryEventStore::new())
-        });
-        let _snapshot_store = self.snapshot_store.unwrap_or_else(|| {
-            Box::new(crate::testing::InMemorySnapshotStore::new())
-        });
         let publisher = self.publisher.unwrap_or_else(|| {
             Arc::new(crate::testing::NoopPublisher::new())
         });
