@@ -414,9 +414,587 @@ Inject dependencies instead.
 
 All public Rust APIs MUST include rustdoc documentation covering public structs, enums, traits, functions, and modules. Documentation MUST explain purpose and usage.
 
+### Source Documentation Requirement
+
+All Rust source files MUST contain rustdoc documentation.
+
+Documentation is required for:
+
+- modules
+- structs
+- enums
+- traits
+- functions
+- constants
+- type aliases
+- internal runtime components
+- test support infrastructure
+
+Public visibility is NOT an exemption.
+
+The purpose of documentation is to explain:
+
+- responsibility
+- invariants
+- lifecycle
+- ownership rules
+- failure semantics
+- usage expectations
+
+Documentation MUST describe WHY a component exists,
+not only WHAT it does.
+
+### DOC-R2 — Internal APIs Must Be Documented
+
+Documentation is mandatory for both public and private APIs.
+
+Private code is not exempt.
+
+### DOC-R3 — Architectural Components Require Invariants
+
+Components participating in:
+
+- Scheduler
+- Worker
+- BatchExecutor
+- Session
+- Offset Store
+- Dedup Store
+- Runtime
+
+MUST document:
+
+- ownership
+- invariants
+- failure semantics
+- constitutional references
+
+### DOC-R4 — Undocumented Source Is Incomplete
+
+Code lacking required rustdoc documentation
+MUST NOT be considered complete.
+
+A task cannot be marked completed
+until documentation requirements are satisfied.
+
+### DOC-R5 — Documentation Is Verified
+
+CI MUST fail if required rustdoc is missing.
+
+Undocumented source files are constitutional violations.
+
+### Documentation Enforcement
+
+All Rust crates MUST enable:
+
+#![deny(missing_docs)]
+
+Undocumented items are compilation errors.
+
+This requirement applies to:
+
+- modules
+- structs
+- enums
+- traits
+- functions
+- constants
+- type aliases
+
+Public visibility does not define documentation requirements.
+
+Internal runtime code is subject to the same documentation standards as public APIs.
+
+### DOC-R6 — Explicit Documentation Exemptions
+
+Documentation exemptions MUST be explicit.
+
+Allowed only for:
+
+- generated code
+- third-party generated bindings
+- test-only fixtures
+
+Exemptions MUST use:
+
+#[allow(missing_docs)]
+
+and include a justification comment.
+
+### DOC-R7 — Documentation Is Part Of Done
+
+A task MUST NOT be considered complete unless:
+
+- code compiles
+- tests pass
+- documentation compiles
+- missing_docs check passes
+
+Documentation is a completion criterion, not an optional improvement.
+
+Examples:
+
+Good:
+
+/// Owns concurrency control and backpressure.
+///
+/// BatchExecutor is the only component allowed
+/// to manage execution concurrency.
+///
+/// Constitutional references:
+/// - FO-R2
+/// - UoW-R3
+pub struct BatchExecutor
+
+Bad:
+
+/// Executes batches.
+pub struct BatchExecutor
+
+### DOC-R8 — Architectural Components Must Reference Invariants
+
+Architectural components MUST document:
+
+- responsibilities
+- ownership
+- failure semantics
+- constitutional rules enforced
+
+Examples:
+
+Scheduler
+Worker
+BatchExecutor
+Session
+OffsetStore
+DedupStore
+Runtime
+
+## Meaningful Testing and Path Coverage
+
+### MT-R1 — Behavioral Assertion Required
+
+Every test MUST validate an observable behavior.
+
+Observable behaviors include:
+
+- business rules
+- state transitions
+- invariants
+- failure handling
+- recovery behavior
+- concurrency guarantees
+- contract enforcement
+
+Tests that only validate constants, mock return values, implementation details, or trivial execution paths are invalid.
+
 ---
 
-## 9. Speckit Workflow Governance
+### MT-R2 — Bug Detection Requirement
+
+Every test MUST be able to detect at least one realistic defect.
+
+The reviewer MUST be able to answer:
+
+"What bug would this test catch?"
+
+If no concrete defect can be identified, the test SHOULD be rejected.
+
+---
+
+### MT-R3 — No Mock Verification As Primary Assertion
+
+Mock verification MAY be used as supporting evidence.
+
+Mock verification MUST NOT be the sole assertion of a test.
+
+At least one observable behavioral outcome MUST be asserted.
+
+---
+
+### MT-R4 — Mutation Resistance
+
+A test MUST fail if the protected behavior is intentionally broken.
+
+Examples:
+
+- inverted conditional
+- removed validation
+- skipped dedup check
+- skipped atomic commit
+- disabled concurrency protection
+
+Tests that survive realistic behavioral mutations SHOULD be reviewed.
+
+---
+
+### MT-R5 — Test Naming Convention
+
+Test names MUST describe the behavior being validated.
+
+Preferred examples:
+
+- should_not_advance_offset_when_commit_fails
+- should_reject_duplicate_event
+- should_skip_already_processed_event
+
+Forbidden examples:
+
+- test_1
+- test_repository
+- should_return_true
+
+---
+
+### MT-R6 — Risk-Based Testing
+
+Testing effort MUST prioritize:
+
+1. Business invariants
+2. Consistency guarantees
+3. Failure recovery
+4. Concurrency behavior
+5. Boundary conditions
+6. External effect guarantees
+
+Testing trivial getters, setters, DTOs, builders, and passive data structures solely for coverage is discouraged.
+
+---
+
+### MT-R7 — Coverage Is Not Correctness
+
+Coverage metrics are necessary but not sufficient.
+
+The constitution explicitly recognizes:
+
+"100% coverage does not imply correctness."
+
+Coverage thresholds MUST NOT be used as justification for low-value tests.
+
+---
+
+### MT-R8 — Coverage-Only Tests Rejection
+
+A Pull Request containing tests whose sole purpose is increasing coverage without validating meaningful behavior MUST be rejected during review.
+
+---
+
+### PC-R1 — Happy Path Alone Is Insufficient
+
+A feature MUST NOT be considered tested if only the success path is validated.
+
+Whenever failure is possible, at least one failure-path test MUST exist.
+
+---
+
+### PC-R2 — Decision Branch Coverage
+
+Every conditional branch MUST have tests covering both outcomes whenever applicable.
+
+Required:
+
+- true branch
+- false branch
+
+Testing only one side of a decision is insufficient.
+
+---
+
+### PC-R3 — Failure Path Coverage
+
+Every operation capable of failure MUST have tests validating failure behavior.
+
+Examples:
+
+- repository save failure
+- repository load failure
+- commit failure
+- dispatch failure
+- validation failure
+
+---
+
+### PC-R4 — Recovery Coverage
+
+Components responsible for persistence, consistency, replay, offset management, deduplication, or execution recovery MUST include recovery-path tests.
+
+Examples:
+
+- crash before commit
+- crash during commit
+- restart after commit
+- replay after failure
+
+---
+
+### PC-R5 — Boundary Coverage
+
+Boundary conditions MUST be tested.
+
+Examples:
+
+- empty collections
+- single item
+- maximum configured batch
+- maximum + 1
+- missing state
+- existing state
+
+---
+
+### PC-R6 — Invalid Input Coverage
+
+Public APIs MUST validate behavior for invalid inputs.
+
+Examples:
+
+- empty identifiers
+- unknown enum values
+- invalid state transitions
+- malformed requests
+- negative values
+- overflow conditions
+
+---
+
+### PC-R7 — Concurrency Coverage
+
+Concurrency-sensitive components MUST test:
+
+- single execution
+- concurrent execution
+- capacity exhaustion
+- backpressure activation
+- contention scenarios
+
+Applies especially to:
+
+- Scheduler
+- Worker
+- BatchExecutor
+- Session
+
+---
+
+### PC-R8 — State Transition Coverage
+
+Every state machine MUST validate:
+
+- valid transitions
+- invalid transitions
+- terminal states
+- recovery transitions
+
+---
+
+### PC-R9 — Critical Invariant Coverage
+
+Every constitutional invariant MUST have at least one test proving enforcement.
+
+Examples:
+
+- offset never advances before commit
+- dedup never persists before commit
+- no concurrent UoW for same tag
+- external effects never dispatch before commit
+
+---
+
+Coverage measures executed lines.
+
+Testing measures validated behavior.
+
+Validated behavior is the primary objective.
+
+Coverage is a secondary metric.
+
+---
+
+## Unit Test Governance
+
+### Purpose
+
+EGO-RS adopts a Unit-Test-First validation strategy.
+
+All mandatory validation MUST be executable through deterministic unit tests.
+
+The mandatory validation pipeline MUST NOT require infrastructure.
+
+Correctness is validated through:
+
+- unit tests
+- contract tests
+- invariant tests
+- state-machine tests
+- fault-injection tests
+- replay tests
+- architectural guards
+
+Infrastructure validation is out of scope.
+
+---
+
+### UT-R1 — Unit Tests Are Authoritative
+
+Unit tests are the primary and authoritative validation mechanism.
+
+Features MUST be considered complete when all required unit tests pass.
+
+Integration tests are not required.
+
+---
+
+### UT-R2 — No Real Infrastructure
+
+Mandatory tests MUST NOT access:
+
+- PostgreSQL
+- MySQL
+- SQLite
+- Cassandra
+- Redis
+- Kafka
+- NATS
+- RabbitMQ
+- Elasticsearch
+- HTTP services
+- gRPC services
+- Cloud services
+- External APIs
+- Filesystems
+
+directly.
+
+---
+
+### UT-R3 — Mock-Based Validation
+
+External dependencies MUST be replaced by:
+
+- mocks
+- stubs
+- fakes
+- test doubles
+
+during test execution.
+
+Unit tests MUST validate behavior through contracts, not infrastructure.
+
+---
+
+### UT-R4 — No Testcontainers
+
+The mandatory validation suite MUST NOT require:
+
+- Testcontainers
+- Docker Compose
+- Embedded databases
+- Embedded brokers
+- Local infrastructure
+
+These technologies are currently prohibited from mandatory validation.
+
+---
+
+### UT-R5 — Offline Execution
+
+The complete mandatory test suite MUST execute:
+
+- offline
+- deterministically
+- without network access
+- without infrastructure startup
+
+---
+
+### UT-R6 — Fast Feedback
+
+The mandatory validation suite SHOULD execute in less than 60 seconds on a normal developer workstation.
+
+Architectural correctness MUST NOT depend on infrastructure startup time.
+
+---
+
+### UT-R7 — Infrastructure Contracts
+
+Infrastructure behavior MUST be validated through mocks implementing domain contracts.
+
+Examples:
+
+**Allowed:**
+
+- MockEventStore
+- MockOffsetStore
+- MockDedupStore
+- MockDispatcher
+
+**Forbidden:**
+
+- EmbeddedPostgres
+- EmbeddedKafka
+- EmbeddedRedis
+- FakeNatsCluster
+
+---
+
+### UT-R8 — Future Integration Tests
+
+Integration testing may be introduced in the future.
+
+Such tests:
+
+- MUST be optional
+- MUST be separated from the mandatory pipeline
+- MUST NOT block feature completion
+
+until explicitly adopted by constitutional amendment.
+
+---
+
+## Test Migration Governance
+
+### TMG-R1
+
+Existing integration tests SHOULD be migrated to unit tests whenever possible.
+
+---
+
+### TMG-R2
+
+When migrating an integration test:
+
+- preserve behavior coverage
+- preserve invariant coverage
+- replace infrastructure with mocks
+
+---
+
+### TMG-R3
+
+A migrated unit test is preferred over an integration test if both validate the same behavior.
+
+---
+
+## Constitutional Compliance
+
+### CC-R11 — No Infrastructure Dependency
+
+The constitutional validation pipeline MUST verify that mandatory tests do not require:
+
+- containers
+- databases
+- brokers
+- network access
+
+---
+
+### CC-R12 — Unit-Test Enforcement
+
+The repository MUST fail validation if mandatory tests depend on infrastructure.
+
+---
+
+## 12. Speckit Workflow Governance
 
 ### Single Source Of Truth
 
@@ -469,7 +1047,7 @@ Speckit SHALL prefer deterministic instructions over reasoning-heavy prompts. Pr
 
 ---
 
-## 10. Hard Failure Conditions
+## 13. Hard Failure Conditions
 
 The following constitute hard failures. Detection MUST halt execution immediately.
 
@@ -527,7 +1105,7 @@ The following constitute hard failures. Detection MUST halt execution immediatel
 
 ---
 
-## 11. Core Invariant and Enforcement Model
+## 14. Core Invariant and Enforcement Model
 
 ### Core Invariant
 
@@ -540,7 +1118,7 @@ Each constitution rule belongs to exactly ONE primary enforcement layer. The pri
 | Priority | Layer | Scope | Mechanism examples |
 |---|---|---|---|
 | 1 (highest) | **Compile-time** | Type system, sealed traits, visibility | ConcurrencyToken, type constructors, module visibility |
-| 2 | **CI-time** | Static analysis, pipeline gates | detect-violations.sh, verify-layers.sh, check-contract-versions.sh |
+| 2 | **CI-time** | Static analysis, pipeline gates | detect-violations.sh, verify-layers.sh, check-contract-versions.sh, detect-integration-tests.sh, validate-constitution.sh |
 | 3 | **Test-time** | Behavioral and state invariants | validate_replay_equivalence, contract tests, fault injection |
 | 4 | **Runtime** | Dynamic state transitions, guards | PhaseGuard, AtomicityGuard, fail-closed mode |
 
@@ -551,7 +1129,7 @@ Each constitution rule belongs to exactly ONE primary enforcement layer. The pri
 | FO-R2, UoW-R3 | Concurrency ownership, sequential execution | Compile-time | ConcurrencyToken type |
 | FO-R3, B-R4 | Forbidden imports, layer boundaries | CI | detect-violations.sh |
 | OM-R4, FS-R3 | Recovery correctness | Test | Fault injection + mock store tests |
-| OM-R1-3, DD-R1-4 | Offset/dedup lifecycle | CI + Test | detect-violations.sh + integration tests |
+| OM-R1-3, DD-R1-4 | Offset/dedup lifecycle | CI + Test | detect-violations.sh + unit tests |
 | AC-R1-3 | Atomic commit | Runtime + Test | AtomicityGuard + fault injection |
 | FS-R1-2, FS-R4 | Failure semantics | Runtime | PhaseGuard, fail-closed mode |
 | UoW-R1-5 | UoW boundaries | CI + Test | detect-violations.sh + UoW contract tests |
@@ -560,6 +1138,8 @@ Each constitution rule belongs to exactly ONE primary enforcement layer. The pri
 | EE-R3 | Idempotency key required | Compile-time | Type-system (required field) |
 | EE-R4-E6 | Dispatch ownership, retry safety, commit immutability | Runtime + Test | BatchExecutor post-commit dispatch + fault injection tests |
 | IM-R1-4 | Domain data immutability, append-only stores, immutable projections, mutable justification | CI + Test | detect-violations.sh + design document audit |
+| CC-R11 | No infrastructure dependency in mandatory tests | CI | detect-integration-tests.sh |
+| CC-R12 | Unit-test enforcement — fail on infrastructure dependency | CI | detect-integration-tests.sh + validate-constitution.sh |
 
 ### Conflict Resolution
 

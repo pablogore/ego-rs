@@ -1,13 +1,23 @@
+//! A test-only [`PersistentEntity`] implementation for use in tests and examples.
+//!
+//! Provides [`TestEntity`] with [`TestCommand`], [`TestEvent`], and [`TestState`]
+//! for exercising the entity lifecycle without real domain logic.
+
 use async_trait::async_trait;
 use crate::persistent_entity::PersistentEntity;
 use crate::command_context::CommandContext;
 use crate::error::EntityError;
 use crate::testing::{TestCommand, TestEvent, TestState};
 
+/// A test-only entity that supports increment, decrement, and get-state commands.
+///
+/// Used in integration tests and examples to validate the persistent entity
+/// lifecycle without requiring a real domain implementation.
 #[derive(Debug, Clone)]
 pub struct TestEntity;
 
 impl TestEntity {
+    /// Creates a new [`TestEntity`].
     pub fn new() -> Self {
         Self
     }
@@ -89,8 +99,3 @@ impl PersistentEntity for TestEntity {
         Ok(new_state)
     }
 }
-
-
-
-// Remove the DomainEvent implementation for TestEntity since it's not an event
-// The TestEntity is a PersistentEntity, not a DomainEvent

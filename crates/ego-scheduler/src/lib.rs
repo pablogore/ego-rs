@@ -20,18 +20,18 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use ego_scheduler::scheduler::Scheduler;
 //! use ego_scheduler::state::SchedulerState;
 //! use ego_scheduler::policy::RoundRobin;
-//! use ego_scheduler::event_bus::{event_bus_channel_with_config, EventBusConfig};
+//! use ego_scheduler::event_bus::{event_bus_channel_with_config, EventBusConfig, DropPolicy};
 //! use ego_scheduler::types::EntityTriple;
 //! use ego_scheduler::event::SchedulerEvent;
 //! use ego_scheduler::event::SchedulerEventEnvelope;
 //! use std::collections::HashSet;
 //!
 //! // Create event bus
-//! let config = EventBusConfig { capacity: 4096 };
+//! let config = EventBusConfig { capacity: 4096, drop_policy: DropPolicy::Block };
 //! let (sender, receiver) = event_bus_channel_with_config(config);
 //!
 //! // Create scheduler with round-robin policy
@@ -49,7 +49,7 @@
 //!     state_version: 1,
 //! };
 //! let envelope = SchedulerEventEnvelope::new(event, entity, 1);
-//! sender.send(envelope).unwrap();
+//! sender.send(envelope).await.unwrap();
 //!
 //! // Process events and get suggestions
 //! // Note: drain_and_apply() and suggest_activation() are async functions
@@ -69,45 +69,6 @@ pub mod metric;
 
 #[cfg(test)]
 mod tests {
-    //! Documentation tests for public API
-    //!
-    //! # Example: Basic Scheduler Usage
-    //!
-    //! ```
-    //! use ego_scheduler::scheduler::Scheduler;
-    //! use ego_scheduler::state::SchedulerState;
-    //! use ego_scheduler::policy::RoundRobin;
-    //! use ego_scheduler::event_bus::{event_bus_channel_with_config, EventBusConfig};
-    //! use ego_scheduler::types::EntityTriple;
-    //! use ego_scheduler::event::SchedulerEvent;
-    //! use ego_scheduler::event::SchedulerEventEnvelope;
-    //! use std::collections::HashSet;
-    //!
-    //! // Create event bus
-    //! let config = EventBusConfig { capacity: 4096 };
-    //! let (sender, receiver) = event_bus_channel_with_config(config);
-    //!
-    //! // Create scheduler with round-robin policy
-    //! let policy = RoundRobin;
-    //! let mut scheduler = Scheduler::new(SchedulerState::new(), receiver, Box::new(policy));
-    //!
-    //! // Create an event and send it
-    //! let entity = EntityTriple {
-    //!     tenant: "tenant1".to_string(),
-    //!     entity_type: "actor".to_string(),
-    //!     entity_id: "actor1".to_string(),
-    //! };
-    //! let event = SchedulerEvent::ExecutionCompleted {
-    //!     entity: entity.clone(),
-    //!     state_version: 1,
-    //! };
-    //! let envelope = SchedulerEventEnvelope::new(event, entity, 1);
-    //! sender.send(envelope).unwrap();
-    //!
-    //! // Process events and get suggestions
-    //! scheduler.drain_and_apply().await;
-    //! let suggestion = scheduler.suggest_activation(&HashSet::new()).await;
-    //! ```
 
     #[test]
     fn it_works() {

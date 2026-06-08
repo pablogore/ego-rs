@@ -1,3 +1,8 @@
+//! Tokio-based implementations of the [`ExecutionBackend`] trait.
+//!
+//! Provides [`TokioExecutionBackend`] for real execution and [`SyncTestBackend`]
+//! for test environments.
+
 use futures::executor::block_on;
 use serde::de::DeserializeOwned;
 
@@ -6,10 +11,14 @@ use crate::error::EntityError;
 use crate::execution_backend::ExecutionBackend;
 use crate::persistent_entity::PersistentEntity;
 
+/// An [`ExecutionBackend`] that runs handler logic via `tokio::task::block_on`.
+///
+/// Suitable for use within Tokio runtimes where blocking is acceptable.
 #[derive(Debug, Default, Clone)]
 pub struct TokioExecutionBackend;
 
 impl TokioExecutionBackend {
+    /// Creates a new [`TokioExecutionBackend`].
     pub fn new() -> Self {
         Self
     }
@@ -42,6 +51,9 @@ impl ExecutionBackend for TokioExecutionBackend {
     }
 }
 
+/// A test-only [`ExecutionBackend`] that delegates to [`TokioExecutionBackend`].
+///
+/// Provides the same behavior for synchronous test contexts.
 #[derive(Debug, Default, Clone)]
 pub struct SyncTestBackend;
 

@@ -33,11 +33,12 @@ pub struct SchedulerEventSender {
 
 impl SchedulerEventSender {
     /// Sends an event to the event bus.
-    pub fn send(&self, event: SchedulerEventEnvelope) -> Result<(), SchedulerError> {
+    pub async fn send(&self, event: SchedulerEventEnvelope) -> Result<(), SchedulerError> {
         match self.drop_policy {
             DropPolicy::Block => {
                 self.inner
-                    .blocking_send(event)
+                    .send(event)
+                    .await
                     .map_err(|_| SchedulerError::EventBusFull)
             }
             DropPolicy::DropNewest => {
