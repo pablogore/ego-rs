@@ -90,10 +90,10 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 
     pub fn build(self) -> EntityRuntime<E> {
-        let event_store = self.event_store.unwrap_or_else(|| {
+        let _event_store = self.event_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemoryEventStore::new())
         });
-        let snapshot_store = self.snapshot_store.unwrap_or_else(|| {
+        let _snapshot_store = self.snapshot_store.unwrap_or_else(|| {
             Box::new(crate::testing::InMemorySnapshotStore::new())
         });
         let publisher = self.publisher.unwrap_or_else(|| {

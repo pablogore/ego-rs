@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::command_context::CommandContext;
@@ -96,6 +97,29 @@ impl TestEvent {
     /// Create a new decremented event.
     pub fn decremented(value: u64) -> Self {
         Self::Decremented(value)
+    }
+}
+
+impl DomainEvent for TestEvent {
+    fn aggregate_id(&self) -> &str {
+        "test-aggregate"
+    }
+
+    fn event_type(&self) -> &str {
+        match self {
+            TestEvent::Incremented(_) => "Incremented",
+            TestEvent::Decremented(_) => "Decremented",
+        }
+    }
+
+    fn payload(&self) -> &serde_json::Value {
+        static PAYLOAD: OnceLock<serde_json::Value> = OnceLock::new();
+        PAYLOAD.get_or_init(|| serde_json::Value::Null)
+    }
+
+    fn occurred_at(&self) -> &DateTime<Utc> {
+        static OCCURRED_AT: OnceLock<DateTime<Utc>> = OnceLock::new();
+        OCCURRED_AT.get_or_init(|| Utc::now())
     }
 }
 
