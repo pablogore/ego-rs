@@ -1,11 +1,17 @@
 use async_trait::async_trait;
-use crate::persistent_entity::{CommandResult, PersistentEntity};
+use crate::persistent_entity::PersistentEntity;
 use crate::command_context::CommandContext;
 use crate::error::EntityError;
 use crate::testing::{TestCommand, TestEvent, TestState};
 
 #[derive(Debug, Clone)]
 pub struct TestEntity;
+
+impl TestEntity {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 #[async_trait]
 impl PersistentEntity for TestEntity {
@@ -26,23 +32,40 @@ impl PersistentEntity for TestEntity {
         state: &Self::State,
         _context: &CommandContext,
     ) -> Result<Vec<Self::Event>, EntityError> {
-        match command.command_type.as_str() {
-            "Increment" => {
-                let value = state.value + command.data.parse::<u64>().unwrap();
-                let new_state = TestState {
-                    value,
-                    version: state.version + 1,
-                };
-                Ok(vec![TestEvent {
-                    event_type: "Incremented".to_string(),
-                    data: format!("incremented by {}", command.data),
-                }])
+        match command {
+            TestCommand::Increment(value) => {
+                Ok(vec![TestEvent::Incremented(*value)])
             }
-            "GetState" => {
+            TestCommand::Decrement(value) => {
+                if state.value < *value {
+                    Err(EntityError::Internal("Cannot decrement below zero".to_string()))
+                } else {
+                    Ok(vec![TestEvent::Decremented(*value)])
+                }
+            }
+            TestCommand::GetState => {
                 Ok(vec![])
             }
-            _ => panic!("Unknown command type"),
         }
+    }
+
+    async fn apply_event(
+        &self,
+        state: &Self::State,
+        event: &Self::Event,
+    ) -> Result<Self::State, EntityError> {
+        let mut new_state = state.clone();
+        match event {
+            TestEvent::Incremented(value) => {
+                new_state.value += value;
+                new_state.version += 1;
+            }
+            TestEvent::Decremented(value) => {
+                new_state.value -= value;
+                new_state.version += 1;
+            }
+        }
+        Ok(new_state)
     }
 
     async fn apply_events(
@@ -52,12 +75,22 @@ impl PersistentEntity for TestEntity {
     ) -> Result<Self::State, EntityError> {
         let mut new_state = state.clone();
         for event in events {
-            if event.event_type == "Incremented" {
-                // In a real implementation, we'd parse the data to get the increment value
-                new_state.value += 1; // Placeholder
-                new_state.version += 1;
+            match event {
+                TestEvent::Incremented(value) => {
+                    new_state.value += value;
+                    new_state.version += 1;
+                }
+                TestEvent::Decremented(value) => {
+                    new_state.value -= value;
+                    new_state.version += 1;
+                }
             }
         }
         Ok(new_state)
     }
 }
+
+
+
+// Remove the DomainEvent implementation for TestEntity since it's not an event
+// The TestEntity is a PersistentEntity, not a DomainEvent

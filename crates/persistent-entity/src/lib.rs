@@ -33,8 +33,14 @@ pub mod testing;
 pub mod test_entity;
 pub mod registry;
 pub mod scheduler;
+pub mod scheduler_event;
+pub mod scheduler_policy;
 pub mod persistence;
 pub mod publisher;
+pub mod builder;
+pub mod execution_backend;
+pub mod execution_backend_tokio;
 
 // Re-export test types for easier access in tests
 pub use testing::{TestCommand, TestEvent, TestState};
+pub use execution_backend_tokio::TokioExecutionBackend;

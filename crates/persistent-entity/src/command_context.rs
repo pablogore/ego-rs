@@ -30,3 +30,23 @@ pub struct CommandContext {
     /// Additional metadata for the command.
     pub metadata: HashMap<String, String>,
 }
+
+impl CommandContext {
+    /// Create a new command context.
+    ///
+    /// # Arguments
+    /// * `entity_type` - The type of the entity
+    ///
+    /// # Returns
+    /// * `CommandContext` - A new command context with default values
+    pub fn new(entity_type: String) -> Self {
+        Self {
+            tenant_id: None,
+            entity_type,
+            entity_id: String::new(),
+            expected_version: None,
+            causation_id: None,
+            metadata: HashMap::new(),
+        }
+    }
+}

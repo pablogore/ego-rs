@@ -36,4 +36,14 @@ impl EntityRegistry {
     pub async fn mark_passivated(&self, _entity_id: String, _version: u64) {
         // For now, we'll do nothing
     }
+
+    /// Mark an entity as active.
+    pub async fn mark_active(&self, entity_id: &str) {
+        self.active_entities.lock().await.insert(entity_id.to_string(), true);
+    }
+
+    /// Remove an entity from the active registry.
+    pub async fn remove_active(&self, entity_id: &str) {
+        self.active_entities.lock().await.remove(entity_id);
+    }
 }

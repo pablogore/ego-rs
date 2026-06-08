@@ -49,7 +49,7 @@ impl RecoveryManager {
         E: Clone + Send + Sync + 'static,
         S: Clone + Send + Sync + 'static,
     {
-        let mut state = initial_state;
+        let state = initial_state;
         let mut event_queue = VecDeque::new();
 
         // Process events in order
@@ -67,7 +67,7 @@ impl RecoveryManager {
         for _event in event_queue {
             // In a real implementation, this would call the entity's apply_events method
             // For now, we just return the state as-is
-            state = state; // Placeholder
+            // Placeholder - in a real implementation, we would process events here
         }
 
         Ok(state)

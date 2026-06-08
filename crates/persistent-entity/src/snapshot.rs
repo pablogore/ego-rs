@@ -76,3 +76,18 @@ impl SnapshotStrategy for VersionBasedSnapshotStrategy {
         Ok(version % self.version_interval == 0)
     }
 }
+
+/// A snapshot strategy that never takes snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoSnapshot;
+
+#[async_trait::async_trait]
+impl SnapshotStrategy for NoSnapshot {
+    async fn should_take_snapshot(
+        &self,
+        _version: u64,
+        _event_count: u64,
+    ) -> Result<bool, EntityError> {
+        Ok(false)
+    }
+}

@@ -3,6 +3,8 @@
 //! This module defines all the error types that can occur in the persistent entity system.
 
 
+use std::fmt;
+
 /// An error that can occur in the persistent entity system.
 #[derive(Debug)]
 pub enum EntityError {
@@ -30,3 +32,21 @@ pub enum EntityError {
         actual: u64,
     },
 }
+
+impl fmt::Display for EntityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EntityError::EntityNotFound => write!(f, "Entity not found"),
+            EntityError::EntityAlreadyActive => write!(f, "Entity already active"),
+            EntityError::EntityNotActive => write!(f, "Entity not active"),
+            EntityError::PersistenceError(msg) => write!(f, "Persistence error: {}", msg),
+            EntityError::EventPublishingError(msg) => write!(f, "Event publishing error: {}", msg),
+            EntityError::SnapshottingError(msg) => write!(f, "Snapshotting error: {}", msg),
+            EntityError::RecoveryError(msg) => write!(f, "Recovery error: {}", msg),
+            EntityError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            EntityError::VersionConflict { expected, actual } => write!(f, "Version conflict: expected {}, actual {}", expected, actual),
+        }
+    }
+}
+
+impl std::error::Error for EntityError {}

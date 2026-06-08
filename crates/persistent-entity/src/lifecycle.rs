@@ -39,17 +39,8 @@ impl LifecycleStateMachine {
     pub fn transition_to(&mut self, state: EntityState) -> Result<(), EntityError> {
         // Basic state transition validation
         match (self.current_state, state) {
-            // Any state can transition to Failed
-            (_, EntityState::Failed) => {
-                self.current_state = state;
-                Ok(())
-            }
             // From Recovering, can go to Active or Failed
             (EntityState::Recovering, EntityState::Active) => {
-                self.current_state = state;
-                Ok(())
-            }
-            (EntityState::Recovering, EntityState::Failed) => {
                 self.current_state = state;
                 Ok(())
             }
@@ -58,16 +49,8 @@ impl LifecycleStateMachine {
                 self.current_state = state;
                 Ok(())
             }
-            (EntityState::Active, EntityState::Failed) => {
-                self.current_state = state;
-                Ok(())
-            }
             // From Passivating, can go to Passivated or Failed
             (EntityState::Passivating, EntityState::Passivated) => {
-                self.current_state = state;
-                Ok(())
-            }
-            (EntityState::Passivating, EntityState::Failed) => {
                 self.current_state = state;
                 Ok(())
             }
@@ -76,7 +59,8 @@ impl LifecycleStateMachine {
                 self.current_state = state;
                 Ok(())
             }
-            (EntityState::Passivated, EntityState::Failed) => {
+            // Any state can transition to Failed
+            (_, EntityState::Failed) => {
                 self.current_state = state;
                 Ok(())
             }

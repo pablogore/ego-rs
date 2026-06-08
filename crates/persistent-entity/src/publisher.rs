@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 /// A simple event publisher trait.
 #[async_trait::async_trait]
-pub trait EventPublisher<E> {
+pub trait EventPublisher<E>: Send + Sync {
     /// Publish events.
     async fn publish(&self, events: &[E]) -> Result<(), String>;
 }
@@ -16,6 +16,7 @@ pub trait EventPublisher<E> {
 #[derive(Debug)]
 pub struct SimpleEventPublisher<E> {
     /// The published events.
+    #[allow(dead_code)]
     events: Arc<Mutex<Vec<E>>>,
 }
 
@@ -29,7 +30,7 @@ impl<E: Send> SimpleEventPublisher<E> {
 }
 
 #[async_trait::async_trait]
-impl<E: Send> EventPublisher<E> for SimpleEventPublisher<E> {
+impl<E: Send + Sync> EventPublisher<E> for SimpleEventPublisher<E> {
     /// Publish events.
     async fn publish(&self, _events: &[E]) -> Result<(), String> {
         // For now, do nothing

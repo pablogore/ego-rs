@@ -22,7 +22,7 @@ impl Supervisor {
             entity.aggregate_id(),
             error
         );
-        self.registry.remove_active(entity).await;
+        self.registry.remove_active(&entity.aggregate_id()).await;
     }
 
     pub async fn on_recovery_failure(
@@ -35,6 +35,6 @@ impl Supervisor {
             entity.aggregate_id(),
             error
         );
-        self.registry.remove_active(entity).await;
+        self.registry.remove_active(&entity.aggregate_id()).await;
     }
 }

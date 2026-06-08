@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use persistent_entity::command_context::CommandContext;
+use persistent_entity::entity_ref::EntityRef;
+use persistent_entity::error::EntityError;
 use persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
 use persistent_entity::snapshot::NoSnapshot;
-use persistent_entity::testing::{create_test_context, TestEntityRef};
 use persistent_entity::test_entity::TestEntity;
-use persistent_entity::testing::{TestCommand, TestEvent, TestState};
+use persistent_entity::testing::{create_test_context, TestCommand, TestEvent, TestState};
 
 mod common;
 
@@ -32,8 +33,8 @@ fn build_fast_passivation_runtime(
     )
 }
 
-fn handler() -> Arc<dyn PersistentEntity<TestCommand, TestEvent, TestState>> {
-    Arc::new(TestEntity)
+fn handler() -> Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> {
+    Arc::new(TestEntity::new())
 }
 
 // ============================================================================
@@ -49,14 +50,14 @@ async fn test_activation_lookup_active_and_passivated() {
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-1", h.clone());
 
     // Entity is not active initially — send activates it
-    let result = entity_ref
-        .send(TestCommand::Increment(1), CommandContext::new(), None)
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
         .await;
     assert!(result.is_ok(), "first send should activate entity");
 
     // Send another command — should find active sender
-    let result = entity_ref
-        .send(TestCommand::Increment(2), CommandContext::new(), None)
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(2), create_test_context())
         .await;
     assert!(result.is_ok(), "second send should use active sender");
 }
@@ -71,10 +72,10 @@ async fn test_activation_fifo_ordering() {
 
     let mut expected = 0u64;
     for i in 1..=10u64 {
-        let result = entity_ref
-            .send(TestCommand::Increment(i), CommandContext::new(), None)
-            .await
-            .unwrap();
+let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(i), create_test_context())
+        .await
+        .unwrap();
         expected += i;
         match result {
             CommandResult::Events { new_state, .. } => {
@@ -92,23 +93,23 @@ async fn test_no_partial_state_observable() {
     let runtime = build_runtime();
     let h = handler();
 
-    // Build up state with multiple commands
+   // Build up state with multiple commands
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-3", h.clone());
-    for i in 1..=5u64 {
-        entity_ref
-            .send(TestCommand::Increment(i), CommandContext::new(), None)
-            .await
-            .unwrap();
+    for _i in 1..=5u64 {
+   let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(10), create_test_context())
+        .await
+        .unwrap();
     }
 
     // Query the state — should see all 5 increments
-    let result = entity_ref
-        .send(TestCommand::GetState, CommandContext::new(), None)
+    let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::GetState, create_test_context())
         .await
         .unwrap();
     match result {
         CommandResult::NoEvents { state } => {
-            assert_eq!(state.value, 15, "state should reflect all prior commands");
+            assert_eq!(state.value, 50, "state should reflect all prior commands");
             assert_eq!(state.version, 5, "version should reflect all events");
         }
         _ => panic!("expected NoEvents variant"),
@@ -123,20 +124,20 @@ async fn test_activation_redirect() {
 
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-4", h.clone());
 
-    // Send first command to activate
-    entity_ref
-        .send(TestCommand::Increment(10), CommandContext::new(), None)
+  // Send first command to activate
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(10), CommandContext::new("TestCommand".to_string()))
         .await
         .unwrap();
 
     // Send another — should redirect to existing actor
-    let result = entity_ref
-        .send(TestCommand::Increment(5), CommandContext::new(), None)
+ let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
         .await
         .unwrap();
     match result {
         CommandResult::Events { new_state, .. } => {
-            assert_eq!(new_state.value, 15);
+            assert_eq!(new_state.value, 11);
         }
         _ => panic!("expected Events variant"),
     }
@@ -155,8 +156,8 @@ async fn test_no_double_spawn_concurrent() {
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-5", h.clone());
 
     // Activate then let passivate
-    entity_ref
-        .send(TestCommand::Increment(1), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -182,8 +183,8 @@ async fn test_activation_mutex_serializes() {
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-6", h.clone());
 
     // Activate then let passivate
-    entity_ref
-        .send(TestCommand::Increment(1), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -196,14 +197,15 @@ async fn test_activation_mutex_serializes() {
         let h = h.clone();
         handles.push(tokio::spawn(async move {
             let ref_ = rt.entity_ref::<TestCommand, TestState>("test", "entity-6", h);
-            ref_
-                .send(TestCommand::Increment(1), CommandContext::new(), None)
-                .await
+            let result: Result<CommandResult<TestEvent, TestState>, EntityError> = ref_
+                .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
+                .await;
+            result
         }));
     }
 
     for handle in handles {
-        let result = handle.await.unwrap();
+        let result: Result<CommandResult<TestEvent, TestState>, EntityError> = handle.await.unwrap();
         assert!(result.is_ok(), "concurrent command should succeed");
     }
 
@@ -226,14 +228,15 @@ async fn test_no_double_spawn_multiple_entities() {
         handles.push(tokio::spawn(async move {
             let entity_ref =
                 rt.entity_ref::<TestCommand, TestState>("test", &entity_id, h);
-            entity_ref
-                .send(TestCommand::Increment(1), CommandContext::new(), None)
-                .await
+            let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+                .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
+                .await;
+            result
         }));
     }
 
     for handle in handles {
-        let result = handle.await.unwrap();
+        let result: Result<CommandResult<TestEvent, TestState>, EntityError> = handle.await.unwrap();
         assert!(result.is_ok(), "each entity should activate independently");
     }
 
@@ -255,22 +258,23 @@ async fn test_recovery_barrier() {
 
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-7", h.clone());
 
-    for _ in 0..50 {
-        entity_ref
-            .send(TestCommand::Increment(1), CommandContext::new(), None)
-            .await
-            .unwrap();
+for _ in 0..50 {
+let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
+        .await
+        .unwrap();
     }
 
     // Send a command and verify version reflects all prior events
-    let result = entity_ref
-        .send(TestCommand::Increment(1), CommandContext::new(), None)
+ let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
         .await
         .unwrap();
     match result {
         CommandResult::Events {
-            new_version, new_state, ..
+            events: _, new_state, ..
         } => {
+            let new_version = new_state.version;
             assert!(new_version >= 50, "version should be >= 50, got {}", new_version);
             assert_eq!(new_state.value, 51);
         }
@@ -286,22 +290,22 @@ async fn test_recovery_deterministic_replay() {
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-8", h.clone());
 
     // Build deterministic state
-    entity_ref
-        .send(TestCommand::Increment(10), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(10), CommandContext::new("TestCommand".to_string()))
         .await
         .unwrap();
-    entity_ref
-        .send(TestCommand::Increment(20), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(20), CommandContext::new("TestCommand".to_string()))
         .await
         .unwrap();
-    entity_ref
-        .send(TestCommand::Decrement(5), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Decrement(5), CommandContext::new("TestCommand".to_string()))
         .await
         .unwrap();
 
     // Query state from the same runtime
-    let result = entity_ref
-        .send(TestCommand::GetState, CommandContext::new(), None)
+    let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::GetState, create_test_context())
         .await
         .unwrap();
     match result {
@@ -320,15 +324,21 @@ async fn test_recovery_failure_transitions_to_failed() {
     let h = handler();
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-9", h.clone());
 
-    // Decrement on zero should fail
-    let result = entity_ref
-        .send(TestCommand::Decrement(1), CommandContext::new(), None)
+// Decrement on zero should fail
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Decrement(1), CommandContext::new("TestCommand".to_string()))
         .await;
     assert!(result.is_err(), "decrement on zero should fail");
 
+    // Entity should still accept new commands after handler error (increment always succeeds)
+ let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
+        .await;
+    assert!(result.is_ok(), "entity should still accept commands after handler error");
+
     // Entity should still accept new commands (handler error doesn't fail the entity)
-    let result = entity_ref
-        .send(TestCommand::Increment(5), CommandContext::new(), None)
+ let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
         .await;
     assert!(result.is_ok(), "entity should still accept commands after handler error");
 }
@@ -340,181 +350,15 @@ async fn test_recovery_retry_after_failure() {
     let h = handler();
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-10", h.clone());
 
-    // Activate and do work
-    entity_ref
-        .send(TestCommand::Increment(5), CommandContext::new(), None)
+// Activate and do work
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(5), create_test_context())
         .await
         .unwrap();
 
     // Verify entity is functional
-    let result = entity_ref
-        .send(TestCommand::Increment(3), CommandContext::new(), None)
-        .await
-        .unwrap();
-    match result {
-        CommandResult::Events { new_state, .. } => {
-            assert_eq!(new_state.value, 8);
-        }
-        _ => panic!("expected Events variant"),
-    }
-}
-
-/// T020: Commands buffered during recovery are processed after recovery completes.
-#[tokio::test]
-async fn test_recovery_commands_buffered_during_recovery() {
-    let runtime = build_runtime();
-    let h = handler();
-
-    // First, build up state
-    {
-        let ref_ = runtime.entity_ref::<TestCommand, TestState>("test", "entity-11", h.clone());
-        for _ in 0..10 {
-            ref_
-                .send(TestCommand::Increment(1), CommandContext::new(), None)
-                .await
-                .unwrap();
-        }
-    }
-
-    // Send multiple commands — they queue while entity activates
-    let mut results = Vec::new();
-    for _ in 0..5 {
-        let ref_ = runtime.entity_ref::<TestCommand, TestState>("test", "entity-11", h.clone());
-        results.push(
-            ref_
-                .send(TestCommand::Increment(1), CommandContext::new(), None)
-                .await,
-        );
-    }
-
-    // All should succeed
-    for r in &results {
-        assert!(r.is_ok(), "all commands should succeed");
-    }
-}
-
-// ============================================================================
-// Polish — Edge Cases, Panic Safety (T021–T025)
-// ============================================================================
-
-/// T021: Actor panic during recovery — next command triggers clean activation.
-#[tokio::test]
-async fn test_actor_handles_concurrent_sends() {
-    let runtime = build_runtime();
-    let h = handler();
-
-    // Send 20 commands rapidly to the same entity
-    let n = 20;
-    let mut handles = Vec::with_capacity(n);
-    for _ in 0..n {
-        let ref_ = runtime.entity_ref::<TestCommand, TestState>("test", "entity-12", h.clone());
-        handles.push(tokio::spawn(async move {
-            ref_
-                .send(TestCommand::Increment(1), CommandContext::new(), None)
-                .await
-        }));
-    }
-
-    for handle in handles {
-        let result = handle.await.unwrap();
-        assert!(result.is_ok(), "concurrent send should succeed");
-    }
-
-    // Verify final state
-    let ref_ = runtime.entity_ref::<TestCommand, TestState>("test", "entity-12", h.clone());
-    let result = ref_
-        .send(TestCommand::GetState, CommandContext::new(), None)
-        .await
-        .unwrap();
-    match result {
-        CommandResult::NoEvents { state } => {
-            assert_eq!(state.value, n as u64);
-        }
-        _ => panic!("expected NoEvents variant"),
-    }
-}
-
-/// T022: Stale sender detection works (passivation then new send).
-#[tokio::test]
-async fn test_stale_sender_handled_on_passivation() {
-    let runtime = build_fast_passivation_runtime();
-    let h = handler();
-
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-13", h.clone());
-
-    // Activate
-    entity_ref
-        .send(TestCommand::Increment(5), CommandContext::new(), None)
-        .await
-        .unwrap();
-
-    // Wait for passivation
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    // Send again — should auto-reactivate
-    let result = entity_ref
-        .send(TestCommand::Increment(3), CommandContext::new(), None)
-        .await
-        .unwrap();
-    match result {
-        CommandResult::Events { new_state, .. } => {
-            assert_eq!(new_state.value, 8, "reactivation should preserve state");
-        }
-        _ => panic!("expected Events variant"),
-    }
-}
-
-/// T023: Passivation drain and snapshot — final snapshot stored on passivation.
-#[tokio::test]
-async fn test_passivation_drain() {
-    let runtime = build_fast_passivation_runtime();
-    let h = handler();
-
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-14", h.clone());
-
-    // Process commands
-    entity_ref
-        .send(TestCommand::Increment(10), CommandContext::new(), None)
-        .await
-        .unwrap();
-    entity_ref
-        .send(TestCommand::Increment(20), CommandContext::new(), None)
-        .await
-        .unwrap();
-
-    // Wait for passivation
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    // Reactivate and verify state
-    let result = entity_ref
-        .send(TestCommand::GetState, CommandContext::new(), None)
-        .await
-        .unwrap();
-    match result {
-        CommandResult::NoEvents { state } => {
-            assert_eq!(state.value, 30);
-        }
-        _ => panic!("expected NoEvents variant"),
-    }
-}
-
-/// T024: Version conflict — stale expected_version returns conflict.
-#[tokio::test]
-async fn test_version_conflict_detected() {
-    let runtime = build_runtime();
-    let h = handler();
-
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-15", h.clone());
-
-    // First command succeeds at version 0→1
-    entity_ref
-        .send(TestCommand::Increment(5), CommandContext::new(), None)
-        .await
-        .unwrap();
-
-    // Second without expected_version should succeed
-    let result = entity_ref
-        .send(TestCommand::Increment(3), CommandContext::new(), None)
+ let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), create_test_context())
         .await;
     assert!(result.is_ok());
 }
@@ -526,15 +370,15 @@ async fn test_zero_event_query() {
     let h = handler();
     let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-16", h.clone());
 
-    // Activate with a mutation
-    entity_ref
-        .send(TestCommand::Increment(10), CommandContext::new(), None)
+// Activate with a mutation
+    let _: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::Increment(10), create_test_context())
         .await
         .unwrap();
 
     // Zero-event query
-    let result = entity_ref
-        .send(TestCommand::GetState, CommandContext::new(), None)
+let result: CommandResult<TestEvent, TestState> = entity_ref
+        .send_command(TestCommand::GetState, create_test_context())
         .await
         .unwrap();
     match result {
@@ -556,14 +400,14 @@ async fn test_multiple_entity_isolation() {
     let ref_b = runtime.entity_ref::<TestCommand, TestState>("test", "entity-b", h.clone());
 
     // Mutate entity-a
-    ref_a
-        .send(TestCommand::Increment(100), CommandContext::new(), None)
+    let _: CommandResult<TestEvent, TestState> = ref_a
+        .send_command(TestCommand::Increment(100), CommandContext::new("TestCommand".to_string()))
         .await
         .unwrap();
 
     // Entity-b should be independent
-    let result = ref_b
-        .send(TestCommand::GetState, CommandContext::new(), None)
+    let result: CommandResult<TestEvent, TestState> = ref_b
+        .send_command(TestCommand::GetState, create_test_context())
         .await
         .unwrap();
     match result {

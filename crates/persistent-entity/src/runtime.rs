@@ -7,6 +7,7 @@ use crate::persistent_entity::PersistentEntity;
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::scheduler::{Scheduler, EntityTriple};
+use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use crate::testing::TestEntityRef;
 
@@ -37,6 +38,7 @@ pub struct EntityRuntime<E> {
     pub publisher: Arc<dyn EventPublisher<E>>,
     pub config: RuntimeConfig,
     pub snapshot_strategy: Arc<dyn SnapshotStrategy>,
+    pub event_sender: SchedulerEventSender,
     _event: PhantomData<E>,
 }
 
@@ -48,6 +50,7 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
         publisher: Arc<dyn EventPublisher<E>>,
         config: RuntimeConfig,
         snapshot_strategy: Arc<dyn SnapshotStrategy>,
+        event_sender: SchedulerEventSender,
     ) -> Self {
         EntityRuntime {
             registry,
@@ -56,6 +59,7 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
             publisher,
             config,
             snapshot_strategy,
+            event_sender,
             _event: PhantomData,
         }
     }
