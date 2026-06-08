@@ -1,22 +1,17 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 
-use crate::types::EntityTriple;
+use crate::scheduler::EntityTriple;
 
 pub trait SchedulingPolicy: Debug + Send + Sync + 'static {
-    fn select_next(
+    /// Suggest which entity should be activated next.
+    ///
+    /// This is a pure advisory recommendation. The Actor is the
+    /// sole execution authority and may ignore this suggestion.
+    fn suggest_activation(
         &self,
         pending: &HashSet<EntityTriple>,
-        budget_available: usize,
     ) -> Option<EntityTriple>;
-
-    fn should_preempt(
-        &self,
-        _new_entity: &EntityTriple,
-        _current_target: &EntityTriple,
-    ) -> bool {
-        false
-    }
 
     fn budget_size(&self) -> usize;
 
@@ -39,12 +34,11 @@ impl RoundRobinPolicy {
 }
 
 impl SchedulingPolicy for RoundRobinPolicy {
-    fn select_next(
+    fn suggest_activation(
         &self,
         pending: &HashSet<EntityTriple>,
-        budget_available: usize,
     ) -> Option<EntityTriple> {
-        if budget_available == 0 || pending.is_empty() {
+        if pending.is_empty() {
             return None;
         }
         pending.iter().next().cloned()

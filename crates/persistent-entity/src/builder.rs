@@ -7,6 +7,10 @@ use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::runtime::{EntityRuntime, RuntimeConfig};
 use crate::scheduler::Scheduler;
+use crate::scheduler_event::{
+    event_bus_channel_with_config, SchedulerEventBusConfig,
+};
+use crate::scheduler_policy::RoundRobinPolicy;
 use crate::snapshot::{SnapshotStrategy, PeriodicSnapshotStrategy};
 
 pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeOwned + Send + Sync + 'static> {
@@ -18,6 +22,7 @@ pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeO
     single_tenant_mode: bool,
     tenant_id: String,
     registry: Option<Arc<EntityRegistry>>,
+    event_bus_capacity: usize,
 }
 
 impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRuntimeBuilder<E> {
@@ -31,6 +36,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             single_tenant_mode: true,
             tenant_id: String::new(),
             registry: None,
+            event_bus_capacity: 4096,
         }
     }
 
@@ -74,6 +80,15 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         self
     }
 
+    /// Set the capacity of the bounded scheduler event bus.
+    ///
+    /// Default: 4096. Higher values reduce event loss under load spikes
+    /// at the cost of more memory. Lower values apply backpressure sooner.
+    pub fn event_bus_capacity(mut self, capacity: usize) -> Self {
+        self.event_bus_capacity = capacity;
+        self
+    }
+
     pub fn build(self) -> EntityRuntime<E> {
         let publisher = self.publisher.unwrap_or_else(|| {
             Arc::new(crate::testing::NoopPublisher::new())
@@ -91,17 +106,28 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         };
 
         let persistence = PersistenceFacade::new();
-        
+
         // Use the provided registry or create a new one
         let registry = self.registry.unwrap_or_else(|| Arc::new(EntityRegistry::new()));
 
+        // Create the bounded scheduler feedback event bus
+        let bus_config = SchedulerEventBusConfig {
+            capacity: self.event_bus_capacity,
+        };
+        let (event_sender, event_receiver) = event_bus_channel_with_config(bus_config);
+
         EntityRuntime::new(
             registry.clone(),
-            Arc::new(Scheduler::new(registry.clone())),
+            Arc::new(Scheduler::new(
+                registry.clone(),
+                Arc::new(RoundRobinPolicy::new(100, 10)),
+                event_receiver,
+            )),
             Arc::new(persistence),
             publisher,
             config,
             snapshot_strategy,
+            event_sender,
         )
     }
 }

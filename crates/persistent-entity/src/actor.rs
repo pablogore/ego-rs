@@ -10,6 +10,7 @@ use crate::persistent_entity::PersistentEntity;
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::scheduler::EntityTriple;
+use crate::scheduler_event::{SchedulerEvent, SchedulerEventSender};
 use crate::snapshot::SnapshotStrategy;
 use crate::command_envelope::CommandEnvelope;
 use tracing::info;
@@ -25,6 +26,7 @@ pub struct EntityActor<C, E: DomainEvent, S> {
     pub publisher: Arc<dyn EventPublisher<E>>,
     pub snapshot_strategy: Arc<dyn SnapshotStrategy>,
     pub entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
+    pub event_sender: SchedulerEventSender,
     pub _phantom: PhantomData<(C, S)>,
 }
 
@@ -74,9 +76,14 @@ where
                     version += stored_events.len() as u64;
                 }
 
-                self.state = Some(state);
+                self.state = Some(state.clone());
                 self.version = version;
                 let _ = self.lifecycle.transition_to(EntityState::Active);
+
+                self.event_sender.emit(SchedulerEvent::RecoveryCompleted {
+                    entity: self.entity_id.clone(),
+                    state_version: version,
+                });
             }
             Err(e) => {
                 let _ = self.lifecycle.transition_to(EntityState::Failed);
@@ -163,6 +170,16 @@ where
                         }
                         self.state = Some(state.clone());
                         self.version = new_version;
+
+                        self.event_sender.emit(SchedulerEvent::ExecutionCompleted {
+                            entity: self.entity_id.clone(),
+                            state_version: new_version,
+                        });
+
+                        self.event_sender.emit(SchedulerEvent::EntityStateUpdated {
+                            entity: self.entity_id.clone(),
+                            state_version: new_version,
+                        });
 
                         // Check if we should take a snapshot
                         let should_snapshot = self.snapshot_strategy.should_take_snapshot(new_version, events.len() as u64).await.unwrap_or(false);
