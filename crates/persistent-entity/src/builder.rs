@@ -10,7 +10,7 @@ use crate::runtime::{EntityRuntime, RuntimeConfig};
 use crate::scheduler::Scheduler;
 use crate::snapshot::{SnapshotStrategy, PeriodicSnapshotStrategy};
 
-pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> {
+pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeOwned + Send + Sync + 'static> {
     mailbox_capacity: usize,
     concurrency_budget: usize,
     passivation_timeout: std::time::Duration,
