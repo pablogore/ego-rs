@@ -1,53 +1,83 @@
-use tokio::sync::{mpsc, oneshot};
+//! Bounded FIFO mailbox for command queuing.
+//!
+//! This module implements a bounded FIFO mailbox for queuing commands to entities.
 
-use crate::command_context::CommandContext;
 use crate::error::EntityError;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Notify};
 
-pub struct CommandEnvelope<C> {
-    pub command: C,
-    pub ctx: CommandContext,
-    pub response_tx: oneshot::Sender<Result<CommandErasedResult, EntityError>>,
-    pub expected_version: Option<u64>,
-}
-
-/// Type-erased return value from command execution.
-pub type CommandErasedResult = Box<dyn std::any::Any + Send>;
-
-pub struct Mailbox<C> {
-    sender: mpsc::Sender<CommandEnvelope<C>>,
+/// A bounded FIFO mailbox for commands.
+#[derive(Debug, Clone)]
+pub struct BoundedMailbox<T> {
+    /// The underlying queue.
+    queue: Arc<Mutex<Vec<T>>>,
+    /// The maximum capacity of the mailbox.
     capacity: usize,
+    /// A notification for when the mailbox is not full.
+    not_full: Arc<Notify>,
+    /// A notification for when the mailbox is not empty.
+    not_empty: Arc<Notify>,
 }
 
-impl<C> Mailbox<C> {
-    pub fn new(capacity: usize) -> (Self, mpsc::Receiver<CommandEnvelope<C>>) {
-        let (tx, rx) = mpsc::channel(capacity);
-        (Mailbox { sender: tx, capacity }, rx)
+impl<T> BoundedMailbox<T> {
+    /// Create a new bounded mailbox.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            capacity,
+            not_full: Arc::new(Notify::new()),
+            not_empty: Arc::new(Notify::new()),
+        }
     }
 
-    pub fn try_send(
-        &self,
-        envelope: CommandEnvelope<C>,
-    ) -> Result<(), TrySendError<C>> {
-        self.sender.try_send(envelope).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(envelope) => TrySendError::Full(envelope),
-            mpsc::error::TrySendError::Closed(envelope) => TrySendError::Closed(envelope),
-        })
+    /// Send a command to the mailbox.
+    pub async fn send(&self, command: T) -> Result<(), EntityError> {
+        loop {
+            {
+                let mut queue = self.queue.lock().await;
+                if queue.len() < self.capacity {
+                    queue.push(command);
+                    self.not_empty.notify_waiters();
+                    return Ok(());
+                }
+            }
+            // Wait until the mailbox is not full
+            self.not_full.notified().await;
+        }
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.sender.is_closed()
+    /// Receive a command from the mailbox.
+    pub async fn recv(&self) -> Result<T, EntityError> {
+        loop {
+            {
+                let mut queue = self.queue.lock().await;
+                if let Some(command) = queue.pop() {
+                    self.not_full.notify_waiters();
+                    return Ok(command);
+                }
+            }
+            // Wait until the mailbox is not empty
+            self.not_empty.notified().await;
+        }
     }
 
-    pub fn sender(&self) -> mpsc::Sender<CommandEnvelope<C>> {
-        self.sender.clone()
+    /// Check if the mailbox is empty.
+    pub async fn is_empty(&self) -> bool {
+        self.queue.lock().await.is_empty()
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity
+    /// Check if the mailbox is full.
+    pub async fn is_full(&self) -> bool {
+        self.queue.lock().await.len() >= self.capacity
     }
-}
 
-pub enum TrySendError<C> {
-    Full(CommandEnvelope<C>),
-    Closed(CommandEnvelope<C>),
+    /// Get the current size of the mailbox.
+    pub async fn len(&self) -> usize {
+        self.queue.lock().await.len()
+    }
+
+    /// Check if the mailbox is empty.
+    pub async fn is_empty_check(&self) -> bool {
+        self.queue.lock().await.is_empty()
+    }
 }

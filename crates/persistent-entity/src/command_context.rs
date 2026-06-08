@@ -1,63 +1,32 @@
-use ego_domain::context::{CorrelationId, CausationId, Metadata, RequestId};
+//! Command context information available during command processing.
+//!
+//! This module provides context information that is available during command processing,
+//! including metadata about the command execution environment.
+
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+/// Context information available during command processing.
+///
+/// This struct contains metadata about the command execution environment,
+/// including tenant information, version information, and other relevant data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandContext {
-    correlation_id: Option<CorrelationId>,
-    causation_id: Option<CausationId>,
-    request_id: Option<RequestId>,
-    metadata: Metadata,
-}
+    /// The tenant identifier for the command.
+    pub tenant_id: Option<String>,
 
-impl CommandContext {
-    pub fn new() -> Self {
-        CommandContext {
-            correlation_id: None,
-            causation_id: None,
-            request_id: None,
-            metadata: HashMap::new(),
-        }
-    }
+    /// The entity type identifier.
+    pub entity_type: String,
 
-    pub fn with_correlation_id(mut self, id: CorrelationId) -> Self {
-        self.correlation_id = Some(id);
-        self
-    }
+    /// The entity identifier.
+    pub entity_id: String,
 
-    pub fn with_causation_id(mut self, id: CausationId) -> Self {
-        self.causation_id = Some(id);
-        self
-    }
+    /// The expected version for optimistic concurrency control.
+    pub expected_version: Option<u64>,
 
-    pub fn with_request_id(mut self, id: RequestId) -> Self {
-        self.request_id = Some(id);
-        self
-    }
+    /// The causation identifier for the command.
+    pub causation_id: Option<String>,
 
-    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
-        self.metadata = metadata;
-        self
-    }
-
-    pub fn correlation_id(&self) -> Option<&CorrelationId> {
-        self.correlation_id.as_ref()
-    }
-
-    pub fn causation_id(&self) -> Option<&CausationId> {
-        self.causation_id.as_ref()
-    }
-
-    pub fn request_id(&self) -> Option<&RequestId> {
-        self.request_id.as_ref()
-    }
-
-    pub fn metadata(&self) -> &Metadata {
-        &self.metadata
-    }
-}
-
-impl Default for CommandContext {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Additional metadata for the command.
+    pub metadata: HashMap<String, String>,
 }

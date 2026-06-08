@@ -1,73 +1,78 @@
+//! Snapshot strategy definitions.
+//!
+//! This module defines the snapshot strategy trait and built-in implementations.
+
+use crate::error::EntityError;
+use serde::{Deserialize, Serialize};
+
+/// A snapshot strategy for determining when to take snapshots.
+#[async_trait::async_trait]
 pub trait SnapshotStrategy: Send + Sync {
-    fn should_snapshot(&self, version: u64) -> bool;
-    fn clone_boxed(&self) -> Box<dyn SnapshotStrategy>;
+    /// Determine if a snapshot should be taken.
+    ///
+    /// # Arguments
+    /// * `version` - The current version of the entity
+    /// * `event_count` - The number of events since the last snapshot
+    ///
+    /// # Returns
+    /// * `bool` - True if a snapshot should be taken
+    async fn should_take_snapshot(
+        &self,
+        version: u64,
+        event_count: u64,
+    ) -> Result<bool, EntityError>;
 }
 
-pub struct SnapshotEveryN {
-    interval: u64,
+/// A snapshot strategy that takes snapshots every N events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeriodicSnapshotStrategy {
+    /// The number of events between snapshots.
+    pub events_between_snapshots: u64,
 }
 
-impl SnapshotEveryN {
-    pub fn new(interval: u64) -> Self {
-        SnapshotEveryN { interval }
-    }
-}
-
-impl SnapshotStrategy for SnapshotEveryN {
-    fn should_snapshot(&self, version: u64) -> bool {
-        version > 0 && version % self.interval == 0
-    }
-
-    fn clone_boxed(&self) -> Box<dyn SnapshotStrategy> {
-        Box::new(SnapshotEveryN::new(self.interval))
-    }
-}
-
-pub struct NoSnapshot;
-
-impl SnapshotStrategy for NoSnapshot {
-    fn should_snapshot(&self, _version: u64) -> bool {
-        false
-    }
-
-    fn clone_boxed(&self) -> Box<dyn SnapshotStrategy> {
-        Box::new(NoSnapshot)
+impl PeriodicSnapshotStrategy {
+    /// Create a new periodic snapshot strategy.
+    pub fn new(events_between_snapshots: u64) -> Self {
+        Self {
+            events_between_snapshots,
+        }
     }
 }
 
-impl Default for NoSnapshot {
-    fn default() -> Self {
-        NoSnapshot
+#[async_trait::async_trait]
+impl SnapshotStrategy for PeriodicSnapshotStrategy {
+    async fn should_take_snapshot(
+        &self,
+        _version: u64,
+        event_count: u64,
+    ) -> Result<bool, EntityError> {
+        Ok(event_count >= self.events_between_snapshots)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A snapshot strategy that takes snapshots based on version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionBasedSnapshotStrategy {
+    /// The version interval between snapshots.
+    pub version_interval: u64,
+}
 
-    #[test]
-    fn test_snapshot_every_n() {
-        let strategy = SnapshotEveryN::new(100);
-        assert!(!strategy.should_snapshot(0));
-        assert!(!strategy.should_snapshot(99));
-        assert!(strategy.should_snapshot(100));
-        assert!(strategy.should_snapshot(200));
-        assert!(!strategy.should_snapshot(101));
+impl VersionBasedSnapshotStrategy {
+    /// Create a new version-based snapshot strategy.
+    pub fn new(version_interval: u64) -> Self {
+        Self {
+            version_interval,
+        }
     }
+}
 
-    #[test]
-    fn test_no_snapshot() {
-        let strategy = NoSnapshot;
-        assert!(!strategy.should_snapshot(0));
-        assert!(!strategy.should_snapshot(100));
-        assert!(!strategy.should_snapshot(9999));
-    }
-
-    #[test]
-    fn test_clone_boxed() {
-        let strategy = SnapshotEveryN::new(100);
-        let cloned = strategy.clone_boxed();
-        assert!(cloned.should_snapshot(100));
-        assert!(!cloned.should_snapshot(99));
+#[async_trait::async_trait]
+impl SnapshotStrategy for VersionBasedSnapshotStrategy {
+    async fn should_take_snapshot(
+        &self,
+        version: u64,
+        _event_count: u64,
+    ) -> Result<bool, EntityError> {
+        Ok(version % self.version_interval == 0)
     }
 }

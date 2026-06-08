@@ -1,44 +1,32 @@
-use ego_domain::persistence::PersistenceError;
+//! Error types for the persistent entity system.
+//!
+//! This module defines all the error types that can occur in the persistent entity system.
 
-#[derive(Debug, thiserror::Error)]
+
+/// An error that can occur in the persistent entity system.
+#[derive(Debug)]
 pub enum EntityError {
-    #[error("entity not found: {0}")]
-    EntityNotFound(String),
-
-    #[error("version conflict: expected {expected}, current {current}")]
-    VersionConflict { expected: u64, current: u64 },
-
-    #[error("entity is passivating, retry later")]
-    EntityPassivating,
-
-    #[error("mailbox at capacity ({0})")]
-    MailboxFull(usize),
-
-    #[error("handler error: {0}")]
-    Handler(String),
-
-    #[error("runtime error: {0}")]
-    Runtime(String),
-}
-
-impl From<PersistenceError> for EntityError {
-    fn from(err: PersistenceError) -> Self {
-        match err {
-            PersistenceError::Conflict { .. } => {
-                EntityError::VersionConflict {
-                    expected: 0,
-                    current: 0,
-                }
-            }
-            PersistenceError::NotFound { .. } => {
-                EntityError::Runtime(err.to_string())
-            }
-            PersistenceError::MissingTenant => {
-                EntityError::Runtime("missing tenant".into())
-            }
-            PersistenceError::Internal(msg) => {
-                EntityError::Runtime(msg)
-            }
-        }
-    }
+    /// An entity was not found.
+    EntityNotFound,
+    /// An entity is already active.
+    EntityAlreadyActive,
+    /// An entity is not active.
+    EntityNotActive,
+    /// An error occurred during persistence.
+    PersistenceError(String),
+    /// An error occurred during event publishing.
+    EventPublishingError(String),
+    /// An error occurred during snapshotting.
+    SnapshottingError(String),
+    /// An error occurred during recovery.
+    RecoveryError(String),
+    /// An internal error occurred.
+    Internal(String),
+    /// A version conflict occurred.
+    VersionConflict {
+        /// The expected version.
+        expected: u64,
+        /// The actual version.
+        actual: u64,
+    },
 }

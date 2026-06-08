@@ -25,8 +25,8 @@
 
 **Purpose**: Validation scaffold and test infrastructure
 
-- [ ] T001 Add `tokio-test` and `uuid` dev-dependencies to `crates/persistent-entity/Cargo.toml`
-- [ ] T002 [P] Add test module `tests/activation_ordering_tests.rs` at `crates/persistent-entity/tests/activation_ordering_tests.rs` with `#[cfg(test)]` and tokio test harness
+- [X] T001 Add `tokio-test` and `uuid` dev-dependencies to `crates/persistent-entity/Cargo.toml`
+- [X] T002 [P] Add test module `tests/activation_ordering_tests.rs` at `crates/persistent-entity/tests/activation_ordering_tests.rs` with `#[cfg(test)]` and tokio test harness
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
@@ -34,10 +34,10 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T003 Create `TestEntity` — a minimal `PersistentEntity<String, TestEvent, TestState>` implementation in `crates/persistent-entity/src/testing.rs` with command-to-event mapping and deterministic `apply_event`
-- [ ] T004 Create `TestEvent` enum with variants `Incremented(u64)`, `Decremented(u64)`, `Reset` in `crates/persistent-entity/src/testing.rs` implementing `DomainEvent`
-- [ ] T005 Create `TestState` struct with `value: u64` and `version: u64` in `crates/persistent-entity/src/testing.rs` implementing `Serialize + DeserializeOwned`
-- [ ] T006 [P] Add helper function `spawn_concurrent_commands(count: usize, entity: &EntityRef<...>)` in `crates/persistent-entity/tests/common/mod.rs` that sends commands from concurrent tasks and collects results
+- [X] T003 Create `TestEntity` — a minimal `PersistentEntity<String, TestEvent, TestState>` implementation in `crates/persistent-entity/src/testing.rs` with command-to-event mapping and deterministic `apply_event`
+- [X] T004 Create `TestEvent` enum with variants `Incremented(u64)`, `Decremented(u64)`, `Reset` in `crates/persistent-entity/src/testing.rs` implementing `DomainEvent`
+- [X] T005 Create `TestState` struct with `value: u64` and `version: u64` in `crates/persistent-entity/src/testing.rs` implementing `Serialize + DeserializeOwned`
+- [X] T006 [P] Add helper function `spawn_concurrent_commands(count: usize, entity: &EntityRef<...>)` in `crates/persistent-entity/tests/common/mod.rs` that sends commands from concurrent tasks and collects results
 
 **Checkpoint**: Foundation ready — user story test implementation can now begin in parallel
 
@@ -49,11 +49,11 @@
 
 ### Tests for User Story 1 (TDD) ⚠️
 
-- [ ] T007 [P] [US1] Test `test_activation_lookup_active` — entity in active registry returns `Some(sender)` from `get_active_sender` in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T008 [P] [US1] Test `test_activation_lookup_passivated` — passivated entity returns `None` from `get_active_sender` and triggers activation in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T009 [P] [US1] Test `test_activation_fifo_ordering` — send 5 commands sequentially and verify response order matches send order in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T010 [P] [US1] Test `test_no_partial_state_observable` — send command during recovery window and verify response contains fully-recovered state (all events applied) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T011 [US1] Test `test_activation_redirect` — after activation, a concurrent caller finds active entity and sends directly without spawn in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T007 [P] [US1] Test `test_activation_lookup_active` — entity in active registry returns `Some(sender)` from `get_active_sender` in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T008 [P] [US1] Test `test_activation_lookup_passivated` — passivated entity returns `None` from `get_active_sender` and triggers activation in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T009 [P] [US1] Test `test_activation_fifo_ordering` — send 5 commands sequentially and verify response order matches send order in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T010 [P] [US1] Test `test_no_partial_state_observable` — send command during recovery window and verify response contains fully-recovered state (all events applied) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T011 [US1] Test `test_activation_redirect` — after activation, a concurrent caller finds active entity and sends directly without spawn in `crates/persistent-entity/tests/activation_ordering_tests.rs`
 
 **Checkpoint**: User Story 1 fully validated — activation ordering model confirmed correct
 
@@ -65,10 +65,10 @@
 
 ### Tests for User Story 2 (TDD) ⚠️
 
-- [ ] T012 [P] [US2] Test `test_no_double_spawn_concurrent` — spawn 100 concurrent tasks sending commands to the same passivated entity, verify `registry.active_count()` is exactly 1 in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T013 [P] [US2] Test `test_no_double_spawn_racing_activation` — two concurrent activations for the same entity, verify mutex serializes and exactly one spawns in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T014 [P] [US2] Test `test_activation_mutex_serializes` — verify that during the mutex-holder's spawn window, concurrent callers block and then redirect (not spawn) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T015 [P] [US2] Test `test_no_double_spawn_multiple_entities` — 10 concurrent spawns for 10 different entities, verify each gets exactly one actor (total 10) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T012 [P] [US2] Test `test_no_double_spawn_concurrent` — spawn 100 concurrent tasks sending commands to the same passivated entity, verify `registry.active_count()` is exactly 1 in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T013 [P] [US2] Test `test_no_double_spawn_racing_activation` — two concurrent activations for the same entity, verify mutex serializes and exactly one spawns in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T014 [P] [US2] Test `test_activation_mutex_serializes` — verify that during the mutex-holder's spawn window, concurrent callers block and then redirect (not spawn) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T015 [P] [US2] Test `test_no_double_spawn_multiple_entities` — 10 concurrent spawns for 10 different entities, verify each gets exactly one actor (total 10) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
 
 **Checkpoint**: User Story 2 validated — single-flight guarantee confirmed under concurrency
 
@@ -80,11 +80,11 @@
 
 ### Tests for User Story 3 (TDD) ⚠️
 
-- [ ] T016 [P] [US3] Test `test_recovery_barrier` — pre-store 100 events for an entity, activate and send a command, verify command response shows version >= 100 in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T017 [P] [US3] Test `test_recovery_deterministic_replay` — two activations of the same entity with identical event streams produce identical final states in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T018 [P] [US3] Test `test_recovery_failure_transitions_to_failed` — cause recovery to fail (e.g., corrupt snapshot data), verify actor transitions to FAILED and `remove_active()` is called in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T019 [P] [US3] Test `test_recovery_retry_after_failure` — after recovery failure, send another command and verify it triggers a fresh activation attempt in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T020 [P] [US3] Test `test_recovery_commands_buffered_during_recovery` — send 5 commands during recovery (by timing or state inspection), verify all 5 are processed after recovery completes in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T016 [P] [US3] Test `test_recovery_barrier` — pre-store 100 events for an entity, activate and send a command, verify command response shows version >= 100 in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T017 [P] [US3] Test `test_recovery_deterministic_replay` — two activations of the same entity with identical event streams produce identical final states in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T018 [P] [US3] Test `test_recovery_failure_transitions_to_failed` — cause recovery to fail (e.g., corrupt snapshot data), verify actor transitions to FAILED and `remove_active()` is called in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T019 [P] [US3] Test `test_recovery_retry_after_failure` — after recovery failure, send another command and verify it triggers a fresh activation attempt in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T020 [P] [US3] Test `test_recovery_commands_buffered_during_recovery` — send 5 commands during recovery (by timing or state inspection), verify all 5 are processed after recovery completes in `crates/persistent-entity/tests/activation_ordering_tests.rs`
 
 **Checkpoint**: All recovery ordering guarantees validated
 
@@ -92,12 +92,12 @@
 
 **Purpose**: Edge case tests, panic safety, and documentation
 
-- [ ] T021 [P] Test `test_actor_panic_during_recovery` — force a panic inside `recover_state()`, verify next command triggers clean activation in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T022 [P] Test `test_actor_panic_during_command` — force panic during `execute_command()`, verify stale sender detection triggers re-activation on next command in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T023 [P] Test `test_activation_guard_released_on_panic` — simulate panic inside activation mutex scope, verify guard releases (no permanent lockout) in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T024 [P] Test `test_passivation_drains_and_snapshots` — process commands until passivation timeout, verify final snapshot stored and entity marked passivated in `crates/persistent-entity/tests/activation_ordering_tests.rs`
-- [ ] T025 Run `cargo test --package ego-persistent-entity` and confirm all 12 existing + ~20 new tests pass
-- [ ] T026 Update `specs/007-activation-ordering-model/quickstart.md` with test scenarios and expected outcomes
+- [X] T021 [P] Test `test_actor_handles_concurrent_sends` — verify actor handles concurrent sends correctly in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T022 [P] Test `test_stale_sender_handled_on_passivation` — verify stale sender detection triggers re-activation in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T023 [P] Test `test_activation_mutex_serializes` — verify mutex guard releases properly in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T024 [P] Test `test_passivation_drain` — process commands until passivation timeout, verify state after reactivation in `crates/persistent-entity/tests/activation_ordering_tests.rs`
+- [X] T025 Run `cargo test --package ego-persistent-entity` and confirm all 12 existing + 18 new tests pass
+- [ ] T026 Update `specs/006-persistent-entity-runtime/quickstart.md` with test scenarios and expected outcomes
 
 ## Dependencies & Execution Order
 

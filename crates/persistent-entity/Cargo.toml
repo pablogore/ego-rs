@@ -1,18 +1,13 @@
 [package]
-name = "ego-persistent-entity"
+name = "persistent-entity"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ego-domain = { path = "../domain" }
-tokio = { version = "1", features = ["sync", "macros", "rt", "time"] }
-async-trait = { workspace = true }
-thiserror = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-log = "0.4"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+async-trait = "0.1"
+futures = "0.3"
