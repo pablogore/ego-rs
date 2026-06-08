@@ -1,19 +1,20 @@
 //! Gap detection and handling.
 
-use crate::event::SchedulerEventEnvelope;
 
 /// Represents a detected gap in sequence IDs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Gap {
+pub struct GapInfo {
     /// The start of the gap.
-    pub start: u64,
+    pub start_seq: u64,
     /// The end of the gap.
-    pub end: u64,
+    pub end_seq: u64,
+    /// The actor that caused the gap.
+    pub source_actor: crate::types::EntityTriple,
 }
 
-impl Gap {
+impl GapInfo {
     /// Creates a new gap.
-    pub fn new(start: u64, end: u64) -> Self {
-        Self { start, end }
+    pub fn new(start_seq: u64, end_seq: u64, source_actor: crate::types::EntityTriple) -> Self {
+        Self { start_seq, end_seq, source_actor }
     }
 }

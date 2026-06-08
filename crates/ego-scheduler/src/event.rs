@@ -1,6 +1,7 @@
 //! Scheduler events and related types.
 
 use crate::types::EntityTriple;
+use sha2::{Sha256, Digest};
 
 /// Events that the scheduler consumes from CORE-006.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,11 +67,22 @@ impl SchedulerEventEnvelope {
         source_actor: EntityTriple,
         sequence_id: u64,
     ) -> Self {
-        // In a real implementation, this would compute a SHA-256 hash of the payload
-        // For now, we'll use a placeholder
+        // Create canonical representation of the payload for hashing
+        let canonical_payload = match &payload {
+            SchedulerEvent::ExecutionCompleted { entity, state_version } => {
+                format!("ExecutionCompleted:{}:{}:{}:{}", entity.tenant, entity.entity_type, entity.entity_id, state_version)
+            },
+            SchedulerEvent::RecoveryCompleted { entity, state_version } => {
+                format!("RecoveryCompleted:{}:{}:{}:{}", entity.tenant, entity.entity_type, entity.entity_id, state_version)
+            },
+        };
+        
+        // Compute SHA-256 hash of canonical payload
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_payload.as_bytes());
+        let result = hasher.finalize();
         let mut event_id = [0u8; 32];
-        event_id[0] = sequence_id as u8;
-        event_id[1] = source_actor.tenant.as_bytes()[0].wrapping_add(source_actor.entity_type.as_bytes()[0]);
+        event_id.copy_from_slice(&result[..32]);
         
         Self {
             event_id,
