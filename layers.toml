@@ -15,3 +15,4 @@
 "runtime-slice" = "domain"
 "ego-runtime" = "foundation"
 "ego-runtime-tokio" = "infrastructure"
+"ego-scheduler" = "foundation"
