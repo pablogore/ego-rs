@@ -1,6 +1,6 @@
 # Implementation Plan: Activation Ordering Model for Persistent Entity Runtime
 
-**Branch**: `007-activation-ordering-model` | **Date**: 2026-06-07 | **Spec**: [spec.md](./spec.md)
+**Branch**: `007-activation-ordering-model` | **Date**: 2026-06-07 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/007-activation-ordering-model/spec.md`
 

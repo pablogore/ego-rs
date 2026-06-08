@@ -1,7 +1,7 @@
 # Data Model: Activation Ordering
 
 **Date**: 2026-06-07  
-**Source**: [spec.md](./spec.md), [registry-visibility-semantics.md](./registry-visibility-semantics.md)
+**Source**: [spec.md](spec.md), [registry-visibility-semantics.md](registry-visibility-semantics.md)
 
 ## Entity: `EntityTriple`
 
