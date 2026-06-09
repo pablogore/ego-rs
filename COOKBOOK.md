@@ -430,24 +430,24 @@ pub trait EntityRef: Clone + Send + Sync + Debug {
 
 ```mermaid
 sequenceDiagram
-    participant Caller as Caller
-    participant Ref as EntityRef
-    participant Actor as EntityActor
-    participant Store as Event Store
-    
-    Caller->>Ref: send_command(cmd, ctx)
-    Ref->>Actor: recover_state()
-    Actor->>Store: load_snapshot()
-    Actor->>Store: replay_events()
-    Actor-->>Ref: state ready
-    
-    Ref->>Actor: handle_command(cmd, state, ctx)
-    Actor->>Actor: validate, produce events
-    Actor->>Store: persist_events(events)
-    Actor->>Actor: apply_events(state, events)
-    Actor->>Actor: maybe_snapshot()
-    Actor-->>Ref: return result
-    Ref-->>Caller: Result<T, EntityError>
+    participant C as Caller
+    participant R as EntityRef
+    participant A as EntityActor
+    participant S as EventStore
+
+    C->>R: send_command(cmd, ctx)
+    R->>A: recover_state()
+    A->>S: load_snapshot()
+    A->>S: replay_events()
+    A-->>R: state ready
+
+    R->>A: handle_command(cmd, state, ctx)
+    A->>A: validate, produce events
+    A->>S: persist_events(events)
+    A->>A: apply_events(state, events)
+    A->>A: maybe_snapshot()
+    A-->>R: return result
+    R-->>C: Result&lt;T, EntityError&gt;
 ```
 
 ### Testing Support
