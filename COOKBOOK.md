@@ -447,7 +447,7 @@ sequenceDiagram
     A->>A: apply_events(state, events)
     A->>A: maybe_snapshot()
     A-->>R: return result
-    R-->>C: Result&lt;T, EntityError&gt;
+    R-->>C: return Result
 ```
 
 ### Testing Support
