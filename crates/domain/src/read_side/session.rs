@@ -78,9 +78,15 @@ where
     ///
     /// Returns the new offset after the batch, or an error.
     /// Returns `Ok(None)` if no events were available.
-    pub async fn execute(&self, last_offset: Option<&Offset>) -> Result<Option<Offset>, ProjectionError> {
+    pub async fn execute(
+        &self,
+        last_offset: Option<&Offset>,
+    ) -> Result<Option<Offset>, ProjectionError> {
         // Phase 1: Fetch events
-        let events = self.read_store.fetch(&self.tag, last_offset, self.config.batch_size).await
+        let events = self
+            .read_store
+            .fetch(&self.tag, last_offset, self.config.batch_size)
+            .await
             .map_err(|e| ProjectionError::transient(format!("fetch failed: {}", e)))?;
 
         if events.is_empty() {
@@ -90,7 +96,8 @@ where
         // Phase 2: Filter duplicates
         let mut unique_events = Vec::new();
         for event in &events {
-            let is_duplicate = self.dedup_store
+            let is_duplicate = self
+                .dedup_store
                 .seen(&self.projection_id, &self.tag, event.event_id())
                 .await
                 .map_err(|e| ProjectionError::transient(format!("dedup check failed: {}", e)))?;
@@ -117,22 +124,32 @@ where
                     self.dedup_store
                         .mark_seen(&self.projection_id, &self.tag, event.event_id())
                         .await
-                        .map_err(|e| ProjectionError::transient(format!("mark dedup failed: {}", e)))?;
+                        .map_err(|e| {
+                            ProjectionError::transient(format!("mark dedup failed: {}", e))
+                        })?;
                 }
 
                 // Write offset
                 self.offset_store
                     .write_offset(&self.projection_id, &self.tag, &self.tenant, &new_offset)
                     .await
-                    .map_err(|e| ProjectionError::transient(format!("write offset failed: {}", e)))?;
+                    .map_err(|e| {
+                        ProjectionError::transient(format!("write offset failed: {}", e))
+                    })?;
 
                 // Report progress
-                self.reporter.on_batch_completed(&self.projection_id, &self.tag, unique_events.len(), &new_offset);
+                self.reporter.on_batch_completed(
+                    &self.projection_id,
+                    &self.tag,
+                    unique_events.len(),
+                    &new_offset,
+                );
 
                 Ok(Some(new_offset))
             }
             Err(err) => {
-                self.reporter.on_error(&self.projection_id, &format!("{}", err));
+                self.reporter
+                    .on_error(&self.projection_id, &format!("{}", err));
                 Err(err)
             }
         }

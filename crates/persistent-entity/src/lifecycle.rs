@@ -65,12 +65,10 @@ impl LifecycleStateMachine {
                 Ok(())
             }
             // No other transitions are allowed
-            _ => Err(EntityError::Internal(
-                format!(
-                    "Invalid state transition from {:?} to {:?}",
-                    self.current_state, state
-                ),
-            )),
+            _ => Err(EntityError::Internal(format!(
+                "Invalid state transition from {:?} to {:?}",
+                self.current_state, state
+            ))),
         }
     }
 

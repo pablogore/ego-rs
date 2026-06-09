@@ -40,12 +40,7 @@ pub trait ProgressReporter: Send + Sync {
     }
 
     /// Called on every state change.
-    fn on_state_transition(
-        &self,
-        projection_id: &str,
-        from: ProjectionState,
-        to: ProjectionState,
-    ) {
+    fn on_state_transition(&self, projection_id: &str, from: ProjectionState, to: ProjectionState) {
         let _ = (projection_id, from, to);
     }
 }

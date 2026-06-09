@@ -6,8 +6,8 @@ use super::event_tag::EventTag;
 use super::handler::Handler;
 use super::offset::OffsetStore;
 use super::progress::ProgressReporter;
-use super::store::ReadSideStore;
 use super::session::ReadSideSession;
+use super::store::ReadSideStore;
 
 /// Orchestrates read-side projections.
 ///

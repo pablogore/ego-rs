@@ -27,9 +27,9 @@
 //! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
-//! 
+//!
 //! ## Modules
-//! 
+//!
 //! | Module | Purpose |
 //! |--------|---------|
 //! | `command` | `Command` marker trait for mutating operations |
@@ -77,12 +77,12 @@ pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use context::{
     AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
-   CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
+    CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
     Metadata, RequestId, RequestIdError, TenantId, TenantIdError,
 };
-pub use envelope::ExecutionEnvelope;
 pub use effect::{Effect, ExternalEffectDescription, HandlerResult};
-pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
+pub use envelope::ExecutionEnvelope;
 pub use event::DomainEvent;
+pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;

@@ -49,7 +49,7 @@ mod tests {
         let command = TestCommand {
             name: "test".to_string(),
         };
-        
+
         // The fact that this compiles means the trait is properly implemented
         // We can't really test the trait itself since it's just a marker trait
         assert_eq!(command.name, "test");
@@ -67,7 +67,7 @@ mod tests {
         let command = TestCommand {
             name: "test".to_string(),
         };
-        
+
         process_command(&command);
     }
 }

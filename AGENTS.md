@@ -26,5 +26,5 @@ Execution behavior for coding agents operating in this repository. Focused on op
 <!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
 
 <!-- SPECKIT START -->
-<!-- Feature: 007-reactive-scheduler-projection | Plan: specs/007-reactive-scheduler-projection/plan.md -->
+<!-- Feature: 008-service-sdk | Plan: specs/008-service-sdk/plan.md -->
 <!-- SPECKIT END -->

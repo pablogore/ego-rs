@@ -1,4 +1,4 @@
-use ego_scheduler::event_bus::{EntityTriple, event_bus_channel};
+use ego_scheduler::event_bus::{event_bus_channel, EntityTriple};
 use ego_scheduler::policy::{RoundRobin, SchedulingPolicy};
 use ego_scheduler::scheduler::Scheduler;
 use ego_scheduler::state::SchedulerState;

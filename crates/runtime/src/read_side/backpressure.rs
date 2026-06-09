@@ -1,8 +1,8 @@
 //! Backpressure control for read-side projections.
 
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 /// Global semaphore for enforcing max_in_flight limits.
 pub struct Backpressure {

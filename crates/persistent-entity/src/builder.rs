@@ -7,13 +7,13 @@ use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::runtime::{EntityRuntime, RuntimeConfig};
 use crate::scheduler::Scheduler;
-use crate::scheduler_event::{
-    event_bus_channel_with_config, SchedulerEventBusConfig,
-};
+use crate::scheduler_event::{event_bus_channel_with_config, SchedulerEventBusConfig};
 use crate::scheduler_policy::RoundRobinPolicy;
-use crate::snapshot::{SnapshotStrategy, PeriodicSnapshotStrategy};
+use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
 
-pub struct EntityRuntimeBuilder<E: DomainEvent + Clone + serde::de::DeserializeOwned + Send + Sync + 'static> {
+pub struct EntityRuntimeBuilder<
+    E: DomainEvent + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
+> {
     mailbox_capacity: usize,
     concurrency_budget: usize,
     passivation_timeout: std::time::Duration,
@@ -90,12 +90,12 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 
     pub fn build(self) -> EntityRuntime<E> {
-        let publisher = self.publisher.unwrap_or_else(|| {
-            Arc::new(crate::testing::NoopPublisher::new())
-        });
-        let snapshot_strategy = self.snapshot_strategy.unwrap_or_else(|| {
-            Arc::new(PeriodicSnapshotStrategy::new(100))
-        });
+        let publisher = self
+            .publisher
+            .unwrap_or_else(|| Arc::new(crate::testing::NoopPublisher::new()));
+        let snapshot_strategy = self
+            .snapshot_strategy
+            .unwrap_or_else(|| Arc::new(PeriodicSnapshotStrategy::new(100)));
 
         let config = RuntimeConfig {
             mailbox_capacity: self.mailbox_capacity,
@@ -108,7 +108,9 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         let persistence = PersistenceFacade::new();
 
         // Use the provided registry or create a new one
-        let registry = self.registry.unwrap_or_else(|| Arc::new(EntityRegistry::new()));
+        let registry = self
+            .registry
+            .unwrap_or_else(|| Arc::new(EntityRegistry::new()));
 
         // Create the bounded scheduler feedback event bus
         let bus_config = SchedulerEventBusConfig {
@@ -132,7 +134,9 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> Default for EntityRuntimeBuilder<E> {
+impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> Default
+    for EntityRuntimeBuilder<E>
+{
     fn default() -> Self {
         Self::new()
     }

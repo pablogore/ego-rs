@@ -41,7 +41,10 @@ pub fn route(
             }
             _ => false,
         };
-        routed.push(RoutedEvent { item, entity_switched: switched });
+        routed.push(RoutedEvent {
+            item,
+            entity_switched: switched,
+        });
     }
     routed
 }

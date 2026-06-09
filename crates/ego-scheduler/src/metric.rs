@@ -5,7 +5,7 @@
 //! - All events logged at debug/info level
 //! - No metric is used for scheduling decisions (I7)
 
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Logs an event consumption at debug level.
 pub fn log_event_consumed(total: u64) {

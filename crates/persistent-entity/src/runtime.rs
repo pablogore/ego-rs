@@ -11,7 +11,7 @@ use crate::persistence::PersistenceFacade;
 use crate::persistent_entity::PersistentEntity;
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
-use crate::scheduler::{Scheduler, EntityTriple};
+use crate::scheduler::{EntityTriple, Scheduler};
 use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use crate::testing::TestEntityRef;

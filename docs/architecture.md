@@ -22,6 +22,9 @@ flowchart LR
     application --> domain
     transport --> domain
     runtime --> domain
+    service-sdk --> domain
+    service-sdk --> persistent-entity
+    runtime --> service-sdk
 ```
 
 No layer may depend on a layer to its right in this chain. Violations are enforced by `layers.toml` and `scripts/verify-layers.sh`.
@@ -43,6 +46,8 @@ Domain contracts MUST be runtime-neutral — no `async`, no Tokio, no runtime-sp
 | `ego-runtime` | foundation | Actor system, mailbox, supervision | `ego-domain` |
 | `ego-runtime-tokio` | infrastructure | Tokio-based runtime execution | `ego-runtime`, `ego-domain` |
 | `runtime-slice` | domain | Deterministic execution types | Nothing internal |
+| `ego-service-sdk` | application | Service contracts, registry, DI, interceptors, context propagation | `ego-domain`, `persistent-entity` |
+| `ego-service-sdk-macros` | application | `#[service]`, `#[operation]` proc-macro code generation | `syn`, `quote`, `proc-macro2` |
 
 ### Module Ownership
 
@@ -52,6 +57,15 @@ Domain contracts MUST be runtime-neutral — no `async`, no Tokio, no runtime-sp
 - **ego-infrastructure/persistence/** — concrete backends (in_memory/, postgres/)
 - **ego-infrastructure/persistence/in_memory/** — reference/testing implementations
 - **ego-infrastructure/persistence/postgres/** — production PostgreSQL adapter
+- **ego-service-sdk/contract/** — ServiceContract trait, ServiceDescriptor, OperationDescriptor, ContractVersion
+- **ego-service-sdk/registry/** — ServiceRegistry, RegistryEntry, ServiceBundle, registry errors
+- **ego-service-sdk/context/** — ServiceContext (TaskLocal-scoped), tenant isolation
+- **ego-service-sdk/interceptor/** — Interceptor trait, InterceptorChain, built-in interceptors
+- **ego-service-sdk/reference/** — ServiceRef<T> typed invocation handles
+- **ego-service-sdk/implementation/** — Service trait, ServiceFactory
+- **ego-service-sdk/error/** — DomainError trait, ErrorCategory, ServiceError
+- **ego-service-sdk/builder/** — RuntimeBuilder extension for service wiring
+- **ego-service-sdk-macros/** — `#[service]` (trait/struct), `#[operation]` proc-macro attributes
 
 ---
 
@@ -72,6 +86,9 @@ Domain contracts MUST be runtime-neutral — no `async`, no Tokio, no runtime-sp
 - `ego-infrastructure` owns all async integration and runtime-specific behavior
 - Traits in `ego-domain` use synchronous signatures; implementations MAY wrap in async behind the SPI boundary
 - `ego-application` SHOULD remain runtime-neutral but MAY depend on runtime traits for use case orchestration
+- `ego-service-sdk` MUST NOT depend on any transport framework (HTTP, gRPC, WebSocket) — SC-007
+- `ego-service-sdk-macros` MUST depend only on `syn`, `quote`, `proc-macro2` — no runtime dependencies
+- ServiceContext propagates via `tokio::task::TaskLocal` — EntityRef reads context transparently without cross-crate coupling
 - Dependency direction is enforced by `layers.toml` and verified by `scripts/verify-layers.sh`
 
 ---

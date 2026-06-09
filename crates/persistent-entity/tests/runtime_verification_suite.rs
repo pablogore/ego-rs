@@ -3,12 +3,12 @@
 //! This module contains comprehensive tests to verify that the implementation
 //! conforms exactly to the FINAL CONSISTENCY LOCK specification.
 
+use persistent_entity::builder::EntityRuntimeBuilder;
+use persistent_entity::execution_backend::ExecutionBackend;
 use persistent_entity::persistent_entity::PersistentEntity;
 use persistent_entity::test_entity::TestEntity;
-use persistent_entity::testing::{TestCommand, TestEvent, create_test_context};
-use persistent_entity::builder::EntityRuntimeBuilder;
+use persistent_entity::testing::{create_test_context, TestCommand, TestEvent};
 use persistent_entity::TokioExecutionBackend;
-use persistent_entity::execution_backend::ExecutionBackend;
 
 /// Test that demonstrates deterministic execution behavior
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn test_deterministic_execution() {
     let events1 = backend
         .execute(&entity, &state, &TestCommand::increment(1), &ctx)
         .expect("First execution should succeed");
-    
+
     let events2 = backend
         .execute(&entity, &state, &TestCommand::increment(1), &ctx)
         .expect("Second execution should succeed");
@@ -47,7 +47,7 @@ async fn test_execution_key_determinism() {
     let events1 = backend
         .execute(&entity, &state, &TestCommand::increment(1), &ctx1)
         .expect("First execution should succeed");
-    
+
     let events2 = backend
         .execute(&entity, &state, &TestCommand::increment(1), &ctx2)
         .expect("Second execution should succeed");
@@ -59,11 +59,8 @@ async fn test_execution_key_determinism() {
 #[tokio::test]
 async fn test_runtime_basic_functionality() {
     let runtime: EntityRuntimeBuilder<TestEvent> = EntityRuntimeBuilder::new();
-    let runtime = runtime
-        .mailbox_capacity(100)
-        .concurrency_budget(10)
-        .build();
-    
+    let runtime = runtime.mailbox_capacity(100).concurrency_budget(10).build();
+
     // Just verify we can create the runtime
     assert_eq!(runtime.config.mailbox_capacity, 100);
     assert_eq!(runtime.config.concurrency_budget, 10);

@@ -16,15 +16,13 @@ use crate::registry::EntityRegistry;
 use crate::scheduler::EntityTriple;
 use crate::snapshot::SnapshotStrategy;
 use crate::test_entity::TestEntity;
-use ego_domain::persistence::{EventStore, Snapshot, PersistenceError, StoredEvent};
+use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use ego_domain::DomainEvent;
 
 fn entity_store() -> &'static Mutex<HashMap<String, TestState>> {
     static STORE: OnceLock<Mutex<HashMap<String, TestState>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-
 
 pub struct NoopPublisher<E> {
     _phantom: std::marker::PhantomData<E>,
@@ -137,10 +135,7 @@ pub struct TestState {
 impl TestState {
     /// Create a new test state.
     pub fn new(value: u64) -> Self {
-        Self {
-            value,
-            version: 0,
-        }
+        Self { value, version: 0 }
     }
 }
 
@@ -212,7 +207,10 @@ impl EntityRef for TestEntityRef {
         // Load current state (drop lock before await)
         let current_state = {
             let mut store = entity_store().lock().unwrap();
-            store.entry(k.clone()).or_insert_with(|| entity.initial_state()).clone()
+            store
+                .entry(k.clone())
+                .or_insert_with(|| entity.initial_state())
+                .clone()
         };
 
         // Execute command (no lock held across await)
@@ -233,7 +231,9 @@ impl EntityRef for TestEntityRef {
 
         let boxed: Box<dyn Any> = Box::new(result);
         let downcast: Box<T> = boxed.downcast().map_err(|_| {
-            EntityError::Internal("type mismatch: expected CommandResult<TestEvent, TestState>".to_string())
+            EntityError::Internal(
+                "type mismatch: expected CommandResult<TestEvent, TestState>".to_string(),
+            )
         })?;
         Ok(*downcast)
     }
@@ -263,8 +263,10 @@ impl<E: Clone + Send + Sync + 'static + DomainEvent> EventStore<E> for InMemoryE
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         let mut streams = self.streams.lock().unwrap();
-        let stream = streams.entry(stream_id.to_string()).or_insert_with(Vec::new);
-        
+        let stream = streams
+            .entry(stream_id.to_string())
+            .or_insert_with(Vec::new);
+
         // Check expected version
         if stream.len() as i64 != version {
             return Err(PersistenceError::Conflict {
@@ -273,11 +275,11 @@ impl<E: Clone + Send + Sync + 'static + DomainEvent> EventStore<E> for InMemoryE
                 actual: stream.len() as i64,
             });
         }
-        
+
         for event in events {
             stream.push(event);
         }
-        
+
         Ok(stream.len() as i64)
     }
 
@@ -327,7 +329,10 @@ impl Snapshot for InMemorySnapshotStore {
         snapshot: serde_json::Value,
     ) -> Result<(), PersistenceError> {
         let mut snapshots = self.snapshots.lock().unwrap();
-        snapshots.insert(stream_id.to_string(), (version, serde_json::to_vec(&snapshot).unwrap()));
+        snapshots.insert(
+            stream_id.to_string(),
+            (version, serde_json::to_vec(&snapshot).unwrap()),
+        );
         Ok(())
     }
 
@@ -357,5 +362,3 @@ pub fn create_test_context() -> CommandContext {
         metadata: HashMap::new(),
     }
 }
-
-

@@ -4,16 +4,16 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::read_side::batch_executor::BatchExecutor;
 use crate::read_side::backpressure::Backpressure;
+use crate::read_side::batch_executor::BatchExecutor;
 use ego_domain::read_side::config::ReadSideConfig;
+use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::handler::Handler;
 use ego_domain::read_side::offset::OffsetStore;
 use ego_domain::read_side::progress::ProgressReporter;
 use ego_domain::read_side::scheduler::TagScheduler;
 use ego_domain::read_side::store::ReadSideStore;
-use ego_domain::read_side::dedup::DedupStore;
 
 /// Scheduler for managing tag-based projection processing.
 ///
@@ -46,7 +46,7 @@ where
     pub fn new(config: ReadSideConfig) -> Self {
         let backpressure = Arc::new(Backpressure::new(config.max_in_flight));
         let batch_executor = BatchExecutor::new(config.clone(), backpressure.clone());
-        
+
         Self {
             config,
             backpressure,
@@ -78,9 +78,9 @@ where
             ProjectionState {
                 _active_tags: tags.clone(),
                 _is_running: true,
-            }
+            },
         );
-        
+
         // Process tags in parallel with backpressure
         for tag in tags {
             // Check if we can process this tag (respect concurrency limits)
@@ -97,12 +97,12 @@ where
                     offset_store.clone(),
                     reporter.clone(),
                 );
-                
+
                 // Execute the session
                 self.batch_executor.execute_session(session).await?;
             }
         }
-        
+
         Ok(())
     }
 }

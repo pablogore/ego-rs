@@ -160,10 +160,7 @@ mod tests {
 
     #[test]
     fn compose_constructs() {
-        let inner = vec![
-            TestEffect::reply("r".to_string()),
-            TestEffect::no(),
-        ];
+        let inner = vec![TestEffect::reply("r".to_string()), TestEffect::no()];
         let effect = TestEffect::compose(inner.clone());
         assert_eq!(effect, Effect::Composed(inner));
     }
@@ -263,8 +260,7 @@ mod tests {
     // --- User Story 3: Composition ---
 
     fn handle_compose_events_and_reply() -> TestEffect {
-        Effect::reply("done".to_string())
-            .and_then(Effect::emit(vec!["evt".to_string()]))
+        Effect::reply("done".to_string()).and_then(Effect::emit(vec!["evt".to_string()]))
     }
 
     fn handle_complex_compose() -> TestEffect {
@@ -276,8 +272,8 @@ mod tests {
     #[test]
     fn handler_returns_composed_events_and_reply() {
         let result = handle_compose_events_and_reply();
-        let expected = Effect::reply("done".to_string())
-            .and_then(Effect::emit(vec!["evt".to_string()]));
+        let expected =
+            Effect::reply("done".to_string()).and_then(Effect::emit(vec!["evt".to_string()]));
         assert_eq!(result, expected);
     }
 

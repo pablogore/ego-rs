@@ -3,8 +3,8 @@
 //! This module provides a basic persistence facade for entity data.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
 /// A facade for persistence operations.
 #[derive(Debug)]

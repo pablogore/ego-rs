@@ -1,5 +1,5 @@
 use ego_scheduler::event_bus::{
-    EntityTriple, SchedulerEvent, SchedulerEventEnvelope, event_bus_channel,
+    event_bus_channel, EntityTriple, SchedulerEvent, SchedulerEventEnvelope,
 };
 use ego_scheduler::policy::RoundRobin;
 use ego_scheduler::scheduler::Scheduler;

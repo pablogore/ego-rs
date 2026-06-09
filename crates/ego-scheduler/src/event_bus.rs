@@ -30,7 +30,11 @@ pub struct EntityTriple {
 impl EntityTriple {
     /// Creates a new EntityTriple.
     pub fn new(tenant: String, entity_type: String, entity_id: String) -> Self {
-        Self { tenant, entity_type, entity_id }
+        Self {
+            tenant,
+            entity_type,
+            entity_id,
+        }
     }
 }
 
@@ -38,9 +42,15 @@ impl EntityTriple {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchedulerEvent {
     /// An entity completed execution.
-    ExecutionCompleted { entity: EntityTriple, state_version: u64 },
+    ExecutionCompleted {
+        entity: EntityTriple,
+        state_version: u64,
+    },
     /// An entity completed recovery.
-    RecoveryCompleted { entity: EntityTriple, state_version: u64 },
+    RecoveryCompleted {
+        entity: EntityTriple,
+        state_version: u64,
+    },
 }
 
 /// Classification of a scheduler event.
@@ -83,7 +93,13 @@ impl SchedulerEventEnvelope {
         let hash = hasher.finalize();
         let mut event_id = [0u8; 32];
         event_id.copy_from_slice(&hash);
-        Self { event_id, sequence_id, event_type, payload, source_actor }
+        Self {
+            event_id,
+            sequence_id,
+            event_type,
+            payload,
+            source_actor,
+        }
     }
 }
 
@@ -113,7 +129,10 @@ pub struct EventBusConfig {
 
 impl Default for EventBusConfig {
     fn default() -> Self {
-        Self { capacity: 4096, drop_policy: DropPolicy::Block }
+        Self {
+            capacity: 4096,
+            drop_policy: DropPolicy::Block,
+        }
     }
 }
 
@@ -128,7 +147,10 @@ impl SchedulerEventSender {
     /// Fire-and-forget send. SendError is final — no retry (I6).
     /// DropPolicy applied strictly at enqueue time.
     pub fn try_send(&self, envelope: SchedulerEventEnvelope) -> Result<(), SchedulerError> {
-        let item = BusItem { sequence: envelope.sequence_id, event: envelope };
+        let item = BusItem {
+            sequence: envelope.sequence_id,
+            event: envelope,
+        };
         match self.sender.try_send(item) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => match self.drop_policy {
@@ -167,7 +189,10 @@ pub fn event_bus_channel_with_config(
     config: EventBusConfig,
 ) -> (SchedulerEventSender, SchedulerEventReceiver) {
     let (sender, receiver) = mpsc::channel(config.capacity);
-    let tx = SchedulerEventSender { sender, drop_policy: config.drop_policy };
+    let tx = SchedulerEventSender {
+        sender,
+        drop_policy: config.drop_policy,
+    };
     let rx = SchedulerEventReceiver { receiver };
     (tx, rx)
 }

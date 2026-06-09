@@ -58,10 +58,7 @@ async fn test_counter_applier_evolves_state() {
     let new_state = entity
         .apply_events(
             &new_state,
-            &[
-                TestEvent::Incremented(3),
-                TestEvent::Decremented(1),
-            ],
+            &[TestEvent::Incremented(3), TestEvent::Decremented(1)],
         )
         .await
         .expect("apply should succeed");

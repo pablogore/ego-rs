@@ -51,10 +51,7 @@ impl<E> EventStreamElement<E> {
         let event_type = event_type.into();
 
         assert!(!event_id.is_empty(), "event_id must not be empty");
-        assert!(
-            !aggregate_id.is_empty(),
-            "aggregate_id must not be empty"
-        );
+        assert!(!aggregate_id.is_empty(), "aggregate_id must not be empty");
         assert!(!tenant_id.is_empty(), "tenant_id must not be empty");
         assert!(!event_type.is_empty(), "event_type must not be empty");
         assert!(event_version >= 1, "event_version must be >= 1");

@@ -39,7 +39,10 @@ impl EntityRegistry {
 
     /// Mark an entity as active.
     pub async fn mark_active(&self, entity_id: &str) {
-        self.active_entities.lock().await.insert(entity_id.to_string(), true);
+        self.active_entities
+            .lock()
+            .await
+            .insert(entity_id.to_string(), true);
     }
 
     /// Remove an entity from the active registry.

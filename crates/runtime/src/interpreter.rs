@@ -144,7 +144,9 @@ mod tests {
     #[tokio::test]
     async fn test_no_effect_returns_ok() {
         let interp = RecordingInterpreter::new();
-        let result = interp.interpret(Effect::<String, String, String>::NoEffect).await;
+        let result = interp
+            .interpret(Effect::<String, String, String>::NoEffect)
+            .await;
         assert!(result.is_ok());
         assert_eq!(interp.take_effects(), vec!["NoEffect"]);
     }
@@ -235,7 +237,9 @@ mod tests {
     async fn test_trait_object_compatible() {
         let interp = RecordingInterpreter::new();
         let trait_obj: &dyn EffectInterpreter<String, String, String> = &interp;
-        let result = trait_obj.interpret(Effect::reply("via_trait".to_string())).await;
+        let result = trait_obj
+            .interpret(Effect::reply("via_trait".to_string()))
+            .await;
         assert!(result.is_ok());
     }
 }

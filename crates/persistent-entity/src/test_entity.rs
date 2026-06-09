@@ -3,11 +3,11 @@
 //! Provides [`TestEntity`] with [`TestCommand`], [`TestEvent`], and [`TestState`]
 //! for exercising the entity lifecycle without real domain logic.
 
-use async_trait::async_trait;
-use crate::persistent_entity::PersistentEntity;
 use crate::command_context::CommandContext;
 use crate::error::EntityError;
+use crate::persistent_entity::PersistentEntity;
 use crate::testing::{TestCommand, TestEvent, TestState};
+use async_trait::async_trait;
 
 /// A test-only entity that supports increment, decrement, and get-state commands.
 ///
@@ -43,19 +43,17 @@ impl PersistentEntity for TestEntity {
         _context: &CommandContext,
     ) -> Result<Vec<Self::Event>, EntityError> {
         match command {
-            TestCommand::Increment(value) => {
-                Ok(vec![TestEvent::Incremented(*value)])
-            }
+            TestCommand::Increment(value) => Ok(vec![TestEvent::Incremented(*value)]),
             TestCommand::Decrement(value) => {
                 if state.value < *value {
-                    Err(EntityError::Internal("Cannot decrement below zero".to_string()))
+                    Err(EntityError::Internal(
+                        "Cannot decrement below zero".to_string(),
+                    ))
                 } else {
                     Ok(vec![TestEvent::Decremented(*value)])
                 }
             }
-            TestCommand::GetState => {
-                Ok(vec![])
-            }
+            TestCommand::GetState => Ok(vec![]),
         }
     }
 

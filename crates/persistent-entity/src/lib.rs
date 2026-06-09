@@ -17,30 +17,30 @@
 //! - [`error`]: Error types for the persistent entity system
 //! - [`testing`]: Test helpers and utilities
 
-pub mod entity_ref;
-pub mod persistent_entity;
+pub mod actor;
+pub mod builder;
 pub mod command_context;
 pub mod command_envelope;
-pub mod runtime;
-pub mod actor;
+pub mod entity_ref;
+pub mod error;
+pub mod execution_backend;
+pub mod execution_backend_tokio;
 pub mod lifecycle;
 pub mod mailbox;
-pub mod recovery;
 pub mod passivation;
-pub mod snapshot;
-pub mod error;
-pub mod testing;
-pub mod test_entity;
+pub mod persistence;
+pub mod persistent_entity;
+pub mod publisher;
+pub mod recovery;
 pub mod registry;
+pub mod runtime;
 pub mod scheduler;
 pub mod scheduler_event;
 pub mod scheduler_policy;
-pub mod persistence;
-pub mod publisher;
-pub mod builder;
-pub mod execution_backend;
-pub mod execution_backend_tokio;
+pub mod snapshot;
+pub mod test_entity;
+pub mod testing;
 
 // Re-export test types for easier access in tests
-pub use testing::{TestCommand, TestEvent, TestState};
 pub use execution_backend_tokio::TokioExecutionBackend;
+pub use testing::{TestCommand, TestEvent, TestState};

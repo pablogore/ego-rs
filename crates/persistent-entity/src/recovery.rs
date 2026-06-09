@@ -56,7 +56,7 @@ impl RecoveryManager {
         for event in events {
             // Add to queue
             event_queue.push_back(event);
-            
+
             // Keep only the maximum number of events in memory
             if event_queue.len() > self.max_events_in_memory {
                 event_queue.pop_front();

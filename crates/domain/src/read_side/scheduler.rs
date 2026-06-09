@@ -2,13 +2,12 @@
 
 use async_trait::async_trait;
 
-
+use crate::read_side::dedup::DedupStore;
 use crate::read_side::event_tag::EventTag;
 use crate::read_side::handler::Handler;
 use crate::read_side::offset::OffsetStore;
 use crate::read_side::progress::ProgressReporter;
 use crate::read_side::store::ReadSideStore;
-use crate::read_side::dedup::DedupStore;
 
 /// Scheduler for managing tag-based projection processing.
 ///

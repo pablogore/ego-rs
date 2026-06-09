@@ -6,10 +6,10 @@
 //! # Invariant
 //! I3: Output advisory only. I7: Policy reads only allowed fields.
 
-use std::collections::BTreeSet;
 use crate::event_bus::EntityTriple;
 use crate::policy::SchedulingPolicy;
 use crate::state::SchedulerState;
+use std::collections::BTreeSet;
 
 /// Evaluates the scheduling policy with current state and pending entities.
 pub fn evaluate(

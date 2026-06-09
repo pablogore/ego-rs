@@ -60,9 +60,7 @@ pub struct VersionBasedSnapshotStrategy {
 impl VersionBasedSnapshotStrategy {
     /// Create a new version-based snapshot strategy.
     pub fn new(version_interval: u64) -> Self {
-        Self {
-            version_interval,
-        }
+        Self { version_interval }
     }
 }
 

@@ -12,8 +12,8 @@
 //! # Failure Semantics
 //! - `apply()` is pure — no side effects, no entity switch detection
 
-use std::collections::VecDeque;
 use crate::event_bus::{EntityTriple, SchedulerEventEnvelope};
+use std::collections::VecDeque;
 
 /// Deterministic projection state of the scheduler.
 /// Single-stream model: tracks exactly one entity's projection at a time (I2).
@@ -56,7 +56,8 @@ impl SchedulerState {
         if self.replay_buffer.len() >= 1024 {
             self.replay_buffer.pop_front();
         }
-        self.replay_buffer.push_back((envelope.sequence_id, envelope.clone()));
+        self.replay_buffer
+            .push_back((envelope.sequence_id, envelope.clone()));
     }
 }
 

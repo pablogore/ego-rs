@@ -8,10 +8,7 @@ pub trait SchedulingPolicy: Debug + Send + Sync + 'static {
     ///
     /// This is a pure advisory recommendation. The Actor is the
     /// sole execution authority and may ignore this suggestion.
-    fn suggest_activation(
-        &self,
-        pending: &HashSet<EntityTriple>,
-    ) -> Option<EntityTriple>;
+    fn suggest_activation(&self, pending: &HashSet<EntityTriple>) -> Option<EntityTriple>;
 
     fn budget_size(&self) -> usize;
 
@@ -34,10 +31,7 @@ impl RoundRobinPolicy {
 }
 
 impl SchedulingPolicy for RoundRobinPolicy {
-    fn suggest_activation(
-        &self,
-        pending: &HashSet<EntityTriple>,
-    ) -> Option<EntityTriple> {
+    fn suggest_activation(&self, pending: &HashSet<EntityTriple>) -> Option<EntityTriple> {
         if pending.is_empty() {
             return None;
         }

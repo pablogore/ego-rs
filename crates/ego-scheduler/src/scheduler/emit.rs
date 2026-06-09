@@ -8,8 +8,8 @@
 //! Execution authority belongs exclusively to CORE-006.
 
 use crate::event_bus::EntityTriple;
-use crate::state::SchedulerState;
 use crate::metric;
+use crate::state::SchedulerState;
 
 /// Emits an advisory suggestion by writing to SchedulerState (I3).
 pub fn emit(state: &mut SchedulerState, suggestion: Option<EntityTriple>) {

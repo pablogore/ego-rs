@@ -2,7 +2,6 @@
 //!
 //! This module defines all the error types that can occur in the persistent entity system.
 
-
 use std::fmt;
 
 /// An error that can occur in the persistent entity system.
@@ -44,7 +43,11 @@ impl fmt::Display for EntityError {
             EntityError::SnapshottingError(msg) => write!(f, "Snapshotting error: {}", msg),
             EntityError::RecoveryError(msg) => write!(f, "Recovery error: {}", msg),
             EntityError::Internal(msg) => write!(f, "Internal error: {}", msg),
-            EntityError::VersionConflict { expected, actual } => write!(f, "Version conflict: expected {}, actual {}", expected, actual),
+            EntityError::VersionConflict { expected, actual } => write!(
+                f,
+                "Version conflict: expected {}, actual {}",
+                expected, actual
+            ),
         }
     }
 }

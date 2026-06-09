@@ -1,5 +1,5 @@
 use ego_scheduler::event_bus::{
-    EntityTriple, SchedulerEvent, SchedulerEventEnvelope, event_bus_channel,
+    event_bus_channel, EntityTriple, SchedulerEvent, SchedulerEventEnvelope,
 };
 use ego_scheduler::policy::RoundRobin;
 use ego_scheduler::scheduler::Scheduler;
@@ -23,7 +23,11 @@ fn test_replay_buffer_bounded() {
     while scheduler.run_cycle().is_some() {}
 
     let buf_len = scheduler.state().replay_buffer.len();
-    assert!(buf_len <= 1024, "ReplayBuffer should be bounded at 1024, got {}", buf_len);
+    assert!(
+        buf_len <= 1024,
+        "ReplayBuffer should be bounded at 1024, got {}",
+        buf_len
+    );
 }
 
 #[test]

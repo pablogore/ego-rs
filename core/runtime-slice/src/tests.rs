@@ -21,7 +21,7 @@ fn test_executor_deterministic_execution() {
     let executor = Executor::new();
     let outcome1 = executor.execute(ctx.clone()).unwrap();
     let outcome2 = executor.execute(ctx).unwrap();
-    
+
     // Verify deterministic execution by checking that observable semantics are identical
     assert_eq!(outcome1.observable_semantics, outcome2.observable_semantics);
     assert_eq!(outcome1.slice_id, outcome2.slice_id);
@@ -59,11 +59,11 @@ fn test_projection_non_mutating() {
     let outcome = executor.execute(ctx).unwrap();
 
     let projection = materialize(&outcome);
-    
+
     // Verify that the projection is non-mutating by checking the result
     assert!(is_non_mutating(&outcome, &projection));
     assert_eq!(outcome.slice_id.as_str(), projection.slice_id);
-    
+
     // Verify that the projection contains expected data
     assert!(!projection.observable_semantics.is_empty());
     assert_eq!(projection.observable_semantics.len(), 1);
@@ -94,9 +94,12 @@ fn test_validation_deterministic_equivalence() {
 
     // Verify deterministic equivalence with additional checks
     assert!(validate_deterministic_equivalence(&outcome_a, &outcome_b));
-    
+
     // Verify that both outcomes have the same observable semantics
-    assert_eq!(outcome_a.observable_semantics, outcome_b.observable_semantics);
+    assert_eq!(
+        outcome_a.observable_semantics,
+        outcome_b.observable_semantics
+    );
     assert_eq!(outcome_a.slice_id, outcome_b.slice_id);
 }
 
@@ -107,11 +110,11 @@ fn test_infrastructure_free() {
     let outcome = executor.execute(ctx).unwrap();
 
     let projection = materialize(&outcome);
-    
+
     // Verify that the projection contains observable semantics
     assert!(!projection.observable_semantics.is_empty());
     assert_eq!(projection.observable_semantics.len(), 1);
-    
+
     // Verify that the projection has the expected structure
     assert_eq!(projection.slice_id, outcome.slice_id.as_str());
 }

@@ -25,7 +25,8 @@ pub async fn spawn_concurrent_commands(
 
         handles.push(tokio::spawn(async move {
             let entity_ref = rt.entity_ref::<TestCommand, TestState>(entity_type, entity_id, h);
-            let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref.send_command(command, ctx).await;
+            let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
+                entity_ref.send_command(command, ctx).await;
             result
         }));
     }

@@ -14,18 +14,18 @@
 //! # Drift Detection
 //! If ANY logic beyond function calls appears in Scheduler: STOP and refactor into a module.
 
-use std::collections::BTreeSet;
 use crate::event_bus::{EntityTriple, SchedulerEventReceiver};
+use crate::metric;
 use crate::policy::SchedulingPolicy;
 use crate::state::SchedulerState;
-use crate::metric;
+use std::collections::BTreeSet;
 
-mod ingest;
-mod route;
-mod reduce;
 mod detect;
-mod evaluate;
 mod emit;
+mod evaluate;
+mod ingest;
+mod reduce;
+mod route;
 
 /// Thin orchestrator that composes 6 pure pipeline components.
 /// No domain logic — composition only.
@@ -39,10 +39,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     /// Creates a new Scheduler with a receiver and policy.
-    pub fn new(
-        receiver: SchedulerEventReceiver,
-        policy: Box<dyn SchedulingPolicy>,
-    ) -> Self {
+    pub fn new(receiver: SchedulerEventReceiver, policy: Box<dyn SchedulingPolicy>) -> Self {
         Self {
             state: SchedulerState::new(),
             receiver,

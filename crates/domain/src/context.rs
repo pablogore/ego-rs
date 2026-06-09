@@ -477,7 +477,10 @@ mod tests {
     fn envelope_to_context_identity_fields() {
         let envelope = full_envelope();
         let ctx: DomainExecutionContext = envelope.into();
-        assert_eq!(ctx.aggregate_id(), Some(&AggregateId::new("agg-001").unwrap()));
+        assert_eq!(
+            ctx.aggregate_id(),
+            Some(&AggregateId::new("agg-001").unwrap())
+        );
         assert_eq!(ctx.entity_id(), Some(&EntityId::new("ent-001").unwrap()));
         assert_eq!(ctx.tenant_id(), Some(&TenantId::new("ten-001").unwrap()));
     }
@@ -486,8 +489,14 @@ mod tests {
     fn envelope_to_context_correlation_fields() {
         let envelope = full_envelope();
         let ctx: DomainExecutionContext = envelope.into();
-        assert_eq!(ctx.correlation_id(), Some(&CorrelationId::new("corr-001").unwrap()));
-        assert_eq!(ctx.causation_id(), Some(&CausationId::new("caus-001").unwrap()));
+        assert_eq!(
+            ctx.correlation_id(),
+            Some(&CorrelationId::new("corr-001").unwrap())
+        );
+        assert_eq!(
+            ctx.causation_id(),
+            Some(&CausationId::new("caus-001").unwrap())
+        );
         assert_eq!(ctx.request_id(), Some(&RequestId::new("req-001").unwrap()));
     }
 
@@ -533,6 +542,9 @@ mod tests {
         let envelope = full_envelope();
         let ctx: DomainExecutionContext = envelope.into();
         let trait_obj: &dyn ExecutionContext = &ctx;
-        assert_eq!(trait_obj.aggregate_id(), Some(&AggregateId::new("agg-001").unwrap()));
+        assert_eq!(
+            trait_obj.aggregate_id(),
+            Some(&AggregateId::new("agg-001").unwrap())
+        );
     }
 }

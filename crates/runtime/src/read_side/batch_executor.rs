@@ -1,7 +1,7 @@
 //! Batch executor — orchestrates read-side processing with backpressure.
 
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use ego_domain::read_side::config::ReadSideConfig;
 use ego_domain::read_side::dedup::DedupStore;
@@ -26,8 +26,11 @@ where
     E: Clone + Send,
 {
     /// Creates a new batch executor with the given configuration and backpressure.
-    pub fn new(_config: ReadSideConfig, backpressure: Arc<crate::read_side::backpressure::Backpressure>) -> Self {
-        Self { 
+    pub fn new(
+        _config: ReadSideConfig,
+        backpressure: Arc<crate::read_side::backpressure::Backpressure>,
+    ) -> Self {
+        Self {
             backpressure,
             _phantom: PhantomData,
         }
@@ -47,10 +50,10 @@ where
     {
         // Acquire backpressure permit
         let _permit = self.backpressure.acquire().await?;
-        
+
         // Execute the session
         session.execute(None).await?;
-        
+
         Ok(())
     }
 }

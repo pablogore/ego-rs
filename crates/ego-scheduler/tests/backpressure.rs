@@ -1,15 +1,21 @@
 use ego_scheduler::event_bus::{
-    EntityTriple, SchedulerEvent, SchedulerEventEnvelope,
-    event_bus_channel_with_config, EventBusConfig, DropPolicy,
+    event_bus_channel_with_config, DropPolicy, EntityTriple, EventBusConfig, SchedulerEvent,
+    SchedulerEventEnvelope,
 };
 
 #[test]
 fn test_backpressure_block() {
-    let config = EventBusConfig { capacity: 2, drop_policy: DropPolicy::Block };
+    let config = EventBusConfig {
+        capacity: 2,
+        drop_policy: DropPolicy::Block,
+    };
     let (tx, mut rx) = event_bus_channel_with_config(config);
 
     let entity = EntityTriple::new("t1".into(), "actor".into(), "a1".into());
-    let ev = SchedulerEvent::ExecutionCompleted { entity: entity.clone(), state_version: 1 };
+    let ev = SchedulerEvent::ExecutionCompleted {
+        entity: entity.clone(),
+        state_version: 1,
+    };
     let env1 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 1);
     let env2 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 2);
     let env3 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 3);
@@ -24,11 +30,17 @@ fn test_backpressure_block() {
 
 #[test]
 fn test_backpressure_drop_newest() {
-    let config = EventBusConfig { capacity: 2, drop_policy: DropPolicy::DropNewest };
+    let config = EventBusConfig {
+        capacity: 2,
+        drop_policy: DropPolicy::DropNewest,
+    };
     let (tx, mut rx) = event_bus_channel_with_config(config);
 
     let entity = EntityTriple::new("t1".into(), "actor".into(), "a1".into());
-    let ev = SchedulerEvent::ExecutionCompleted { entity: entity.clone(), state_version: 1 };
+    let ev = SchedulerEvent::ExecutionCompleted {
+        entity: entity.clone(),
+        state_version: 1,
+    };
     let env1 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 1);
     let env2 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 2);
     let env3 = SchedulerEventEnvelope::new(ev.clone(), entity.clone(), 3);

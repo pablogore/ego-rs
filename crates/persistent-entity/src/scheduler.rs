@@ -151,10 +151,7 @@ impl Scheduler {
     ///
     /// This is a pure advisory recommendation. The caller (Actor or Runtime)
     /// is the sole execution authority and may accept or ignore it.
-    pub fn suggest_activation(
-        &self,
-        pending: &HashSet<EntityTriple>,
-    ) -> Option<EntityTriple> {
+    pub fn suggest_activation(&self, pending: &HashSet<EntityTriple>) -> Option<EntityTriple> {
         let mut inner = self.inner.lock().unwrap();
         inner.drain_and_update();
         let suggestion = self.policy.suggest_activation(pending);

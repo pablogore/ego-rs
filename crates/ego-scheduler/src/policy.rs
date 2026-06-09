@@ -8,9 +8,9 @@
 //! - I7: Policy may only read `total_events_consumed` and `last_suggestion`
 //! - I2: `pending` is BTreeSet — deterministic iteration, no cross-entity ordering
 
-use std::collections::BTreeSet;
-use crate::state::SchedulerState;
 use crate::event_bus::EntityTriple;
+use crate::state::SchedulerState;
+use std::collections::BTreeSet;
 
 /// Pure function trait for activation suggestion.
 ///

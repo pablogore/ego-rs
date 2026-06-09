@@ -11,6 +11,8 @@ members = [
     "crates/event-adapter",
     "crates/persistent-entity",
     "crates/ego-scheduler",
+    "crates/service-sdk",
+    "crates/service-sdk-macros",
 ]
 resolver = "2"
 

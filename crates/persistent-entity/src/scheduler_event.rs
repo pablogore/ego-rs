@@ -256,5 +256,8 @@ pub fn event_bus_channel_with_config(
     config: SchedulerEventBusConfig,
 ) -> (SchedulerEventSender, SchedulerEventReceiver) {
     let (tx, rx) = mpsc::channel(config.capacity);
-    (SchedulerEventSender::new(tx), SchedulerEventReceiver::new(rx))
+    (
+        SchedulerEventSender::new(tx),
+        SchedulerEventReceiver::new(rx),
+    )
 }
