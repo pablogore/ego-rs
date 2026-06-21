@@ -5,7 +5,7 @@
 //! authentication, and metrics collection.
 
 use crate::context::ServiceContext;
-use crate::error::ServiceError;
+use crate::error::{ServiceError, ServiceErrorTrait};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -24,9 +24,6 @@ use std::sync::Arc;
 pub trait Interceptor: Send + Sync {
     /// Called before a service invocation.
     ///
-    /// This method is called before the service operation is executed.
-    /// It can be used for pre-processing, logging, or validation.
-    ///
     /// # Arguments
     /// * `context` - The service context for the current invocation
     ///
@@ -36,9 +33,6 @@ pub trait Interceptor: Send + Sync {
     async fn on_request(&self, context: &ServiceContext) -> Result<(), ServiceError>;
 
     /// Called after a successful service invocation.
-    ///
-    /// This method is called after a successful service operation execution.
-    /// It can be used for post-processing, logging, or metrics collection.
     ///
     /// # Arguments
     /// * `context` - The service context for the current invocation
@@ -50,20 +44,20 @@ pub trait Interceptor: Send + Sync {
 
     /// Called when a service invocation fails.
     ///
-    /// This method is called when a service operation fails.
-    /// It can be used for error handling, logging, or cleanup.
+    /// Receives a `&dyn ServiceErrorTrait` so interceptors are decoupled from
+    /// the concrete error type. The original error is forwarded unchanged to the caller.
     ///
     /// # Arguments
     /// * `context` - The service context for the current invocation
-    /// * `error` - The error that occurred during service invocation
+    /// * `error` - The error that occurred, as a trait object
     ///
     /// # Returns
     /// * `Ok(())` if the interceptor succeeds
-    /// * `Err(ServiceError)` if the interceptor fails
+    /// * `Err(ServiceError)` if the interceptor itself fails
     async fn on_error(
         &self,
         context: &ServiceContext,
-        error: &ServiceError,
+        error: &dyn ServiceErrorTrait,
     ) -> Result<(), ServiceError>;
 }
 
@@ -79,34 +73,16 @@ pub struct InterceptorChain {
 
 impl InterceptorChain {
     /// Creates a new interceptor chain.
-    ///
-    /// # Returns
-    /// A new, empty `InterceptorChain` instance
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Adds an interceptor to the chain.
-    ///
-    /// Interceptors are executed in the order they are added.
-    ///
-    /// # Arguments
-    /// * `interceptor` - The interceptor to add to the chain
     pub fn add_interceptor(&mut self, interceptor: Arc<dyn Interceptor>) {
         self.interceptors.push(interceptor);
     }
 
     /// Runs the on_request hooks for all interceptors in the chain.
-    ///
-    /// Executes the `on_request` method of each interceptor in the chain.
-    /// If any interceptor fails, the chain stops and the error is returned.
-    ///
-    /// # Arguments
-    /// * `context` - The service context for the current invocation
-    ///
-    /// # Returns
-    /// * `Ok(())` if all interceptors succeed
-    /// * `Err(ServiceError)` if any interceptor fails
     pub async fn on_request(&self, context: &ServiceContext) -> Result<(), ServiceError> {
         for interceptor in &self.interceptors {
             interceptor.on_request(context).await?;
@@ -115,16 +91,6 @@ impl InterceptorChain {
     }
 
     /// Runs the on_response hooks for all interceptors in the chain.
-    ///
-    /// Executes the `on_response` method of each interceptor in the chain.
-    /// If any interceptor fails, the chain stops and the error is returned.
-    ///
-    /// # Arguments
-    /// * `context` - The service context for the current invocation
-    ///
-    /// # Returns
-    /// * `Ok(())` if all interceptors succeed
-    /// * `Err(ServiceError)` if any interceptor fails
     pub async fn on_response(&self, context: &ServiceContext) -> Result<(), ServiceError> {
         for interceptor in &self.interceptors {
             interceptor.on_response(context).await?;
@@ -134,20 +100,11 @@ impl InterceptorChain {
 
     /// Runs the on_error hooks for all interceptors in the chain.
     ///
-    /// Executes the `on_error` method of each interceptor in the chain.
-    /// If any interceptor fails, the chain stops and the error is returned.
-    ///
-    /// # Arguments
-    /// * `context` - The service context for the current invocation
-    /// * `error` - The error that occurred during service invocation
-    ///
-    /// # Returns
-    /// * `Ok(())` if all interceptors succeed
-    /// * `Err(ServiceError)` if any interceptor fails
+    /// Takes `&dyn ServiceErrorTrait` so interceptors are decoupled from the concrete error type.
     pub async fn on_error(
         &self,
         context: &ServiceContext,
-        error: &ServiceError,
+        error: &dyn ServiceErrorTrait,
     ) -> Result<(), ServiceError> {
         for interceptor in &self.interceptors {
             interceptor.on_error(context, error).await?;

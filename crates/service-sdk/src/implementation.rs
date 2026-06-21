@@ -10,7 +10,8 @@ use std::collections::HashMap;
 /// Service implementation trait.
 ///
 /// All service implementations must implement this trait to be registered
-/// with the service registry.
+/// with the service registry. Lifecycle hooks (`initialize`/`shutdown`) are
+/// intentionally absent — use [`LifecycleManaged`] for components that need them.
 #[async_trait]
 pub trait Service: Send + Sync {
     /// Returns the service descriptor for this service.
@@ -30,13 +31,23 @@ pub trait Service: Send + Sync {
     fn metadata(&self) -> HashMap<String, String> {
         HashMap::new()
     }
+}
 
-    /// Initializes the service.
+/// Lifecycle management trait for runtime-managed components (entities, projections, adapters).
+///
+/// This trait is separate from [`Service`] so that the `Service` trait remains minimal.
+/// Only components that explicitly need startup/teardown hooks implement this.
+/// The runtime drives `initialize()` on startup and `shutdown()` on teardown in reverse order.
+#[async_trait]
+pub trait LifecycleManaged: Send + Sync {
+    /// Called once by the runtime when the component is starting up.
+    /// The default implementation is a no-op.
     async fn initialize(&self) -> ServiceResult<()> {
         Ok(())
     }
 
-    /// Shuts down the service.
+    /// Called once by the runtime when the component is shutting down.
+    /// The default implementation is a no-op.
     async fn shutdown(&self) -> ServiceResult<()> {
         Ok(())
     }

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use ego_service_sdk::context::ServiceContext;
-use ego_service_sdk::error::ServiceError;
+use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ async fn test_interceptor_invocation() {
         async fn on_error(
             &self,
             _context: &ServiceContext,
-            _error: &ServiceError,
+            _error: &dyn ServiceErrorTrait,
         ) -> Result<(), ServiceError> {
             self.error_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

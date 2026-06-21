@@ -1,7 +1,7 @@
 //! Tests for interceptor functionality.
 
-use crate::contract::{ServiceDescriptor, ContractVersion};
-use crate::error::ServiceError;
+use crate::contract::{ContractVersion, ServiceDescriptor};
+use crate::error::{ServiceError, ServiceErrorTrait};
 use crate::context::ServiceContext;
 use crate::interceptor::{Interceptor, InterceptorChain};
 use async_trait::async_trait;
@@ -26,7 +26,7 @@ async fn test_interceptor_chain() {
             Ok(())
         }
 
-        async fn on_error(&self, _context: &ServiceContext, _error: &ServiceError) -> Result<(), ServiceError> {
+        async fn on_error(&self, _context: &ServiceContext, _error: &dyn ServiceErrorTrait) -> Result<(), ServiceError> {
             self.call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
@@ -44,7 +44,7 @@ async fn test_interceptor_chain() {
     chain.add_interceptor(interceptor2.clone());
 
     let context = ServiceContext::new();
-    
+
     // Test on_request
     chain.on_request(&context).await.unwrap();
     assert_eq!(interceptor1.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);

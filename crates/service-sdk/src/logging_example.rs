@@ -8,11 +8,11 @@ impl ExampleService {
     pub fn process_request(&self, input: &str) -> Result<String, String> {
         // kitlogger is available as a dependency
         // This shows that the dependency is properly integrated
-        
+
         if input.is_empty() {
             return Err("Input cannot be empty".to_string());
         }
-        
+
         let result = format!("Processed: {}", input);
         Ok(result)
     }

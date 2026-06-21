@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::contract::{ContractVersion, OperationDescriptor, ServiceDescriptor};
-use ego_service_sdk::error::ServiceError;
-use ego_service_sdk::implementation::Service;
+use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
+use ego_service_sdk::implementation::{LifecycleManaged, Service};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
 use ego_service_sdk::registry::ServiceRegistry;
 use std::sync::Arc;
@@ -30,6 +30,8 @@ impl TestServiceImpl {
                     errors: vec![],
                     description: None,
                     metadata: std::collections::HashMap::new(),
+                    idempotent: false,
+                    mutating: true,
                 }],
                 description: None,
                 metadata: std::collections::HashMap::new(),
@@ -80,7 +82,7 @@ impl Interceptor for CountingInterceptor {
     async fn on_error(
         &self,
         _context: &ServiceContext,
-        _error: &ServiceError,
+        _error: &dyn ServiceErrorTrait,
     ) -> Result<(), ServiceError> {
         Ok(())
     }
@@ -102,6 +104,8 @@ async fn test_service_descriptor() {
             errors: vec![],
             description: None,
             metadata: std::collections::HashMap::new(),
+            idempotent: false,
+            mutating: true,
         }],
         description: None,
         metadata: std::collections::HashMap::new(),
@@ -218,9 +222,46 @@ async fn test_deadline() {
     assert!(!ctx.is_deadline_expired());
 }
 
+/// REQ-017 / TASK-005 — A struct implementing only Service must compile without lifecycle hooks.
+/// The lifecycle hooks (initialize, shutdown) live exclusively on LifecycleManaged.
 #[tokio::test]
-async fn test_initialize_and_shutdown() {
-    let service = TestServiceImpl::new("InitSvc");
-    assert!(service.initialize().await.is_ok());
-    assert!(service.shutdown().await.is_ok());
+async fn service_trait_has_no_lifecycle_hooks() {
+    struct NoLifecycleService {
+        descriptor: ServiceDescriptor,
+    }
+
+    // Service must compile without any initialize/shutdown methods.
+    #[async_trait]
+    impl Service for NoLifecycleService {
+        fn descriptor(&self) -> &ServiceDescriptor {
+            &self.descriptor
+        }
+    }
+
+    let svc = NoLifecycleService {
+        descriptor: ServiceDescriptor {
+            name: "NoLifecycle".to_string(),
+            version: ContractVersion::new(1, 0, 0),
+            operations: vec![],
+            description: None,
+            metadata: std::collections::HashMap::new(),
+        },
+    };
+    assert_eq!(svc.name(), "NoLifecycle");
+}
+
+/// REQ-017 / TASK-005 — A struct implementing LifecycleManaged exposes initialize/shutdown.
+#[tokio::test]
+async fn lifecycle_managed_hooks_are_callable() {
+    struct ManagedService;
+
+    #[async_trait]
+    impl LifecycleManaged for ManagedService {
+        // Default no-op implementations are sufficient.
+    }
+
+    let svc = ManagedService;
+    // Default implementations must return Ok(()).
+    assert!(svc.initialize().await.is_ok());
+    assert!(svc.shutdown().await.is_ok());
 }

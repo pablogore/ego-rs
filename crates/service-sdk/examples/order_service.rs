@@ -111,6 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             errors: vec!["OrderError".to_string()],
             description: None,
             metadata: std::collections::HashMap::new(),
+            idempotent: false,
+            mutating: true,
         }],
         description: None,
         metadata: std::collections::HashMap::new(),

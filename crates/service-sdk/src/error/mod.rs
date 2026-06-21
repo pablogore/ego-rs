@@ -1,13 +1,17 @@
 pub mod category;
+pub mod domain_error;
+pub mod service_error_trait;
 
-use serde::{Deserialize, Serialize};
+pub use category::ErrorCategory;
+pub use domain_error::{DomainError, IntoServiceError};
+pub use service_error_trait::ServiceErrorTrait;
 
 /// A service error that represents various failure conditions in service operations.
 ///
 /// Service errors are categorized to provide structured error handling and
 /// appropriate responses to service callers. Each error variant represents a
 /// specific type of failure that can occur during service execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceError {
     /// A validation error indicating that input data failed validation checks.
     Validation {
@@ -198,6 +202,53 @@ impl ServiceError {
 /// This type alias provides a convenient way to work with service operations
 /// that may return either a successful result or a service error.
 pub type Result<T> = std::result::Result<T, ServiceError>;
+
+impl ServiceErrorTrait for ServiceError {
+    fn code(&self) -> &str {
+        match self {
+            ServiceError::Validation { .. } => "VALIDATION",
+            ServiceError::Authorization { .. } => "AUTHORIZATION",
+            ServiceError::Internal { .. } => "INTERNAL",
+            ServiceError::NotFound { .. } => "NOT_FOUND",
+            ServiceError::Conflict { .. } => "CONFLICT",
+            ServiceError::Timeout { .. } => "TIMEOUT",
+            ServiceError::RateLimit { .. } => "RATE_LIMIT",
+            ServiceError::ServiceUnavailable { .. } => "SERVICE_UNAVAILABLE",
+            ServiceError::BusinessLogic { .. } => "BUSINESS_LOGIC",
+            ServiceError::Custom { .. } => "CUSTOM",
+        }
+    }
+
+    fn category(&self) -> ErrorCategory {
+        match self {
+            ServiceError::Validation { .. } => ErrorCategory::Validation,
+            ServiceError::Authorization { .. } => ErrorCategory::Authorization,
+            ServiceError::Internal { .. } => ErrorCategory::System,
+            ServiceError::NotFound { .. } => ErrorCategory::Resource,
+            ServiceError::Conflict { .. } => ErrorCategory::Business,
+            ServiceError::Timeout { .. } => ErrorCategory::Timeout,
+            ServiceError::RateLimit { .. } => ErrorCategory::System,
+            ServiceError::ServiceUnavailable { .. } => ErrorCategory::System,
+            ServiceError::BusinessLogic { .. } => ErrorCategory::Business,
+            ServiceError::Custom { .. } => ErrorCategory::Unknown,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            ServiceError::Validation { message }
+            | ServiceError::Authorization { message }
+            | ServiceError::Internal { message }
+            | ServiceError::NotFound { message }
+            | ServiceError::Conflict { message }
+            | ServiceError::Timeout { message }
+            | ServiceError::RateLimit { message }
+            | ServiceError::ServiceUnavailable { message }
+            | ServiceError::BusinessLogic { message }
+            | ServiceError::Custom { message } => message.clone(),
+        }
+    }
+}
 
 impl From<crate::error::category::ErrorCategory> for ServiceError {
     fn from(category: crate::error::category::ErrorCategory) -> Self {
