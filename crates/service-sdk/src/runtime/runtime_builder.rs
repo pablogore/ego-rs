@@ -78,8 +78,8 @@ impl DependencyTable {
 ///
 /// | Responsibility          | Owned by                    |
 /// |-------------------------|-----------------------------|
-/// | service registry        | `registry` (pub field)      |
-/// | interceptor chain       | `interceptor_chain` (pub)   |
+/// | service registry        | `registry`                  |
+/// | interceptor chain       | `interceptor_chain`         |
 /// | resolved DI instances   | `resolved` (DependencyTable) |
 /// | tenant enforcement      | `enforce_tenant()` method   |
 ///
@@ -88,10 +88,11 @@ impl DependencyTable {
 /// `DependencyNotFound`.
 #[derive(Debug)]
 pub struct RuntimeInner {
-    /// The type-keyed service registry holding raw implementations.
-    pub registry: ServiceRegistry,
-    /// The interceptor chain applied to every resolved proxy.
-    pub interceptor_chain: Arc<InterceptorChain>,
+    // Populated by RuntimeBuilder (TASK-013); not yet read within this crate.
+    #[allow(dead_code)]
+    pub(crate) registry: ServiceRegistry,
+    #[allow(dead_code)]
+    pub(crate) interceptor_chain: Arc<InterceptorChain>,
     /// Resolved instances for projection, adapter, and config injection.
     resolved: DependencyTable,
 }
