@@ -16,7 +16,6 @@ pub mod di;
 pub mod error;
 pub mod implementation;
 pub mod interceptor;
-pub mod logging_example;
 pub mod registry;
 pub mod runtime;
 

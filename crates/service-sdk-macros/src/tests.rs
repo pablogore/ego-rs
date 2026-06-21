@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use proc_macro2::TokenStream;
     use syn::parse_quote;

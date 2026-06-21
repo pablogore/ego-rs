@@ -140,14 +140,6 @@ impl ServiceRegistry {
         }
         Ok(())
     }
-
-    /// Returns a reference to the raw entries map (for internal use).
-    #[doc(hidden)]
-    pub fn services(
-        &self,
-    ) -> std::collections::HashMap<String, crate::contract::ServiceDescriptor> {
-        std::collections::HashMap::new()
-    }
 }
 
 #[cfg(test)]
