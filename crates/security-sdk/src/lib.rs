@@ -2,11 +2,11 @@
 //! `ego-security-sdk` — transport-agnostic, provider-agnostic security primitives
 //! for the ego-rs ecosystem.
 //!
-//! Provides canonical types for identity ([`principal::Principal`]),
-//! credentials ([`credential::Credential`]), authentication
-//! ([`authentication::AuthenticationProvider`]), authorization
-//! ([`authorization::AuthorizationProvider`]), and security-context propagation
-//! ([`context::SecurityContext`]).
+//! Provides canonical types for identity (`principal::Principal`),
+//! credentials (`credential::Credential`), authentication
+//! (`authentication::AuthenticationProvider`), authorization
+//! (`authorization::AuthorizationProvider`), and security-context propagation
+//! (`context::SecurityContext`).
 //!
 //! Depends on no ego crate — only on third-party libraries — so any layer may
 //! import it without risking a dependency cycle.

@@ -1,1 +1,1 @@
-//! Policy model — [`Permission`], [`RoleStore`] trait, and [`InMemoryRoleStore`].
+//! Policy model — `Permission`, `RoleStore` trait, and `InMemoryRoleStore`.

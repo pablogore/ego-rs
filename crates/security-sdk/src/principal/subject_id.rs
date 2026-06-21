@@ -5,7 +5,7 @@ use crate::error::SecurityError;
 /// Opaque subject identifier — a non-empty string chosen by the provider.
 ///
 /// No format is enforced at the core level. Examples like `"user:123"` or
-/// `"service:billing"` are illustrative; the [`crate::authentication::AuthenticationProvider`]
+/// `"service:billing"` are illustrative; the `AuthenticationProvider`
 /// decides the actual structure.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SubjectId(String);
