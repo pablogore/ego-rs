@@ -1,0 +1,44 @@
+---
+source: crates/service-sdk/tests/golden_codegen.rs
+expression: "<GoldenPaymentServiceTag as ServiceContract>::descriptor()"
+---
+ServiceDescriptor {
+    name: "GoldenPaymentService",
+    version: ContractVersion {
+        major: 1,
+        minor: 0,
+        patch: 0,
+    },
+    operations: [
+        OperationDescriptor {
+            name: "charge",
+            input: [
+                "u64",
+            ],
+            output: "Result < String, ServiceError >",
+            errors: [
+                "ServiceError",
+            ],
+            description: None,
+            metadata: {},
+            idempotent: false,
+            mutating: true,
+        },
+        OperationDescriptor {
+            name: "refund",
+            input: [
+                "u64",
+            ],
+            output: "Result < String, ServiceError >",
+            errors: [
+                "ServiceError",
+            ],
+            description: None,
+            metadata: {},
+            idempotent: false,
+            mutating: true,
+        },
+    ],
+    description: None,
+    metadata: {},
+}

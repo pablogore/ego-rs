@@ -90,6 +90,12 @@ pub trait Injectable: Send + Sync {
     fn dependencies() -> Vec<DepKey>
     where
         Self: Sized;
+
+    /// Constructs an instance by resolving dependencies from the runtime.
+    /// Returns `RuntimeError::DependencyNotFound` while resolvers are not yet wired.
+    fn build(rt: &crate::runtime::RuntimeInner) -> Result<Self, crate::runtime::RuntimeError>
+    where
+        Self: Sized;
 }
 
 #[cfg(test)]

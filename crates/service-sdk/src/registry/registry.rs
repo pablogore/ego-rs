@@ -45,6 +45,7 @@ impl std::fmt::Display for RegistryError {
 ///
 /// Keys are `TypeId` of a generated zero-sized tag type (e.g. `OrderServiceTag`).
 /// Multiple versions of the same service can be registered simultaneously.
+#[derive(Debug, Clone)]
 pub struct ServiceRegistry {
     // TypeId of the tag → list of (version, raw Arc<dyn Any + Send + Sync>)
     entries: HashMap<TypeId, VersionList>,

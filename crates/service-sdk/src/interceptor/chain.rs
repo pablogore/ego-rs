@@ -71,6 +71,17 @@ pub struct InterceptorChain {
     interceptors: Vec<Arc<dyn Interceptor>>,
 }
 
+impl std::fmt::Debug for InterceptorChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterceptorChain")
+            .field(
+                "interceptors",
+                &format_args!("{} interceptors", self.interceptors.len()),
+            )
+            .finish()
+    }
+}
+
 impl InterceptorChain {
     /// Creates a new interceptor chain.
     pub fn new() -> Self {

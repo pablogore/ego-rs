@@ -20,6 +20,7 @@ Thumbs.db
 
 # AI / Coding assistants
 .aider*
+.gga
 
 # Environment
 .env

@@ -1,0 +1,30 @@
+---
+source: crates/service-sdk/tests/golden_codegen.rs
+expression: "<GoldenOrderServiceTag as ServiceContract>::descriptor()"
+---
+ServiceDescriptor {
+    name: "GoldenOrderService",
+    version: ContractVersion {
+        major: 1,
+        minor: 0,
+        patch: 0,
+    },
+    operations: [
+        OperationDescriptor {
+            name: "place_order",
+            input: [
+                "String",
+            ],
+            output: "Result < String, GoldenOrderError >",
+            errors: [
+                "GoldenOrderError",
+            ],
+            description: None,
+            metadata: {},
+            idempotent: false,
+            mutating: true,
+        },
+    ],
+    description: None,
+    metadata: {},
+}
