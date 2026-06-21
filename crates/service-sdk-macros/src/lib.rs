@@ -345,7 +345,9 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 // Strip the #[operation] attribute so it isn't re-applied to the trait method
                 let mut clean_method = method.clone();
-                clean_method.attrs.retain(|attr| !attr.path().is_ident("operation"));
+                clean_method
+                    .attrs
+                    .retain(|attr| !attr.path().is_ident("operation"));
                 output_items.push(TraitItem::Fn(clean_method));
             } else {
                 output_items.push(item);

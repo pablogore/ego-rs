@@ -14,7 +14,7 @@ mod tests {
                 async fn do_something(&self, input: String) -> Result<String, ServiceError>;
             }
         };
-        
+
         // Just verify it parses and compiles
         assert!(!service_trait.is_empty());
     }
@@ -29,7 +29,7 @@ mod tests {
                 Ok("result".to_string())
             }
         };
-        
+
         // Just verify it parses and compiles
         assert!(!operation_fn.is_empty());
     }
@@ -44,7 +44,7 @@ mod tests {
                 async fn do_something(&self, input: String) -> Result<String, ServiceError>;
             }
         };
-        
+
         // Verify the trait is parsed correctly
         assert!(!service_trait.is_empty());
     }
