@@ -253,32 +253,23 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
     let struct_name = &input_struct.ident;
 
     let mut dep_keys: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut has_di_fields = false;
-    let mut plain_field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
 
     if let syn::Fields::Named(fields) = &input_struct.fields {
         for field in &fields.named {
             let field_name = &field.ident;
             if let Some(dep_key) = classify_field_type(&field.ty) {
                 dep_keys.push(dep_key);
-                has_di_fields = true;
+            }
+            if let Some(init_expr) = classify_field_init(&field.ty) {
+                // DI field: resolve from RuntimeInner
+                field_inits.push(quote! { #field_name: #init_expr });
             } else {
-                plain_field_inits.push(quote! { #field_name: Default::default() });
+                // Plain field: use Default::default()
+                field_inits.push(quote! { #field_name: Default::default() });
             }
         }
     }
-
-    // Structs with DI fields return DependencyNotFound until RuntimeInner wires real resolvers.
-    // Structs with only plain fields can be built immediately via Default.
-    let build_body = if has_di_fields {
-        quote! {
-            Err(ego_service_sdk::runtime::RuntimeError::DependencyNotFound)
-        }
-    } else {
-        quote! {
-            Ok(Self { #(#plain_field_inits),* })
-        }
-    };
 
     let expanded = quote! {
         #input_struct
@@ -290,14 +281,51 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
                 vec![#(#dep_keys),*]
             }
 
-            fn build(_rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, ego_service_sdk::runtime::RuntimeError>
+            fn build(rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, ego_service_sdk::runtime::RuntimeError>
             where Self: Sized {
-                #build_body
+                Ok(Self {
+                    #(#field_inits),*
+                })
             }
         }
     };
 
     TokenStream::from(expanded)
+}
+
+/// Returns the resolver expression for a DI field type, e.g.
+/// `rt.resolve_projection::<UserProjection>()?`.
+/// Returns `None` for non-DI fields.
+/// `EntityRef<T>` is excluded — it is owned by entity-sdk (INV-008).
+fn classify_field_init(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let ident_str = segment.ident.to_string();
+            if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                    match ident_str.as_str() {
+                        "ProjectionRef" => {
+                            return Some(quote! {
+                                rt.resolve_projection::<#inner_ty>()?
+                            });
+                        }
+                        "AdapterRef" => {
+                            return Some(quote! {
+                                rt.resolve_adapter::<#inner_ty>()?
+                            });
+                        }
+                        "ConfigValue" => {
+                            return Some(quote! {
+                                rt.resolve_config::<#inner_ty>()?
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Maps a field type to a `DepKey` variant; returns `None` for non-DI fields.

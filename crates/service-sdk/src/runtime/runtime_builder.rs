@@ -9,13 +9,13 @@
 //! `RuntimeInner` is shared state held by all generated proxies via `Weak<RuntimeInner>`.
 //! It owns the `ServiceRegistry` and the `InterceptorChain`.
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::context::ServiceContext;
 use crate::contract::version::VersionConstraint;
-use crate::di::{DepKey, Injectable};
+use crate::di::{AdapterRef, ConfigValue, DepKey, Injectable, ProjectionRef};
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 
@@ -32,15 +32,59 @@ pub struct RuntimeInner {
     pub registry: ServiceRegistry,
     /// The interceptor chain applied to every resolved proxy.
     pub interceptor_chain: Arc<InterceptorChain>,
+    /// Registered projection instances for dependency injection.
+    projection_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Registered adapter instances for dependency injection.
+    adapter_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Registered config instances for dependency injection.
+    config_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl RuntimeInner {
-    /// Creates a new `RuntimeInner` with the given registry and interceptor chain.
+    /// Creates a new `RuntimeInner`.
     pub fn new(registry: ServiceRegistry, interceptor_chain: Arc<InterceptorChain>) -> Self {
         Self {
             registry,
             interceptor_chain,
+            projection_instances: HashMap::new(),
+            adapter_instances: HashMap::new(),
+            config_instances: HashMap::new(),
         }
+    }
+
+    /// Resolves a registered `ProjectionRef<T>` by type.
+    ///
+    /// Returns `DependencyNotFound` if no instance was registered for `T`.
+    pub fn resolve_projection<T: 'static + Send + Sync>(
+        &self,
+    ) -> Result<ProjectionRef<T>, RuntimeError> {
+        self.projection_instances
+            .get(&TypeId::of::<T>())
+            .and_then(|arc| arc.clone().downcast::<T>().ok())
+            .map(ProjectionRef::new)
+            .ok_or(RuntimeError::DependencyNotFound)
+    }
+
+    /// Resolves a registered `AdapterRef<A>` by type.
+    ///
+    /// Returns `DependencyNotFound` if no instance was registered for `A`.
+    pub fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
+        self.adapter_instances
+            .get(&TypeId::of::<A>())
+            .and_then(|arc| arc.clone().downcast::<A>().ok())
+            .map(AdapterRef::new)
+            .ok_or(RuntimeError::DependencyNotFound)
+    }
+
+    /// Resolves a registered `ConfigValue<C>` by type.
+    ///
+    /// Returns `DependencyNotFound` if no instance was registered for `C`.
+    pub fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
+        self.config_instances
+            .get(&TypeId::of::<C>())
+            .and_then(|arc| arc.clone().downcast::<C>().ok())
+            .map(ConfigValue::new)
+            .ok_or(RuntimeError::DependencyNotFound)
     }
 
     /// Enforces tenant isolation — currently a stub.
@@ -52,6 +96,9 @@ impl Default for RuntimeInner {
         Self {
             registry: ServiceRegistry::new(),
             interceptor_chain: Arc::new(InterceptorChain::new()),
+            projection_instances: HashMap::new(),
+            adapter_instances: HashMap::new(),
+            config_instances: HashMap::new(),
         }
     }
 }
@@ -212,6 +259,13 @@ pub struct RuntimeBuilder {
     projection_type_ids: Vec<TypeId>,
     entity_type_ids: Vec<TypeId>,
 
+    /// Registered instances for dependency resolution during `build()`.
+    projection_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Registered instances for dependency resolution during `build()`.
+    adapter_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Registered instances for dependency resolution during `build()`.
+    config_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+
     /// Optional pre-configured service registry. Defaults to empty.
     registry: Option<ServiceRegistry>,
 
@@ -234,6 +288,9 @@ impl RuntimeBuilder {
             service_nodes: Vec::new(),
             projection_type_ids: Vec::new(),
             entity_type_ids: Vec::new(),
+            projection_instances: HashMap::new(),
+            adapter_instances: HashMap::new(),
+            config_instances: HashMap::new(),
             registry: None,
             interceptor_chain: None,
         }
@@ -297,6 +354,46 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a projection type AND stores the given instance for resolution.
+    ///
+    /// The type is also added to `projection_type_ids` so graph validation
+    /// recognises `Projection<T>` as an available dependency.
+    pub fn with_projection_value<P: 'static + Send + Sync>(mut self, instance: P) -> Self {
+        let tid = TypeId::of::<P>();
+        self.projection_type_ids.push(tid);
+        self.projection_instances.insert(tid, Arc::new(instance));
+        self.dependencies.push(Dependency {
+            type_id: std::any::type_name::<P>().to_string(),
+            name: None,
+            version: None,
+        });
+        self
+    }
+
+    /// Registers an adapter type AND stores the given instance for resolution.
+    pub fn with_adapter_value<A: 'static + Send + Sync>(mut self, instance: A) -> Self {
+        let tid = TypeId::of::<A>();
+        self.adapter_instances.insert(tid, Arc::new(instance));
+        self.dependencies.push(Dependency {
+            type_id: std::any::type_name::<A>().to_string(),
+            name: None,
+            version: None,
+        });
+        self
+    }
+
+    /// Registers a config value AND stores the given instance for resolution.
+    pub fn with_config_value<C: 'static + Send + Sync>(mut self, instance: C) -> Self {
+        let tid = TypeId::of::<C>();
+        self.config_instances.insert(tid, Arc::new(instance));
+        self.dependencies.push(Dependency {
+            type_id: std::any::type_name::<C>().to_string(),
+            name: None,
+            version: None,
+        });
+        self
+    }
+
     /// Registers a named service bundle as an available dependency.
     pub fn with_service_bundle(mut self, bundle: &str) -> Self {
         self.dependencies.push(Dependency {
@@ -344,6 +441,9 @@ impl RuntimeBuilder {
         let inner = Arc::new(RuntimeInner {
             registry,
             interceptor_chain: chain,
+            projection_instances: self.projection_instances,
+            adapter_instances: self.adapter_instances,
+            config_instances: self.config_instances,
         });
 
         Ok(Runtime { inner })

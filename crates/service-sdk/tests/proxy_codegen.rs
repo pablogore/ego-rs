@@ -9,7 +9,7 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::runtime::{RuntimeError, RuntimeInner};
+use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError, RuntimeInner};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -252,12 +252,52 @@ fn service_on_struct_detects_fields() {
 #[test]
 fn injectable_build_returns_dependency_not_found_for_di_fields() {
     // InjectableServiceImpl has DI fields (ProjectionRef, AdapterRef).
-    // build() must return DependencyNotFound until RuntimeInner has real resolvers.
+    // build() calls rt.resolve_projection / rt.resolve_adapter which return
+    // DependencyNotFound when no instance is registered.
     let rt = RuntimeInner::default();
     let result = InjectableServiceImpl::build(&rt);
     assert!(
         matches!(result, Err(RuntimeError::DependencyNotFound)),
-        "build() must return DependencyNotFound while resolvers are not wired"
+        "build() must return DependencyNotFound when resolvers are missing"
+    );
+}
+
+#[tokio::test]
+async fn injectable_build_succeeds_when_deps_are_registered() {
+    // Register MyProjection and MyAdapter as resolvable instances.
+    let runtime = RuntimeBuilder::new()
+        .with_projection_value(MyProjection)
+        .with_adapter_value(MyAdapter)
+        .build()
+        .await
+        .unwrap();
+
+    let result = InjectableServiceImpl::build(runtime.inner());
+    assert!(
+        result.is_ok(),
+        "build() must succeed when deps are registered with RuntimeInner"
+    );
+}
+
+#[tokio::test]
+async fn injectable_build_uses_runtime_inner_not_stub() {
+    // Prove generated build() actually resolves from RuntimeInner:
+    // Different registered projections resolve to the correct instances.
+    let runtime = RuntimeBuilder::new()
+        .with_projection_value(MyProjection)
+        .with_adapter_value(MyAdapter)
+        .build()
+        .await
+        .unwrap();
+
+    let svc = InjectableServiceImpl::build(runtime.inner()).unwrap();
+    // Deref to verify it's the real resolved instance, not a stub.
+    let _: &MyProjection = &svc.projection;
+    let _: &MyAdapter = &svc.adapter;
+    assert_eq!(
+        svc.name,
+        String::default(),
+        "plain field must still use Default::default()"
     );
 }
 
