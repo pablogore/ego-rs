@@ -585,31 +585,6 @@ mod tests {
         }
     }
 
-    /// A service that depends on two projections.
-    struct ServiceDepAB;
-    impl Injectable for ServiceDepAB {
-        fn dependencies() -> Vec<DepKey> {
-            vec![
-                DepKey::Projection(TypeId::of::<ProjectionA>()),
-                DepKey::Projection(TypeId::of::<ProjectionB>()),
-            ]
-        }
-        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(ServiceDepAB)
-        }
-    }
-
-    /// Another projection type — no deps.
-    struct ProjectionA;
-    impl Injectable for ProjectionA {
-        fn dependencies() -> Vec<DepKey> {
-            vec![]
-        }
-        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(ProjectionA)
-        }
-    }
-
     // ----------------------------------------------------------
     // Cycle-detection test types
     //   Services participate in cycle detection;

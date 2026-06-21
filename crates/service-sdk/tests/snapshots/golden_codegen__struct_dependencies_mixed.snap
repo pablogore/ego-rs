@@ -1,0 +1,12 @@
+---
+source: crates/service-sdk/tests/golden_codegen.rs
+expression: deps
+---
+[
+    Projection(
+        TypeId(<opaque>),
+    ),
+    Adapter(
+        TypeId(<opaque>),
+    ),
+]
