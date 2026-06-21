@@ -13,6 +13,7 @@ members = [
     "crates/ego-scheduler",
     "crates/service-sdk",
     "crates/service-sdk-macros",
+    "crates/security-sdk",
 ]
 resolver = "2"
 

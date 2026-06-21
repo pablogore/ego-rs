@@ -1,0 +1,1 @@
+//! Security error types.
