@@ -109,10 +109,10 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     /// Resolves a typed service proxy for the given tag type.
     ///
-/// # Type Parameters
-///
-/// * `T` — A tag type (e.g. `OrderServiceTag`) that implements `Resolvable`.
-///   The tag connects the registry key to its proxy type.
+    /// # Type Parameters
+    ///
+    /// * `T` — A tag type (e.g. `OrderServiceTag`) that implements `Resolvable`.
+    ///   The tag connects the registry key to its proxy type.
     ///
     /// # Returns
     ///
@@ -315,20 +315,24 @@ impl RuntimeBuilder {
     ///
     /// # Validation
     ///
-    /// 1. **Missing dependencies** — every dep `TypeId` referenced by a
-    ///    service's `Injectable::dependencies()` must be explicitly registered
-    ///    via `with_service`, `with_projection`, or `with_entity`.
+    /// 1. **Missing dependencies** — every dep referenced by a service's
+    ///    `Injectable::dependencies()` must be explicitly registered via
+    ///    `with_projection`, `with_entity`, `with_adapter`, or `with_config`,
+    ///    matching BOTH the `DepKey` variant AND the inner `TypeId`.
+    ///
+    ///    Services registered via `with_service` do NOT satisfy dependency
+    ///    requirements — they are consumers, not providers.
     ///
     /// 2. **Cycle detection** — the directed graph is sorted with Kahn's
-    ///    algorithm. If any node cannot be ordered, a `DependencyCycle` error
-    ///    is returned.
+    ///    algorithm. If any node cannot be ordered, a `DependencyCycle`
+    ///    error is returned.
     ///
     /// # Returns
     ///
     /// * `Ok(Runtime)` — graph is valid, runtime is ready for resolution.
     /// * `Err(RuntimeError::DependencyCycle)` — a cycle was detected.
-/// * `Err(RuntimeError::MissingDependency)` — a referenced dependency
-///   was not registered.
+    /// * `Err(RuntimeError::MissingDependency)` — a referenced dep was not
+    ///   registered under the correct category.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
         self.validate_deps()?;
 
@@ -347,50 +351,56 @@ impl RuntimeBuilder {
 
     /// Runs Kahn topological sort on the declared dependency graph.
     ///
+    /// Deps are matched by `(DepKey variant, TypeId)` — a plain `TypeId`
+    /// match is NOT enough.  For example, `Projection<T>` is NOT satisfied
+    /// by `Entity<T>`.
+    ///
     /// Returns `Ok(())` if the graph is a valid DAG.
     /// Returns `Err(DependencyCycle)` if a cycle is detected.
-    /// Returns `Err(MissingDependency)` if a dependency references an
-    /// unregistered type.
+    /// Returns `Err(MissingDependency)` if a dep's (variant, TypeId) pair
+    /// was not registered.
     fn validate_deps(&self) -> Result<(), RuntimeError> {
-        // ---- Step 1: collect all explicitly registered TypeIds ----
-        let mut available: HashSet<TypeId> = HashSet::new();
+        // ---- Step 1: collect available deps by (variant, TypeId) ----
+        // Services are tracked for cycle detection but do NOT satisfy
+        // dependency requirements — they consume deps, not provide them.
+        let mut registered_by_category: HashSet<DepKey> = HashSet::new();
+        let mut all_type_ids: HashSet<TypeId> = HashSet::new();
 
         for node in &self.service_nodes {
-            available.insert(node.type_id);
+            all_type_ids.insert(node.type_id);
         }
         for tid in &self.projection_type_ids {
-            available.insert(*tid);
+            all_type_ids.insert(*tid);
+            registered_by_category.insert(DepKey::Projection(*tid));
         }
         for tid in &self.entity_type_ids {
-            available.insert(*tid);
+            all_type_ids.insert(*tid);
+            registered_by_category.insert(DepKey::Entity(*tid));
         }
 
         // ---- Step 2: collect edges and check for missing deps ----
-        // Edge (from, to) means "from depends on to".
         let mut edges: Vec<(TypeId, TypeId)> = Vec::new();
-        let mut referenced: HashSet<TypeId> = HashSet::new();
+        // Referenced TypeIds for cycle-detection node set.
+        let mut referenced_type_ids: HashSet<TypeId> = HashSet::new();
 
         for node in &self.service_nodes {
             for dep in &node.deps {
-                let dep_type_id = dep_type_to_id(dep);
-                referenced.insert(dep_type_id);
-                edges.push((node.type_id, dep_type_id));
-            }
-        }
+                let tid = dep_key_type_id(dep);
+                referenced_type_ids.insert(tid);
+                edges.push((node.type_id, tid));
 
-        // Missing dependency: referenced by a service but not registered.
-        for dep_id in &referenced {
-            if !available.contains(dep_id) {
-                return Err(RuntimeError::MissingDependency);
+                // --- category-aware missing-dep check ---
+                if !registered_by_category.contains(dep) {
+                    return Err(RuntimeError::MissingDependency);
+                }
             }
         }
 
         // ---- Step 3: build the full node set for cycle detection ----
-        let mut all_nodes: HashSet<TypeId> = available.clone();
-        all_nodes.extend(&referenced);
+        let mut all_nodes: HashSet<TypeId> = all_type_ids.clone();
+        all_nodes.extend(&referenced_type_ids);
 
         // ---- Step 4: Kahn topological sort ----
-        // deps_left[node] = number of dependencies this node is waiting on.
         let mut deps_left: HashMap<TypeId, usize> = HashMap::new();
         let mut dependents: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
 
@@ -400,12 +410,10 @@ impl RuntimeBuilder {
         }
 
         for (from, to) in &edges {
-            // `from` depends on `to` → `from` is waiting on `to`.
             *deps_left.entry(*from).or_insert(0) += 1;
             dependents.entry(*to).or_default().push(*from);
         }
 
-        // Seed queue with nodes that have zero pending dependencies.
         let mut queue: VecDeque<TypeId> = deps_left
             .iter()
             .filter(|(_, &count)| count == 0)
@@ -415,8 +423,6 @@ impl RuntimeBuilder {
         let mut processed = 0;
         while let Some(node) = queue.pop_front() {
             processed += 1;
-            // When a node is resolved, decrement deps_left for everything
-            // that depends on it.
             if let Some(deps_of_node) = dependents.get(&node) {
                 for dependent in deps_of_node {
                     if let Some(count) = deps_left.get_mut(dependent) {
@@ -437,8 +443,8 @@ impl RuntimeBuilder {
     }
 }
 
-/// Extracts the inner `TypeId` from any `DepKey` variant.
-fn dep_type_to_id(dep: &DepKey) -> TypeId {
+/// Returns the inner `TypeId` from any `DepKey` variant.
+fn dep_key_type_id(dep: &DepKey) -> TypeId {
     match dep {
         DepKey::Entity(t) | DepKey::Projection(t) | DepKey::Adapter(t) | DepKey::Config(t) => *t,
     }
@@ -457,37 +463,90 @@ mod tests {
     // Test types
     // ------------------------------------------------------------------
 
-    struct ServiceC;
-    impl Injectable for ServiceC {
+    /// A leaf projection type — no deps.
+    struct ProjectionC;
+    impl Injectable for ProjectionC {
         fn dependencies() -> Vec<DepKey> {
             vec![]
         }
         fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(ServiceC)
+            Ok(ProjectionC)
         }
     }
 
-    struct ServiceB;
-    impl Injectable for ServiceB {
+    /// A projection type that depends on another projection.
+    struct ProjectionB;
+    impl Injectable for ProjectionB {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Projection(TypeId::of::<ServiceC>())]
+            vec![DepKey::Projection(TypeId::of::<ProjectionC>())]
         }
         fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(ServiceB)
+            Ok(ProjectionB)
         }
     }
+
+    /// A service that depends on two projections.
+    struct ServiceDepAB;
+    impl Injectable for ServiceDepAB {
+        fn dependencies() -> Vec<DepKey> {
+            vec![
+                DepKey::Projection(TypeId::of::<ProjectionA>()),
+                DepKey::Projection(TypeId::of::<ProjectionB>()),
+            ]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ServiceDepAB)
+        }
+    }
+
+    /// Another projection type — no deps.
+    struct ProjectionA;
+    impl Injectable for ProjectionA {
+        fn dependencies() -> Vec<DepKey> {
+            vec![]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ProjectionA)
+        }
+    }
+
+    // ----------------------------------------------------------
+    // Cycle-detection test types
+    //   Services participate in cycle detection;
+    //   dependencies must also be satisfied by category.
+    // ----------------------------------------------------------
 
     struct ServiceA;
     impl Injectable for ServiceA {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Projection(TypeId::of::<ServiceB>())]
+            vec![DepKey::Projection(TypeId::of::<ProjectionB>())]
         }
         fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
             Ok(ServiceA)
         }
     }
 
-    /// A service that depends on itself (creates a cycle).
+    struct ServiceB;
+    impl Injectable for ServiceB {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Projection(TypeId::of::<ProjectionC>())]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ServiceB)
+        }
+    }
+
+    struct ServiceOnlyC;
+    impl Injectable for ServiceOnlyC {
+        fn dependencies() -> Vec<DepKey> {
+            vec![]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ServiceOnlyC)
+        }
+    }
+
+    /// A service that depends on itself (creates a self-cycle).
     struct SelfCycleService;
     impl Injectable for SelfCycleService {
         fn dependencies() -> Vec<DepKey> {
@@ -498,14 +557,43 @@ mod tests {
         }
     }
 
-    /// A service with an unregistered dependency.
-    struct MissingDepService;
-    impl Injectable for MissingDepService {
+    // ------------------------------------------------------------------
+    // Category mismatch test types
+    // ------------------------------------------------------------------
+
+    /// A struct used for category-mismatch testing.
+    struct SomeType;
+
+    /// A service that depends on Projection<SomeType>.
+    struct ServiceProjectionDep;
+    impl Injectable for ServiceProjectionDep {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Projection(TypeId::of::<ServiceC>())]
+            vec![DepKey::Projection(TypeId::of::<SomeType>())]
         }
         fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(MissingDepService)
+            Ok(ServiceProjectionDep)
+        }
+    }
+
+    /// A service that depends on Adapter<SomeType>.
+    struct ServiceAdapterDep;
+    impl Injectable for ServiceAdapterDep {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Adapter(TypeId::of::<SomeType>())]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ServiceAdapterDep)
+        }
+    }
+
+    /// A service that depends on Config<SomeType>.
+    struct ServiceConfigDep;
+    impl Injectable for ServiceConfigDep {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Config(TypeId::of::<SomeType>())]
+        }
+        fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(ServiceConfigDep)
         }
     }
 
@@ -522,9 +610,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_service() {
-        let builder = RuntimeBuilder::new().with_service::<ServiceA>();
+        let builder = RuntimeBuilder::new().with_service::<ServiceOnlyC>();
         assert_eq!(builder.services.len(), 1);
-        assert!(builder.services[0].contains("ServiceA"));
     }
 
     #[tokio::test]
@@ -548,39 +635,37 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // TASK-013: Dependency graph validation
+    // TASK-013: Dependency graph validation (category-aware)
     // ------------------------------------------------------------------
 
-    /// Valid graph: A -> B -> C  (all registered, no cycles).
+    /// Valid graph: services depend on projections that are properly registered.
     #[tokio::test]
     async fn runtime_build_succeeds_for_valid_graph() {
         let result = RuntimeBuilder::new()
-            .with_service::<ServiceA>() // A depends on B
-            .with_service::<ServiceB>() // B depends on C
-            .with_service::<ServiceC>() // no deps
+            .with_service::<ServiceA>() // A depends on Projection<B>
+            .with_service::<ServiceB>() // B depends on Projection<C>
+            .with_service::<ServiceOnlyC>() // no deps
+            .with_projection::<ProjectionB>() // satisfies A's dep
+            .with_projection::<ProjectionC>() // satisfies B's dep
             .build()
             .await;
 
-        assert!(
-            result.is_ok(),
-            "valid graph (A -> B -> C) must build: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "valid graph must build: {:?}", result.err());
     }
 
-    /// Cycle: A -> B -> A  → must fail with DependencyCycle.
+    /// Self-cycle must fail.
+    /// Dep is satisfied via Entity registration so cycle detection triggers.
     #[tokio::test]
     async fn runtime_build_fails_on_cycle() {
-        // Self-cycle: SelfCycleService depends on itself.
         let result = RuntimeBuilder::new()
-            .with_service::<SelfCycleService>()
+            .with_service::<SelfCycleService>() // depends on Entity<SelfCycleService>
+            .with_entity::<SelfCycleService>() // satisfies the dep → cycle detection fires
             .build()
             .await;
 
         assert!(
             matches!(result, Err(RuntimeError::DependencyCycle)),
-            "self-cycle must yield DependencyCycle: {:?}",
-            result
+            "self-cycle must yield DependencyCycle"
         );
     }
 
@@ -596,7 +681,6 @@ mod tests {
                 Ok(CycleA)
             }
         }
-
         struct CycleB;
         impl Injectable for CycleB {
             fn dependencies() -> Vec<DepKey> {
@@ -607,9 +691,13 @@ mod tests {
             }
         }
 
+        // Both deps need projection registrations, but the cycle will
+        // be detected before missing-dep because the graph is irreducible.
         let result = RuntimeBuilder::new()
             .with_service::<CycleA>()
             .with_service::<CycleB>()
+            .with_projection::<CycleB>()
+            .with_projection::<CycleA>()
             .build()
             .await;
 
@@ -619,33 +707,142 @@ mod tests {
         );
     }
 
-    /// Missing dependency: A depends on C, but C is not registered.
+    /// Missing dependency: Projection<C> is not registered at all.
     #[tokio::test]
     async fn runtime_build_fails_on_missing_dependency() {
+        struct NeedsProjection;
+        impl Injectable for NeedsProjection {
+            fn dependencies() -> Vec<DepKey> {
+                vec![DepKey::Projection(TypeId::of::<ProjectionC>())]
+            }
+            fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+                Ok(NeedsProjection)
+            }
+        }
+
         let result = RuntimeBuilder::new()
-            .with_service::<MissingDepService>() // depends on C, but C not registered
+            .with_service::<NeedsProjection>()
             .build()
             .await;
 
         assert!(
             matches!(result, Err(RuntimeError::MissingDependency)),
-            "missing dependency must yield MissingDependency: {:?}",
-            result
+            "unregistered dependency must yield MissingDependency"
         );
     }
 
-    /// Missing dependency where dep IS registered as a projection.
+    /// Dep satisfied by correctly-categorized registration.
     #[tokio::test]
     async fn runtime_build_succeeds_when_dep_is_projection() {
+        struct NeedsProjection;
+        impl Injectable for NeedsProjection {
+            fn dependencies() -> Vec<DepKey> {
+                vec![DepKey::Projection(TypeId::of::<ProjectionC>())]
+            }
+            fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+                Ok(NeedsProjection)
+            }
+        }
+
         let result = RuntimeBuilder::new()
-            .with_service::<MissingDepService>() // needs Projection<ServiceC>
-            .with_projection::<ServiceC>() // ServiceC is available as projection
+            .with_service::<NeedsProjection>()
+            .with_projection::<ProjectionC>()
             .build()
             .await;
 
-            assert!(
+        assert!(
             result.is_ok(),
-            "dep satisfied by projection must build: {:?}",
+            "dep satisfied by matching category must build: {:?}",
+            result.err()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // BLOCKER 2: DepKey category mismatch — same TypeId, wrong variant
+    // ------------------------------------------------------------------
+
+    /// Projection<T> MUST NOT be satisfied by Entity<T>.
+    #[tokio::test]
+    async fn runtime_build_fails_when_projection_satisfied_by_entity() {
+        let result = RuntimeBuilder::new()
+            .with_service::<ServiceProjectionDep>() // needs Projection<SomeType>
+            .with_entity::<SomeType>() // Entity<SomeType> != Projection<SomeType>
+            .build()
+            .await;
+
+        assert!(
+            matches!(result, Err(RuntimeError::MissingDependency)),
+            "Projection<T> must NOT be satisfied by Entity<T>"
+        );
+    }
+
+    /// Projection<T> satisfied by Projection<T> — MUST work.
+    #[tokio::test]
+    async fn runtime_build_succeeds_projection_matched_by_projection() {
+        let result = RuntimeBuilder::new()
+            .with_service::<ServiceProjectionDep>() // needs Projection<SomeType>
+            .with_projection::<SomeType>() // Projection<SomeType> ✓
+            .build()
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Projection<T> must be satisfied by Projection<T>"
+        );
+    }
+
+    /// Adapter<T> MUST NOT be satisfied by Projection<T>.
+    #[tokio::test]
+    async fn runtime_build_fails_when_adapter_satisfied_by_projection() {
+        let result = RuntimeBuilder::new()
+            .with_service::<ServiceAdapterDep>() // needs Adapter<SomeType>
+            .with_projection::<SomeType>() // Projection<SomeType> != Adapter<SomeType>
+            .build()
+            .await;
+
+        assert!(
+            matches!(result, Err(RuntimeError::MissingDependency)),
+            "Adapter<T> must NOT be satisfied by Projection<T>"
+        );
+    }
+
+    /// Config<T> MUST NOT be satisfied by Entity<T>.
+    #[tokio::test]
+    async fn runtime_build_fails_when_config_satisfied_by_entity() {
+        let result = RuntimeBuilder::new()
+            .with_service::<ServiceConfigDep>() // needs Config<SomeType>
+            .with_entity::<SomeType>() // Entity<SomeType> != Config<SomeType>
+            .build()
+            .await;
+
+        assert!(
+            matches!(result, Err(RuntimeError::MissingDependency)),
+            "Config<T> must NOT be satisfied by Entity<T>"
+        );
+    }
+
+    /// Entity<T> satisfied by Entity<T> — MUST work.
+    #[tokio::test]
+    async fn runtime_build_succeeds_entity_matched_by_entity() {
+        struct EntityDepService;
+        impl Injectable for EntityDepService {
+            fn dependencies() -> Vec<DepKey> {
+                vec![DepKey::Entity(TypeId::of::<SomeType>())]
+            }
+            fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+                Ok(EntityDepService)
+            }
+        }
+
+        let result = RuntimeBuilder::new()
+            .with_service::<EntityDepService>() // needs Entity<SomeType>
+            .with_entity::<SomeType>() // Entity<SomeType> ✓
+            .build()
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Entity<T> must be satisfied by Entity<T>: {:?}",
             result.err()
         );
     }

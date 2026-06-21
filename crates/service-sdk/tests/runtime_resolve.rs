@@ -11,12 +11,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::contract::version::ContractVersion;
+use ego_service_sdk::di::{DepKey, Injectable};
 use ego_service_sdk::error::ServiceError;
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::di::{DepKey, Injectable};
+use ego_service_sdk::registry::ServiceRegistry;
 use ego_service_sdk::runtime::RuntimeInner;
 use ego_service_sdk::runtime::{ResolvableContainer, RuntimeBuilder, RuntimeError};
-use ego_service_sdk::registry::ServiceRegistry;
 use ego_service_sdk_macros::service;
 
 // ---------------------------------------------------------------------------
@@ -143,8 +143,11 @@ async fn resolve_preserves_interceptors() {
     assert_eq!(result, "Hello, World!");
 
     let calls = recorder.calls.lock().unwrap().clone();
-    assert_eq!(calls, vec!["on_request", "on_response"],
-               "interceptor hooks must fire via resolved proxy");
+    assert_eq!(
+        calls,
+        vec!["on_request", "on_response"],
+        "interceptor hooks must fire via resolved proxy"
+    );
 }
 
 #[tokio::test]
@@ -169,8 +172,11 @@ async fn resolve_preserves_context() {
         .unwrap();
 
     let captured = ctx_service.captured_tenant.lock().unwrap().clone();
-    assert_eq!(captured.as_deref(), Some("tenant-abc"),
-               "ServiceContext must propagate through resolved proxy");
+    assert_eq!(
+        captured.as_deref(),
+        Some("tenant-abc"),
+        "ServiceContext must propagate through resolved proxy"
+    );
 }
 
 #[tokio::test]
@@ -214,8 +220,11 @@ async fn resolve_error_path_fires_on_error() {
     assert!(result.is_err(), "failing service must return an error");
 
     let calls = recorder.calls.lock().unwrap().clone();
-    assert_eq!(calls, vec!["on_request", "on_error"],
-               "error path must fire on_request -> on_error");
+    assert_eq!(
+        calls,
+        vec!["on_request", "on_error"],
+        "error path must fire on_request -> on_error"
+    );
 }
 
 #[tokio::test]
@@ -237,17 +246,22 @@ async fn resolve_multiple_services_each_resolves_independently() {
     }
 
     // Register both services.
-    let greet_container = ResolvableContainer(Arc::new(GreetService) as Arc<dyn ResolveTestService>);
+    let greet_container =
+        ResolvableContainer(Arc::new(GreetService) as Arc<dyn ResolveTestService>);
     let query_container = ResolvableContainer(Arc::new(QueryServiceImpl) as Arc<dyn QueryService>);
 
     let mut registry = ServiceRegistry::new();
     registry
-        .register::<ResolveTestServiceTag>(ContractVersion::new(1, 0, 0),
-                                           Arc::new(greet_container) as Arc<dyn Any + Send + Sync>)
+        .register::<ResolveTestServiceTag>(
+            ContractVersion::new(1, 0, 0),
+            Arc::new(greet_container) as Arc<dyn Any + Send + Sync>,
+        )
         .unwrap();
     registry
-        .register::<QueryServiceTag>(ContractVersion::new(1, 0, 0),
-                                     Arc::new(query_container) as Arc<dyn Any + Send + Sync>)
+        .register::<QueryServiceTag>(
+            ContractVersion::new(1, 0, 0),
+            Arc::new(query_container) as Arc<dyn Any + Send + Sync>,
+        )
         .unwrap();
 
     let runtime = RuntimeBuilder::new()
@@ -279,7 +293,9 @@ impl Injectable for ServiceA {
         vec![DepKey::Projection(TypeId::of::<ServiceB>())]
     }
     fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError>
-    where Self: Sized {
+    where
+        Self: Sized,
+    {
         Ok(ServiceA)
     }
 }
@@ -291,7 +307,9 @@ impl Injectable for ServiceB {
         vec![DepKey::Projection(TypeId::of::<ServiceC>())]
     }
     fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError>
-    where Self: Sized {
+    where
+        Self: Sized,
+    {
         Ok(ServiceB)
     }
 }
@@ -303,7 +321,9 @@ impl Injectable for ServiceC {
         vec![]
     }
     fn build(_rt: &RuntimeInner) -> Result<Self, RuntimeError>
-    where Self: Sized {
+    where
+        Self: Sized,
+    {
         Ok(ServiceC)
     }
 }
@@ -313,9 +333,11 @@ async fn topological_order_is_deterministic() {
     // Register in forward order and build multiple times.
     for i in 0..10 {
         let builder = RuntimeBuilder::new()
-            .with_service::<ServiceA>()
-            .with_service::<ServiceB>()
-            .with_service::<ServiceC>();
+            .with_service::<ServiceA>() // depends on Projection<B>
+            .with_service::<ServiceB>() // depends on Projection<C>
+            .with_service::<ServiceC>() // no deps
+            .with_projection::<ServiceB>() // satisfies A's dep
+            .with_projection::<ServiceC>(); // satisfies B's dep
 
         let result = builder.build().await;
         assert!(
@@ -331,9 +353,11 @@ async fn multiple_builds_produce_same_order() {
     // Register in REVERSE order and verify it still builds.
     for i in 0..10 {
         let builder = RuntimeBuilder::new()
-            .with_service::<ServiceC>()
-            .with_service::<ServiceB>()
-            .with_service::<ServiceA>();
+            .with_service::<ServiceC>() // no deps
+            .with_service::<ServiceB>() // depends on Projection<C>
+            .with_service::<ServiceA>() // depends on Projection<B>
+            .with_projection::<ServiceC>() // satisfies B's dep
+            .with_projection::<ServiceB>(); // satisfies A's dep
 
         let result = builder.build().await;
         assert!(
