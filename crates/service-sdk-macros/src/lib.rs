@@ -55,9 +55,18 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
     let version_str = service_args.version.unwrap_or_else(|| "1.0.0".to_string());
     let parts: Vec<&str> = version_str.split('.').collect();
-    let major = parts.first().map(|s| s.parse::<u32>().unwrap_or(1)).unwrap_or(1);
-    let minor = parts.get(1).map(|s| s.parse::<u32>().unwrap_or(0)).unwrap_or(0);
-    let patch = parts.get(2).map(|s| s.parse::<u32>().unwrap_or(0)).unwrap_or(0);
+    let major = parts
+        .first()
+        .map(|s| s.parse::<u32>().unwrap_or(1))
+        .unwrap_or(1);
+    let minor = parts
+        .get(1)
+        .map(|s| s.parse::<u32>().unwrap_or(0))
+        .unwrap_or(0);
+    let patch = parts
+        .get(2)
+        .map(|s| s.parse::<u32>().unwrap_or(0))
+        .unwrap_or(0);
 
     let mut operation_descriptors = Vec::new();
     let mut forwarding_methods = Vec::new();
@@ -191,6 +200,22 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             #(#forwarding_methods)*
         }
 
+            // Tag impl — enables runtime resolution.
+        impl ego_service_sdk::runtime::Resolvable for #tag_name {
+            type Proxy = #ref_name;
+
+            fn create_proxy(
+                inner: std::sync::Arc<dyn std::any::Any + std::marker::Send + std::marker::Sync>,
+                chain: std::sync::Arc<ego_service_sdk::interceptor::InterceptorChain>,
+                runtime: std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>,
+            ) -> Result<Self::Proxy, ego_service_sdk::runtime::RuntimeError> {
+                let container = inner
+                    .downcast::<ego_service_sdk::runtime::ResolvableContainer<dyn #trait_name>>()
+                    .map_err(|_| ego_service_sdk::runtime::RuntimeError::DependencyNotFound)?;
+                Ok(#ref_name::new(container.0.clone(), chain, runtime))
+            }
+        }
+
         // Tag impl avoids orphan rule violations from a blanket impl.
         impl ego_service_sdk::contract::ServiceContract for #tag_name {
             fn type_id() -> &'static str {
@@ -228,22 +253,46 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
     let struct_name = &input_struct.ident;
 
     let mut dep_keys: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut has_di_fields = false;
+    let mut plain_field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
 
     if let syn::Fields::Named(fields) = &input_struct.fields {
         for field in &fields.named {
+            let field_name = &field.ident;
             if let Some(dep_key) = classify_field_type(&field.ty) {
                 dep_keys.push(dep_key);
+                has_di_fields = true;
+            } else {
+                plain_field_inits.push(quote! { #field_name: Default::default() });
             }
         }
     }
+
+    // Structs with DI fields return DependencyNotFound until RuntimeInner wires real resolvers.
+    // Structs with only plain fields can be built immediately via Default.
+    let build_body = if has_di_fields {
+        quote! {
+            Err(ego_service_sdk::runtime::RuntimeError::DependencyNotFound)
+        }
+    } else {
+        quote! {
+            Ok(Self { #(#plain_field_inits),* })
+        }
+    };
 
     let expanded = quote! {
         #input_struct
 
         impl ego_service_sdk::di::Injectable for #struct_name {
-            fn dependencies() -> Vec<ego_service_sdk::di::DepKey> {
+            fn dependencies() -> Vec<ego_service_sdk::di::DepKey>
+            where Self: Sized {
                 use std::any::TypeId;
                 vec![#(#dep_keys),*]
+            }
+
+            fn build(_rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, ego_service_sdk::runtime::RuntimeError>
+            where Self: Sized {
+                #build_body
             }
         }
     };

@@ -72,7 +72,7 @@ impl<T> Deref for ConfigValue<T> {
 }
 
 /// A discriminated key identifying the kind and type of a dependency.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DepKey {
     /// An entity dependency, keyed by type.
     Entity(TypeId),
@@ -88,6 +88,12 @@ pub enum DepKey {
 pub trait Injectable: Send + Sync {
     /// Returns the list of dependency keys this type requires.
     fn dependencies() -> Vec<DepKey>
+    where
+        Self: Sized;
+
+    /// Constructs an instance by resolving dependencies from the runtime.
+    /// Returns `RuntimeError::DependencyNotFound` while resolvers are not yet wired.
+    fn build(rt: &crate::runtime::RuntimeInner) -> Result<Self, crate::runtime::RuntimeError>
     where
         Self: Sized;
 }

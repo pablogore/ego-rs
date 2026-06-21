@@ -9,6 +9,7 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
+use ego_service_sdk::runtime::{RuntimeError, RuntimeInner};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -24,9 +25,15 @@ use std::sync::Arc;
 pub struct OrderError(pub String);
 
 impl ServiceErrorTrait for OrderError {
-    fn code(&self) -> &str { "ORDER_ERROR" }
-    fn category(&self) -> ErrorCategory { ErrorCategory::Business }
-    fn message(&self) -> String { self.0.clone() }
+    fn code(&self) -> &str {
+        "ORDER_ERROR"
+    }
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Business
+    }
+    fn message(&self) -> String {
+        self.0.clone()
+    }
 }
 
 /// Sample trait that uses a domain error type unrelated to ServiceError.
@@ -54,7 +61,7 @@ fn service_on_trait_generates_tag_and_ref() {
 
     let inner: Arc<dyn OrderService> = Arc::new(NoopOrderService);
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
     let runtime_weak = Arc::downgrade(&runtime_inner);
 
     // Must compile: OrderServiceRef::new(inner, chain, runtime_weak)
@@ -120,7 +127,7 @@ async fn interceptors_fire_in_order_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
@@ -143,7 +150,7 @@ async fn interceptors_fire_on_success_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
@@ -183,7 +190,7 @@ async fn context_propagates_across_service_boundary() {
     let inner: Arc<dyn PaymentService> = capturing.clone();
 
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, chain, runtime_weak);
 
@@ -226,7 +233,6 @@ struct InjectableServiceImpl {
 #[test]
 fn service_on_struct_detects_fields() {
     let deps = InjectableServiceImpl::dependencies();
-    // Must contain exactly 2 entries: Projection + Adapter (not the plain String).
     assert_eq!(
         deps.len(),
         2,
@@ -241,4 +247,37 @@ fn service_on_struct_detects_fields() {
         "dependencies() must include a Projection DepKey"
     );
     assert!(has_adapter, "dependencies() must include an Adapter DepKey");
+}
+
+#[test]
+fn injectable_build_returns_dependency_not_found_for_di_fields() {
+    // InjectableServiceImpl has DI fields (ProjectionRef, AdapterRef).
+    // build() must return DependencyNotFound until RuntimeInner has real resolvers.
+    let rt = RuntimeInner::default();
+    let result = InjectableServiceImpl::build(&rt);
+    assert!(
+        matches!(result, Err(RuntimeError::DependencyNotFound)),
+        "build() must return DependencyNotFound while resolvers are not wired"
+    );
+}
+
+/// A struct with only plain fields — build() should succeed via Default.
+#[allow(dead_code)]
+#[service]
+struct PlainServiceImpl {
+    name: String,
+    count: u32,
+}
+
+#[test]
+fn injectable_build_succeeds_for_plain_fields() {
+    let rt = RuntimeInner::default();
+    let result = PlainServiceImpl::build(&rt);
+    assert!(
+        result.is_ok(),
+        "build() must succeed when all fields use Default"
+    );
+    let instance = result.unwrap();
+    assert_eq!(instance.name, String::default());
+    assert_eq!(instance.count, u32::default());
 }
