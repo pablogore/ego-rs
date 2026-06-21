@@ -16,6 +16,8 @@
 //! See the [`ego-service-sdk-macros`](https://docs.rs/ego-service-sdk-macros)
 //! crate for usage examples and the `tests/` directory for working integration tests.
 
+pub use kitlogger;
+
 pub mod builder;
 pub mod context;
 pub mod contract;
@@ -23,6 +25,7 @@ pub mod error;
 pub mod implementation;
 pub mod interceptor;
 pub mod lib_tests;
+pub mod logging_example;
 pub mod reference;
 pub mod registry;
 pub mod runtime;
@@ -36,6 +39,7 @@ pub use contract::*;
 pub use error::*;
 pub use implementation::*;
 pub use interceptor::*;
+pub use logging_example::*;
 pub use reference::*;
 pub use registry::*;
 pub use runtime::*;

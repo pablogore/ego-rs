@@ -9,6 +9,7 @@ tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["serde", "v4"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
+kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }

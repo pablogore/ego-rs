@@ -213,6 +213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-exporter"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "kitlogger-log-domain",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -459,6 +468,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ego-service-sdk-macros",
+ "kitlogger",
  "mockall 0.12.1",
  "serde",
  "thiserror 1.0.69",
@@ -1037,6 +1047,35 @@ dependencies = [
  "once_cell",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "kitlogger"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "async-trait",
+ "console-exporter",
+ "kitlogger-formatter",
+ "kitlogger-log-domain",
+ "telemetry-adapter-contracts",
+ "telemetry-config-semantics",
+ "telemetry-types",
+]
+
+[[package]]
+name = "kitlogger-formatter"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "kitlogger-log-domain",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "kitlogger-log-domain"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
 
 [[package]]
 name = "lazy_static"
@@ -1949,6 +1988,32 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "telemetry-adapter-contracts"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "async-trait",
+ "serde",
+ "telemetry-types",
+]
+
+[[package]]
+name = "telemetry-config-semantics"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "telemetry-types"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

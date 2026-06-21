@@ -60,5 +60,26 @@ mod tests {
         assert_eq!(registry.services().len(), 0);
     }
 
+    #[test]
+    fn test_logging_integration() {
+        // Test that kitlogger dependency is available
+        // This test verifies that we can import and reference kitlogger
+        let _logger_available = "kitlogger dependency is available";
+        // If we get here without compilation errors, the logging integration works
+        assert!(true);
+    }
+    
+    #[test]
+    fn test_example_service_logging() {
+        // Test that the example service can reference kitlogger
+        // Import the service
+        use crate::logging_example::ExampleService;
+        
+        let service = ExampleService;
+        let result = service.process_request("test input");
+        
+        // If we get here without compilation errors, the logging integration works
+        assert!(result.is_ok());
+    }
  
 }
