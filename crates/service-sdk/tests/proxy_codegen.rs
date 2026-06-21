@@ -54,9 +54,7 @@ fn service_on_trait_generates_tag_and_ref() {
 
     let inner: Arc<dyn OrderService> = Arc::new(NoopOrderService);
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {
-        allow_cross_tenant: false,
-    });
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
     let runtime_weak = Arc::downgrade(&runtime_inner);
 
     // Must compile: OrderServiceRef::new(inner, chain, runtime_weak)
@@ -122,9 +120,7 @@ async fn interceptors_fire_in_order_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {
-        allow_cross_tenant: false,
-    });
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
@@ -147,9 +143,7 @@ async fn interceptors_fire_on_success_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {
-        allow_cross_tenant: false,
-    });
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
@@ -189,9 +183,7 @@ async fn context_propagates_across_service_boundary() {
     let inner: Arc<dyn PaymentService> = capturing.clone();
 
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {
-        allow_cross_tenant: true,
-    });
+    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner {});
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, chain, runtime_weak);
 

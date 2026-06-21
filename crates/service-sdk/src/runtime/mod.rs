@@ -9,7 +9,6 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_builder_creation() {
         let builder = RuntimeBuilder::new();
-        assert_eq!(builder.services.len(), 0);
         assert_eq!(builder.dependencies.len(), 0);
     }
 

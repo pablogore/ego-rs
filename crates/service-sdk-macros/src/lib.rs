@@ -312,7 +312,7 @@ fn extract_error_types(ty: &syn::Type) -> proc_macro2::TokenStream {
 #[cfg(test)]
 mod tests;
 
-/// Marks a trait method as a service operation, generating its `OperationDescriptor`.
+/// Marker attribute consumed by `#[service]` to identify operation methods; passes through unchanged.
 #[proc_macro_attribute]
 pub fn operation(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(input as ItemFn);

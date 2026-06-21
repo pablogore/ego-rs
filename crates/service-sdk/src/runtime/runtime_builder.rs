@@ -1,9 +1,7 @@
 use crate::context::ServiceContext;
 
 /// Shared state held by the runtime and referenced by generated proxies via `Weak<RuntimeInner>`.
-pub struct RuntimeInner {
-    pub allow_cross_tenant: bool,
-}
+pub struct RuntimeInner {}
 
 impl RuntimeInner {
     /// Stub: no-op; returns `()` (not `Result`) so proxies impose no `From<ServiceError>` bound.
@@ -12,7 +10,6 @@ impl RuntimeInner {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeBuilder {
-    pub services: Vec<String>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -26,8 +23,6 @@ pub struct Dependency {
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
     ServiceNotFound,
-    DependencyNotFound,
-    DependencyCycle,
 }
 
 impl Default for RuntimeBuilder {
@@ -39,7 +34,6 @@ impl Default for RuntimeBuilder {
 impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
-            services: Vec::new(),
             dependencies: Vec::new(),
         }
     }
