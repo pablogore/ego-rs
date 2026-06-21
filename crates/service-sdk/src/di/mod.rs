@@ -72,7 +72,7 @@ impl<T> Deref for ConfigValue<T> {
 }
 
 /// A discriminated key identifying the kind and type of a dependency.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DepKey {
     /// An entity dependency, keyed by type.
     Entity(TypeId),

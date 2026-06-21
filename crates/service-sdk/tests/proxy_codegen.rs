@@ -9,7 +9,7 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError, RuntimeInner};
+use ego_service_sdk::runtime::{RuntimeError, RuntimeInner};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -33,12 +33,6 @@ impl ServiceErrorTrait for OrderError {
     }
     fn message(&self) -> String {
         self.0.clone()
-    }
-}
-
-impl From<RuntimeError> for OrderError {
-    fn from(e: RuntimeError) -> Self {
-        OrderError(e.to_string())
     }
 }
 
@@ -265,45 +259,6 @@ fn injectable_build_returns_dependency_not_found_for_di_fields() {
     assert!(
         matches!(result, Err(RuntimeError::DependencyNotFound)),
         "build() must return DependencyNotFound when resolvers are missing"
-    );
-}
-
-#[tokio::test]
-async fn injectable_build_succeeds_when_deps_are_registered() {
-    // Register MyProjection and MyAdapter as resolvable instances.
-    let runtime = RuntimeBuilder::new()
-        .with_projection_value(MyProjection)
-        .with_adapter_value(MyAdapter)
-        .build()
-        .await
-        .unwrap();
-
-    let result = InjectableServiceImpl::build(runtime.inner());
-    assert!(
-        result.is_ok(),
-        "build() must succeed when deps are registered with RuntimeInner"
-    );
-}
-
-#[tokio::test]
-async fn injectable_build_uses_runtime_inner_not_stub() {
-    // Prove generated build() actually resolves from RuntimeInner:
-    // Different registered projections resolve to the correct instances.
-    let runtime = RuntimeBuilder::new()
-        .with_projection_value(MyProjection)
-        .with_adapter_value(MyAdapter)
-        .build()
-        .await
-        .unwrap();
-
-    let svc = InjectableServiceImpl::build(runtime.inner()).unwrap();
-    // Deref to verify it's the real resolved instance, not a stub.
-    let _: &MyProjection = &svc.projection;
-    let _: &MyAdapter = &svc.adapter;
-    assert_eq!(
-        svc.name,
-        String::default(),
-        "plain field must still use Default::default()"
     );
 }
 

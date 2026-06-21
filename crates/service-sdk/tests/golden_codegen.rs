@@ -14,7 +14,6 @@ use ego_service_sdk::contract::ServiceContract;
 use ego_service_sdk::di::{AdapterRef, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
-use ego_service_sdk::runtime::RuntimeError;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -35,12 +34,6 @@ impl ServiceErrorTrait for GoldenOrderError {
     }
     fn message(&self) -> String {
         self.0.clone()
-    }
-}
-
-impl From<RuntimeError> for GoldenOrderError {
-    fn from(e: RuntimeError) -> Self {
-        GoldenOrderError(e.to_string())
     }
 }
 
