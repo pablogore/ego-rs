@@ -1,8 +1,8 @@
 //! Runtime state shared by generated service proxies.
 //!
 //! `RuntimeInner` is the shared state held by all generated proxies via
-//! `Weak<RuntimeInner>`. It owns projection, adapter, and config instances
-//! for dependency injection.
+//! `Weak<RuntimeInner>`. It is a façade over smaller internal structs that
+//! each own a distinct responsibility.
 //!
 //! NOTE: `RuntimeBuilder`, `Runtime`, graph validation, and tenant enforcement
 //! are deferred to TASK-013 / TASK-014. This module only contains what the
@@ -18,26 +18,82 @@ use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 
 // ---------------------------------------------------------------------------
+// Internal: grouped resolved-instance tables
+// ---------------------------------------------------------------------------
+
+/// Owns the resolved instances for all three dependency kinds.
+///
+/// Kept as a private field of `RuntimeInner` so the three maps are
+/// packaged together rather than scattered across the parent struct.
+#[derive(Debug)]
+struct DependencyTable {
+    projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl DependencyTable {
+    fn new() -> Self {
+        Self {
+            projections: HashMap::new(),
+            adapters: HashMap::new(),
+            configs: HashMap::new(),
+        }
+    }
+
+    fn resolve_projection<T: 'static + Send + Sync>(
+        &self,
+    ) -> Result<ProjectionRef<T>, RuntimeError> {
+        self.projections
+            .get(&TypeId::of::<T>())
+            .and_then(|arc| arc.clone().downcast::<T>().ok())
+            .map(ProjectionRef::new)
+            .ok_or(RuntimeError::DependencyNotFound)
+    }
+
+    fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
+        self.adapters
+            .get(&TypeId::of::<A>())
+            .and_then(|arc| arc.clone().downcast::<A>().ok())
+            .map(AdapterRef::new)
+            .ok_or(RuntimeError::DependencyNotFound)
+    }
+
+    fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
+        self.configs
+            .get(&TypeId::of::<C>())
+            .and_then(|arc| arc.clone().downcast::<C>().ok())
+            .map(ConfigValue::new)
+            .ok_or(RuntimeError::DependencyNotFound)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared runtime state
 // ---------------------------------------------------------------------------
 
 /// Shared state held by all generated proxies via `Weak<RuntimeInner>`.
 ///
-/// The `RuntimeBuilder` (TASK-013) is responsible for constructing this
-/// struct with registered instances. Until then, the resolve methods return
-/// `DependencyNotFound` when no instances have been registered.
+/// This is a façade that delegates to smaller internal structs:
+///
+/// | Responsibility          | Owned by                    |
+/// |-------------------------|-----------------------------|
+/// | service registry        | `registry` (pub field)      |
+/// | interceptor chain       | `interceptor_chain` (pub)   |
+/// | resolved DI instances   | `resolved` (DependencyTable) |
+/// | tenant enforcement      | `enforce_tenant()` method   |
+///
+/// The `RuntimeBuilder` (TASK-013) will construct this struct with
+/// registered instances. Until then, the resolve methods return
+/// `DependencyNotFound`.
 #[derive(Debug)]
 pub struct RuntimeInner {
     /// The type-keyed service registry holding raw implementations.
     pub registry: ServiceRegistry,
     /// The interceptor chain applied to every resolved proxy.
     pub interceptor_chain: Arc<InterceptorChain>,
-    /// Registered projection instances for dependency injection.
-    projection_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
-    /// Registered adapter instances for dependency injection.
-    adapter_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
-    /// Registered config instances for dependency injection.
-    config_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Resolved instances for projection, adapter, and config injection.
+    resolved: DependencyTable,
 }
 
 impl RuntimeInner {
@@ -46,9 +102,7 @@ impl RuntimeInner {
         Self {
             registry,
             interceptor_chain,
-            projection_instances: HashMap::new(),
-            adapter_instances: HashMap::new(),
-            config_instances: HashMap::new(),
+            resolved: DependencyTable::new(),
         }
     }
 
@@ -58,33 +112,21 @@ impl RuntimeInner {
     pub fn resolve_projection<T: 'static + Send + Sync>(
         &self,
     ) -> Result<ProjectionRef<T>, RuntimeError> {
-        self.projection_instances
-            .get(&TypeId::of::<T>())
-            .and_then(|arc| arc.clone().downcast::<T>().ok())
-            .map(ProjectionRef::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+        self.resolved.resolve_projection::<T>()
     }
 
     /// Resolves a registered `AdapterRef<A>` by type.
     ///
     /// Returns `DependencyNotFound` if no instance was registered for `A`.
     pub fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
-        self.adapter_instances
-            .get(&TypeId::of::<A>())
-            .and_then(|arc| arc.clone().downcast::<A>().ok())
-            .map(AdapterRef::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+        self.resolved.resolve_adapter::<A>()
     }
 
     /// Resolves a registered `ConfigValue<C>` by type.
     ///
     /// Returns `DependencyNotFound` if no instance was registered for `C`.
     pub fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
-        self.config_instances
-            .get(&TypeId::of::<C>())
-            .and_then(|arc| arc.clone().downcast::<C>().ok())
-            .map(ConfigValue::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+        self.resolved.resolve_config::<C>()
     }
 
     /// Enforces tenant isolation. Currently a no-op until TASK-014.
@@ -96,9 +138,7 @@ impl Default for RuntimeInner {
         Self {
             registry: ServiceRegistry::new(),
             interceptor_chain: Arc::new(InterceptorChain::new()),
-            projection_instances: HashMap::new(),
-            adapter_instances: HashMap::new(),
-            config_instances: HashMap::new(),
+            resolved: DependencyTable::new(),
         }
     }
 }
@@ -123,6 +163,18 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- DependencyTable unit tests -----------------------------------------
+
+    #[test]
+    fn dependency_table_new_is_empty() {
+        let t = DependencyTable::new();
+        assert!(t.projections.is_empty());
+        assert!(t.adapters.is_empty());
+        assert!(t.configs.is_empty());
+    }
+
+    // -- Missing registration (TypeId not found) ----------------------------
 
     #[test]
     fn runtime_inner_default_creates_empty() {
@@ -152,5 +204,132 @@ mod tests {
         let rt = RuntimeInner::default();
         let result: Result<ConfigValue<()>, RuntimeError> = rt.resolve_config();
         assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    // -- Successful downcast -------------------------------------------------
+
+    /// Stub type for downcast testing.
+    #[derive(Debug, PartialEq)]
+    struct MyProjection(u32);
+
+    #[test]
+    fn resolve_projection_succeeds_for_registered_type() {
+        let mut rt = RuntimeInner::default();
+        let instance = Arc::new(MyProjection(42)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .projections
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let result = rt.resolve_projection::<MyProjection>();
+        assert!(result.is_ok());
+        assert_eq!(*result.unwrap(), MyProjection(42));
+    }
+
+    #[test]
+    fn resolve_adapter_succeeds_for_registered_type() {
+        let mut rt = RuntimeInner::default();
+        let instance = Arc::new(MyProjection(99)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .adapters
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let result = rt.resolve_adapter::<MyProjection>();
+        assert!(result.is_ok());
+        assert_eq!(*result.unwrap(), MyProjection(99));
+    }
+
+    #[test]
+    fn resolve_config_succeeds_for_registered_type() {
+        let mut rt = RuntimeInner::default();
+        let instance = Arc::new(String::from("config-value")) as Arc<dyn Any + Send + Sync>;
+        rt.resolved.configs.insert(TypeId::of::<String>(), instance);
+
+        let result = rt.resolve_config::<String>();
+        assert!(result.is_ok());
+        assert_eq!(*result.unwrap(), "config-value");
+    }
+
+    // -- Incorrect type downcast --------------------------------------------
+
+    #[test]
+    fn resolve_projection_returns_not_found_for_wrong_type() {
+        let mut rt = RuntimeInner::default();
+        // Register as String, request as MyProjection.
+        let instance = Arc::new(String::from("not-a-projection")) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .projections
+            .insert(TypeId::of::<String>(), instance);
+
+        let result = rt.resolve_projection::<MyProjection>();
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    #[test]
+    fn resolve_adapter_returns_not_found_for_wrong_type() {
+        let mut rt = RuntimeInner::default();
+        let instance = Arc::new(String::from("not-an-adapter")) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .adapters
+            .insert(TypeId::of::<String>(), instance);
+
+        let result = rt.resolve_adapter::<MyProjection>();
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    #[test]
+    fn resolve_config_returns_not_found_for_wrong_type() {
+        let mut rt = RuntimeInner::default();
+        let instance = Arc::new(MyProjection(7)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .configs
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let result = rt.resolve_config::<String>();
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    // -- Concurrent resolution -----------------------------------------------
+
+    #[test]
+    fn concurrent_resolution_succeeds() {
+        let rt = Arc::new(RuntimeInner::default());
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let rt_clone = rt.clone();
+            handles.push(std::thread::spawn(move || {
+                let r1 = rt_clone.resolve_projection::<()>();
+                let r2 = rt_clone.resolve_adapter::<()>();
+                let r3 = rt_clone.resolve_config::<()>();
+                (r1, r2, r3)
+            }));
+        }
+
+        for h in handles {
+            let (r1, r2, r3) = h.join().unwrap();
+            assert!(matches!(r1, Err(RuntimeError::DependencyNotFound)));
+            assert!(matches!(r2, Err(RuntimeError::DependencyNotFound)));
+            assert!(matches!(r3, Err(RuntimeError::DependencyNotFound)));
+        }
+    }
+
+    // -- Table of responsibility: DependencyTable fields ---------------------
+
+    #[test]
+    fn dependency_table_respects_kind_boundaries() {
+        let mut t = DependencyTable::new();
+        let val = Arc::new(42) as Arc<dyn Any + Send + Sync>;
+
+        // Insert into projections — must NOT be resolvable via adapters or configs.
+        t.projections.insert(TypeId::of::<i32>(), val.clone());
+        assert!(t.resolve_projection::<i32>().is_ok());
+        assert!(t.resolve_adapter::<i32>().is_err());
+        assert!(t.resolve_config::<i32>().is_err());
+
+        t.adapters.insert(TypeId::of::<i32>(), val.clone());
+        assert!(t.resolve_adapter::<i32>().is_ok());
+
+        t.configs.insert(TypeId::of::<i32>(), val);
+        assert!(t.resolve_config::<i32>().is_ok());
     }
 }
