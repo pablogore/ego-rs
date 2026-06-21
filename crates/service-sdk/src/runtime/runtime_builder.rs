@@ -1,7 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 /// A runtime builder.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RuntimeBuilder {
     /// The services to include in the runtime.
     pub services: Vec<String>,
@@ -10,7 +8,7 @@ pub struct RuntimeBuilder {
 }
 
 /// A dependency in the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Dependency {
     /// The type ID of the dependency.
     pub type_id: String,
@@ -21,7 +19,7 @@ pub struct Dependency {
 }
 
 /// An error that can occur in the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RuntimeError {
     /// A service was not found.
     ServiceNotFound,
@@ -109,7 +107,7 @@ impl RuntimeBuilder {
 }
 
 /// A runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Runtime {
     // Runtime state
 }

@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+//! Error category enumeration — single canonical definition.
 
-/// An error category.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+/// An error category for structured error handling and routing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ErrorCategory {
     /// A validation error.
     Validation,
@@ -21,15 +21,4 @@ pub enum ErrorCategory {
     Timeout,
     /// An unknown error.
     Unknown,
-}
-
-/// A domain error.
-///
-/// This trait should be implemented by all domain-specific errors.
-pub trait DomainError: std::error::Error {
-    /// Returns the error code for this error.
-    fn code(&self) -> &str;
-
-    /// Returns the error category for this error.
-    fn category(&self) -> ErrorCategory;
 }

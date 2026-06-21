@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 // TaskLocal for storing the current service context
 tokio::task_local! {
@@ -17,7 +17,7 @@ tokio::task_local! {
 /// - Trace IDs for distributed tracing
 /// - Deadline and timeout information
 /// - Additional metadata for service processing
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ServiceContext {
     /// The tenant ID.
     pub tenant_id: Option<String>,
@@ -33,6 +33,8 @@ pub struct ServiceContext {
     pub additional_context: HashMap<String, String>,
     /// Whether cross-tenant access is allowed.
     pub allow_cross_tenant: bool,
+    /// Optional push-style cancellation token.
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 impl ServiceContext {
@@ -49,6 +51,7 @@ impl ServiceContext {
             timeout: None,
             additional_context: HashMap::new(),
             allow_cross_tenant: false,
+            cancellation_token: None,
         }
     }
 
@@ -131,6 +134,28 @@ impl ServiceContext {
     pub fn allow_cross_tenant(mut self) -> Self {
         self.allow_cross_tenant = true;
         self
+    }
+
+    /// Attaches a `CancellationToken` to this context for push-style cancellation.
+    ///
+    /// # Arguments
+    /// * `token` - The `CancellationToken` to associate with this context
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the cancellation token set
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// Returns `true` if the associated `CancellationToken` has been cancelled.
+    ///
+    /// Returns `false` if no token is attached.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation_token
+            .as_ref()
+            .map(|t| t.is_cancelled())
+            .unwrap_or(false)
     }
 
     /// Gets the current service context from the task-local storage.

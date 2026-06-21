@@ -21,7 +21,8 @@
 //! #         }
 //! #         pub struct OperationDescriptor { pub name: String, pub input: Vec<String>,
 //! #             pub output: String, pub errors: Vec<String>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String> }
+//! #             pub metadata: std::collections::HashMap<String, String>,
+//! #             pub idempotent: bool, pub mutating: bool }
 //! #         pub struct ServiceDescriptor { pub name: String, pub version: ContractVersion,
 //! #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
 //! #             pub metadata: std::collections::HashMap<String, String> }
@@ -74,6 +75,7 @@
 //! #             pub name: String, pub input: Vec<String>, pub output: String,
 //! #             pub errors: Vec<String>, pub description: Option<String>,
 //! #             pub metadata: std::collections::HashMap<String, String>,
+//! #             pub idempotent: bool, pub mutating: bool,
 //! #         }
 //! #         pub struct ServiceDescriptor {
 //! #             pub name: String, pub version: ContractVersion,
@@ -122,6 +124,7 @@
 //! #             pub name: String, pub input: Vec<String>, pub output: String,
 //! #             pub errors: Vec<String>, pub description: Option<String>,
 //! #             pub metadata: std::collections::HashMap<String, String>,
+//! #             pub idempotent: bool, pub mutating: bool,
 //! #         }
 //! #         pub struct ServiceDescriptor {
 //! #             pub name: String, pub version: ContractVersion,
@@ -179,6 +182,7 @@
 //! #             pub name: String, pub input: Vec<String>, pub output: String,
 //! #             pub errors: Vec<String>, pub description: Option<String>,
 //! #             pub metadata: std::collections::HashMap<String, String>,
+//! #             pub idempotent: bool, pub mutating: bool,
 //! #         }
 //! #         pub struct ServiceDescriptor {
 //! #             pub name: String, pub version: ContractVersion,
@@ -255,6 +259,7 @@ impl Parse for ServiceArgs {
 /// #             pub name: String, pub input: Vec<String>, pub output: String,
 /// #             pub errors: Vec<String>, pub description: Option<String>,
 /// #             pub metadata: std::collections::HashMap<String, String>,
+/// #             pub idempotent: bool, pub mutating: bool,
 /// #         }
 /// #         pub struct ServiceDescriptor {
 /// #             pub name: String, pub version: ContractVersion,
@@ -340,12 +345,16 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
                         errors: #error_types,
                         description: None,
                         metadata: std::collections::HashMap::new(),
+                        idempotent: false,
+                        mutating: true,
                     }
                 });
 
                 // Strip the #[operation] attribute so it isn't re-applied to the trait method
                 let mut clean_method = method.clone();
-                clean_method.attrs.retain(|attr| !attr.path().is_ident("operation"));
+                clean_method
+                    .attrs
+                    .retain(|attr| !attr.path().is_ident("operation"));
                 output_items.push(TraitItem::Fn(clean_method));
             } else {
                 output_items.push(item);
@@ -440,6 +449,7 @@ mod tests;
 /// #             pub name: String, pub input: Vec<String>, pub output: String,
 /// #             pub errors: Vec<String>, pub description: Option<String>,
 /// #             pub metadata: std::collections::HashMap<String, String>,
+/// #             pub idempotent: bool, pub mutating: bool,
 /// #         }
 /// #         pub struct ServiceDescriptor {
 /// #             pub name: String, pub version: ContractVersion,
