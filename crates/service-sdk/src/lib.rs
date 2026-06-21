@@ -27,3 +27,7 @@ pub use implementation::*;
 pub use interceptor::*;
 pub use registry::*;
 pub use runtime::*;
+
+// Re-export async_trait so generated code can reference it via ego_service_sdk::async_trait.
+#[doc(hidden)]
+pub use async_trait;

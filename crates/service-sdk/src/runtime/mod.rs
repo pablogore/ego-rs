@@ -1,6 +1,6 @@
 mod runtime_builder;
 
-pub use runtime_builder::RuntimeBuilder;
+pub use runtime_builder::{Runtime, RuntimeBuilder, RuntimeError, RuntimeInner};
 
 #[cfg(test)]
 mod tests {

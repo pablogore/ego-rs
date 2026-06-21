@@ -1,224 +1,11 @@
-//! Proc-macro attributes for the Service SDK.
-//!
-//! Provides the `#[service]` and `#[operation]` attributes for declaring
-//! service contracts and operations. These macros generate the necessary
-//! service descriptors and proxy types for service invocation.
-//!
-//! # Usage
-//!
-//! ## Service Declaration
-//!
-//! ```rust
-//! # #[allow(dead_code)]
-//! # mod ego_service_sdk {
-//! #     pub mod contract {
-//! #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-//! #         impl ContractVersion { pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) } }
-//! #         impl std::fmt::Display for ContractVersion {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-//! #             }
-//! #         }
-//! #         pub struct OperationDescriptor { pub name: String, pub input: Vec<String>,
-//! #             pub output: String, pub errors: Vec<String>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #             pub idempotent: bool, pub mutating: bool }
-//! #         pub struct ServiceDescriptor { pub name: String, pub version: ContractVersion,
-//! #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String> }
-//! #         pub trait ServiceContract {
-//! #             fn type_id() -> &'static str; fn name() -> &'static str;
-//! #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-//! #             fn operations() -> Vec<OperationDescriptor>;
-//! #         }
-//! #     }
-//! #     pub mod error { pub struct ServiceError; }
-//! # }
-//! use ego_service_sdk_macros::{service, operation};
-//! use ego_service_sdk::error::ServiceError;
-//!
-//! #[service]
-//! trait MyService {
-//!     #[operation]
-//!     async fn do_something(&self, input: String) -> Result<String, ServiceError>;
-//! }
-//! ```
-//!
-//! ## Generated Code
-//!
-//! The `#[service]` macro generates:
-//! - A service descriptor
-//! - A `ServiceContract` implementation for the trait
-//!
-//! The `#[operation]` macro generates:
-//! - Operation descriptors
-//! - Method signatures for service implementations
-//!
-//! # Examples
-//!
-//! ## Service Contract Declaration
-//!
-//! ```rust
-//! # #[allow(dead_code)]
-//! # mod ego_service_sdk {
-//! #     pub mod contract {
-//! #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-//! #         impl ContractVersion {
-//! #             pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) }
-//! #         }
-//! #         impl std::fmt::Display for ContractVersion {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-//! #             }
-//! #         }
-//! #         pub struct OperationDescriptor {
-//! #             pub name: String, pub input: Vec<String>, pub output: String,
-//! #             pub errors: Vec<String>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #             pub idempotent: bool, pub mutating: bool,
-//! #         }
-//! #         pub struct ServiceDescriptor {
-//! #             pub name: String, pub version: ContractVersion,
-//! #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #         }
-//! #         pub trait ServiceContract {
-//! #             fn type_id() -> &'static str; fn name() -> &'static str;
-//! #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-//! #             fn operations() -> Vec<OperationDescriptor>;
-//! #         }
-//! #     }
-//! #     pub mod error { pub struct ServiceError; }
-//! # }
-//! use ego_service_sdk_macros::{service, operation};
-//! use ego_service_sdk::error::ServiceError;
-//!
-//! #[service(version = "1.2.3")]
-//! trait MyService {
-//!     #[operation]
-//!     async fn do_something(&self, input: String) -> Result<String, ServiceError>;
-//!     
-//!     #[operation]
-//!     async fn do_another_thing(&self, input: i32) -> Result<bool, ServiceError>;
-//! }
-//! ```
-//!
-//! ## Service Descriptor Access
-//!
-//! After applying the `#[service]` macro, the service contract can be accessed via:
-//!
-//! ```rust
-//! # #[allow(dead_code)]
-//! # mod ego_service_sdk {
-//! #     pub mod contract {
-//! #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-//! #         impl ContractVersion {
-//! #             pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) }
-//! #         }
-//! #         impl std::fmt::Display for ContractVersion {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-//! #             }
-//! #         }
-//! #         pub struct OperationDescriptor {
-//! #             pub name: String, pub input: Vec<String>, pub output: String,
-//! #             pub errors: Vec<String>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #             pub idempotent: bool, pub mutating: bool,
-//! #         }
-//! #         pub struct ServiceDescriptor {
-//! #             pub name: String, pub version: ContractVersion,
-//! #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #         }
-//! #         pub trait ServiceContract {
-//! #             fn type_id() -> &'static str; fn name() -> &'static str;
-//! #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-//! #             fn operations() -> Vec<OperationDescriptor>;
-//! #         }
-//! #     }
-//! #     pub mod error { pub struct ServiceError; }
-//! # }
-//! use ego_service_sdk_macros::{service, operation};
-//! use ego_service_sdk::error::ServiceError;
-//! use ego_service_sdk::contract::ServiceContract;
-//!
-//! #[service(version = "1.2.3")]
-//! trait MyService {
-//!     #[operation]
-//!     async fn do_something(&self, input: String) -> Result<String, ServiceError>;
-//! }
-//! # struct MyHandler;
-//! # impl MyService for MyHandler {
-//! #     async fn do_something(&self, input: String) -> Result<String, ServiceError> {
-//! #         Ok("done".to_string())
-//! #     }
-//! # }
-//!
-//! let descriptor = MyHandler::descriptor();
-//! assert_eq!(descriptor.name, "MyService");
-//! assert_eq!(descriptor.version.to_string(), "1.2.3");
-//! assert_eq!(descriptor.operations.len(), 1);
-//! ```
-//!
-//! ## Operation Metadata
-//!
-//! The `#[operation]` macro extracts metadata from method signatures:
-//!
-//! ```rust
-//! # #[allow(dead_code)]
-//! # mod ego_service_sdk {
-//! #     pub mod contract {
-//! #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-//! #         impl ContractVersion {
-//! #             pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) }
-//! #         }
-//! #         impl std::fmt::Display for ContractVersion {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-//! #             }
-//! #         }
-//! #         pub struct OperationDescriptor {
-//! #             pub name: String, pub input: Vec<String>, pub output: String,
-//! #             pub errors: Vec<String>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #             pub idempotent: bool, pub mutating: bool,
-//! #         }
-//! #         pub struct ServiceDescriptor {
-//! #             pub name: String, pub version: ContractVersion,
-//! #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-//! #             pub metadata: std::collections::HashMap<String, String>,
-//! #         }
-//! #         pub trait ServiceContract {
-//! #             fn type_id() -> &'static str; fn name() -> &'static str;
-//! #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-//! #             fn operations() -> Vec<OperationDescriptor>;
-//! #         }
-//! #     }
-//! #     pub mod error { pub struct ServiceError; }
-//! # }
-//! use ego_service_sdk_macros::{service, operation};
-//! use ego_service_sdk::error::ServiceError;
-//!
-//! #[service]
-//! trait MyService {
-//!     #[operation]
-//!     async fn process_data(&self, input: String) -> Result<String, ServiceError>;
-//! }
-//! ```
-//!
-//! This generates an operation descriptor with:
-//! - Name: "process_data"
-//! - Input types: ["String"]
-//! - Output type: "Result<String, ServiceError>"
-//! - Error types: ["ServiceError"]
+//! Proc-macro attributes for the Service SDK: `#[service]` and `#[operation]`.
 
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, ItemFn, ItemTrait, TraitItem};
+use syn::{parse_macro_input, Ident, ItemFn, ItemStruct, ItemTrait, TraitItem};
 
-/// Arguments for the #[service] macro
 #[derive(Debug)]
 struct ServiceArgs {
     version: Option<String>,
@@ -239,96 +26,63 @@ impl Parse for ServiceArgs {
     }
 }
 
-/// A proc-macro attribute for declaring service contracts.
+/// Declares a service contract on a trait or struct.
 ///
-/// Transforms a trait definition into a service contract.
-/// ```rust
-/// # #[allow(dead_code)]
-/// # mod ego_service_sdk {
-/// #     pub mod contract {
-/// #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-/// #         impl ContractVersion {
-/// #             pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) }
-/// #         }
-/// #         impl std::fmt::Display for ContractVersion {
-/// #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-/// #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-/// #             }
-/// #         }
-/// #         pub struct OperationDescriptor {
-/// #             pub name: String, pub input: Vec<String>, pub output: String,
-/// #             pub errors: Vec<String>, pub description: Option<String>,
-/// #             pub metadata: std::collections::HashMap<String, String>,
-/// #             pub idempotent: bool, pub mutating: bool,
-/// #         }
-/// #         pub struct ServiceDescriptor {
-/// #             pub name: String, pub version: ContractVersion,
-/// #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-/// #             pub metadata: std::collections::HashMap<String, String>,
-/// #         }
-/// #         pub trait ServiceContract {
-/// #             fn type_id() -> &'static str; fn name() -> &'static str;
-/// #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-/// #             fn operations() -> Vec<OperationDescriptor>;
-/// #         }
-/// #     }
-/// #     pub mod error { pub struct ServiceError; }
-/// # }
-/// use ego_service_sdk_macros::{service, operation};
-/// use ego_service_sdk::error::ServiceError;
-///
-/// #[service]
-/// trait MyService {
-///     #[operation]
-///     async fn do_something(&self, input: String) -> Result<String, ServiceError>;
-/// }
-/// ```
+/// On a trait: emits `{TraitName}Tag` (registry key ZST), `{TraitName}Ref` (proxy), and `ServiceContract`.
+/// On a struct: emits `Injectable` with `dependencies()` for `ProjectionRef`, `AdapterRef`, `ConfigValue` fields.
 #[proc_macro_attribute]
 pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
-    let input_trait = parse_macro_input!(input as ItemTrait);
     let service_args = parse_macro_input!(args as ServiceArgs);
 
-    let trait_name = input_trait.ident.clone();
+    if let Ok(input_trait) = syn::parse::<ItemTrait>(input.clone()) {
+        expand_service_trait(input_trait, service_args)
+    } else if let Ok(input_struct) = syn::parse::<ItemStruct>(input.clone()) {
+        expand_service_struct(input_struct)
+    } else {
+        let err = syn::Error::new(
+            Span::call_site(),
+            "#[service] can only be applied to a `trait` or a `struct`",
+        )
+        .to_compile_error();
+        TokenStream::from(err)
+    }
+}
+
+fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> TokenStream {
+    let trait_name = &input_trait.ident;
+    let tag_name = Ident::new(&format!("{}Tag", trait_name), trait_name.span());
+    let ref_name = Ident::new(&format!("{}Ref", trait_name), trait_name.span());
 
     let version_str = service_args.version.unwrap_or_else(|| "1.0.0".to_string());
     let parts: Vec<&str> = version_str.split('.').collect();
-    let major = parts
-        .first()
-        .map(|s| s.parse::<u32>().unwrap_or(1))
-        .unwrap_or(1);
-    let minor = parts
-        .get(1)
-        .map(|s| s.parse::<u32>().unwrap_or(0))
-        .unwrap_or(0);
-    let patch = parts
-        .get(2)
-        .map(|s| s.parse::<u32>().unwrap_or(0))
-        .unwrap_or(0);
+    let major = parts.first().map(|s| s.parse::<u32>().unwrap_or(1)).unwrap_or(1);
+    let minor = parts.get(1).map(|s| s.parse::<u32>().unwrap_or(0)).unwrap_or(0);
+    let patch = parts.get(2).map(|s| s.parse::<u32>().unwrap_or(0)).unwrap_or(0);
 
-    let mut operations = Vec::new();
+    let mut operation_descriptors = Vec::new();
+    let mut forwarding_methods = Vec::new();
     let mut output_items = Vec::new();
-    for item in input_trait.items {
-        if let TraitItem::Fn(method) = &item {
-            let has_operation_attr = method
-                .attrs
-                .iter()
-                .any(|attr| attr.path().is_ident("operation"));
 
-            if has_operation_attr {
+    for item in &input_trait.items {
+        if let TraitItem::Fn(method) = item {
+            let has_operation = method.attrs.iter().any(|a| a.path().is_ident("operation"));
+            if has_operation {
                 let method_name = &method.sig.ident;
 
                 let mut input_types = Vec::new();
-                let mut input_names = Vec::new();
+                let mut arg_names: Vec<proc_macro2::TokenStream> = Vec::new();
+                let mut arg_types: Vec<proc_macro2::TokenStream> = Vec::new();
                 for fn_input in method.sig.inputs.iter() {
                     if let syn::FnArg::Typed(pat_type) = fn_input {
-                        let input_type = &pat_type.ty;
-                        let input_name = &pat_type.pat;
-                        input_types.push(quote! { stringify!(#input_type).to_string() });
-                        input_names.push(quote! { stringify!(#input_name) });
+                        let ty = &pat_type.ty;
+                        let pat = &pat_type.pat;
+                        input_types.push(quote! { stringify!(#ty).to_string() });
+                        arg_names.push(quote! { #pat });
+                        arg_types.push(quote! { #ty });
                     }
                 }
 
-                let (output_type, error_types) = match &method.sig.output {
+                let (output_type_str, error_types_ts) = match &method.sig.output {
                     syn::ReturnType::Type(_, ty) => {
                         let out_str = quote! { stringify!(#ty) };
                         let errs = extract_error_types(ty);
@@ -337,12 +91,12 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
                     _ => (quote! { "()" }, quote! { vec![] }),
                 };
 
-                operations.push(quote! {
+                operation_descriptors.push(quote! {
                     ego_service_sdk::contract::OperationDescriptor {
                         name: stringify!(#method_name).to_string(),
                         input: vec![#(#input_types),*],
-                        output: #output_type.to_string(),
-                        errors: #error_types,
+                        output: #output_type_str.to_string(),
+                        errors: #error_types_ts,
                         description: None,
                         metadata: std::collections::HashMap::new(),
                         idempotent: false,
@@ -350,29 +104,95 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 });
 
-                // Strip the #[operation] attribute so it isn't re-applied to the trait method
-                let mut clean_method = method.clone();
-                clean_method
-                    .attrs
-                    .retain(|attr| !attr.path().is_ident("operation"));
-                output_items.push(TraitItem::Fn(clean_method));
+                let return_type = &method.sig.output;
+                forwarding_methods.push(quote! {
+                    async fn #method_name(&self, #(#arg_names: #arg_types),*) #return_type {
+                        let ctx = ego_service_sdk::context::ServiceContext::current()
+                            .unwrap_or_default();
+                        if let Some(rt) = self.runtime.upgrade() {
+                            rt.enforce_tenant(&ctx);
+                        }
+                        let inner_ref = self.inner.clone();
+                        let chain_ref = self.chain.clone();
+                        // ctx_for_scope moves into the closure; inner_ctx is re-read inside
+                        // so the task-local is active when the impl body runs.
+                        let ctx_for_scope = ctx.clone();
+                        ctx_for_scope.scope(|| async move {
+                            let inner_ctx = ego_service_sdk::context::ServiceContext::current()
+                                .unwrap_or_default();
+                            let _ = chain_ref.on_request(&inner_ctx).await;
+                            match inner_ref.#method_name(#(#arg_names),*).await {
+                                Ok(v) => {
+                                    chain_ref.on_response(&inner_ctx).await.ok();
+                                    Ok(v)
+                                }
+                                Err(e) => {
+                                    chain_ref
+                                        .on_error(
+                                            &inner_ctx,
+                                            &e as &dyn ego_service_sdk::error::ServiceErrorTrait,
+                                        )
+                                        .await
+                                        .ok();
+                                    Err(e)
+                                }
+                            }
+                        }).await
+                    }
+                });
+
+                let mut clean = method.clone();
+                clean.attrs.retain(|a| !a.path().is_ident("operation"));
+                output_items.push(TraitItem::Fn(clean));
             } else {
-                output_items.push(item);
+                output_items.push(item.clone());
             }
         } else {
-            output_items.push(item);
+            output_items.push(item.clone());
         }
     }
 
-    let output_trait = syn::ItemTrait {
+    // Arc<dyn TraitName> requires Send + Sync supertraits.
+    let mut output_trait = ItemTrait {
         items: output_items,
-        ..input_trait
+        ..input_trait.clone()
     };
+    let send_bound: syn::TypeParamBound = syn::parse_quote!(Send);
+    let sync_bound: syn::TypeParamBound = syn::parse_quote!(Sync);
+    output_trait.supertraits.push(send_bound);
+    output_trait.supertraits.push(sync_bound);
 
     let expanded = quote! {
+        #[ego_service_sdk::async_trait::async_trait]
         #output_trait
 
-        impl<T: #trait_name> ego_service_sdk::contract::ServiceContract for T {
+        /// Zero-sized type used as the registry key for `#trait_name`.
+        pub struct #tag_name;
+
+        /// Generated proxy for `#trait_name`.
+        pub struct #ref_name {
+            inner: std::sync::Arc<dyn #trait_name>,
+            chain: std::sync::Arc<ego_service_sdk::interceptor::InterceptorChain>,
+            runtime: std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>,
+        }
+
+        impl #ref_name {
+            pub fn new(
+                inner: std::sync::Arc<dyn #trait_name>,
+                chain: std::sync::Arc<ego_service_sdk::interceptor::InterceptorChain>,
+                runtime: std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>,
+            ) -> Self {
+                Self { inner, chain, runtime }
+            }
+        }
+
+        #[ego_service_sdk::async_trait::async_trait]
+        impl #trait_name for #ref_name {
+            #(#forwarding_methods)*
+        }
+
+        // Tag impl avoids orphan rule violations from a blanket impl.
+        impl ego_service_sdk::contract::ServiceContract for #tag_name {
             fn type_id() -> &'static str {
                 std::any::type_name::<Self>()
             }
@@ -388,20 +208,86 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
             fn descriptor() -> ego_service_sdk::contract::ServiceDescriptor {
                 ego_service_sdk::contract::ServiceDescriptor {
                     name: stringify!(#trait_name).to_string(),
-                    version: Self::version(),
-                    operations: vec![#(#operations),*],
+                    version: <Self as ego_service_sdk::contract::ServiceContract>::version(),
+                    operations: vec![#(#operation_descriptors),*],
                     description: None,
                     metadata: std::collections::HashMap::new(),
                 }
             }
 
             fn operations() -> Vec<ego_service_sdk::contract::OperationDescriptor> {
-                vec![#(#operations),*]
+                <Self as ego_service_sdk::contract::ServiceContract>::descriptor().operations
             }
         }
     };
 
     TokenStream::from(expanded)
+}
+
+fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
+    let struct_name = &input_struct.ident;
+
+    let mut dep_keys: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    if let syn::Fields::Named(fields) = &input_struct.fields {
+        for field in &fields.named {
+            if let Some(dep_key) = classify_field_type(&field.ty) {
+                dep_keys.push(dep_key);
+            }
+        }
+    }
+
+    let expanded = quote! {
+        #input_struct
+
+        impl ego_service_sdk::di::Injectable for #struct_name {
+            fn dependencies() -> Vec<ego_service_sdk::di::DepKey> {
+                use std::any::TypeId;
+                vec![#(#dep_keys),*]
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Maps a field type to a `DepKey` variant; returns `None` for non-DI fields.
+/// `EntityRef<T>` is excluded — it is owned by entity-sdk (INV-008).
+fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let ident_str = segment.ident.to_string();
+            if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                    match ident_str.as_str() {
+                        "ProjectionRef" => {
+                            return Some(quote! {
+                                ego_service_sdk::di::DepKey::Projection(
+                                    std::any::TypeId::of::<#inner_ty>()
+                                )
+                            });
+                        }
+                        "AdapterRef" => {
+                            return Some(quote! {
+                                ego_service_sdk::di::DepKey::Adapter(
+                                    std::any::TypeId::of::<#inner_ty>()
+                                )
+                            });
+                        }
+                        "ConfigValue" => {
+                            return Some(quote! {
+                                ego_service_sdk::di::DepKey::Config(
+                                    std::any::TypeId::of::<#inner_ty>()
+                                )
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn extract_error_types(ty: &syn::Type) -> proc_macro2::TokenStream {
@@ -426,61 +312,9 @@ fn extract_error_types(ty: &syn::Type) -> proc_macro2::TokenStream {
 #[cfg(test)]
 mod tests;
 
-/// A proc-macro attribute for marking methods as service operations.
-///
-/// Used inside a `#[service]` trait to identify which methods are operations.
-/// Each annotated method generates an `OperationDescriptor` entry in the
-/// parent service's `ServiceDescriptor`.
-///
-/// ```rust
-/// # #[allow(dead_code)]
-/// # mod ego_service_sdk {
-/// #     pub mod contract {
-/// #         pub struct ContractVersion(pub u32, pub u32, pub u32);
-/// #         impl ContractVersion {
-/// #             pub fn new(m: u32, n: u32, p: u32) -> Self { Self(m, n, p) }
-/// #         }
-/// #         impl std::fmt::Display for ContractVersion {
-/// #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-/// #                 write!(f, "{}.{}.{}", self.0, self.1, self.2)
-/// #             }
-/// #         }
-/// #         pub struct OperationDescriptor {
-/// #             pub name: String, pub input: Vec<String>, pub output: String,
-/// #             pub errors: Vec<String>, pub description: Option<String>,
-/// #             pub metadata: std::collections::HashMap<String, String>,
-/// #             pub idempotent: bool, pub mutating: bool,
-/// #         }
-/// #         pub struct ServiceDescriptor {
-/// #             pub name: String, pub version: ContractVersion,
-/// #             pub operations: Vec<OperationDescriptor>, pub description: Option<String>,
-/// #             pub metadata: std::collections::HashMap<String, String>,
-/// #         }
-/// #         pub trait ServiceContract {
-/// #             fn type_id() -> &'static str; fn name() -> &'static str;
-/// #             fn version() -> ContractVersion; fn descriptor() -> ServiceDescriptor;
-/// #             fn operations() -> Vec<OperationDescriptor>;
-/// #         }
-/// #     }
-/// #     pub mod error { pub struct ServiceError; }
-/// # }
-/// use ego_service_sdk_macros::{service, operation};
-/// use ego_service_sdk::error::ServiceError;
-///
-/// #[service]
-/// trait MyService {
-///     #[operation]
-///     async fn do_something(&self, input: String) -> Result<String, ServiceError>;
-/// }
-/// ```
-///
-/// The macro extracts method metadata (name, input type, output type, error type)
-/// for automatic descriptor generation. The method signature itself passes through
-/// unchanged.
+/// Marks a trait method as a service operation, generating its `OperationDescriptor`.
 #[proc_macro_attribute]
 pub fn operation(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(input as ItemFn);
-    // The operation macro currently just passes through the input unchanged
-    // In a full implementation, this would extract metadata and generate descriptors
     TokenStream::from(quote! { #input_fn })
 }

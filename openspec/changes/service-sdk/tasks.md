@@ -101,7 +101,7 @@
 
 > **Prerequisite**: Phase 1 and 2 must be green before this phase. The macro crate has zero runtime dep; changes here do not affect Phase 2's registry correctness.
 
-### TASK-009 — Macro: `#[service]` on traits — emit `{TraitName}Tag` ZST + `{TraitName}Ref` struct
+### [x] TASK-009 — Macro: `#[service]` on traits — emit `{TraitName}Tag` ZST + `{TraitName}Ref` struct
 
 **Spec**: REQ-006, INV-002
 **Description**: Extend `crates/service-sdk-macros/src/lib.rs` `service` proc-macro for `ItemTrait`: after emitting the existing `ServiceContract` impl, also emit `pub struct {TraitName}Tag;` (the registry key ZST) and `pub struct {TraitName}Ref { inner: std::sync::Arc<dyn {TraitName}>, chain: std::sync::Arc<ego_service_sdk::interceptor::InterceptorChain>, runtime: std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>, }` with a `pub fn new(inner: Arc<dyn {TraitName}>, chain: Arc<InterceptorChain>, runtime: Weak<RuntimeInner>) -> Self` constructor. Write the test FIRST: add a `trybuild` test case `tests/ui/service_on_trait_generates_tag_and_ref.rs` (or use `macro_rules!` expansion assertions) that verifies `OrderServiceTag` and `OrderServiceRef` are public types after macro expansion and that `OrderServiceRef::new(...)` compiles.
@@ -111,7 +111,7 @@
 
 ---
 
-### TASK-010 — Macro: `#[service]` on traits — emit typed forwarding `impl TraitName for {TraitName}Ref`
+### [x] TASK-010 — Macro: `#[service]` on traits — emit typed forwarding `impl TraitName for {TraitName}Ref`
 
 **Spec**: REQ-007, REQ-008, INV-002
 **Description**: For each `#[operation]`-annotated method on the trait, emit inside `#[async_trait::async_trait] impl {TraitName} for {TraitName}Ref`: (1) read/create `ServiceContext::current().unwrap_or_default()`; (2) call `if let Some(rt) = self.runtime.upgrade() { rt.enforce_tenant(&ctx)?; }`; (3) wrap body in `ctx.scope(|| async { ... }).await`; (4) call `self.chain.on_request(&ctx).await` before dispatch; (5) `match self.inner.{method}(args).await { Ok(v) => { chain.on_response; Ok(v) } Err(e) => { chain.on_error(&e as &dyn ServiceErrorTrait); Err(e) } }`. Every `#[operation]` method MUST appear in the generated impl — missing one is a compile error enforced by the trait bound. Write tests FIRST: extend `tests/interceptor_invocation.rs` to use a generated `PaymentServiceRef` with a `SpyInterceptor`; assert `on_request` → impl → `on_response` order; assert `on_error` fires when impl returns `Err`.
@@ -121,7 +121,7 @@
 
 ---
 
-### TASK-011 — Macro: `#[service]` on structs — field-type detection + Injectable + factory
+### [x] TASK-011 — Macro: `#[service]` on structs — field-type detection + Injectable + factory
 
 **Spec**: REQ-009, REQ-010
 **Description**: In `service` proc-macro, branch on `parse::<ItemStruct>()` (when `#[service]` is applied to a struct); for each field, inspect the last path segment of its type to classify it as `EntityRef<T>`, `ProjectionRef<P>`, `AdapterRef<A>`, `ConfigValue<T>`, or plain; emit `impl Injectable for {StructName}` with `fn dependencies() -> Vec<DepKey>` listing each classified dep and `fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError>` calling the appropriate resolver for each dep. Write tests FIRST: `macros::tests::service_on_struct_detects_fields` — define a struct with one field of each category and assert the emitted `Injectable::dependencies()` vec contains the correct `DepKey` variants.
