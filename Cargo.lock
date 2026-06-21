@@ -504,12 +504,9 @@ dependencies = [
 name = "ego-service-sdk-macros"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "ego-service-sdk",
  "proc-macro2",
  "quote",
  "syn",
- "tokio",
 ]
 
 [[package]]

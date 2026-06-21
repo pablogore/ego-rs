@@ -119,7 +119,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         let ctx = ego_service_sdk::context::ServiceContext::current()
                             .unwrap_or_default();
                         if let Some(rt) = self.runtime.upgrade() {
-                            rt.enforce_tenant(&ctx);
+                            rt.enforce_tenant(&ctx)?;
                         }
                         let inner_ref = self.inner.clone();
                         let chain_ref = self.chain.clone();

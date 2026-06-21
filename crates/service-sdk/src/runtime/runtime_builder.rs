@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::context::ServiceContext;
 use crate::contract::version::VersionConstraint;
 use crate::di::{AdapterRef, ConfigValue, DepKey, Injectable, ProjectionRef};
+use crate::error::ServiceError;
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 
@@ -38,6 +39,10 @@ pub struct RuntimeInner {
     adapter_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     /// Registered config instances for dependency injection.
     config_instances: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// The tenant this runtime is bound to. `None` means system-level (no tenant).
+    pub tenant_id: Option<String>,
+    /// When `true`, all cross-tenant calls are allowed regardless of context.
+    pub allow_cross_tenant: bool,
 }
 
 impl RuntimeInner {
@@ -49,6 +54,8 @@ impl RuntimeInner {
             projection_instances: HashMap::new(),
             adapter_instances: HashMap::new(),
             config_instances: HashMap::new(),
+            tenant_id: None,
+            allow_cross_tenant: false,
         }
     }
 
@@ -87,8 +94,29 @@ impl RuntimeInner {
             .ok_or(RuntimeError::DependencyNotFound)
     }
 
-    /// Enforces tenant isolation — currently a stub.
-    pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
+    /// Enforces tenant isolation.
+    ///
+    /// Returns `Ok(())` when:
+    /// - The runtime allows cross-tenant access (`allow_cross_tenant`), OR
+    /// - The context's `allow_cross_tenant` is set, OR
+    /// - Neither the runtime nor context has a tenant_id, OR
+    /// - Both tenant IDs match.
+    ///
+    /// Returns `Err(CrossTenantDenied)` when enforcement is active and tenants differ.
+    pub fn enforce_tenant(&self, ctx: &ServiceContext) -> Result<(), RuntimeError> {
+        if self.allow_cross_tenant || ctx.allow_cross_tenant {
+            return Ok(());
+        }
+        match (&self.tenant_id, &ctx.tenant_id) {
+            (Some(rt_tenant), Some(ctx_tenant)) if rt_tenant != ctx_tenant => {
+                Err(RuntimeError::CrossTenantDenied {
+                    expected: rt_tenant.clone(),
+                    actual: ctx_tenant.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Default for RuntimeInner {
@@ -99,6 +127,8 @@ impl Default for RuntimeInner {
             projection_instances: HashMap::new(),
             adapter_instances: HashMap::new(),
             config_instances: HashMap::new(),
+            tenant_id: None,
+            allow_cross_tenant: false,
         }
     }
 }
@@ -132,6 +162,45 @@ pub enum RuntimeError {
     DependencyCycle,
     /// The registry returned an error during registration or resolution.
     RegistryError(String),
+    /// A cross-tenant call was denied.
+    CrossTenantDenied {
+        /// The tenant the runtime expects.
+        expected: String,
+        /// The tenant the caller provided.
+        actual: String,
+    },
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::ServiceNotFound => write!(f, "service not found"),
+            RuntimeError::DependencyNotFound => write!(f, "dependency not found"),
+            RuntimeError::MissingDependency => write!(f, "missing dependency"),
+            RuntimeError::DependencyCycle => write!(f, "dependency cycle detected"),
+            RuntimeError::RegistryError(msg) => write!(f, "registry error: {msg}"),
+            RuntimeError::CrossTenantDenied { expected, actual } => {
+                write!(
+                    f,
+                    "cross-tenant call denied: expected tenant '{expected}', got '{actual}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+/// Converts a `RuntimeError` into a `ServiceError` for use in generated proxy code.
+impl From<RuntimeError> for ServiceError {
+    fn from(e: RuntimeError) -> Self {
+        match e {
+            RuntimeError::CrossTenantDenied { expected, actual } => ServiceError::authorization(
+                format!("cross-tenant call denied: expected tenant '{expected}', got '{actual}'"),
+            ),
+            other => ServiceError::internal(format!("runtime error: {other}")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +340,11 @@ pub struct RuntimeBuilder {
 
     /// Optional interceptor chain. Defaults to empty.
     interceptor_chain: Option<Arc<InterceptorChain>>,
+
+    /// Optional tenant ID for this runtime.
+    tenant_id: Option<String>,
+    /// Whether cross-tenant access is allowed at the runtime level.
+    allow_cross_tenant: bool,
 }
 
 impl Default for RuntimeBuilder {
@@ -293,6 +367,8 @@ impl RuntimeBuilder {
             config_instances: HashMap::new(),
             registry: None,
             interceptor_chain: None,
+            tenant_id: None,
+            allow_cross_tenant: false,
         }
     }
 
@@ -310,6 +386,20 @@ impl RuntimeBuilder {
     /// resolved proxy.
     pub fn with_interceptor_chain(mut self, chain: Arc<InterceptorChain>) -> Self {
         self.interceptor_chain = Some(chain);
+        self
+    }
+
+    /// Sets the tenant ID for this runtime. All services registered through
+    /// this runtime are considered to belong to this tenant.
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    /// Allows cross-tenant access at the runtime level. When set, `enforce_tenant`
+    /// will permit all calls regardless of the caller's tenant context.
+    pub fn allow_cross_tenant(mut self) -> Self {
+        self.allow_cross_tenant = true;
         self
     }
 
@@ -408,6 +498,14 @@ impl RuntimeBuilder {
     // Graph validation (Kahn topological sort)
     // ------------------------------------------------------------------
 
+    /// Returns the topological sort order of the dependency graph.
+    ///
+    /// This is useful for tests that need to verify deterministic ordering.
+    /// See `RuntimeBuilder::build` for validation details.
+    pub fn sorted_order(&self) -> Result<Vec<TypeId>, RuntimeError> {
+        self.validate_deps()
+    }
+
     /// Validates the dependency graph and produces a `Runtime`.
     ///
     /// # Validation
@@ -431,7 +529,7 @@ impl RuntimeBuilder {
     /// * `Err(RuntimeError::MissingDependency)` — a referenced dep was not
     ///   registered under the correct category.
     pub async fn build(self) -> Result<Runtime, RuntimeError> {
-        self.validate_deps()?;
+        let _order = self.validate_deps()?;
 
         let registry = self.registry.unwrap_or_default();
         let chain = self
@@ -444,6 +542,8 @@ impl RuntimeBuilder {
             projection_instances: self.projection_instances,
             adapter_instances: self.adapter_instances,
             config_instances: self.config_instances,
+            tenant_id: self.tenant_id,
+            allow_cross_tenant: self.allow_cross_tenant,
         });
 
         Ok(Runtime { inner })
@@ -455,11 +555,12 @@ impl RuntimeBuilder {
     /// match is NOT enough.  For example, `Projection<T>` is NOT satisfied
     /// by `Entity<T>`.
     ///
-    /// Returns `Ok(())` if the graph is a valid DAG.
+    /// Returns `Ok(sorted_order)` if the graph is a valid DAG, where
+    /// `sorted_order` is the topological order of all nodes in the graph.
     /// Returns `Err(DependencyCycle)` if a cycle is detected.
     /// Returns `Err(MissingDependency)` if a dep's (variant, TypeId) pair
     /// was not registered.
-    fn validate_deps(&self) -> Result<(), RuntimeError> {
+    fn validate_deps(&self) -> Result<Vec<TypeId>, RuntimeError> {
         // ---- Step 1: collect available deps by (variant, TypeId) ----
         // Services are tracked for cycle detection but do NOT satisfy
         // dependency requirements — they consume deps, not provide them.
@@ -520,9 +621,9 @@ impl RuntimeBuilder {
             .map(|(node, _)| *node)
             .collect();
 
-        let mut processed = 0;
+        let mut order: Vec<TypeId> = Vec::with_capacity(all_nodes.len());
         while let Some(node) = queue.pop_front() {
-            processed += 1;
+            order.push(node);
             if let Some(deps_of_node) = dependents.get(&node) {
                 for dependent in deps_of_node {
                     if let Some(count) = deps_left.get_mut(dependent) {
@@ -535,11 +636,11 @@ impl RuntimeBuilder {
             }
         }
 
-        if processed != all_nodes.len() {
+        if order.len() != all_nodes.len() {
             return Err(RuntimeError::DependencyCycle);
         }
 
-        Ok(())
+        Ok(order)
     }
 }
 
@@ -920,5 +1021,94 @@ mod tests {
             "Entity<T> must be satisfied by Entity<T>: {:?}",
             result.err()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Tenant enforcement
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn enforce_tenant_same_tenant_allowed() {
+        let rt = RuntimeInner {
+            tenant_id: None,
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new().with_tenant_id("tenant-a");
+        assert!(rt.enforce_tenant(&ctx).is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_tenants_match() {
+        let rt = RuntimeInner {
+            tenant_id: Some("tenant-a".to_string()),
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new().with_tenant_id("tenant-a");
+        assert!(rt.enforce_tenant(&ctx).is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_cross_tenant_rejected() {
+        let rt = RuntimeInner {
+            tenant_id: Some("tenant-a".to_string()),
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new().with_tenant_id("tenant-b");
+        match rt.enforce_tenant(&ctx) {
+            Err(RuntimeError::CrossTenantDenied { expected, actual }) => {
+                assert_eq!(expected, "tenant-a");
+                assert_eq!(actual, "tenant-b");
+            }
+            other => panic!("expected CrossTenantDenied, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_tenant_context_allows_cross_tenant() {
+        let rt = RuntimeInner {
+            tenant_id: Some("tenant-a".to_string()),
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new()
+            .with_tenant_id("tenant-b")
+            .allow_cross_tenant();
+        assert!(rt.enforce_tenant(&ctx).is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_runtime_allows_cross_tenant() {
+        let rt = RuntimeInner {
+            tenant_id: Some("tenant-a".to_string()),
+            allow_cross_tenant: true,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new().with_tenant_id("tenant-b");
+        assert!(rt.enforce_tenant(&ctx).is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_no_runtime_tenant_skips() {
+        let rt = RuntimeInner {
+            tenant_id: None,
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new().with_tenant_id("tenant-b");
+        assert!(rt.enforce_tenant(&ctx).is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_no_context_tenant_skips() {
+        let rt = RuntimeInner {
+            tenant_id: Some("tenant-a".to_string()),
+            allow_cross_tenant: false,
+            ..RuntimeInner::default()
+        };
+        let ctx = ServiceContext::new();
+        assert!(rt.enforce_tenant(&ctx).is_ok());
     }
 }

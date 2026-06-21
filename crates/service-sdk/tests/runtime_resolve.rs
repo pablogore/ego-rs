@@ -330,7 +330,9 @@ impl Injectable for ServiceC {
 
 #[tokio::test]
 async fn topological_order_is_deterministic() {
-    // Register in forward order and build multiple times.
+    // Register in forward order, capture the sort order across 10 builds,
+    // and verify every run produces an identical sequence.
+    let mut prev_order: Option<Vec<TypeId>> = None;
     for i in 0..10 {
         let builder = RuntimeBuilder::new()
             .with_service::<ServiceA>() // depends on Projection<B>
@@ -339,18 +341,30 @@ async fn topological_order_is_deterministic() {
             .with_projection::<ServiceB>() // satisfies A's dep
             .with_projection::<ServiceC>(); // satisfies B's dep
 
-        let result = builder.build().await;
-        assert!(
-            result.is_ok(),
-            "forward order iteration {i} must build: {:?}",
-            result.err()
-        );
+        let order = builder.sorted_order().expect("forward order must sort");
+        if let Some(ref prev) = prev_order {
+            assert_eq!(
+                &order, prev,
+                "forward order iteration {i} produced different sort order"
+            );
+        }
+        prev_order = Some(order);
     }
 }
 
 #[tokio::test]
 async fn multiple_builds_produce_same_order() {
-    // Register in REVERSE order and verify it still builds.
+    // Register in REVERSE order and verify the topological sort produces the
+    // same sequence as the forward-order registration.
+    let forward = RuntimeBuilder::new()
+        .with_service::<ServiceA>() // depends on Projection<B>
+        .with_service::<ServiceB>() // depends on Projection<C>
+        .with_service::<ServiceC>() // no deps
+        .with_projection::<ServiceB>() // satisfies A's dep
+        .with_projection::<ServiceC>()
+        .sorted_order()
+        .expect("forward order must sort");
+
     for i in 0..10 {
         let builder = RuntimeBuilder::new()
             .with_service::<ServiceC>() // no deps
@@ -359,11 +373,10 @@ async fn multiple_builds_produce_same_order() {
             .with_projection::<ServiceC>() // satisfies B's dep
             .with_projection::<ServiceB>(); // satisfies A's dep
 
-        let result = builder.build().await;
-        assert!(
-            result.is_ok(),
-            "reverse order iteration {i} must build: {:?}",
-            result.err()
+        let order = builder.sorted_order().expect("reverse order must sort");
+        assert_eq!(
+            order, forward,
+            "reverse registration iteration {i} must produce same sort order as forward"
         );
     }
 }

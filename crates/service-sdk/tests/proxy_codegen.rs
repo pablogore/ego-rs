@@ -36,6 +36,12 @@ impl ServiceErrorTrait for OrderError {
     }
 }
 
+impl From<RuntimeError> for OrderError {
+    fn from(e: RuntimeError) -> Self {
+        OrderError(e.to_string())
+    }
+}
+
 /// Sample trait that uses a domain error type unrelated to ServiceError.
 /// This must compile even though OrderError does not implement From<ServiceError>.
 #[service(version = "1.0.0")]
