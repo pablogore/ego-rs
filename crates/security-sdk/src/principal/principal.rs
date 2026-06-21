@@ -170,6 +170,18 @@ mod tests {
     }
 
     #[test]
+    fn with_attribute_overwrites_existing_key() {
+        let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
+            .with_attribute("region", "us-east-1")
+            .with_attribute("region", "eu-west-1");
+        assert_eq!(
+            p.attributes.get("region").map(String::as_str),
+            Some("eu-west-1"),
+            "second call should overwrite the first"
+        );
+    }
+
+    #[test]
     fn subject_id_and_attributes() {
         // TS-001: full construction scenario
         let p = Principal::new(PrincipalKind::User, make_subject("user:42"))
