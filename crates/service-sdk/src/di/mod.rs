@@ -3,14 +3,13 @@
 //! This module provides the core DI types used to declare service dependencies
 //! in a strongly-typed, macro-friendly way.
 
+// NOTE: EntityRef<T> is owned by entity-sdk (CORE-006) and must NOT be defined here.
+// When CORE-006 is available, add: use entity_sdk::EntityRef; and re-export it.
+// See INV-008 in openspec/changes/service-sdk/spec.md.
+
 use std::any::TypeId;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
-
-// TODO: replace with entity_sdk::EntityRef when CORE-006 is available
-/// A reference to an entity. Placeholder until entity_sdk::EntityRef is available.
-pub struct EntityRef<T>(PhantomData<T>);
 
 /// A reference to a read-model projection.
 pub struct ProjectionRef<P> {

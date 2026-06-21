@@ -10,8 +10,6 @@
 //! - **Dependency Injection**: Field-declared dependencies resolved at runtime
 //! - **Service Context**: Propagated across service calls for tracing and tenant isolation
 
-pub use kitlogger;
-
 pub mod context;
 pub mod contract;
 pub mod di;
