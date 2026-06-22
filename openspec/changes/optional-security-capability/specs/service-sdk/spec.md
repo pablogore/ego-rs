@@ -52,7 +52,13 @@ pub fn with_security(
 ) -> Self;
 ```
 
-`build()` MUST succeed whether or not `.with_security()` was called. When `.with_security()` IS called, every `ServiceContext` produced by the runtime MUST have `security: Some(...)` with the context derived from the registered providers. When NOT called, every `ServiceContext` MUST have `security == None`. No global or ambient provider state is introduced — capability is instance-scoped to the runtime.
+`build()` MUST succeed whether or not `.with_security()` was called. When `.with_security()` IS called, the runtime registers the authentication and authorization providers and is marked as security-capable. Creating a `SecurityContext` requires an authenticated `Principal` — without a future authentication entrypoint (CORE-011), `ServiceContext.security` remains `None` and no `SecurityContext` is fabricated. When NOT called, no providers are registered. No global or ambient provider state is introduced — capability is instance-scoped to the runtime.
+
+#### Scenario: Registering providers does not create a SecurityContext
+
+- GIVEN `RuntimeBuilder::new().with_security(authn_provider, authz_provider).build()`
+- WHEN a new `ServiceContext::new()` is created
+- THEN `service_ctx.security() == None` (no `SecurityContext` is fabricated; only providers are registered)
 
 #### Scenario: Build without security succeeds
 
@@ -66,7 +72,8 @@ pub fn with_security(
 - GIVEN `RuntimeBuilder::new()`
 - WHEN `.with_security(authn_provider, authz_provider).build()` is called
 - THEN a valid `Runtime` is returned with security configured
-- AND every `ServiceContext` has `security: Some(...)`
+- AND the runtime stores the registered providers
+- AND newly created `ServiceContext` values have `security == None` (no `SecurityContext` is fabricated until CORE-011)
 
 #### Scenario: No global security state
 

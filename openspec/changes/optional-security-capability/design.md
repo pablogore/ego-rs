@@ -16,19 +16,51 @@ All resolved decisions (D1/B, GAP-008, D3/A, GAP-009, A1) are inherited unchange
 
 ## Data Flow
 
+### CORE-010B — Runtime Builder
+
 ```
-RuntimeBuilder::new()               → Runtime { inner: Arc<RuntimeInner> }
-RuntimeBuilder::new()                → Runtime { inner (security_providers: None) }
-  .with_security(authn, authz)
-  .build()                           → Runtime { inner (security_providers: Some(...)) }
+RuntimeBuilder::new().build()
+    → Runtime { inner: RuntimeInner { security_providers: None } }
 
-ServiceContext::security()           → None                                (providers not installed)
-ServiceContext::security()           → Some(&SecurityContext)              (providers installed + auth'd)
-ServiceContext::require_security()   → Err(CapabilityNotEnabled)           (providers not installed)
-ServiceContext::require_security()   → Ok(&SecurityContext)                (providers installed + auth'd)
+RuntimeBuilder::new()
+    .with_security(authn, authz)
+    .build()
+    → Runtime { inner: RuntimeInner { security_providers: Some((authn, authz)) } }
+```
 
-authorize_in_context(None, ...)      → Err(CapabilityNotEnabled)           [changed from MissingContext]
-authorize_in_context(Some(ctx), ...) → Ok(()) | Err(AuthorizationDenied)   [unchanged behavior]
+`with_security()` registers **provider capability** only — it does NOT fabricate a
+`SecurityContext`. Creating a `SecurityContext` requires an authenticated `Principal`,
+which is deferred to CORE-011 (authentication entrypoint).
+
+### CORE-010B — ServiceContext Security States
+
+```
+ServiceContext::security()           → None   (capability not installed)
+ServiceContext::security()           → None   (providers installed — no auth entrypoint yet)
+
+ServiceContext::require_security()   → Err(CapabilityNotEnabled)   (capability not installed)
+ServiceContext::require_security()   → Err(CapabilityNotEnabled)   (providers installed — no auth entrypoint yet)
+
+authorize_in_context(None, ...)      → Err(CapabilityNotEnabled)   [CORE-010B: always this path]
+```
+
+In CORE-010B, `ServiceContext.security` is always `None` because no authentication
+entrypoint exists to create a `Principal` and thus no `SecurityContext` can be legitimately
+constructed. `require_security()` always returns `Err(CapabilityNotEnabled)`.
+
+### Future States (CORE-011+)
+
+```
+Runtime entrypoint with authentication
+    → AuthenticationProvider.authenticate(credential)
+    → SecurityContext::new(principal)
+    → ServiceContext::with_security(Arc::new(security_ctx))
+
+ServiceContext::security()           → Some(&SecurityContext)   (auth completed)
+ServiceContext::require_security()   → Ok(&SecurityContext)     (auth completed)
+
+authorize_in_context(None, ...)      → Err(CapabilityNotEnabled)   [no security at all]
+authorize_in_context(Some(ctx), ...) → Ok(()) | Err(AuthorizationDenied)
 ```
 
 ## File Changes
