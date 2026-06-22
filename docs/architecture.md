@@ -24,10 +24,16 @@ flowchart LR
     runtime --> domain
     service-sdk --> domain
     service-sdk --> persistent-entity
+    service-sdk --> security-sdk
     runtime --> service-sdk
+    security-sdk:::crosscutting
+
+    classDef crosscutting fill:#f0f4ff,stroke:#6366f1
 ```
 
 No layer may depend on a layer to its right in this chain. Violations are enforced by `layers.toml` and `scripts/verify-layers.sh`.
+
+Cross-cutting SDKs (highlighted) sit outside the layer chain — any layer may import them, but they import no ego layer.
 
 ### Runtime Neutrality
 
@@ -46,8 +52,29 @@ Domain contracts MUST be runtime-neutral — no `async`, no Tokio, no runtime-sp
 | `ego-runtime` | foundation | Actor system, mailbox, supervision | `ego-domain` |
 | `ego-runtime-tokio` | infrastructure | Tokio-based runtime execution | `ego-runtime`, `ego-domain` |
 | `runtime-slice` | domain | Deterministic execution types | Nothing internal |
-| `ego-service-sdk` | application | Service contracts, registry, DI, interceptors, context propagation | `ego-domain`, `persistent-entity` |
+| `ego-service-sdk` | application | Service contracts, registry, DI, interceptors, context propagation | `ego-domain`, `persistent-entity`, `ego-security-sdk` |
 | `ego-service-sdk-macros` | application | `#[service]`, `#[operation]` proc-macro code generation | `syn`, `quote`, `proc-macro2` |
+| `ego-security-sdk` | **cross-cutting** | Canonical security primitives: Principal, Credential, AuthN/AuthZ contracts, RBAC, SecurityContext | Third-party only (`async-trait`, `thiserror`, `serde`) |
+
+### Cross-Cutting SDKs
+
+Cross-cutting SDKs are crates that provide shared capabilities consumed by any layer without belonging to any layer themselves. They are **leaf nodes** in the dependency graph: layers depend on them, they depend on no ego layer.
+
+**Rules:**
+
+- A cross-cutting SDK MUST NOT import any ego layer (`domain`, `application`, `infrastructure`, `transport`).
+- Any layer MAY import a cross-cutting SDK without violating the dependency direction rules.
+- Cross-cutting SDKs MUST NOT introduce circular dependencies between layers.
+- Cross-cutting SDKs SHOULD minimize production dependencies — they are transitively pulled into every consumer.
+- Tokio and other async runtimes are `[dev-dependencies]` only unless the SDK has a documented runtime requirement.
+
+**Current cross-cutting SDKs:**
+
+| Crate | Capability | Production Deps |
+|-------|-----------|-----------------|
+| `ego-security-sdk` | AuthN/AuthZ, Principal, RBAC, SecurityContext | `async-trait`, `thiserror`, `serde` |
+
+Future candidates: `ego-telemetry-sdk`, `ego-config-sdk`, `ego-logging-sdk`.
 
 ### Module Ownership
 
@@ -90,6 +117,8 @@ Domain contracts MUST be runtime-neutral — no `async`, no Tokio, no runtime-sp
 - `ego-service-sdk-macros` MUST depend only on `syn`, `quote`, `proc-macro2` — no runtime dependencies
 - ServiceContext propagates via `tokio::task::TaskLocal` — EntityRef reads context transparently without cross-crate coupling
 - Dependency direction is enforced by `layers.toml` and verified by `scripts/verify-layers.sh`
+- Cross-cutting SDKs MUST NOT appear as dependencies of `ego-domain` — domain contracts stay runtime and capability neutral
+- Cross-cutting SDKs MAY be depended on by any layer; this is NOT a layering violation
 
 ---
 

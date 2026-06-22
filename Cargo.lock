@@ -483,6 +483,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ego-security-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mockall 0.12.1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "ego-service-sdk"
 version = "0.1.0"
 dependencies = [
