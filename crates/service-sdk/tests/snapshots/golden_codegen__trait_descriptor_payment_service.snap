@@ -13,6 +13,7 @@ ServiceDescriptor {
         OperationDescriptor {
             name: "charge",
             input: [
+                "ServiceContext",
                 "u64",
             ],
             output: "Result < String, ServiceError >",
@@ -27,6 +28,7 @@ ServiceDescriptor {
         OperationDescriptor {
             name: "refund",
             input: [
+                "ServiceContext",
                 "u64",
             ],
             output: "Result < String, ServiceError >",

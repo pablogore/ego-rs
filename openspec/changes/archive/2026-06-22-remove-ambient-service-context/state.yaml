@@ -1,0 +1,14 @@
+change: remove-ambient-service-context
+artifact_store: openspec
+
+dag:
+  explore:    { status: skipped }
+  proposal:   { status: done,    artifact: proposal.md }
+  spec:       { status: done,    artifact: spec.md }
+  design:     { status: done,    artifact: design.md }
+  tasks:      { status: done,    artifact: tasks.md }
+  apply:      { status: pending }
+  verify:     { status: pending }
+  archive:    { status: pending }
+
+next_recommended: apply

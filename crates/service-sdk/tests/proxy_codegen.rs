@@ -41,7 +41,11 @@ impl ServiceErrorTrait for OrderError {
 #[service(version = "1.0.0")]
 pub trait OrderService {
     #[operation]
-    async fn place_order(&self, product_id: String) -> Result<String, OrderError>;
+    async fn place_order(
+        &self,
+        ctx: ServiceContext,
+        product_id: String,
+    ) -> Result<String, OrderError>;
 }
 
 #[test]
@@ -54,7 +58,11 @@ fn service_on_trait_generates_tag_and_ref() {
 
     #[async_trait]
     impl OrderService for NoopOrderService {
-        async fn place_order(&self, _product_id: String) -> Result<String, OrderError> {
+        async fn place_order(
+            &self,
+            _ctx: ServiceContext,
+            _product_id: String,
+        ) -> Result<String, OrderError> {
             Ok("noop".to_string())
         }
     }
@@ -102,20 +110,20 @@ impl Interceptor for SpyInterceptor {
 #[service(version = "1.0.0")]
 pub trait PaymentService {
     #[operation]
-    async fn charge(&self, amount: u64) -> Result<String, ServiceError>;
+    async fn charge(&self, ctx: ServiceContext, amount: u64) -> Result<String, ServiceError>;
 
     #[operation]
-    async fn refund(&self, amount: u64) -> Result<String, ServiceError>;
+    async fn refund(&self, ctx: ServiceContext, amount: u64) -> Result<String, ServiceError>;
 }
 
 struct FailingPaymentService;
 
 #[async_trait]
 impl PaymentService for FailingPaymentService {
-    async fn charge(&self, _amount: u64) -> Result<String, ServiceError> {
+    async fn charge(&self, _ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {
         Err(ServiceError::internal("payment failed"))
     }
-    async fn refund(&self, _amount: u64) -> Result<String, ServiceError> {
+    async fn refund(&self, _ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {
         Ok("refunded".to_string())
     }
 }
@@ -131,8 +139,10 @@ async fn interceptors_fire_in_order_via_generated_ref() {
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
+    let ctx = ServiceContext::new();
+
     // charge() returns Err — should fire on_request then on_error.
-    let result = proxy.charge(100).await;
+    let result = proxy.charge(ctx, 100).await;
     assert!(result.is_err(), "charge must return Err");
 
     let calls = spy.calls.lock().unwrap().clone();
@@ -154,8 +164,10 @@ async fn interceptors_fire_on_success_via_generated_ref() {
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
+    let ctx = ServiceContext::new();
+
     // refund() returns Ok — should fire on_request then on_response.
-    let result = proxy.refund(50).await;
+    let result = proxy.refund(ctx, 50).await;
     assert!(result.is_ok(), "refund must return Ok");
 
     let calls = spy.calls.lock().unwrap().clone();
@@ -167,19 +179,18 @@ async fn interceptors_fire_on_success_via_generated_ref() {
 }
 
 #[tokio::test]
-async fn context_propagates_across_service_boundary() {
+async fn context_propagates_via_explicit_param() {
     struct ContextCapturingService {
         captured_tenant: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait]
     impl PaymentService for ContextCapturingService {
-        async fn charge(&self, _amount: u64) -> Result<String, ServiceError> {
-            let tenant = ServiceContext::current().and_then(|ctx| ctx.tenant_id.clone());
-            *self.captured_tenant.lock().unwrap() = tenant;
+        async fn charge(&self, ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {
+            *self.captured_tenant.lock().unwrap() = ctx.tenant_id.clone();
             Ok("charged".to_string())
         }
-        async fn refund(&self, _amount: u64) -> Result<String, ServiceError> {
+        async fn refund(&self, _ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {
             Ok("refunded".to_string())
         }
     }
@@ -188,23 +199,19 @@ async fn context_propagates_across_service_boundary() {
         captured_tenant: std::sync::Mutex::new(None),
     });
     let inner: Arc<dyn PaymentService> = capturing.clone();
-
     let chain = Arc::new(InterceptorChain::new());
     let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
     let runtime_weak = Arc::downgrade(&runtime_inner);
     let proxy = PaymentServiceRef::new(inner, chain, runtime_weak);
 
-    let outer_ctx = ServiceContext::new().with_tenant_id("tenant-abc");
-    outer_ctx
-        .scope(|| async { proxy.charge(42).await })
-        .await
-        .unwrap();
+    let ctx = ServiceContext::new().with_tenant_id("tenant-abc");
+    proxy.charge(ctx, 42).await.unwrap();
 
     let captured = capturing.captured_tenant.lock().unwrap().clone();
     assert_eq!(
         captured.as_deref(),
         Some("tenant-abc"),
-        "ServiceContext::current() inside impl must carry the outer tenant_id"
+        "Context explicitly passed to proxy must arrive at impl through parameter"
     );
 }
 

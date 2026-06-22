@@ -267,14 +267,14 @@ flowchart TB
     Interceptor --> Implementation
 ```
 
-### ServiceContext — TaskLocal Propagation
+### ServiceContext — Explicit Propagation
 
 ```mermaid
 flowchart LR
     A["Request arrives"] --> B["Build ServiceContext<br/>with_tenant_id()<br/>with_correlation_id()"]
-    B --> C["ctx.scope(|| async { ... })"]
-    C --> D["Inside: ServiceContext::current()<br/>returns Some(ctx)"]
-    C --> E["Outside: ServiceContext::current()<br/>returns None"]
+    B --> C["Pass ctx to service method<br/>svc.operation(ctx, args)"]
+    C --> D["Handler receives ctx<br/>as owned parameter"]
+    D --> E["Clone for sub-calls<br/>ctx.clone()"]
 ```
 
 ### Interceptor Chain
@@ -534,12 +534,10 @@ let ctx = ServiceContext::new();
 chain.on_request(&ctx).await.unwrap();
 assert_eq!(counter.request_count.load(Ordering::Relaxed), 1);
 
-// Test context scoping
+// Test context explicit carry
 let ctx = ServiceContext::new().with_tenant_id("my-tenant");
-let captured = ctx.scope(|| async {
-    ServiceContext::current()
-}).await;
-assert_eq!(captured.unwrap().tenant_id(), Some("my-tenant"));
+let ctx2 = ctx.clone();
+assert_eq!(ctx2.tenant_id(), Some("my-tenant"));
 ```
 
 ### Persistent Entity Testing

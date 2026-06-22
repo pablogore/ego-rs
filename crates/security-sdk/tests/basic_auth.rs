@@ -70,7 +70,10 @@ async fn injected_verifier_returns_none_gives_auth_failed() {
             secret: "wrong".into(),
         })
         .await;
-    assert!(matches!(result, Err(SecurityError::AuthenticationFailed(_))));
+    assert!(matches!(
+        result,
+        Err(SecurityError::AuthenticationFailed(_))
+    ));
 }
 
 #[tokio::test]
@@ -80,7 +83,9 @@ async fn non_basic_credential_returns_invalid_credential() {
         secret: "s3cr3t".into(),
     }));
 
-    let result = provider.authenticate(&Credential::Bearer("tok".into())).await;
+    let result = provider
+        .authenticate(&Credential::Bearer("tok".into()))
+        .await;
     assert!(matches!(result, Err(SecurityError::InvalidCredential(_))));
 }
 

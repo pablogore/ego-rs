@@ -13,6 +13,7 @@ ServiceDescriptor {
         OperationDescriptor {
             name: "place_order",
             input: [
+                "ServiceContext",
                 "String",
             ],
             output: "Result < String, GoldenOrderError >",

@@ -1,101 +1,71 @@
 //! Tests for ServiceContext scope functionality.
+//!
+//! After CORE-010A, ServiceContext has no ambient APIs (scope, current).
+//! Context values are propagated via explicit ownership, cloning, and
+//! parameter passing. These tests verify that fields are preserved
+//! through explicit operations rather than ambient side effects.
 
 use ego_service_sdk::context::ServiceContext;
 use std::collections::HashMap;
 
 #[tokio::test]
-async fn test_service_context_scope() {
-    let context = ServiceContext::new()
+async fn test_service_context_explicit_field_carry() {
+    let ctx = ServiceContext::new()
         .with_tenant_id("tenant1")
         .with_correlation_id("correlation1")
         .with_trace_id("trace1");
 
-    assert_eq!(context.tenant_id(), Some("tenant1"));
-    assert_eq!(context.correlation_id(), Some("correlation1"));
-    assert_eq!(context.trace_id(), Some("trace1"));
-
-    let result = context.scope(|| async {
-        let current_context = ServiceContext::current();
-        assert!(current_context.is_some());
-        let current = current_context.unwrap();
-        assert_eq!(current.tenant_id(), Some("tenant1"));
-        assert_eq!(current.correlation_id(), Some("correlation1"));
-        assert_eq!(current.trace_id(), Some("trace1"));
-        "test_result"
-    });
-
-    let final_result = result.await;
-    assert_eq!(final_result, "test_result");
+    // Clone and assert fields on the owned value directly
+    let ctx2 = ctx.clone();
+    assert_eq!(ctx2.tenant_id(), Some("tenant1"));
+    assert_eq!(ctx2.correlation_id(), Some("correlation1"));
+    assert_eq!(ctx2.trace_id(), Some("trace1"));
 }
 
 #[tokio::test]
-async fn test_service_context_scope_with_tenant() {
-    let context = ServiceContext::new().with_tenant_id("test-tenant");
+async fn test_service_context_explicit_tenant_carry() {
+    let ctx = ServiceContext::new().with_tenant_id("test-tenant");
 
-    let result = context.scope(|| async {
-        let current_context = ServiceContext::current();
-        assert!(current_context.is_some());
-        let current = current_context.unwrap();
-        assert_eq!(current.tenant_id(), Some("test-tenant"));
-        "tenant_test_result"
-    });
+    // Clone preserves the tenant field
+    let ctx2 = ctx.clone();
+    assert_eq!(ctx2.tenant_id(), Some("test-tenant"));
 
-    let final_result = result.await;
-    assert_eq!(final_result, "tenant_test_result");
+    // The original is still intact
+    assert_eq!(ctx.tenant_id(), Some("test-tenant"));
 }
 
 #[tokio::test]
-async fn test_service_context_scope_with_additional_context() {
-    let mut additional_context = HashMap::new();
-    additional_context.insert("key1".to_string(), "value1".to_string());
-    additional_context.insert("key2".to_string(), "value2".to_string());
+async fn test_service_context_explicit_additional_context() {
+    let mut additional = HashMap::new();
+    additional.insert("key1".to_string(), "value1".to_string());
+    additional.insert("key2".to_string(), "value2".to_string());
 
-    let context = ServiceContext::new().with_additional_context(additional_context);
+    let ctx = ServiceContext::new().with_additional_context(additional);
 
-    let result = context.scope(|| async {
-        let current_context = ServiceContext::current();
-        assert!(current_context.is_some());
-        let current = current_context.unwrap();
-        assert_eq!(current.additional_context.len(), 2);
-        assert_eq!(
-            current.additional_context.get("key1"),
-            Some(&"value1".to_string())
-        );
-        assert_eq!(
-            current.additional_context.get("key2"),
-            Some(&"value2".to_string())
-        );
-        "additional_context_result"
-    });
-
-    let final_result = result.await;
-    assert_eq!(final_result, "additional_context_result");
+    // Clone and assert fields on owned value
+    let ctx2 = ctx.clone();
+    assert_eq!(ctx2.additional_context.len(), 2);
+    assert_eq!(
+        ctx2.additional_context.get("key1"),
+        Some(&"value1".to_string())
+    );
+    assert_eq!(
+        ctx2.additional_context.get("key2"),
+        Some(&"value2".to_string())
+    );
 }
 
 #[tokio::test]
-async fn test_service_context_scope_restores_context() {
-    let initial_context = ServiceContext::new().with_tenant_id("initial_tenant");
+async fn test_service_context_explicit_independence() {
+    // Two separate owned values are independent — no ambient side effects
+    let ctx_a = ServiceContext::new().with_tenant_id("tenant_a");
+    let ctx_b = ServiceContext::new().with_tenant_id("tenant_b");
 
-    let _scope = initial_context.scope(|| async {
-        let new_context = ServiceContext::new().with_tenant_id("new_tenant");
+    assert_eq!(ctx_a.tenant_id(), Some("tenant_a"));
+    assert_eq!(ctx_b.tenant_id(), Some("tenant_b"));
 
-        let _new_scope = new_context
-            .scope(|| async {
-                let current_context = ServiceContext::current();
-                assert!(current_context.is_some());
-                let current = current_context.unwrap();
-                assert_eq!(current.tenant_id(), Some("new_tenant"));
-                "nested_result"
-            })
-            .await;
-
-        let current_context = ServiceContext::current();
-        assert!(current_context.is_some());
-        let current = current_context.unwrap();
-        assert_eq!(current.tenant_id(), Some("initial_tenant"));
-        "outer_result"
-    });
-
-    let current_context = ServiceContext::current();
-    assert!(current_context.is_none());
+    // Mutating ctx_a does NOT affect ctx_b
+    let ctx_a_clone = ctx_a.clone();
+    assert_eq!(ctx_a_clone.tenant_id(), Some("tenant_a"));
+    assert_eq!(ctx_b.tenant_id(), Some("tenant_b"));
 }

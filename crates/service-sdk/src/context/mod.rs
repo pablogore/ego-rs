@@ -5,11 +5,6 @@ use std::time::{Duration, SystemTime};
 use ego_security_sdk::context::SecurityContext;
 use tokio_util::sync::CancellationToken;
 
-// TaskLocal for storing the current service context
-tokio::task_local! {
-    static CURRENT_CONTEXT: ServiceContext;
-}
-
 /// A service context that propagates across service calls for tracing, tenant isolation, and other cross-cutting concerns.
 ///
 /// Service contexts are used to carry information that's relevant across service boundaries,
@@ -178,31 +173,6 @@ impl ServiceContext {
             .as_ref()
             .map(|t| t.is_cancelled())
             .unwrap_or(false)
-    }
-
-    /// Gets the current service context from the task-local storage.
-    ///
-    /// # Returns
-    /// The current service context if available, or `None` if not in a service context
-    pub fn current() -> Option<ServiceContext> {
-        CURRENT_CONTEXT.try_with(|ctx| ctx.clone()).ok()
-    }
-
-    /// Creates a new scope with the given service context.
-    /// The context is available inside the closure via `ServiceContext::current()`.
-    ///
-    /// # Arguments
-    /// * `f` - The closure to execute within the context
-    ///
-    /// # Returns
-    /// A future that will execute the closure within the context
-    pub fn scope<F, Fut>(&self, f: F) -> impl std::future::Future<Output = Fut::Output>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future,
-    {
-        let cloned = self.clone();
-        async move { CURRENT_CONTEXT.scope(cloned, f()).await }
     }
 
     /// Checks if the deadline has expired.
