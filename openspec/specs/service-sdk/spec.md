@@ -298,7 +298,6 @@ pub fn with_security(
 - THEN zero matches related to security or provider state are returned
 
 ---
-
 ## Non-Functional Requirements
 
 ### NFR-001: No Behavioral Regression
