@@ -1,5 +1,6 @@
 //! Principal identity model — [`Principal`], [`PrincipalKind`], [`SubjectId`], [`Role`], [`Claim`].
 
+#[allow(clippy::module_inception)]
 pub mod principal;
 pub mod subject_id;
 

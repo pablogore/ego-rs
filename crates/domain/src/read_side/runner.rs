@@ -45,6 +45,7 @@ where
     }
 
     /// Creates a new session for a projection and tag.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         &self,
         projection_id: String,

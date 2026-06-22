@@ -254,7 +254,7 @@ flowchart TB
         direction TB
         Contract["Contract Layer<br/>ServiceContract trait<br/>ServiceDescriptor<br/>OperationDescriptor"] 
         Registry["Registry<br/>ServiceRegistry<br/>name → descriptor"]
-        Context["Context<br/>ServiceContext<br/>TaskLocal propagation"]
+        Context["Context<br/>ServiceContext<br/>Explicit propagation"]
         Interceptor["Interceptor Chain<br/>on_request<br/>on_response<br/>on_error"]
         Implementation["Implementation<br/>Service trait<br/>ServiceFactory"]
         Runtime["RuntimeBuilder<br/>wire services, entities<br/>projections"]
@@ -648,7 +648,7 @@ flowchart LR
 | `crates/service-sdk/src/lib.rs` | Crate root — re-exports all modules |
 | `crates/service-sdk/src/contract/mod.rs` | `ServiceContract` trait, `ServiceDescriptor`, `OperationDescriptor`, `ContractVersion` |
 | `crates/service-sdk/src/implementation.rs` | `Service` trait, `ServiceFactory` trait |
-| `crates/service-sdk/src/context/mod.rs` | `ServiceContext` (TaskLocal), `ContextKey` trait |
+| `crates/service-sdk/src/context/mod.rs` | `ServiceContext` (Explicit propagation), `ContextKey` trait |
 | `crates/service-sdk/src/interceptor/chain.rs` | `Interceptor` trait, `InterceptorChain` |
 | `crates/service-sdk/src/registry/mod.rs` | `ServiceRegistry` |
 | `crates/service-sdk/src/error/mod.rs` | `ServiceError` (9 variants), `Result<T>` |
