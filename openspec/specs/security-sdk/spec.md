@@ -232,28 +232,62 @@ pub trait RoleStore: Send + Sync {
 
 ### FR-012: SecurityContext — explicit propagation through ServiceContext
 
-`ServiceContext` (in `crates/service-sdk`) MUST gain exactly one new field:
+The existing field `security: Option<Arc<SecurityContext>>` on `ServiceContext` (introduced by the Security SDK) is unchanged. This change defines the semantics and modifies `authorize_in_context` behavior:
 
-```rust
-pub security: Option<Arc<SecurityContext>>,
-```
+- `security == None` means "security capability not installed in this runtime" — a valid deployment state, not a propagation failure
+- `security == Some(arc_ctx)` means "capability installed; `arc_ctx.principal()` is always valid"
+- The field MUST default to `None` when not set
+- The field MUST be propagated unchanged through all runtime execution paths
+- The field MUST never be resolved via thread-local, task-local, or any global mechanism
 
-This field MUST:
-- Default to `None` when not set — all existing `ServiceContext` construction sites compile unchanged
-- Be propagated unchanged by `RuntimeBuilder` and graph execution through Services, Command Handlers, Persistent Entities, Projections, and the Scheduler
-- Never be resolved via thread-local, task-local, or any global mechanism
+When `security == None`, `authorize_in_context` MUST return `SecurityError::CapabilityNotEnabled` instead of `SecurityError::MissingContext`. The `MissingContext` variant is retained in the enum for potential future internal-invariant detection.
+(Previously: `authorize_in_context` returned `SecurityError::MissingContext` when `security == None`)
 
-**Given** an existing test that constructs a `ServiceContext` without specifying `security`
-**When** the test is compiled after this change
-**Then** it compiles without errors or warnings (the field defaults to `None`)
+#### Scenario: Backward compatibility — field defaults to None
 
-**Given** a `SecurityContext` constructed from a `Principal`, wrapped in `Some(Arc::new(ctx))`
-**When** a `ServiceContext` carrying that `security` field is passed through a `RuntimeBuilder`-wired call chain
-**Then** the receiving component reads the same `SecurityContext` (with non-None principal) from `service_ctx.security`
+- GIVEN an existing test that constructs a `ServiceContext` without specifying `security`
+- WHEN the test is compiled after this change
+- THEN it compiles without errors or warnings (the field defaults to `None`)
 
-**Test**: `service_sdk::context::tests::security_field_defaults_to_none` — construct `ServiceContext` without the field; assert `security.is_none()`. `service_sdk::context::tests::security_propagates_through_chain` — wire a call chain, assert `security` field is identical at both ends.
+#### Scenario: Security propagates through call chain unchanged
+
+- GIVEN a `SecurityContext` wrapped in `Some(Arc::new(ctx))`
+- WHEN a `ServiceContext` carrying that field is passed through a `RuntimeBuilder`-wired call chain
+- THEN the receiving component reads the same `SecurityContext` from `service_ctx.security`
+
+#### Scenario: authorize_in_context returns CapabilityNotEnabled for unconfigured runtime
+
+- GIVEN a `ServiceContext` with `security == None` (valid state: no security installed)
+- WHEN `authorize_in_context` is called
+- THEN `Err(SecurityError::CapabilityNotEnabled)` is returned
+
+#### Scenario: MissingContext retained in enum
+
+- GIVEN the `SecurityError` enum definition
+- WHEN all variants are enumerated
+- THEN `MissingContext` is present alongside `CapabilityNotEnabled`
+
+**Test**: `service_sdk::context::tests::security_field_defaults_to_none` — construct `ServiceContext` without the field; assert `security.is_none()`. `service_sdk::context::tests::security_propagates_through_chain` — wire a call chain, assert `security` field is identical at both ends. `authorization::tests::none_security_returns_capability_not_enabled` — assert `Err(CapabilityNotEnabled)` is returned for unconfigured runtime. `declarative_authz::none_security_returns_capability_not_enabled` — same assertion in declarative authorization path.
 
 `AccessRequest::from_permission(descriptor)` is the stable parsing API that a future `#[authorize(...)]` macro targets. Its format is `"<resource>:<action>"` — exactly one colon separator, neither segment empty.
+
+---
+
+### FR-014: SecurityError::CapabilityNotEnabled variant
+
+`SecurityError` MUST include a `CapabilityNotEnabled` variant with no payload fields. This variant represents "security was never installed in the runtime" — distinct from `MissingContext` which represents "capability exists but was not propagated".
+
+#### Scenario: Variant matches correctly
+
+- GIVEN a `SecurityError::CapabilityNotEnabled` value
+- WHEN the value is pattern-matched
+- THEN it matches the `CapabilityNotEnabled` arm (no payload)
+
+#### Scenario: Returned when runtime has no security
+
+- GIVEN a runtime built without `.with_security()`
+- WHEN `authorize_in_context` is called on a `ServiceContext` with `security == None`
+- THEN `Err(SecurityError::CapabilityNotEnabled)` is returned
 
 ---
 
@@ -383,6 +417,7 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 | Provider internal error | `RoleStore` backend fails (I/O, store unreachable) | `Err(SecurityError::ProviderError(_))` — opaque, no store-specific type |
 | Empty SubjectId | `SubjectId::new("")` | `Err(SecurityError::InvalidSubjectId)` — dedicated variant; `InvalidCredential` is reserved for credential scheme/format errors |
 | Invalid `AccessRequest` descriptor | `AccessRequest::from_permission` with missing `:`, empty resource, or empty action | `Err(SecurityError::InvalidAccessRequest)` |
+| Security not installed | `authorize_in_context` with `security == None` | `Err(SecurityError::CapabilityNotEnabled)` |
 
 ---
 
