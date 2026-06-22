@@ -45,6 +45,18 @@ fn security_propagates_through_chain() {
 }
 
 #[test]
+fn with_security_replaces_previous_value() {
+    let sec_a = Arc::new(make_security_ctx("user:alice"));
+    let sec_b = Arc::new(make_security_ctx("user:bob"));
+    let ctx = ServiceContext::new()
+        .with_security(Arc::clone(&sec_a))
+        .with_security(Arc::clone(&sec_b));
+    // Last write wins — sec_b is retained, sec_a is gone.
+    let subject = ctx.security().unwrap().principal().subject.as_str().to_owned();
+    assert_eq!(subject, "user:bob");
+}
+
+#[test]
 fn existing_construction_sites_compile() {
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};

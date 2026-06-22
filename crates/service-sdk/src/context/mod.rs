@@ -166,8 +166,8 @@ impl ServiceContext {
     }
 
     /// Returns the attached security context, if any.
-    pub fn security(&self) -> Option<&Arc<SecurityContext>> {
-        self.security.as_ref()
+    pub fn security(&self) -> Option<&SecurityContext> {
+        self.security.as_deref()
     }
 
     /// Returns `true` if the associated `CancellationToken` has been cancelled.
