@@ -1005,8 +1005,8 @@ Tests to write (FR-012, INT-001):
 - `existing_construction_sites_compile` — construct `ServiceContext` using every existing builder call in the codebase; this test acts as a compile-time regression check that adding the field does not break old code.
 
 **Acceptance**:
-- [ ] Four test bodies written
-- [ ] `security_field_defaults_to_none` and `security_field_set_via_builder` are the primary red-state tests that gate TASK-029
+- [x] Four test bodies written
+- [x] `security_field_defaults_to_none` and `security_field_set_via_builder` are the primary red-state tests that gate TASK-029
 
 ---
 
@@ -1051,10 +1051,10 @@ ego-security-sdk = { path = "../security-sdk" }
 No other existing field is renamed, removed, or retyped. No `Default` impl change needed (it delegates to `new()`).
 
 **Acceptance**:
-- [ ] All four tests from TASK-028 pass
-- [ ] `cargo test --workspace` exits 0 (all existing tests still green, `security: None` default keeps them compiling)
-- [ ] `grep -rn "thread_local\|task_local\|lazy_static\|once_cell" crates/service-sdk/src/context/` returns no security-context-related hits
-- [ ] INV-007: `ServiceContext::clone()` preserves the `security` field unchanged; verified by test
+- [x] All four tests from TASK-028 pass
+- [x] `cargo test --workspace` exits 0 (all existing tests still green, `security: None` default keeps them compiling)
+- [x] `grep -rn "thread_local\|task_local\|lazy_static\|once_cell" crates/service-sdk/src/context/` returns no security-context-related hits
+- [x] INV-007: `ServiceContext::clone()` preserves the `security` field unchanged; verified by test
 
 ---
 
@@ -1079,8 +1079,8 @@ Tests (from design):
 Each test must use `#[tokio::test]` runtime.
 
 **Acceptance**:
-- [ ] All four tests pass under `cargo test --workspace`
-- [ ] No `InMemoryVerifier` is exported from the production code — test-only helpers are in `#[cfg(test)]` blocks
+- [x] All four tests pass under `cargo test --workspace`
+- [x] No `InMemoryVerifier` is exported from the production code — test-only helpers are in `#[cfg(test)]` blocks
 
 ---
 
@@ -1102,7 +1102,7 @@ Tests (from design, TS-006 + TS-007):
 - `mock_role_store_injectable` — `MockRoleStore` (no `InMemoryRoleStore` import); `RbacProvider::new(Arc::new(mock))` compiles and evaluates correctly.
 
 **Acceptance**:
-- [ ] All five tests pass under `cargo test --workspace`
+- [x] All five tests pass under `cargo test --workspace`
 
 ---
 
@@ -1124,8 +1124,8 @@ Tests:
 Import `ego_security_sdk` and `ego_service_sdk` directly.
 
 **Acceptance**:
-- [ ] All three tests pass under `cargo test --workspace`
-- [ ] Test file contains no `thread_local`, `task_local`, or ambient access pattern
+- [x] All three tests pass under `cargo test --workspace`
+- [x] Test file contains no `thread_local`, `task_local`, or ambient access pattern
 
 ---
 
@@ -1147,7 +1147,7 @@ Tests:
 - `full_path_deny` — same wiring; principal lacks required role; `authorize_in_context` returns `Err(SecurityError::AuthorizationDenied { .. })`.
 
 **Acceptance**:
-- [ ] All five tests pass under `cargo test --workspace`
+- [x] All five tests pass under `cargo test --workspace`
 
 ---
 
@@ -1167,8 +1167,8 @@ Tests:
 - `authentication_provider_error_is_neutral` — `MockAuthenticationProvider` returns `Err(SecurityError::ProviderError("internal".into()))`; the caller receives `SecurityError::ProviderError` with no external type.
 
 **Acceptance**:
-- [ ] All three tests pass under `cargo test --workspace`
-- [ ] No `jsonwebtoken` import in `crates/security-sdk/src/`
+- [x] All three tests pass under `cargo test --workspace`
+- [x] No `jsonwebtoken` import in `crates/security-sdk/src/`
 
 ---
 
@@ -1193,11 +1193,11 @@ Final verification sweep.
 Fix any missing doc comment or import violation found — this task is cleanup only, no new production logic.
 
 **Acceptance**:
-- [ ] `cargo test --workspace` exits 0
-- [ ] `cargo build --workspace` exits 0
-- [ ] `cargo doc -p ego-security-sdk --no-deps` exits 0
-- [ ] NFR-003 grep returns no results
-- [ ] NFR-005 grep returns no security-related hits
+- [x] `cargo test --workspace` exits 0
+- [x] `cargo build --workspace` exits 0
+- [x] `cargo doc -p ego-security-sdk --no-deps` exits 0
+- [x] NFR-003 grep returns no results
+- [x] NFR-005 grep returns no security-related hits
 
 ---
 

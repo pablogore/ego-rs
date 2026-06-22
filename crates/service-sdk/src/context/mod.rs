@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use ego_security_sdk::context::SecurityContext;
 use tokio_util::sync::CancellationToken;
 
 // TaskLocal for storing the current service context
@@ -35,6 +37,8 @@ pub struct ServiceContext {
     pub allow_cross_tenant: bool,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
+    /// Attached security context carrying the authenticated principal, if any.
+    pub security: Option<Arc<SecurityContext>>,
 }
 
 impl ServiceContext {
@@ -52,6 +56,7 @@ impl ServiceContext {
             additional_context: HashMap::new(),
             allow_cross_tenant: false,
             cancellation_token: None,
+            security: None,
         }
     }
 
@@ -146,6 +151,23 @@ impl ServiceContext {
     pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
         self.cancellation_token = Some(token);
         self
+    }
+
+    /// Attaches a security context (authenticated identity + scope).
+    ///
+    /// # Arguments
+    /// * `security` - The [`SecurityContext`] to associate with this service context
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the security context set
+    pub fn with_security(mut self, security: Arc<SecurityContext>) -> Self {
+        self.security = Some(security);
+        self
+    }
+
+    /// Returns the attached security context, if any.
+    pub fn security(&self) -> Option<&SecurityContext> {
+        self.security.as_deref()
     }
 
     /// Returns `true` if the associated `CancellationToken` has been cancelled.
