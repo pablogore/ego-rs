@@ -277,6 +277,35 @@ flowchart LR
     D --> E["Clone for sub-calls<br/>ctx.clone()"]
 ```
 
+### API Contract: ServiceContext in Operation Signatures
+
+As of CORE-010A, `ServiceContext` is a formal part of every generated operation signature.
+This is an intentional contract — not an implementation detail.
+
+Every operation declared in a service trait receives `ctx: ServiceContext` as its first
+parameter:
+
+```rust
+#[async_trait]
+pub trait OrderService: Send + Sync {
+    async fn place_order(&self, ctx: ServiceContext, cmd: CreateOrder) -> Result<OrderId, ServiceError>;
+}
+```
+
+Callers must construct and pass context explicitly:
+
+```rust
+let ctx = ServiceContext::new()
+    .with_tenant_id("tenant-123")
+    .with_correlation_id("req-456");
+
+service.place_order(ctx, cmd).await?;
+```
+
+**Migrating from ambient context**: If your service implementation previously called
+`ServiceContext::current()`, change the method signature to accept `ctx: ServiceContext`
+as its first parameter and remove the ambient call.
+
 ### Interceptor Chain
 
 ```mermaid

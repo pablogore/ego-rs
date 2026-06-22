@@ -1,4 +1,4 @@
-//! Tests for ServiceContext scope functionality.
+//! Tests for explicit ServiceContext propagation semantics.
 //!
 //! After CORE-010A, ServiceContext has no ambient APIs (scope, current).
 //! Context values are propagated via explicit ownership, cloning, and
