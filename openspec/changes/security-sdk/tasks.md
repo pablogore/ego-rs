@@ -14,8 +14,8 @@ Add `"crates/security-sdk"` to the workspace `members` list so the new crate is 
 No production code exists yet; this task solely registers the crate with the build graph.
 
 **Acceptance**:
-- [ ] `Cargo.toml` workspace members include `"crates/security-sdk"`
-- [ ] `cargo build --workspace` does not error on a missing member (crate directory may not exist yet, but the entry is ready)
+- [x] `Cargo.toml` workspace members include `"crates/security-sdk"`
+- [x] `cargo build --workspace` does not error on a missing member (crate directory may not exist yet, but the entry is ready)
 
 ---
 
@@ -63,10 +63,10 @@ pub mod providers;
 Each `mod.rs` can initially contain only `//! Module placeholder.` so the crate compiles.
 
 **Acceptance**:
-- [ ] `cargo build -p ego-security-sdk` exits 0 with the skeleton in place
-- [ ] `lib.rs` starts with `#![deny(missing_docs)]`
-- [ ] All eight `pub mod` declarations are present
-- [ ] No `tokio` entry in `[dependencies]` (dev only)
+- [x] `cargo build -p ego-security-sdk` exits 0 with the skeleton in place
+- [x] `lib.rs` starts with `#![deny(missing_docs)]`
+- [x] All eight `pub mod` declarations are present
+- [x] No `tokio` entry in `[dependencies]` (dev only)
 
 ---
 
@@ -93,9 +93,9 @@ Tests to write (all must compile-fail until TASK-004 provides the implementation
 - `no_external_type_in_variants` — a compile-time structural check: assert `SecurityError` implements `std::error::Error + Send + Sync + 'static`.
 
 **Acceptance**:
-- [ ] All eight test bodies are written
-- [ ] Tests reference the exact variant names and field names specified in the design
-- [ ] File compiles to a state where `cargo test -p ego-security-sdk error` fails only because the enum is missing, not due to syntax errors
+- [x] All eight test bodies are written
+- [x] Tests reference the exact variant names and field names specified in the design
+- [x] File compiles to a state where `cargo test -p ego-security-sdk error` fails only because the enum is missing, not due to syntax errors
 
 ---
 
@@ -155,10 +155,10 @@ pub enum SecurityError {
 No `#[from]` on any external type. All `From` conversions to `ProviderError` must be local to provider modules, not on the enum itself.
 
 **Acceptance**:
-- [ ] All eight tests from TASK-003 pass
-- [ ] `cargo build -p ego-security-sdk` exits 0
-- [ ] `grep -r "jsonwebtoken\|#\[from\]" crates/security-sdk/src/error/` returns no results
-- [ ] `SecurityError: Send + Sync + 'static` (confirmed by the compile-time test)
+- [x] All eight tests from TASK-003 pass
+- [x] `cargo build -p ego-security-sdk` exits 0
+- [x] `grep -r "jsonwebtoken\|#\[from\]" crates/security-sdk/src/error/` returns no results
+- [x] `SecurityError: Send + Sync + 'static` (confirmed by the compile-time test)
 
 ---
 
@@ -181,8 +181,8 @@ Tests to write:
 - `as_str_roundtrip` — `SubjectId::new("agent:x").unwrap().as_str()` equals `"agent:x"`.
 
 **Acceptance**:
-- [ ] Four test bodies written in the `#[cfg(test)] mod tests` block
-- [ ] Tests reference `SubjectId::new`, `SubjectId::as_str`, and `SecurityError::InvalidSubjectId` by exact name
+- [x] Four test bodies written in the `#[cfg(test)] mod tests` block
+- [x] Tests reference `SubjectId::new`, `SubjectId::as_str`, and `SecurityError::InvalidSubjectId` by exact name
 
 ---
 
@@ -233,9 +233,9 @@ impl SubjectId {
 `principal/mod.rs` re-exports: `pub use subject_id::SubjectId;` and later all principal types.
 
 **Acceptance**:
-- [ ] All four tests from TASK-005 pass
-- [ ] Empty string returns `Err(SecurityError::InvalidSubjectId(_))` — NOT `InvalidCredential`
-- [ ] `as_str` returns the original non-empty value
+- [x] All four tests from TASK-005 pass
+- [x] Empty string returns `Err(SecurityError::InvalidSubjectId(_))` — NOT `InvalidCredential`
+- [x] `as_str` returns the original non-empty value
 
 ---
 
@@ -260,8 +260,8 @@ Tests to write:
 - `subject_id_and_attributes` — full TS-001 scenario: kind User, subject `"user:42"`, role `"admin"`, claim `("email","alice@example.com")`, attribute `("region","eu-west-1")`; assert each accessor.
 
 **Acceptance**:
-- [ ] Eight test bodies written
-- [ ] Tests reference exact field/method names from the design: `kind`, `subject`, `roles`, `claims`, `attributes`, `with_role`, `with_claim`, `with_attribute`, `has_role`
+- [x] Eight test bodies written
+- [x] Tests reference exact field/method names from the design: `kind`, `subject`, `roles`, `claims`, `attributes`, `with_role`, `with_claim`, `with_attribute`, `has_role`
 
 ---
 
@@ -288,10 +288,10 @@ Key points:
 `principal/mod.rs` must re-export: `SubjectId`, `PrincipalKind`, `Principal`, `Role`, `Claim`.
 
 **Acceptance**:
-- [ ] All eight tests from TASK-007 pass
-- [ ] `PrincipalKind` is declared `#[non_exhaustive]`
-- [ ] `HashSet` deduplication verified by the `with_role_adds_to_set` test
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All eight tests from TASK-007 pass
+- [x] `PrincipalKind` is declared `#[non_exhaustive]`
+- [x] `HashSet` deduplication verified by the `with_role_adds_to_set` test
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -313,8 +313,8 @@ Tests to write (TS-002):
 - `credential_is_no_transport_type` — compile-time check: the file imports no HTTP/gRPC/tonic/axum/actix types.
 
 **Acceptance**:
-- [ ] Five test bodies written
-- [ ] `Custom.payload` is `Vec<u8>` per the design
+- [x] Five test bodies written
+- [x] `Custom.payload` is `Vec<u8>` per the design
 
 ---
 
@@ -355,9 +355,9 @@ pub enum Credential {
 ```
 
 **Acceptance**:
-- [ ] All five tests from TASK-009 pass
-- [ ] `grep -r "use http\|use hyper\|use tonic\|use axum\|use actix" crates/security-sdk/src/credential/` returns no results
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All five tests from TASK-009 pass
+- [x] `grep -r "use http\|use hyper\|use tonic\|use axum\|use actix" crates/security-sdk/src/credential/` returns no results
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -378,8 +378,8 @@ Tests to write:
 - `authenticate_signature_takes_credential_ref` — verify the signature is `async fn authenticate(&self, credential: &Credential) -> Result<Principal, SecurityError>` by calling it from the stub.
 
 **Acceptance**:
-- [ ] Both test bodies written
-- [ ] Trait is annotated with `#[cfg_attr(test, mockall::automock)]` stub placeholder comment noting it will be added in TASK-012
+- [x] Both test bodies written
+- [x] Trait is annotated with `#[cfg_attr(test, mockall::automock)]` stub placeholder comment noting it will be added in TASK-012
 
 ---
 
@@ -421,9 +421,9 @@ pub trait AuthenticationProvider: Send + Sync {
 No generic methods. No `Self`-returning methods. No associated types in dispatched methods.
 
 **Acceptance**:
-- [ ] Both tests from TASK-011 pass
-- [ ] `cargo build -p ego-security-sdk` exits 0
-- [ ] `#[cfg_attr(test, mockall::automock)]` present
+- [x] Both tests from TASK-011 pass
+- [x] `cargo build -p ego-security-sdk` exits 0
+- [x] `#[cfg_attr(test, mockall::automock)]` present
 
 ---
 
@@ -444,8 +444,8 @@ Tests to write (TS-003, FR-006):
 - `verifier_backend_error_surfaces_provider_error` — inject a `CredentialVerifier` stub that returns `Err(SecurityError::ProviderError("io".into()))`; call authenticate; assert the error propagates as `Err(SecurityError::ProviderError(_))`.
 
 **Acceptance**:
-- [ ] Four test bodies written
-- [ ] Tests reference `CredentialVerifier` trait and `BasicAuthenticationProvider::new(Arc<dyn CredentialVerifier>)` constructor shape
+- [x] Four test bodies written
+- [x] Tests reference `CredentialVerifier` trait and `BasicAuthenticationProvider::new(Arc<dyn CredentialVerifier>)` constructor shape
 
 ---
 
@@ -487,9 +487,9 @@ Provide a constructor: `pub fn new(verifier: Arc<dyn CredentialVerifier>) -> Sel
 For tests, provide a simple `InMemoryVerifier { username: String, secret: String }` inside `#[cfg(test)]` that returns a hardcoded `Principal` on match and `None` on mismatch.
 
 **Acceptance**:
-- [ ] All four tests from TASK-013 pass
-- [ ] Provider error from verifier backend propagates unchanged (verified by `verifier_backend_error_surfaces_provider_error` test)
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All four tests from TASK-013 pass
+- [x] Provider error from verifier backend propagates unchanged (verified by `verifier_backend_error_surfaces_provider_error` test)
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -513,8 +513,8 @@ Tests to write (FR-011):
 - `is_clone_and_send_sync` — compile-time: `fn assert_send_sync<T: Send + Sync + Clone>() {}; assert_send_sync::<SecurityContext>();`.
 
 **Acceptance**:
-- [ ] Five test bodies written
-- [ ] `principal()` return type is `&Principal`, NOT `Option<&Principal>`
+- [x] Five test bodies written
+- [x] `principal()` return type is `&Principal`, NOT `Option<&Principal>`
 
 ---
 
@@ -567,10 +567,10 @@ impl SecurityContext {
 No `thread_local!`, no `task_local!`, no `once_cell`, no `lazy_static`.
 
 **Acceptance**:
-- [ ] All five tests from TASK-021 pass
-- [ ] `grep -rn "thread_local\|task_local\|lazy_static\|once_cell" crates/security-sdk/src/context/` returns no results
-- [ ] `SecurityContext: Send + Sync + Clone` confirmed by compile-time test
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All five tests from TASK-021 pass
+- [x] `grep -rn "thread_local\|task_local\|lazy_static\|once_cell" crates/security-sdk/src/context/` returns no results
+- [x] `SecurityContext: Send + Sync + Clone` confirmed by compile-time test
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -601,8 +601,8 @@ Tests for `decision.rs`:
 - `deny_reason_accessible` — pattern-match `Deny { reason }` and assert content.
 
 **Acceptance**:
-- [ ] Nine test bodies written across the two files
-- [ ] No transport types imported
+- [x] Nine test bodies written across the two files
+- [x] No transport types imported
 
 ---
 
@@ -645,9 +645,9 @@ impl AuthorizationDecision {
 `authorization/mod.rs` re-exports all authorization types and will receive `AuthorizationProvider` (TASK-017) and `authorize_in_context` (TASK-025). Add module-level doc comment now.
 
 **Acceptance**:
-- [ ] All nine tests from TASK-015 pass
-- [ ] `AccessRequest::from_permission` implemented; parses `"resource:action"` correctly
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All nine tests from TASK-015 pass
+- [x] `AccessRequest::from_permission` implemented; parses `"resource:action"` correctly
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -667,8 +667,8 @@ Tests to write:
 - `external_provider_impl_compiles` — same as `provider_is_object_safe` but explicitly named to cover FR-013/TS-010.
 
 **Acceptance**:
-- [ ] Three test bodies written
-- [ ] Tests reference `AuthorizationProvider::authorize` with all four parameters: `&Principal`, `&AccessRequest`, `&SecurityContext`
+- [x] Three test bodies written
+- [x] Tests reference `AuthorizationProvider::authorize` with all four parameters: `&Principal`, `&AccessRequest`, `&SecurityContext`
 
 ---
 
@@ -711,9 +711,9 @@ pub trait AuthorizationProvider: Send + Sync {
 ```
 
 **Acceptance**:
-- [ ] All three tests from TASK-017 pass
-- [ ] `#[cfg_attr(test, mockall::automock)]` present
-- [ ] No generic methods; no `Self`-returning methods
+- [x] All three tests from TASK-017 pass
+- [x] `#[cfg_attr(test, mockall::automock)]` present
+- [x] No generic methods; no `Self`-returning methods
 
 ---
 
@@ -737,8 +737,8 @@ Tests to write:
 - `known_role_returns_permissions` — `InMemoryRoleStore` with `Role("admin") → [Permission { resource: "orders", action: "read" }]`; assert `permissions_for_role` returns the vec.
 
 **Acceptance**:
-- [ ] Five test bodies written
-- [ ] `permissions_for_role` method name exact (not `get_permissions` or similar)
+- [x] Five test bodies written
+- [x] `permissions_for_role` method name exact (not `get_permissions` or similar)
 
 ---
 
@@ -800,10 +800,10 @@ impl InMemoryRoleStore {
 Unknown role → `Ok(vec![])`, never an error.
 
 **Acceptance**:
-- [ ] All five tests from TASK-019 pass
-- [ ] `#[cfg_attr(test, mockall::automock)]` on `RoleStore`
-- [ ] `InMemoryRoleStore::new()` starts empty; `with_role` is a builder
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All five tests from TASK-019 pass
+- [x] `#[cfg_attr(test, mockall::automock)]` on `RoleStore`
+- [x] `InMemoryRoleStore::new()` starts empty; `with_role` is a builder
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -828,8 +828,8 @@ Tests to write (FR-010, TS-006, TS-007):
 - `provider_error_propagates` — `MockRoleStore` configured to return `Err(SecurityError::ProviderError("db down".into()))`; `authorize` returns `Err(SecurityError::ProviderError(_))`.
 
 **Acceptance**:
-- [ ] Six test bodies written
-- [ ] `custom_role_store_compiles` test does NOT import `InMemoryRoleStore` — proving `RbacProvider` depends only on the trait
+- [x] Six test bodies written
+- [x] `custom_role_store_compiles` test does NOT import `InMemoryRoleStore` — proving `RbacProvider` depends only on the trait
 
 ---
 
@@ -867,9 +867,9 @@ impl RbacProvider {
 `InMemoryRoleStore` lives in `policy/in_memory_role_store.rs` (implemented in TASK-020). `providers/rbac/mod.rs` must NOT reference it — `RbacProvider` depends only on `Arc<dyn RoleStore>`. `InMemoryRoleStore` is made public from the crate root via `policy`'s re-export.
 
 **Acceptance**:
-- [ ] All six tests from TASK-023 pass
-- [ ] `RbacProvider`'s source file has no direct `use ... InMemoryRoleStore` import
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All six tests from TASK-023 pass
+- [x] `RbacProvider`'s source file has no direct `use ... InMemoryRoleStore` import
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -892,7 +892,7 @@ Tests to write:
 - `provider_error_propagates` — `MockAuthorizationProvider` returns `Err(SecurityError::ProviderError("x".into()))`; assert error propagates.
 
 **Acceptance**:
-- [ ] Four test bodies written using `MockAuthorizationProvider` from `mockall`
+- [x] Four test bodies written using `MockAuthorizationProvider` from `mockall`
 
 ---
 
@@ -940,9 +940,9 @@ pub async fn authorize_in_context(
 Location: `crates/security-sdk/src/authorization/mod.rs` (per design decision).
 
 **Acceptance**:
-- [ ] All four tests from TASK-025 pass
-- [ ] Function signature matches exactly: `(Option<&SecurityContext>, Resource, Action, &dyn AuthorizationProvider) -> Result<(), SecurityError>`
-- [ ] `cargo build -p ego-security-sdk` exits 0
+- [x] All four tests from TASK-025 pass
+- [x] Function signature matches exactly: `(Option<&SecurityContext>, Resource, Action, &dyn AuthorizationProvider) -> Result<(), SecurityError>`
+- [x] `cargo build -p ego-security-sdk` exits 0
 
 ---
 
@@ -980,9 +980,9 @@ pub use policy::InMemoryRoleStore;
 Run `cargo doc -p ego-security-sdk --no-deps` and confirm it exits 0 (fails if any public item lacks a doc comment). Fix any missing doc comments found.
 
 **Acceptance**:
-- [ ] `cargo doc -p ego-security-sdk --no-deps` exits 0
-- [ ] `cargo build -p ego-security-sdk` exits 0 (which enforces `#![deny(missing_docs)]`)
-- [ ] All public items re-exported from `lib.rs`
+- [x] `cargo doc -p ego-security-sdk --no-deps` exits 0
+- [x] `cargo build -p ego-security-sdk` exits 0 (which enforces `#![deny(missing_docs)]`)
+- [x] All public items re-exported from `lib.rs`
 
 ---
 
