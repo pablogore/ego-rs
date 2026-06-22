@@ -5,9 +5,33 @@
 pub enum AuthorizationDecision {
     /// Access is granted.
     Allow,
-    /// Access is denied with a human-readable reason.
+    /// Access is denied.
+    ///
+    /// # Stability contract
+    ///
+    /// `reason` is a **non-contractual, human-readable string** intended for
+    /// logging and debugging. Consumers **must not** branch on specific reason
+    /// strings — they are not stable across versions and differ between
+    /// providers.
+    ///
+    /// # Future work — typed denial reasons
+    ///
+    /// A structured variant is planned (tracked as a future improvement):
+    ///
+    /// ```text
+    /// enum DenialReason {
+    ///     MissingRole,
+    ///     MissingPermission,
+    ///     MissingContext,
+    ///     ProviderFailure,
+    ///     Custom(String),
+    /// }
+    /// ```
+    ///
+    /// Until then, treat `reason` as an opaque diagnostic string.
     Deny {
-        /// Why access was denied.
+        /// Non-contractual, human-readable description of why access was
+        /// denied. Do not branch on specific values.
         reason: String,
     },
 }
@@ -39,5 +63,16 @@ mod tests {
             AuthorizationDecision::Deny { reason } => assert_eq!(reason, "forbidden"),
             _ => panic!("expected Deny"),
         }
+    }
+
+    #[test]
+    fn deny_reason_is_informational_not_contractual() {
+        // Two providers can produce different reason strings for the same
+        // condition — consumers must not branch on specific values.
+        let a = AuthorizationDecision::Deny { reason: "missing role".into() };
+        let b = AuthorizationDecision::Deny { reason: "role missing".into() };
+        assert!(!a.is_allowed());
+        assert!(!b.is_allowed());
+        // Both are semantically identical denials; only is_allowed() is stable.
     }
 }

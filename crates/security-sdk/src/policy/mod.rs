@@ -13,7 +13,9 @@ use crate::{error::SecurityError, principal::Role};
 pub struct Permission {
     /// Resource kind this permission applies to (e.g. `"orders"`).
     pub resource: String,
-    /// Action granted (e.g. `"read"`). `"*"` matches any action.
+    /// Action granted (e.g. `"read"`). `"*"` is the wildcard that grants any
+    /// action on this resource. Wildcards are valid here (grant side) but are
+    /// rejected on the request side — see [`crate::authorization::AccessRequest`].
     pub action: String,
 }
 

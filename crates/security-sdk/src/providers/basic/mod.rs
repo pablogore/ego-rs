@@ -75,6 +75,24 @@ mod tests {
         principal::{Principal, PrincipalKind, SubjectId},
     };
 
+    #[test]
+    fn verifier_is_object_safe() {
+        struct StubVerifier;
+
+        #[async_trait]
+        impl CredentialVerifier for StubVerifier {
+            async fn verify(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<Principal>, SecurityError> {
+                unimplemented!()
+            }
+        }
+
+        let _: Arc<dyn CredentialVerifier> = Arc::new(StubVerifier);
+    }
+
     struct InMemoryVerifier {
         username: String,
         secret: String,
