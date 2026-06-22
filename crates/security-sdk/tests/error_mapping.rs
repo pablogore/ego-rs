@@ -30,7 +30,10 @@ async fn role_store_failure_gives_provider_error() {
     let principal = principal_with_role("admin");
     let ctx = make_ctx(&principal);
     let req = AccessRequest::new(
-        Resource { kind: "orders".into(), id: None },
+        Resource {
+            kind: "orders".into(),
+            id: None,
+        },
         Action("read".into()),
     );
     let result = provider.authorize(&principal, &req, &ctx).await;
@@ -57,7 +60,9 @@ async fn authentication_provider_error_is_neutral() {
         }
     }
 
-    let result = ErrorAuthProvider.authenticate(&Credential::Bearer("tok".into())).await;
+    let result = ErrorAuthProvider
+        .authenticate(&Credential::Bearer("tok".into()))
+        .await;
     assert!(matches!(result, Err(SecurityError::ProviderError(_))));
     if let Err(e) = result {
         assert!(!e.to_string().contains("jsonwebtoken"));

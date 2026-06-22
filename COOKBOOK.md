@@ -254,7 +254,7 @@ flowchart TB
         direction TB
         Contract["Contract Layer<br/>ServiceContract trait<br/>ServiceDescriptor<br/>OperationDescriptor"] 
         Registry["Registry<br/>ServiceRegistry<br/>name → descriptor"]
-        Context["Context<br/>ServiceContext<br/>TaskLocal propagation"]
+        Context["Context<br/>ServiceContext<br/>Explicit propagation"]
         Interceptor["Interceptor Chain<br/>on_request<br/>on_response<br/>on_error"]
         Implementation["Implementation<br/>Service trait<br/>ServiceFactory"]
         Runtime["RuntimeBuilder<br/>wire services, entities<br/>projections"]
@@ -267,15 +267,44 @@ flowchart TB
     Interceptor --> Implementation
 ```
 
-### ServiceContext — TaskLocal Propagation
+### ServiceContext — Explicit Propagation
 
 ```mermaid
 flowchart LR
     A["Request arrives"] --> B["Build ServiceContext<br/>with_tenant_id()<br/>with_correlation_id()"]
-    B --> C["ctx.scope(|| async { ... })"]
-    C --> D["Inside: ServiceContext::current()<br/>returns Some(ctx)"]
-    C --> E["Outside: ServiceContext::current()<br/>returns None"]
+    B --> C["Pass ctx to service method<br/>svc.operation(ctx, args)"]
+    C --> D["Handler receives ctx<br/>as owned parameter"]
+    D --> E["Clone for sub-calls<br/>ctx.clone()"]
 ```
+
+### API Contract: ServiceContext in Operation Signatures
+
+As of CORE-010A, `ServiceContext` is a formal part of every generated operation signature.
+This is an intentional contract — not an implementation detail.
+
+Every operation declared in a service trait receives `ctx: ServiceContext` as its first
+parameter:
+
+```rust
+#[async_trait]
+pub trait OrderService: Send + Sync {
+    async fn place_order(&self, ctx: ServiceContext, cmd: CreateOrder) -> Result<OrderId, ServiceError>;
+}
+```
+
+Callers must construct and pass context explicitly:
+
+```rust
+let ctx = ServiceContext::new()
+    .with_tenant_id("tenant-123")
+    .with_correlation_id("req-456");
+
+service.place_order(ctx, cmd).await?;
+```
+
+**Migrating from ambient context**: If your service implementation previously called
+`ServiceContext::current()`, change the method signature to accept `ctx: ServiceContext`
+as its first parameter and remove the ambient call.
 
 ### Interceptor Chain
 
@@ -534,12 +563,10 @@ let ctx = ServiceContext::new();
 chain.on_request(&ctx).await.unwrap();
 assert_eq!(counter.request_count.load(Ordering::Relaxed), 1);
 
-// Test context scoping
+// Test context explicit carry
 let ctx = ServiceContext::new().with_tenant_id("my-tenant");
-let captured = ctx.scope(|| async {
-    ServiceContext::current()
-}).await;
-assert_eq!(captured.unwrap().tenant_id(), Some("my-tenant"));
+let ctx2 = ctx.clone();
+assert_eq!(ctx2.tenant_id(), Some("my-tenant"));
 ```
 
 ### Persistent Entity Testing
@@ -650,7 +677,7 @@ flowchart LR
 | `crates/service-sdk/src/lib.rs` | Crate root — re-exports all modules |
 | `crates/service-sdk/src/contract/mod.rs` | `ServiceContract` trait, `ServiceDescriptor`, `OperationDescriptor`, `ContractVersion` |
 | `crates/service-sdk/src/implementation.rs` | `Service` trait, `ServiceFactory` trait |
-| `crates/service-sdk/src/context/mod.rs` | `ServiceContext` (TaskLocal), `ContextKey` trait |
+| `crates/service-sdk/src/context/mod.rs` | `ServiceContext` (Explicit propagation), `ContextKey` trait |
 | `crates/service-sdk/src/interceptor/chain.rs` | `Interceptor` trait, `InterceptorChain` |
 | `crates/service-sdk/src/registry/mod.rs` | `ServiceRegistry` |
 | `crates/service-sdk/src/error/mod.rs` | `ServiceError` (9 variants), `Result<T>` |

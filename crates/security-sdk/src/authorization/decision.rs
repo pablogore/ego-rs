@@ -59,7 +59,9 @@ mod tests {
 
     #[test]
     fn deny_reason_accessible() {
-        match (AuthorizationDecision::Deny { reason: "forbidden".into() }) {
+        match (AuthorizationDecision::Deny {
+            reason: "forbidden".into(),
+        }) {
             AuthorizationDecision::Deny { reason } => assert_eq!(reason, "forbidden"),
             _ => panic!("expected Deny"),
         }
@@ -69,8 +71,12 @@ mod tests {
     fn deny_reason_is_informational_not_contractual() {
         // Two providers can produce different reason strings for the same
         // condition — consumers must not branch on specific values.
-        let a = AuthorizationDecision::Deny { reason: "missing role".into() };
-        let b = AuthorizationDecision::Deny { reason: "role missing".into() };
+        let a = AuthorizationDecision::Deny {
+            reason: "missing role".into(),
+        };
+        let b = AuthorizationDecision::Deny {
+            reason: "role missing".into(),
+        };
         assert!(!a.is_allowed());
         assert!(!b.is_allowed());
         // Both are semantically identical denials; only is_allowed() is stable.

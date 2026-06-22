@@ -56,13 +56,18 @@ pub enum OrderError {
 /// #[service(version = "1.0.0")]
 /// pub trait OrderService {
 ///     #[operation]
-///     async fn create_order(&self, cmd: CreateOrder) -> Result<OrderId, OrderError>;
+///     async fn create_order(&self, ctx: ServiceContext, cmd: CreateOrder) -> Result<OrderId, OrderError>;
 /// }
 /// ```
 #[async_trait]
 pub trait OrderService: Send + Sync {
     /// Create a new order.
-    async fn create_order(&self, cmd: CreateOrder) -> Result<OrderId, OrderError>;
+    /// The `ctx` parameter carries tenant, correlation, and tracing data explicitly.
+    async fn create_order(
+        &self,
+        ctx: ServiceContext,
+        cmd: CreateOrder,
+    ) -> Result<OrderId, OrderError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +88,11 @@ pub struct OrderServiceImpl;
 
 #[async_trait]
 impl OrderService for OrderServiceImpl {
-    async fn create_order(&self, cmd: CreateOrder) -> Result<OrderId, OrderError> {
+    async fn create_order(
+        &self,
+        _ctx: ServiceContext,
+        cmd: CreateOrder,
+    ) -> Result<OrderId, OrderError> {
         // In a real implementation, this would persist via an EntityRef<Order>.
         // For this example, we return a mock order ID.
         let id = OrderId(format!("ord-{}", cmd.product_id));
@@ -106,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         version: ContractVersion::new(1, 0, 0),
         operations: vec![OperationDescriptor {
             name: "create_order".to_string(),
-            input: vec!["CreateOrder".to_string()],
+            input: vec!["ServiceContext".to_string(), "CreateOrder".to_string()],
             output: "OrderId".to_string(),
             errors: vec!["OrderError".to_string()],
             description: None,
@@ -123,27 +132,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Operations: {}", descriptor.operations.len());
 
     // 3. Create an invocation context
-    let context = ServiceContext::new()
+    let ctx = ServiceContext::new()
         .with_tenant_id("tenant-acme")
         .with_correlation_id("req-123")
         .with_trace_id("trace-456");
 
-    // 4. Invoke within the context scope
-    let result = context
-        .scope(|| async {
-            let current = ServiceContext::current();
-            if let Some(ctx) = current {
-                println!("Invoking within tenant: {:?}", ctx.tenant_id());
-            }
-
-            // Call the service
-            let cmd = CreateOrder {
-                product_id: "prod-42".to_string(),
-                quantity: 10,
-            };
-            service.create_order(cmd).await
-        })
-        .await;
+    // 4. Invoke the service with explicit context passing
+    let cmd = CreateOrder {
+        product_id: "prod-42".to_string(),
+        quantity: 10,
+    };
+    let result = service.create_order(ctx, cmd).await;
 
     // 5. Verify the result
     match result {
@@ -157,11 +156,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 6. Demonstrate ServiceContext::current() is None outside scope
-    let outside_ctx = ServiceContext::current();
-    assert!(outside_ctx.is_none());
-    println!("Outside scope: context is {:?}", outside_ctx);
-
     println!("\n✓ Example completed successfully");
     Ok(())
 }
@@ -173,21 +167,13 @@ mod tests {
     #[tokio::test]
     async fn test_create_order_success() {
         let service = OrderServiceImpl;
+        let ctx = ServiceContext::new().with_tenant_id("test-tenant");
         let cmd = CreateOrder {
             product_id: "test-product".to_string(),
             quantity: 1,
         };
-        let result = service.create_order(cmd).await;
+        let result = service.create_order(ctx, cmd).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), OrderId("test-product".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_context_scoping() {
-        let context = ServiceContext::new().with_tenant_id("test-tenant");
-
-        let captured = context.scope(|| async { ServiceContext::current() }).await;
-        assert!(captured.is_some());
-        assert_eq!(captured.unwrap().tenant_id(), Some("test-tenant"));
     }
 }

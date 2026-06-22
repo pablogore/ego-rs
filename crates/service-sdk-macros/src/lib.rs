@@ -114,39 +114,39 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 });
 
                 let return_type = &method.sig.output;
+
+                // The first typed param after &self is ctx: ServiceContext (per ADR-2).
+                // Clone it when forwarding to the inner impl so the original
+                // stays alive for enforce_tenant and interceptor calls.
+                let inner_call_args: Vec<_> = if arg_names.is_empty() {
+                    vec![]
+                } else {
+                    let first = &arg_names[0];
+                    let rest = &arg_names[1..];
+                    std::iter::once(quote! { #first.clone() })
+                        .chain(rest.iter().cloned())
+                        .collect()
+                };
+
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#arg_names: #arg_types),*) #return_type {
-                        let ctx = ego_service_sdk::context::ServiceContext::current()
-                            .unwrap_or_default();
                         if let Some(rt) = self.runtime.upgrade() {
                             rt.enforce_tenant(&ctx);
                         }
                         let inner_ref = self.inner.clone();
                         let chain_ref = self.chain.clone();
-                        // ctx_for_scope moves into the closure; inner_ctx is re-read inside
-                        // so the task-local is active when the impl body runs.
-                        let ctx_for_scope = ctx.clone();
-                        ctx_for_scope.scope(|| async move {
-                            let inner_ctx = ego_service_sdk::context::ServiceContext::current()
-                                .unwrap_or_default();
-                            let _ = chain_ref.on_request(&inner_ctx).await;
-                            match inner_ref.#method_name(#(#arg_names),*).await {
-                                Ok(v) => {
-                                    chain_ref.on_response(&inner_ctx).await.ok();
-                                    Ok(v)
-                                }
-                                Err(e) => {
-                                    chain_ref
-                                        .on_error(
-                                            &inner_ctx,
-                                            &e as &dyn ego_service_sdk::error::ServiceErrorTrait,
-                                        )
-                                        .await
-                                        .ok();
-                                    Err(e)
-                                }
+                        let _ = chain_ref.on_request(&ctx).await;
+                        let result = inner_ref.#method_name(#(#inner_call_args),*).await;
+                        match &result {
+                            Ok(_) => { chain_ref.on_response(&ctx).await.ok(); }
+                            Err(e) => {
+                                chain_ref
+                                    .on_error(&ctx, e as &dyn ego_service_sdk::error::ServiceErrorTrait)
+                                    .await
+                                    .ok();
                             }
-                        }).await
+                        }
+                        result
                     }
                 });
 

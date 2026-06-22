@@ -5,9 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::{
-    authentication::AuthenticationProvider,
-    credential::Credential,
-    error::SecurityError,
+    authentication::AuthenticationProvider, credential::Credential, error::SecurityError,
     principal::Principal,
 };
 
@@ -81,11 +79,7 @@ mod tests {
 
         #[async_trait]
         impl CredentialVerifier for StubVerifier {
-            async fn verify(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> Result<Option<Principal>, SecurityError> {
+            async fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
                 unimplemented!()
             }
         }
@@ -158,7 +152,10 @@ mod tests {
                 secret: "wrong".into(),
             })
             .await;
-        assert!(matches!(result, Err(SecurityError::AuthenticationFailed(_))));
+        assert!(matches!(
+            result,
+            Err(SecurityError::AuthenticationFailed(_))
+        ));
     }
 
     #[tokio::test]

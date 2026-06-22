@@ -36,8 +36,22 @@ fn two_independent_contexts_do_not_share_state() {
     let ctx_b = ServiceContext::new()
         .with_security(Arc::new(SecurityContext::new(make_principal("user:bob"))));
 
-    let sub_a = ctx_a.security.as_ref().unwrap().principal().subject.as_str().to_owned();
-    let sub_b = ctx_b.security.as_ref().unwrap().principal().subject.as_str().to_owned();
+    let sub_a = ctx_a
+        .security
+        .as_ref()
+        .unwrap()
+        .principal()
+        .subject
+        .as_str()
+        .to_owned();
+    let sub_b = ctx_b
+        .security
+        .as_ref()
+        .unwrap()
+        .principal()
+        .subject
+        .as_str()
+        .to_owned();
 
     assert_eq!(sub_a, "user:alice");
     assert_eq!(sub_b, "user:bob");

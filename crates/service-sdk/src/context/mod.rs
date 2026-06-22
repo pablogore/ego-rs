@@ -5,20 +5,37 @@ use std::time::{Duration, SystemTime};
 use ego_security_sdk::context::SecurityContext;
 use tokio_util::sync::CancellationToken;
 
-// TaskLocal for storing the current service context
-tokio::task_local! {
-    static CURRENT_CONTEXT: ServiceContext;
-}
-
-/// A service context that propagates across service calls for tracing, tenant isolation, and other cross-cutting concerns.
+/// A service context that propagates across service calls for tracing, tenant isolation,
+/// and other cross-cutting concerns.
 ///
-/// Service contexts are used to carry information that's relevant across service boundaries,
-/// such as:
-/// - Tenant identification for multi-tenancy
-/// - Correlation IDs for request tracing
-/// - Trace IDs for distributed tracing
-/// - Deadline and timeout information
-/// - Additional metadata for service processing
+/// `ServiceContext` is an explicit-propagation value type: it is constructed at the entry
+/// point of a request and passed forward by value (ownership, clone, or parameter) to every
+/// component that needs it. There is no ambient or thread-local fallback.
+///
+/// ## Fields
+///
+/// - `tenant_id` / `correlation_id` / `trace_id`: `Option<String>` — cloned by value (heap copy).
+/// - `deadline` / `timeout`: `Option<SystemTime>` / `Option<Duration>` — stack-size copies.
+/// - `additional_context`: `HashMap<String, String>` — cloned by value; cost is proportional
+///   to the number of entries. Keep this map small.
+/// - `cancellation_token`: `Option<CancellationToken>` — cheap clone (internally reference-counted).
+/// - `security`: `Option<Arc<SecurityContext>>` — cheap clone (Arc reference-count increment only;
+///   the underlying `SecurityContext` is NOT copied).
+///
+/// ## Clone cost
+///
+/// `ServiceContext::clone()` performs a shallow clone of `security` (Arc increment) and a
+/// deep clone of string fields and the additional-context map. For typical request contexts
+/// (3-5 string fields, empty or small map), this is a few heap allocations.
+///
+/// For hot paths that clone context frequently, prefer keeping `additional_context` empty
+/// and relying on the typed fields. Avoid storing large payloads in `additional_context`.
+///
+/// ## Ownership model
+///
+/// Each component that requires a `ServiceContext` MUST declare that dependency in its
+/// public signature. The context is passed forward — not looked up. Use `.clone()` when
+/// passing to both an interceptor chain and an inner handler in the same call.
 #[derive(Debug, Clone)]
 pub struct ServiceContext {
     /// The tenant ID.
@@ -178,31 +195,6 @@ impl ServiceContext {
             .as_ref()
             .map(|t| t.is_cancelled())
             .unwrap_or(false)
-    }
-
-    /// Gets the current service context from the task-local storage.
-    ///
-    /// # Returns
-    /// The current service context if available, or `None` if not in a service context
-    pub fn current() -> Option<ServiceContext> {
-        CURRENT_CONTEXT.try_with(|ctx| ctx.clone()).ok()
-    }
-
-    /// Creates a new scope with the given service context.
-    /// The context is available inside the closure via `ServiceContext::current()`.
-    ///
-    /// # Arguments
-    /// * `f` - The closure to execute within the context
-    ///
-    /// # Returns
-    /// A future that will execute the closure within the context
-    pub fn scope<F, Fut>(&self, f: F) -> impl std::future::Future<Output = Fut::Output>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future,
-    {
-        let cloned = self.clone();
-        async move { CURRENT_CONTEXT.scope(cloned, f()).await }
     }
 
     /// Checks if the deadline has expired.

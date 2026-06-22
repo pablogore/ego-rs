@@ -35,6 +35,7 @@ impl<E> EventStreamElement<E> {
     /// # Panics
     /// Panics if `event_id`, `aggregate_id`, `tenant_id`, or `event_type` is empty,
     /// if `event_version < 1`, or if `tags` is empty.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_id: impl Into<String>,
         aggregate_id: impl Into<String>,

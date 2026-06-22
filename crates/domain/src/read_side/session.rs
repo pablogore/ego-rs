@@ -49,6 +49,7 @@ where
     PR: ProgressReporter,
 {
     /// Creates a new session.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         projection_id: String,
         tag: EventTag,

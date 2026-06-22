@@ -20,16 +20,16 @@ pub mod policy;
 pub mod principal;
 pub mod providers;
 
-pub use error::SecurityError;
-pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
-pub use credential::Credential;
 pub use authentication::AuthenticationProvider;
 pub use authorization::{
     authorize_in_context, AccessRequest, Action, AuthorizationDecision, AuthorizationProvider,
     Resource,
 };
-pub use policy::{InMemoryRoleStore, Permission, RoleStore};
 pub use context::SecurityContext;
+pub use credential::Credential;
+pub use error::SecurityError;
+pub use policy::{InMemoryRoleStore, Permission, RoleStore};
+pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
 pub use providers::{
     basic::{BasicAuthenticationProvider, CredentialVerifier},
     rbac::RbacProvider,

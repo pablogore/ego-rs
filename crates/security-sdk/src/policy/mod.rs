@@ -29,10 +29,7 @@ pub trait RoleStore: Send + Sync {
     /// Returns the permissions granted by `role`.
     ///
     /// An unknown role returns `Ok(Vec::new())`, not an error.
-    async fn permissions_for_role(
-        &self,
-        role: &Role,
-    ) -> Result<Vec<Permission>, SecurityError>;
+    async fn permissions_for_role(&self, role: &Role) -> Result<Vec<Permission>, SecurityError>;
 }
 
 #[cfg(test)]
@@ -44,15 +41,24 @@ mod tests {
 
     #[test]
     fn permission_equality() {
-        let a = Permission { resource: "orders".into(), action: "read".into() };
-        let b = Permission { resource: "orders".into(), action: "read".into() };
+        let a = Permission {
+            resource: "orders".into(),
+            action: "read".into(),
+        };
+        let b = Permission {
+            resource: "orders".into(),
+            action: "read".into(),
+        };
         assert_eq!(a, b);
     }
 
     #[test]
     fn permission_hashes_consistently() {
         use std::collections::HashSet;
-        let p = Permission { resource: "orders".into(), action: "read".into() };
+        let p = Permission {
+            resource: "orders".into(),
+            action: "read".into(),
+        };
         let mut set = HashSet::new();
         set.insert(p.clone());
         set.insert(p.clone());
@@ -85,7 +91,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_role_returns_empty_vec() {
         let store = InMemoryRoleStore::new();
-        let result = store.permissions_for_role(&Role("unknown".into())).await.unwrap();
+        let result = store
+            .permissions_for_role(&Role("unknown".into()))
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -93,9 +102,15 @@ mod tests {
     async fn known_role_returns_permissions() {
         let store = InMemoryRoleStore::new().with_role(
             Role("admin".into()),
-            vec![Permission { resource: "orders".into(), action: "read".into() }],
+            vec![Permission {
+                resource: "orders".into(),
+                action: "read".into(),
+            }],
         );
-        let perms = store.permissions_for_role(&Role("admin".into())).await.unwrap();
+        let perms = store
+            .permissions_for_role(&Role("admin".into()))
+            .await
+            .unwrap();
         assert_eq!(perms.len(), 1);
         assert_eq!(perms[0].resource, "orders");
         assert_eq!(perms[0].action, "read");

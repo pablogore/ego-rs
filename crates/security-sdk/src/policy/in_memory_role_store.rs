@@ -4,10 +4,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::{
-    error::SecurityError,
-    principal::Role,
-};
+use crate::{error::SecurityError, principal::Role};
 
 use super::{Permission, RoleStore};
 
@@ -22,7 +19,9 @@ pub struct InMemoryRoleStore {
 impl InMemoryRoleStore {
     /// Creates an empty store.
     pub fn new() -> Self {
-        Self { grants: HashMap::new() }
+        Self {
+            grants: HashMap::new(),
+        }
     }
 
     /// Builder: grants `permissions` to `role`.
@@ -40,10 +39,7 @@ impl Default for InMemoryRoleStore {
 
 #[async_trait]
 impl RoleStore for InMemoryRoleStore {
-    async fn permissions_for_role(
-        &self,
-        role: &Role,
-    ) -> Result<Vec<Permission>, SecurityError> {
+    async fn permissions_for_role(&self, role: &Role) -> Result<Vec<Permission>, SecurityError> {
         Ok(self.grants.get(role).cloned().unwrap_or_default())
     }
 }

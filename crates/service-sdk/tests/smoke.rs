@@ -192,15 +192,11 @@ async fn test_service_context() {
 }
 
 #[tokio::test]
-async fn test_context_scope() {
+async fn test_context_explicit_carry() {
     let ctx = ServiceContext::new().with_tenant_id("scoped-tenant");
-
-    let captured = ctx.scope(|| async { ServiceContext::current() }).await;
-    assert!(captured.is_some());
-    assert_eq!(captured.unwrap().tenant_id(), Some("scoped-tenant"));
-
-    // Outside scope, no context
-    assert!(ServiceContext::current().is_none());
+    let ctx2 = ctx.clone();
+    assert_eq!(ctx2.tenant_id(), Some("scoped-tenant"));
+    // No scope() call; no current() call.
 }
 
 #[tokio::test]

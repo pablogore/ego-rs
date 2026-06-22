@@ -47,10 +47,7 @@ mod tests {
     use crate::principal::{Principal, PrincipalKind, SubjectId};
 
     fn make_principal(subject: &str) -> Principal {
-        Principal::new(
-            PrincipalKind::User,
-            SubjectId::new(subject).unwrap(),
-        )
+        Principal::new(PrincipalKind::User, SubjectId::new(subject).unwrap())
     }
 
     #[test]
@@ -62,8 +59,7 @@ mod tests {
 
     #[test]
     fn with_scope_adds_entry() {
-        let ctx = SecurityContext::new(make_principal("u:1"))
-            .with_scope("tenant", "t1");
+        let ctx = SecurityContext::new(make_principal("u:1")).with_scope("tenant", "t1");
         assert_eq!(ctx.scope.get("tenant").map(String::as_str), Some("t1"));
     }
 

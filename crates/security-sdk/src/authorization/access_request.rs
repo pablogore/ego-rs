@@ -83,7 +83,10 @@ impl AccessRequest {
             ));
         }
         Ok(Self::new(
-            Resource { kind: resource.into(), id: None },
+            Resource {
+                kind: resource.into(),
+                id: None,
+            },
             Action(action.into()),
         ))
     }
@@ -96,7 +99,10 @@ mod tests {
     #[test]
     fn constructs_from_resource_and_action() {
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
         );
         assert_eq!(req.resource.kind, "orders");
@@ -106,7 +112,10 @@ mod tests {
     #[test]
     fn resource_with_instance_id() {
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: Some("order-42".into()) },
+            Resource {
+                kind: "orders".into(),
+                id: Some("order-42".into()),
+            },
             Action("read".into()),
         );
         assert_eq!(req.resource.id.as_deref(), Some("order-42"));

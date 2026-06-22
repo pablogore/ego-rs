@@ -19,15 +19,16 @@ where
     E: Clone + Send + Sync,
 {
     /// Starts processing for a projection with the given tags.
+    #[allow(clippy::too_many_arguments)]
     async fn start_projection(
         &mut self,
         projection_id: String,
         tags: Vec<EventTag>,
         tenant: String,
-        handler: impl Handler<E> + Send + Clone,
+        handler: impl Handler<E> + Clone,
         read_store: impl ReadSideStore<E> + Send + Sync + Clone,
         dedup_store: impl DedupStore + Send + Sync + Clone,
         offset_store: impl OffsetStore + Send + Sync + Clone,
-        reporter: impl ProgressReporter + Send + Clone,
+        reporter: impl ProgressReporter + Clone,
     ) -> Result<(), Box<dyn std::error::Error>>;
 }

@@ -100,7 +100,9 @@ mod tests {
             _: &AccessRequest,
             _: &SecurityContext,
         ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Deny { reason: "denied".into() })
+            Ok(AuthorizationDecision::Deny {
+                reason: "denied".into(),
+            })
         }
     }
 
@@ -125,14 +127,23 @@ mod tests {
     async fn allow_and_deny_are_matchable() {
         let ctx = make_ctx();
         let req = AccessRequest::new(
-            Resource { kind: "res".into(), id: None },
+            Resource {
+                kind: "res".into(),
+                id: None,
+            },
             Action("act".into()),
         );
 
-        let allow_result = AlwaysAllow.authorize(ctx.principal(), &req, &ctx).await.unwrap();
+        let allow_result = AlwaysAllow
+            .authorize(ctx.principal(), &req, &ctx)
+            .await
+            .unwrap();
         assert!(matches!(allow_result, AuthorizationDecision::Allow));
 
-        let deny_result = AlwaysDeny.authorize(ctx.principal(), &req, &ctx).await.unwrap();
+        let deny_result = AlwaysDeny
+            .authorize(ctx.principal(), &req, &ctx)
+            .await
+            .unwrap();
         assert!(matches!(deny_result, AuthorizationDecision::Deny { .. }));
     }
 
@@ -143,7 +154,10 @@ mod tests {
         let ctx = make_ctx();
         let result = authorize_in_context(
             Some(&ctx),
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
             &AlwaysAllow,
         )
@@ -163,14 +177,19 @@ mod tests {
                 _: &AccessRequest,
                 _: &SecurityContext,
             ) -> Result<AuthorizationDecision, SecurityError> {
-                Ok(AuthorizationDecision::Deny { reason: "no role".into() })
+                Ok(AuthorizationDecision::Deny {
+                    reason: "no role".into(),
+                })
             }
         }
 
         let ctx = make_ctx();
         let result = authorize_in_context(
             Some(&ctx),
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
             &DenyProvider,
         )
@@ -185,7 +204,10 @@ mod tests {
     async fn none_security_returns_missing_context() {
         let result = authorize_in_context(
             None,
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
             &AlwaysAllow,
         )
@@ -212,7 +234,10 @@ mod tests {
         let ctx = make_ctx();
         let result = authorize_in_context(
             Some(&ctx),
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
             &ErrorProvider,
         )

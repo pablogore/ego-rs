@@ -93,7 +93,10 @@ mod tests {
 
     fn write_posts_req() -> AccessRequest {
         AccessRequest::new(
-            Resource { kind: "posts".into(), id: None },
+            Resource {
+                kind: "posts".into(),
+                id: None,
+            },
             Action("write".into()),
         )
     }
@@ -102,12 +105,18 @@ mod tests {
     async fn role_grants_allow() {
         let store = InMemoryRoleStore::new().with_role(
             Role("editor".into()),
-            vec![Permission { resource: "posts".into(), action: "write".into() }],
+            vec![Permission {
+                resource: "posts".into(),
+                action: "write".into(),
+            }],
         );
         let principal = user_with_role("editor");
         let ctx = make_ctx(&principal);
         let provider = RbacProvider::new(Arc::new(store));
-        let decision = provider.authorize(&principal, &write_posts_req(), &ctx).await.unwrap();
+        let decision = provider
+            .authorize(&principal, &write_posts_req(), &ctx)
+            .await
+            .unwrap();
         assert!(matches!(decision, AuthorizationDecision::Allow));
     }
 
@@ -115,12 +124,18 @@ mod tests {
     async fn missing_role_returns_deny() {
         let store = InMemoryRoleStore::new().with_role(
             Role("editor".into()),
-            vec![Permission { resource: "posts".into(), action: "write".into() }],
+            vec![Permission {
+                resource: "posts".into(),
+                action: "write".into(),
+            }],
         );
         let principal = user_with_role("viewer");
         let ctx = make_ctx(&principal);
         let provider = RbacProvider::new(Arc::new(store));
-        let decision = provider.authorize(&principal, &write_posts_req(), &ctx).await.unwrap();
+        let decision = provider
+            .authorize(&principal, &write_posts_req(), &ctx)
+            .await
+            .unwrap();
         assert!(matches!(decision, AuthorizationDecision::Deny { .. }));
     }
 
@@ -128,13 +143,19 @@ mod tests {
     async fn wildcard_action_grants_allow() {
         let store = InMemoryRoleStore::new().with_role(
             Role("admin".into()),
-            vec![Permission { resource: "data".into(), action: "*".into() }],
+            vec![Permission {
+                resource: "data".into(),
+                action: "*".into(),
+            }],
         );
         let principal = user_with_role("admin");
         let ctx = make_ctx(&principal);
         let provider = RbacProvider::new(Arc::new(store));
         let req = AccessRequest::new(
-            Resource { kind: "data".into(), id: None },
+            Resource {
+                kind: "data".into(),
+                id: None,
+            },
             Action("delete".into()),
         );
         let decision = provider.authorize(&principal, &req, &ctx).await.unwrap();
@@ -148,7 +169,10 @@ mod tests {
         let ctx = make_ctx(&principal);
         let provider = RbacProvider::new(Arc::new(store));
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
         );
         let decision = provider.authorize(&principal, &req, &ctx).await.unwrap();
@@ -158,13 +182,18 @@ mod tests {
     #[tokio::test]
     async fn custom_role_store_compiles() {
         let mut mock_store = MockRoleStore::new();
-        mock_store.expect_permissions_for_role().returning(|_| Ok(vec![]));
+        mock_store
+            .expect_permissions_for_role()
+            .returning(|_| Ok(vec![]));
         let provider = RbacProvider::new(Arc::new(mock_store));
         let subject = SubjectId::new("user:test").unwrap();
         let principal = Principal::new(PrincipalKind::User, subject);
         let ctx = make_ctx(&principal);
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
         );
         let decision = provider.authorize(&principal, &req, &ctx).await.unwrap();
@@ -178,13 +207,19 @@ mod tests {
         // not supported in this version (deferred to CORE-009A).
         let store = InMemoryRoleStore::new().with_role(
             Role("admin".into()),
-            vec![Permission { resource: "*".into(), action: "read".into() }],
+            vec![Permission {
+                resource: "*".into(),
+                action: "read".into(),
+            }],
         );
         let principal = user_with_role("admin");
         let ctx = make_ctx(&principal);
         let provider = RbacProvider::new(Arc::new(store));
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
         );
         // "orders" != "*" (literal) → Deny, not Allow.
@@ -205,7 +240,10 @@ mod tests {
         let principal = user_with_role("admin");
         let ctx = make_ctx(&principal);
         let req = AccessRequest::new(
-            Resource { kind: "orders".into(), id: None },
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
             Action("read".into()),
         );
         let result = provider.authorize(&principal, &req, &ctx).await;

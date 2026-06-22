@@ -61,7 +61,6 @@ mod tests {
         fn process_command<C: Command>(_command: &C) {
             // This function accepts any type that implements Command
             // The fact that we can pass a TestCommand means the trait is properly implemented
-            assert!(true); // Placeholder assertion
         }
 
         let command = TestCommand {

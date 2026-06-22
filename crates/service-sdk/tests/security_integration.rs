@@ -52,7 +52,13 @@ fn with_security_replaces_previous_value() {
         .with_security(Arc::clone(&sec_a))
         .with_security(Arc::clone(&sec_b));
     // Last write wins — sec_b is retained, sec_a is gone.
-    let subject = ctx.security().unwrap().principal().subject.as_str().to_owned();
+    let subject = ctx
+        .security()
+        .unwrap()
+        .principal()
+        .subject
+        .as_str()
+        .to_owned();
     assert_eq!(subject, "user:bob");
 }
 

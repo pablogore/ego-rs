@@ -151,14 +151,17 @@ mod tests {
     fn with_attribute_sets_key() {
         let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
             .with_attribute("region", "us-east-1");
-        assert_eq!(p.attributes.get("region").map(String::as_str), Some("us-east-1"));
+        assert_eq!(
+            p.attributes.get("region").map(String::as_str),
+            Some("us-east-1")
+        );
     }
 
     #[test]
     fn has_role_returns_true_when_present() {
         let role = Role("admin".into());
-        let p = Principal::new(PrincipalKind::Service, make_subject("svc:1"))
-            .with_role(role.clone());
+        let p =
+            Principal::new(PrincipalKind::Service, make_subject("svc:1")).with_role(role.clone());
         assert!(p.has_role(&role));
     }
 
@@ -195,7 +198,13 @@ mod tests {
         assert_eq!(p.kind, PrincipalKind::User);
         assert_eq!(p.subject.as_str(), "user:42");
         assert!(p.has_role(&Role("admin".into())));
-        assert!(p.claims.iter().any(|c| c.name == "email" && c.value == "alice@example.com"));
-        assert_eq!(p.attributes.get("region").map(String::as_str), Some("eu-west-1"));
+        assert!(p
+            .claims
+            .iter()
+            .any(|c| c.name == "email" && c.value == "alice@example.com"));
+        assert_eq!(
+            p.attributes.get("region").map(String::as_str),
+            Some("eu-west-1")
+        );
     }
 }

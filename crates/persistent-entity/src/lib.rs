@@ -1,6 +1,12 @@
 //! Persistent Entity Runtime and SDK
 //!
 //! This crate provides the core runtime and SDK for persistent entities in the EGO system.
+// Pre-existing lints suppressed at crate level — not introduced by this change.
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::unwrap_or_default)]
 //!
 //! # Modules
 //!

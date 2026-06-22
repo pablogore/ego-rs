@@ -10,6 +10,7 @@
 //! NOTE: TypeId values are non-deterministic across compilations. These tests
 //! use `insta::with_settings!` + `filters` to normalise them to `TypeId(<opaque>)`.
 
+use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::contract::ServiceContract;
 use ego_service_sdk::di::{AdapterRef, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
@@ -50,7 +51,11 @@ pub struct MyAdapter;
 #[service(version = "1.0.0")]
 pub trait GoldenOrderService {
     #[operation]
-    async fn place_order(&self, product_id: String) -> Result<String, GoldenOrderError>;
+    async fn place_order(
+        &self,
+        ctx: ServiceContext,
+        product_id: String,
+    ) -> Result<String, GoldenOrderError>;
 }
 
 #[test]
@@ -72,10 +77,10 @@ fn golden_trait_descriptor_order_service() {
 #[service(version = "1.0.0")]
 pub trait GoldenPaymentService {
     #[operation]
-    async fn charge(&self, amount: u64) -> Result<String, ServiceError>;
+    async fn charge(&self, ctx: ServiceContext, amount: u64) -> Result<String, ServiceError>;
 
     #[operation]
-    async fn refund(&self, amount: u64) -> Result<String, ServiceError>;
+    async fn refund(&self, ctx: ServiceContext, amount: u64) -> Result<String, ServiceError>;
 }
 
 #[test]
