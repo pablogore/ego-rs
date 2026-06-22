@@ -1,0 +1,14 @@
+change: optional-security-capability
+artifact_store: openspec
+
+dag:
+  explore:    { status: skipped }
+  proposal:   { status: done,    artifact: proposal.md }
+  spec:       { status: done,    artifact: specs/ }
+  design:     { status: done,    artifact: design.md }
+  tasks:      { status: done,    artifact: tasks.md }
+  apply:      { status: done,    artifact: tasks.md }
+  verify:     { status: pending }
+  archive:    { status: pending }
+
+next_recommended: verify

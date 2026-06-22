@@ -101,7 +101,7 @@ async fn deny_returns_authorization_denied() {
 }
 
 #[tokio::test]
-async fn none_security_returns_missing_context() {
+async fn none_security_returns_capability_not_enabled() {
     let result = authorize_in_context(
         None,
         Resource {
@@ -112,7 +112,7 @@ async fn none_security_returns_missing_context() {
         &StubAllow,
     )
     .await;
-    assert!(matches!(result, Err(SecurityError::MissingContext)));
+    assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
 }
 
 #[tokio::test]

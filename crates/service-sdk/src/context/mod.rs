@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ego_security_sdk::context::SecurityContext;
+use ego_security_sdk::error::SecurityError;
 use tokio_util::sync::CancellationToken;
 
 /// A service context that propagates across service calls for tracing, tenant isolation,
@@ -247,6 +248,21 @@ impl ServiceContext {
     pub fn trace_id(&self) -> Option<&str> {
         self.trace_id.as_deref()
     }
+
+    /// Requires that security be enabled in the runtime.
+    ///
+    /// This method should be called by service handlers that need to ensure
+    /// security is enabled in the runtime. If security is not enabled, it
+    /// returns a `SecurityError::CapabilityNotEnabled`.
+    ///
+    /// # Returns
+    /// * `Ok(&SecurityContext)` - If security is enabled and a security context is present
+    /// * `Err(SecurityError)` - If security is not enabled in the runtime
+    pub fn require_security(&self) -> Result<&SecurityContext, SecurityError> {
+        self.security
+            .as_deref()
+            .ok_or(SecurityError::CapabilityNotEnabled)
+    }
 }
 
 impl Default for ServiceContext {
@@ -271,4 +287,40 @@ pub trait ContextKey: Send + Sync {
     /// # Returns
     /// The value if found, or `None` if not present
     fn get(&self, context: &ServiceContext) -> Option<&Self::Value>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ego_security_sdk::context::SecurityContext;
+    use ego_security_sdk::error::SecurityError;
+    use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
+
+    use super::ServiceContext;
+
+    fn make_security_context() -> SecurityContext {
+        let subject = SubjectId::new("user:test").unwrap();
+        let principal = Principal::new(PrincipalKind::User, subject);
+        SecurityContext::new(principal)
+    }
+
+    #[test]
+    fn require_security_returns_err_when_none() {
+        let ctx = ServiceContext::new();
+        let result = ctx.require_security();
+        assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
+    }
+
+    #[test]
+    fn require_security_returns_ok_when_some() {
+        let sec_ctx = make_security_context();
+        let ctx = ServiceContext::new().with_security(Arc::new(sec_ctx));
+        let result = ctx.require_security();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().principal().subject.as_str(),
+            "user:test"
+        );
+    }
 }
