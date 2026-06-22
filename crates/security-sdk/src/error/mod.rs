@@ -31,6 +31,10 @@ pub enum SecurityError {
     #[error("missing security context")]
     MissingContext,
 
+    /// Security capability is not enabled in the runtime.
+    #[error("security capability not enabled")]
+    CapabilityNotEnabled,
+
     /// A provider or backing store failed. Underlying cause is flattened to a
     /// string so no vendor type leaks through the public surface.
     #[error("provider error: {0}")]
@@ -93,6 +97,16 @@ mod tests {
         assert!(
             err.to_string().contains("missing security context"),
             "expected 'missing security context', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn display_capability_not_enabled() {
+        let err = SecurityError::CapabilityNotEnabled;
+        assert!(
+            err.to_string().contains("security capability not enabled"),
+            "expected 'security capability not enabled', got: {}",
             err
         );
     }

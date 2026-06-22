@@ -41,7 +41,7 @@ pub trait AuthorizationProvider: Send + Sync {
 /// (extracted from `ctx.security`) so this function remains ego-dep-free.
 ///
 /// # Errors
-/// - [`SecurityError::MissingContext`] if `security` is `None`.
+/// - [`SecurityError::CapabilityNotEnabled`] if security is not enabled in the runtime.
 /// - [`SecurityError::AuthorizationDenied`] if the decision is `Deny`.
 /// - Propagates any provider error.
 pub async fn authorize_in_context(
@@ -50,7 +50,7 @@ pub async fn authorize_in_context(
     action: Action,
     provider: &dyn AuthorizationProvider,
 ) -> Result<(), SecurityError> {
-    let sec = security.ok_or(SecurityError::MissingContext)?;
+    let sec = security.ok_or(SecurityError::CapabilityNotEnabled)?;
     let principal = sec.principal();
     let request = AccessRequest::new(resource, action);
     match provider.authorize(principal, &request, sec).await? {
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn none_security_returns_missing_context() {
+    async fn none_security_returns_capability_not_enabled() {
         let result = authorize_in_context(
             None,
             Resource {
@@ -212,7 +212,7 @@ mod tests {
             &AlwaysAllow,
         )
         .await;
-        assert!(matches!(result, Err(SecurityError::MissingContext)));
+        assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
     }
 
     #[tokio::test]

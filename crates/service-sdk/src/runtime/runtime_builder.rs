@@ -12,6 +12,9 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ego_security_sdk::authentication::AuthenticationProvider;
+use ego_security_sdk::authorization::AuthorizationProvider;
+
 use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, ProjectionRef};
 use crate::interceptor::InterceptorChain;
@@ -86,23 +89,42 @@ impl DependencyTable {
 /// The `RuntimeBuilder` (TASK-013) will construct this struct with
 /// registered instances. Until then, the resolve methods return
 /// `DependencyNotFound`.
-#[derive(Debug)]
 pub struct RuntimeInner {
     // Populated by RuntimeBuilder (TASK-013); not yet read within this crate.
     #[allow(dead_code)]
     pub(crate) registry: ServiceRegistry,
     #[allow(dead_code)]
     pub(crate) interceptor_chain: Arc<InterceptorChain>,
+    /// Optional security providers (authn + authz) installed via RuntimeBuilder.
+    pub(crate) security_providers:
+        Option<(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)>,
     /// Resolved instances for projection, adapter, and config injection.
     resolved: DependencyTable,
 }
 
+impl std::fmt::Debug for RuntimeInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeInner")
+            .field("registry", &self.registry)
+            .field("interceptor_chain", &self.interceptor_chain)
+            .field("resolved", &self.resolved)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RuntimeInner {
     /// Creates a new `RuntimeInner`.
-    pub fn new(registry: ServiceRegistry, interceptor_chain: Arc<InterceptorChain>) -> Self {
+    pub fn new(
+        registry: ServiceRegistry,
+        interceptor_chain: Arc<InterceptorChain>,
+        security_providers: Option<
+            (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>),
+        >,
+    ) -> Self {
         Self {
             registry,
             interceptor_chain,
+            security_providers,
             resolved: DependencyTable::new(),
         }
     }
@@ -139,6 +161,7 @@ impl Default for RuntimeInner {
         Self {
             registry: ServiceRegistry::new(),
             interceptor_chain: Arc::new(InterceptorChain::new()),
+            security_providers: None,
             resolved: DependencyTable::new(),
         }
     }
