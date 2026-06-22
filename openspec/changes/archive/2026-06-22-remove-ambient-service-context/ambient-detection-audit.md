@@ -20,9 +20,16 @@
 
 ---
 
-## Exemptions
+## Approved Ambient-Like Constructs
 
-### LazyLock in `crates/domain/src/actor.rs`
+The following constructs are **explicitly approved** because they do not participate in
+execution-context propagation. Future additions require architecture review.
+
+| Location | Construct | Purpose | Approved |
+|----------|-----------|---------|---------|
+| `crates/domain/src/actor.rs` — `actor_id!` macro | `LazyLock<ActorId>` | `ActorId` string interning | ✅ 2026-06-22 |
+
+### Detail: LazyLock in `crates/domain/src/actor.rs`
 
 **Location**: `crates/domain/src/actor.rs:153-154`
 
@@ -32,9 +39,11 @@ static ID: ::std::sync::LazyLock<$crate::actor::ActorId> =
     ::std::sync::LazyLock::new(|| { ... });
 ```
 
-**Context**: Inside the `actor_id!` macro. Used for `ActorId` string interning — interns a static `&ActorId` reference to avoid repeated heap allocation of the same actor identity string. This is NOT a `ServiceContext` pattern. The `LazyLock` holds an `ActorId`, not any form of context.
+**Context**: Inside the `actor_id!` macro. Interns a static `&ActorId` reference to avoid
+repeated heap allocation of the same actor identity string. The `LazyLock` holds an `ActorId`,
+not any form of execution context.
 
-**Verdict**: EXEMPT — unrelated to context propagation.
+**Verdict**: APPROVED — unrelated to context propagation. Does not violate NFR-002 or INV-001.
 
 ---
 
