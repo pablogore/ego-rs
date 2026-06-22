@@ -76,6 +76,12 @@ mod tests {
         let _: Arc<dyn RoleStore> = Arc::new(StubStore);
     }
 
+    #[test]
+    fn role_store_dyn_is_send_and_sync() {
+        fn assert_send_sync<T: ?Sized + Send + Sync>() {}
+        assert_send_sync::<dyn RoleStore>();
+    }
+
     #[tokio::test]
     async fn unknown_role_returns_empty_vec() {
         let store = InMemoryRoleStore::new();

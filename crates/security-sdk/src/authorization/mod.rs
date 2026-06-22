@@ -115,6 +115,12 @@ mod tests {
         let _: Arc<dyn AuthorizationProvider> = Arc::new(AlwaysAllow);
     }
 
+    #[test]
+    fn provider_dyn_is_send_and_sync() {
+        fn assert_send_sync<T: ?Sized + Send + Sync>() {}
+        assert_send_sync::<dyn AuthorizationProvider>();
+    }
+
     #[tokio::test]
     async fn allow_and_deny_are_matchable() {
         let ctx = make_ctx();
@@ -128,11 +134,6 @@ mod tests {
 
         let deny_result = AlwaysDeny.authorize(ctx.principal(), &req, &ctx).await.unwrap();
         assert!(matches!(deny_result, AuthorizationDecision::Deny { .. }));
-    }
-
-    #[test]
-    fn external_provider_impl_compiles() {
-        let _: Arc<dyn AuthorizationProvider> = Arc::new(AlwaysAllow);
     }
 
     // ── authorize_in_context tests (TASK-025) ─────────────────────────────────

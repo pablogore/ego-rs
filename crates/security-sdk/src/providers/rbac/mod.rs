@@ -15,8 +15,22 @@ use crate::{
 /// Role-Based Access Control provider backed by a [`RoleStore`].
 ///
 /// For each role on the principal, fetches its permissions from the store
-/// and checks whether any grant the requested resource+action.
-/// A wildcard action (`"*"`) matches any requested action.
+/// and checks whether any permission grants the requested resource + action.
+///
+/// # Wildcard semantics
+///
+/// | Pattern in [`Permission`]  | Behavior | Status |
+/// |----------------------------|----------|--------|
+/// | `resource: "orders"`, `action: "*"` | Grants **any** action on `"orders"` | **Supported** |
+/// | `resource: "*"`, `action: "read"` | Matches only the literal resource name `"*"` | **Not supported** — resource wildcards are deferred to CORE-009A |
+/// | `resource: "*"`, `action: "*"` | Matches only `resource == "*"` && `action == "*"` literally | **Not supported** |
+///
+/// Action wildcards (`perm.action == "*"`) are the only supported wildcard form.
+/// Resource wildcards are treated as the literal string `"*"` — they do **not**
+/// match all resources. Callers that need resource wildcards should wait for
+/// CORE-009A or implement a custom [`AuthorizationProvider`].
+///
+/// [`Permission`]: crate::policy::Permission
 pub struct RbacProvider {
     store: Arc<dyn RoleStore>,
 }
@@ -155,6 +169,30 @@ mod tests {
         );
         let decision = provider.authorize(&principal, &req, &ctx).await.unwrap();
         assert!(matches!(decision, AuthorizationDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn wildcard_resource_is_literal_not_match_all() {
+        // Permission.resource = "*" is treated as the literal string "*".
+        // It does NOT grant access to every resource — resource wildcards are
+        // not supported in this version (deferred to CORE-009A).
+        let store = InMemoryRoleStore::new().with_role(
+            Role("admin".into()),
+            vec![Permission { resource: "*".into(), action: "read".into() }],
+        );
+        let principal = user_with_role("admin");
+        let ctx = make_ctx(&principal);
+        let provider = RbacProvider::new(Arc::new(store));
+        let req = AccessRequest::new(
+            Resource { kind: "orders".into(), id: None },
+            Action("read".into()),
+        );
+        // "orders" != "*" (literal) → Deny, not Allow.
+        let decision = provider.authorize(&principal, &req, &ctx).await.unwrap();
+        assert!(
+            matches!(decision, AuthorizationDecision::Deny { .. }),
+            "resource wildcard '*' must not match 'orders' — wildcards are not supported on the resource side"
+        );
     }
 
     #[tokio::test]

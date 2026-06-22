@@ -93,6 +93,12 @@ mod tests {
         let _: Arc<dyn CredentialVerifier> = Arc::new(StubVerifier);
     }
 
+    #[test]
+    fn verifier_dyn_is_send_and_sync() {
+        fn assert_send_sync<T: ?Sized + Send + Sync>() {}
+        assert_send_sync::<dyn CredentialVerifier>();
+    }
+
     struct InMemoryVerifier {
         username: String,
         secret: String,

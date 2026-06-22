@@ -38,7 +38,14 @@ mod tests {
 
     #[test]
     fn provider_is_object_safe() {
+        // Proves dyn-compatibility and Arc-injectability.
         let _: Arc<dyn AuthenticationProvider> = Arc::new(StubAuthProvider);
+    }
+
+    #[test]
+    fn provider_dyn_is_send_and_sync() {
+        fn assert_send_sync<T: ?Sized + Send + Sync>() {}
+        assert_send_sync::<dyn AuthenticationProvider>();
     }
 
     #[tokio::test]
