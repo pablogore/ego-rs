@@ -10,6 +10,7 @@ tokio-util = { version = "0.7" }
 semver = "1"
 thiserror = "1.0"
 kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+ego-security-sdk = { path = "../security-sdk" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }

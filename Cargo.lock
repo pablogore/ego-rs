@@ -499,6 +499,7 @@ name = "ego-service-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ego-security-sdk",
  "ego-service-sdk-macros",
  "insta",
  "kitlogger",
