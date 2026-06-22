@@ -1,0 +1,24 @@
+change: security-sdk
+artifact_store: openspec
+
+dag:
+  explore:    { status: skipped }
+  proposal:   { status: done,    artifact: proposal.md }
+  spec:       { status: done,    artifact: spec.md }
+  design:     { status: done,    artifact: design.md }
+  tasks:      { status: done,    artifact: tasks.md }
+  apply:      { status: done,    notes: "Implemented across 3 PRs — CORE-009 PR-1/2/3" }
+  verify:     { status: done,    notes: "PASS WITH WARNINGS — 0 CRITICAL, 3 warnings (W-001, W-002, W-003)" }
+  archive:    { status: done,    date: "2026-06-22", notes: "Final spec merged to openspec/specs/security-sdk/" }
+
+next_recommended: none
+
+archive_metadata:
+  archived_date: "2026-06-22"
+  archived_from: "openspec/changes/security-sdk"
+  archived_to: "openspec/changes/archive/2026-06-22-security-sdk"
+  main_spec_location: "openspec/specs/security-sdk/spec.md"
+  verify_report_observation_id: 915
+  all_requirements_met: true
+  critical_issues: 0
+  warnings: 3

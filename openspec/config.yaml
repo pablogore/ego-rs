@@ -1,0 +1,35 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Rust (stable), Cargo workspace, tokio async runtime
+  Architecture: Hexagonal / Clean Architecture, CQRS + Event Sourcing
+  Testing: cargo test, strict TDD mode enabled
+  Style: explicit propagation, no ambient/thread-local/task-local state
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Define clear scope boundaries and non-goals
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Each requirement must be independently testable
+  design:
+    - Include sequence diagrams for complex async flows
+    - Document architecture decisions with rationale
+    - No circular dependencies between crates
+  tasks:
+    - Group by phase, use hierarchical numbering (TASK-NNN)
+    - Keep tasks completable in one session
+    - Each task must include a verifiable acceptance criterion
+  apply:
+    - Follow existing code patterns (hexagonal, explicit propagation)
+    tdd: true
+    test_command: "cargo test --workspace"
+  verify:
+    test_command: "cargo test --workspace"
+    build_command: "cargo build --workspace"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+    - Merge delta specs into openspec/specs/{domain}/spec.md
