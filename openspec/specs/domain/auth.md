@@ -108,7 +108,7 @@ pub enum AuthenticationError {
     ExpiredToken,                    // exp claim indicates token has expired
     MissingClaim(String),            // Required claim is absent (e.g., 'sub')
     InvalidSignature,                // Signature validation failed
-    AlgorithmNotSupported,           // Token algorithm not supported by provider
+    AlgorithmNotSupported(String),   // Token algorithm not supported by provider
 }
 ```
 
