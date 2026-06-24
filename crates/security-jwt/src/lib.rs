@@ -30,8 +30,10 @@
 //! ));
 //! let config = JwtConfig {
 //!     algorithm: JwtAlgorithm::Hs256,
-//!     expected_iss: Some("my-service".into()),
-//!     expected_aud: None,
+//!     validation: security_jwt::JwtProviderConfig {
+//!         expected_iss: Some("my-service".into()),
+//!         expected_aud: None,
+//!     },
 //! };
 //! let auth = JwtAuthenticator::new(config, resolver, Arc::new(SystemClock));
 //! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;
@@ -55,6 +57,6 @@ mod validation;
 #[cfg(test)]
 mod test_helpers;
 
-pub use authenticator::JwtAuthenticator;
-pub use config::{JwtAlgorithm, JwtConfig};
+pub use authenticator::{Es256AuthenticationProvider, Hs256AuthenticationProvider, JwtAuthenticator, Rs256AuthenticationProvider};
+pub use config::{Es256Config, Hs256Config, JwtAlgorithm, JwtConfig, JwtProviderConfig, Rs256Config};
 pub use key_resolver::{KeyResolver, KeyResolverError, LocalKeyResolver, VerificationKey};

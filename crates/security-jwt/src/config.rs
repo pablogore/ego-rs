@@ -22,19 +22,41 @@ pub enum JwtAlgorithm {
 /// [`crate::KeyResolver`] and an [`ego_domain::auth::Clock`] to construct
 /// an authenticator. This struct holds only functional validation parameters —
 /// key material lives in the resolver.
+#[derive(Debug, Clone, PartialEq)]
 pub struct JwtConfig {
     /// Algorithm discriminant — selects HS256, RS256, or ES256. Key material is
     /// provided separately via [`crate::KeyResolver`].
     pub algorithm: JwtAlgorithm,
 
-    /// If `Some`, the token's `iss` claim MUST equal this value.
-    /// If `None`, any issuer (including absent) is accepted.
-    pub expected_iss: Option<String>,
+    /// Issuer/audience validation constraints, composed from [`JwtProviderConfig`].
+    pub validation: JwtProviderConfig,
+}
 
+/// Shared validation configuration for the single-algorithm providers.
+///
+/// Holds optional issuer and audience constraints. Key material lives in the
+/// injected [`crate::KeyResolver`] — not here. The algorithm is encoded at
+/// the type level by each provider, so no `algorithm` field is needed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JwtProviderConfig {
+    /// If `Some`, the token's `iss` claim MUST equal this value.
+    pub expected_iss: Option<String>,
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
-    /// If `None`, the `aud` claim is not validated.
     pub expected_aud: Option<Vec<String>>,
 }
+
+impl Default for JwtProviderConfig {
+    fn default() -> Self {
+        Self { expected_iss: None, expected_aud: None }
+    }
+}
+
+/// Type alias for clarity at call sites using [`crate::Hs256AuthenticationProvider`].
+pub type Hs256Config = JwtProviderConfig;
+/// Type alias for clarity at call sites using [`crate::Rs256AuthenticationProvider`].
+pub type Rs256Config = JwtProviderConfig;
+/// Type alias for clarity at call sites using [`crate::Es256AuthenticationProvider`].
+pub type Es256Config = JwtProviderConfig;
 
 // ---------------------------------------------------------------------------
 // Tests
