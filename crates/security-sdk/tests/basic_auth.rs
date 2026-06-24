@@ -50,7 +50,7 @@ fn injected_verifier_returns_security_context() {
     });
     assert!(result.is_ok());
     let ctx = result.unwrap();
-    assert_eq!(ctx.principal().subject.as_str(), "user:alice");
+    assert_eq!(ctx.principal().subject_id.as_str(), "user:alice");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn non_basic_credential_returns_invalid_token() {
 }
 
 #[test]
-fn verifier_backend_error_gives_invalid_token() {
+fn verifier_backend_error_gives_provider_unavailable() {
     let provider = BasicAuthenticationProvider::new(Arc::new(ErrorVerifier));
 
     let result = provider.authenticate(&Credential::Basic {
@@ -94,6 +94,6 @@ fn verifier_backend_error_gives_invalid_token() {
     });
     assert!(matches!(
         result,
-        Err(AuthenticationError::InvalidToken(_))
+        Err(AuthenticationError::ProviderUnavailable(_))
     ));
 }

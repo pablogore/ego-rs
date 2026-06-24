@@ -7,6 +7,7 @@ use ego_domain::auth::AuthenticationError;
 ///
 /// Synchronous per AD-004: authentication is CPU-bound, performs no I/O.
 /// Object-safe: stored and invoked as `Arc<dyn AuthenticationProvider>`.
+#[cfg_attr(test, mockall::automock)]
 pub trait AuthenticationProvider: Send + Sync {
     /// Authenticates `credential` and returns the resolved [`SecurityContext`].
     ///
@@ -49,6 +50,19 @@ mod tests {
     }
 
     #[test]
+    fn mock_provider_returns_configured_result() {
+        let mut mock = MockAuthenticationProvider::new();
+        mock.expect_authenticate().times(1).return_once(|_| {
+            let principal =
+                Principal::new(PrincipalKind::User, SubjectId::new("mock:user").unwrap());
+            Ok(SecurityContext::empty(principal))
+        });
+        let result = mock.authenticate(&Credential::Bearer("tok".into()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().principal().subject_id.as_str(), "mock:user");
+    }
+
+    #[test]
     fn authenticate_returns_security_context() {
         struct ReturnsUser;
 
@@ -58,13 +72,13 @@ mod tests {
                 _credential: &Credential,
             ) -> Result<SecurityContext, AuthenticationError> {
                 let principal = Principal::new(PrincipalKind::User, SubjectId::new("user:stub").unwrap());
-                Ok(SecurityContext::new(principal))
+                Ok(SecurityContext::empty(principal))
             }
         }
 
         let cred = Credential::Bearer("tok".into());
         let result = ReturnsUser.authenticate(&cred);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().principal().subject.as_str(), "user:stub");
+        assert_eq!(result.unwrap().principal().subject_id.as_str(), "user:stub");
     }
 }

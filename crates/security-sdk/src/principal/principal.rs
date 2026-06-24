@@ -1,6 +1,6 @@
 //! Principal identity type and related types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::principal::SubjectId;
 
@@ -22,7 +22,19 @@ pub enum PrincipalKind {
 }
 
 /// A named role assigned to a principal.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// # Ordering
+///
+/// `Role` implements `Ord` solely so it can be used as a [`BTreeSet`] key
+/// in [`Principal::roles`]. The order is **lexicographic** (alphabetical on
+/// the inner string) and carries **no privilege semantics**:
+/// `"admin" < "viewer"` is true — the opposite of a typical privilege ladder.
+///
+/// Do **not** use `<`/`>`/`cmp` on roles for access-control decisions.
+/// For permission checks, call [`Principal::has_role`] or query a [`RoleStore`].
+///
+/// [`RoleStore`]: crate::policy::RoleStore
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Role(pub String);
 
 /// A typed assertion about the principal (name + value), provider-neutral.
@@ -46,24 +58,24 @@ pub struct Principal {
     /// Kind of actor.
     pub kind: PrincipalKind,
     /// Canonical, validated subject id.
-    pub subject: SubjectId,
+    pub subject_id: SubjectId,
     /// Tenant/workspace this principal belongs to, if any.
     pub tenant_id: Option<String>,
-    /// Roles assigned to this principal.
-    pub roles: HashSet<Role>,
+    /// Roles assigned to this principal (sorted for deterministic iteration).
+    pub roles: BTreeSet<Role>,
     /// Free-form attributes.
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
 }
 
 impl Principal {
     /// Creates a principal with the given kind and subject; empty roles/attributes.
-    pub fn new(kind: PrincipalKind, subject: SubjectId) -> Self {
+    pub fn new(kind: PrincipalKind, subject_id: SubjectId) -> Self {
         Self {
             kind,
-            subject,
+            subject_id,
             tenant_id: None,
-            roles: HashSet::new(),
-            attributes: HashMap::new(),
+            roles: BTreeSet::new(),
+            attributes: BTreeMap::new(),
         }
     }
 
@@ -73,7 +85,7 @@ impl Principal {
         self
     }
 
-    /// Builder: adds a role (duplicates are silently deduplicated via [`HashSet`] semantics).
+    /// Builder: adds a role (duplicates are silently deduplicated via [`BTreeSet`] semantics — roles are sorted lexicographically, not by privilege level).
     pub fn with_role(mut self, role: Role) -> Self {
         self.roles.insert(role);
         self
@@ -105,7 +117,7 @@ mod tests {
         let subject = make_subject("user:abc");
         let p = Principal::new(PrincipalKind::User, subject.clone());
         assert_eq!(p.kind, PrincipalKind::User);
-        assert_eq!(p.subject.as_str(), "user:abc");
+        assert_eq!(p.subject_id.as_str(), "user:abc");
         assert!(p.tenant_id.is_none());
         assert!(p.roles.is_empty(), "roles should start empty");
         assert!(p.attributes.is_empty(), "attributes should start empty");
@@ -166,6 +178,15 @@ mod tests {
     }
 
     #[test]
+    fn role_ord_is_lexicographic_not_privilege() {
+        // "admin" < "viewer" alphabetically — the opposite of a privilege ladder.
+        // This test exists to make that counter-intuitive fact executable and
+        // visible: never use Ord on Role for access-control comparisons.
+        assert!(Role("admin".into()) < Role("viewer".into()));
+        assert!(Role("superadmin".into()) > Role("admin".into()));
+    }
+
+    #[test]
     fn has_role_returns_false_when_absent() {
         let p = Principal::new(PrincipalKind::Service, make_subject("svc:1"))
             .with_role(Role("viewer".into()));
@@ -192,7 +213,7 @@ mod tests {
             .with_attribute("region", "eu-west-1");
 
         assert_eq!(p.kind, PrincipalKind::User);
-        assert_eq!(p.subject.as_str(), "user:42");
+        assert_eq!(p.subject_id.as_str(), "user:42");
         assert!(p.has_role(&Role("admin".into())));
         assert_eq!(p.tenant_id, Some("acme".into()));
         assert_eq!(

@@ -11,10 +11,10 @@ pub fn principal_with_role(role: &str) -> Principal {
 }
 
 pub fn make_ctx(p: &Principal) -> SecurityContext {
-    SecurityContext::new(p.clone())
+    SecurityContext::empty(p.clone())
 }
 
 pub fn make_ctx_from_subject(subject: &str) -> SecurityContext {
     let sub = SubjectId::new(subject).unwrap();
-    SecurityContext::new(Principal::new(PrincipalKind::User, sub))
+    SecurityContext::empty(Principal::new(PrincipalKind::User, sub))
 }

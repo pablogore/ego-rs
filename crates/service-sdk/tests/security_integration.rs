@@ -9,7 +9,7 @@ use ego_service_sdk::context::ServiceContext;
 fn make_security_ctx(subject: &str) -> SecurityContext {
     let sub = SubjectId::new(subject).unwrap();
     let principal = Principal::new(PrincipalKind::User, sub);
-    SecurityContext::new(principal)
+    SecurityContext::empty(principal)
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn security_propagates_through_chain() {
             .security()
             .unwrap()
             .principal()
-            .subject
+            .subject_id
             .as_str()
             .to_owned()
     };
@@ -56,7 +56,7 @@ fn with_security_replaces_previous_value() {
         .security()
         .unwrap()
         .principal()
-        .subject
+        .subject_id
         .as_str()
         .to_owned();
     assert_eq!(subject, "user:bob");

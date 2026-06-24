@@ -42,13 +42,11 @@ impl AuthenticationProvider for BasicAuthenticationProvider {
         match credential {
             Credential::Basic { username, secret } => {
                 match self.verifier.verify(username, secret) {
-                    Ok(Some(principal)) => Ok(SecurityContext::new(principal)),
+                    Ok(Some(principal)) => Ok(SecurityContext::empty(principal)),
                     Ok(None) => Err(AuthenticationError::InvalidToken(
                         "invalid username or password".into(),
                     )),
-                    Err(e) => Err(AuthenticationError::InvalidToken(format!(
-                        "provider error: {e}"
-                    ))),
+                    Err(e) => Err(AuthenticationError::ProviderUnavailable(e.to_string())),
                 }
             }
             _ => Err(AuthenticationError::InvalidToken(
@@ -133,7 +131,7 @@ mod tests {
         });
         assert!(result.is_ok());
         let ctx = result.unwrap();
-        assert_eq!(ctx.principal().subject.as_str(), "user:alice");
+        assert_eq!(ctx.principal().subject_id.as_str(), "user:alice");
     }
 
     #[test]
@@ -166,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_backend_error_surfaces_invalid_token() {
+    fn verifier_backend_error_surfaces_provider_unavailable() {
         let provider = BasicAuthenticationProvider::new(Arc::new(ErrorVerifier));
         let result = provider.authenticate(&Credential::Basic {
             username: "alice".into(),
@@ -174,7 +172,7 @@ mod tests {
         });
         assert!(matches!(
             result,
-            Err(AuthenticationError::InvalidToken(_))
+            Err(AuthenticationError::ProviderUnavailable(_))
         ));
     }
 }

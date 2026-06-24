@@ -50,6 +50,8 @@ impl AuthorizationProvider for RbacProvider {
         request: &AccessRequest,
         _ctx: &SecurityContext,
     ) -> Result<AuthorizationDecision, SecurityError> {
+        // Iterates in lexicographic role order (BTreeSet) — authorization
+        // correctness is order-independent; first-permit short-circuits.
         for role in &principal.roles {
             let perms = self.store.permissions_for_role(role).await?;
             for perm in perms {
@@ -83,7 +85,7 @@ mod tests {
     };
 
     fn make_ctx(principal: &Principal) -> SecurityContext {
-        SecurityContext::new(principal.clone())
+        SecurityContext::empty(principal.clone())
     }
 
     fn user_with_role(role: &str) -> Principal {

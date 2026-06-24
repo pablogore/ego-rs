@@ -302,7 +302,7 @@ mod tests {
     fn make_security_context() -> SecurityContext {
         let subject = SubjectId::new("user:test").unwrap();
         let principal = Principal::new(PrincipalKind::User, subject);
-        SecurityContext::new(principal)
+        SecurityContext::empty(principal)
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
         let result = ctx.require_security();
         assert!(result.is_ok());
         assert_eq!(
-            result.unwrap().principal().subject.as_str(),
+            result.unwrap().principal().subject_id.as_str(),
             "user:test"
         );
     }

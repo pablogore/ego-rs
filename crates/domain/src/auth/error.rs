@@ -4,10 +4,18 @@
 //! authentication failures. Each variant carries enough context for logging
 //! and structured diagnostics.
 
-/// Error returned by [`super::AuthenticationProvider::authenticate`].
+/// Error returned by an authentication provider's `authenticate` method.
 ///
 /// Each variant carries enough context to produce a structured log entry
 /// without leaking sensitive token material.
+///
+/// # Adding new variants
+///
+/// This enum is `#[non_exhaustive]` and derives `PartialEq`. Adding a field
+/// whose type does not implement `PartialEq` (e.g. `std::io::Error`) **breaks
+/// the derive and fails to compile** — hand-roll `PartialEq` for the whole enum
+/// before introducing such a field.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthenticationError {
     /// The token could not be parsed or its claims are structurally invalid.
@@ -29,6 +37,10 @@ pub enum AuthenticationError {
     /// The token signature does not match the configured key.
     #[error("invalid token signature")]
     InvalidSignature,
+
+    /// The authentication provider backend is unavailable or returned an unexpected error.
+    #[error("authentication provider unavailable: {0}")]
+    ProviderUnavailable(String),
 }
 
 #[cfg(test)]

@@ -27,6 +27,10 @@ impl RuntimeBuilder {
     }
 
     /// Registers authentication and authorization providers for this runtime.
+    ///
+    /// The providers are stored and exposed via [`Runtime::security_providers`].
+    /// The runtime does not automatically enforce authentication — callers are
+    /// responsible for invoking the provider and populating [`ServiceContext::security`].
     pub fn with_security(
         self,
         authn: Arc<dyn AuthenticationProvider>,
@@ -105,7 +109,7 @@ mod tests {
         fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
             let subject = SubjectId::new("user:stub").unwrap();
             let principal = Principal::new(PrincipalKind::User, subject);
-            Ok(SecurityContext::new(principal))
+            Ok(SecurityContext::empty(principal))
         }
     }
 

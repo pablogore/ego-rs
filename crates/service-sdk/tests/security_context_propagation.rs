@@ -13,7 +13,7 @@ fn make_principal(subject: &str) -> Principal {
 
 #[test]
 fn security_context_carried_via_explicit_passing() {
-    let sec_ctx = Arc::new(SecurityContext::new(make_principal("user:alice")));
+    let sec_ctx = Arc::new(SecurityContext::empty(make_principal("user:alice")));
     let svc_ctx = ServiceContext::new().with_security(Arc::clone(&sec_ctx));
 
     let handler = |ctx: &ServiceContext| {
@@ -21,7 +21,7 @@ fn security_context_carried_via_explicit_passing() {
             .as_ref()
             .unwrap()
             .principal()
-            .subject
+            .subject_id
             .as_str()
             .to_owned()
     };
@@ -32,16 +32,16 @@ fn security_context_carried_via_explicit_passing() {
 #[test]
 fn two_independent_contexts_do_not_share_state() {
     let ctx_a = ServiceContext::new()
-        .with_security(Arc::new(SecurityContext::new(make_principal("user:alice"))));
+        .with_security(Arc::new(SecurityContext::empty(make_principal("user:alice"))));
     let ctx_b = ServiceContext::new()
-        .with_security(Arc::new(SecurityContext::new(make_principal("user:bob"))));
+        .with_security(Arc::new(SecurityContext::empty(make_principal("user:bob"))));
 
     let sub_a = ctx_a
         .security
         .as_ref()
         .unwrap()
         .principal()
-        .subject
+        .subject_id
         .as_str()
         .to_owned();
     let sub_b = ctx_b
@@ -49,7 +49,7 @@ fn two_independent_contexts_do_not_share_state() {
         .as_ref()
         .unwrap()
         .principal()
-        .subject
+        .subject_id
         .as_str()
         .to_owned();
 
@@ -60,7 +60,7 @@ fn two_independent_contexts_do_not_share_state() {
 
 #[test]
 fn inv_007_clone_preserves_security_field() {
-    let arc = Arc::new(SecurityContext::new(make_principal("user:alice")));
+    let arc = Arc::new(SecurityContext::empty(make_principal("user:alice")));
     let original = ServiceContext::new().with_security(Arc::clone(&arc));
     let cloned = original.clone();
 

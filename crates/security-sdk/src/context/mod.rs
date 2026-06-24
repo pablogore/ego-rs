@@ -26,18 +26,17 @@ pub struct SecurityContext {
 }
 
 impl SecurityContext {
-    /// Creates a context for the given authenticated principal with empty claims.
-    pub fn new(principal: Principal) -> Self {
+    /// Creates a context with the given authenticated principal and claims.
+    pub fn new(principal: Principal, claims: Claims) -> Self {
+        Self { principal, claims }
+    }
+
+    /// Creates a context with the given principal and empty claims.
+    pub fn empty(principal: Principal) -> Self {
         Self {
             principal,
             claims: Claims::empty(),
         }
-    }
-
-    /// Creates a context with principal and claims.
-    pub fn with_claims(mut self, claims: Claims) -> Self {
-        self.claims = claims;
-        self
     }
 
     /// Returns the authenticated principal.
@@ -55,40 +54,36 @@ impl SecurityContext {
 mod tests {
     use super::SecurityContext;
     use crate::principal::{Principal, PrincipalKind, SubjectId};
+    use ego_domain::auth::Claims;
 
     fn make_principal(subject: &str) -> Principal {
         Principal::new(PrincipalKind::User, SubjectId::new(subject).unwrap())
     }
 
     #[test]
-    fn constructs_from_principal() {
+    fn constructs_from_principal_and_claims() {
         let p = make_principal("user:42");
-        let ctx = SecurityContext::new(p.clone());
-        assert_eq!(ctx.principal().subject.as_str(), "user:42");
-    }
-
-    #[test]
-    fn claims_defaults_to_empty() {
-        let ctx = SecurityContext::new(make_principal("u:1"));
+        let claims = Claims::empty();
+        let ctx = SecurityContext::new(p.clone(), claims.clone());
+        assert_eq!(ctx.principal().subject_id.as_str(), "user:42");
         assert!(ctx.claims().custom.is_empty());
     }
 
     #[test]
-    fn principal_is_non_optional() {
-        let ctx = SecurityContext::new(make_principal("u:1"));
-        let subject: &str = ctx.principal().subject.as_str();
-        assert_eq!(subject, "u:1");
+    fn empty_creates_context_without_claims() {
+        let ctx = SecurityContext::empty(make_principal("u:1"));
+        assert!(ctx.claims().custom.is_empty());
     }
 
     #[test]
     fn no_ambient_state_leak() {
-        let ctx_a = SecurityContext::new(make_principal("user:a"));
-        let ctx_b = SecurityContext::new(make_principal("user:b"));
-        assert_eq!(ctx_a.principal().subject.as_str(), "user:a");
-        assert_eq!(ctx_b.principal().subject.as_str(), "user:b");
+        let ctx_a = SecurityContext::empty(make_principal("user:a"));
+        let ctx_b = SecurityContext::empty(make_principal("user:b"));
+        assert_eq!(ctx_a.principal().subject_id.as_str(), "user:a");
+        assert_eq!(ctx_b.principal().subject_id.as_str(), "user:b");
         assert_ne!(
-            ctx_a.principal().subject.as_str(),
-            ctx_b.principal().subject.as_str()
+            ctx_a.principal().subject_id.as_str(),
+            ctx_b.principal().subject_id.as_str()
         );
     }
 
