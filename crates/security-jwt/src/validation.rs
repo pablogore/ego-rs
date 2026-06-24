@@ -9,6 +9,7 @@ use ego_domain::auth::{AuthenticationError, Claims, Clock, StandardClaims};
 use ego_security_sdk::{Principal, PrincipalKind, Role, SecurityContext, SubjectId};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::Value;
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // ValidationParams
@@ -65,11 +66,18 @@ impl JwtValidationEngine {
             jsonwebtoken::decode::<RawClaims>(token, key, &validation).map_err(|e| {
                 use jsonwebtoken::errors::ErrorKind;
                 match e.kind() {
-                    ErrorKind::InvalidSignature => AuthenticationError::InvalidSignature,
+                    ErrorKind::InvalidSignature => {
+                        warn!(error = "invalid_signature", "JWT validation failed");
+                        AuthenticationError::InvalidSignature
+                    }
                     ErrorKind::InvalidAlgorithm | ErrorKind::InvalidAlgorithmName => {
+                        warn!(error = "algorithm_not_supported", "JWT validation failed");
                         AuthenticationError::AlgorithmNotSupported(format!("{e}"))
                     }
-                    _ => AuthenticationError::InvalidToken(format!("{e}")),
+                    _ => {
+                        warn!(error = "invalid_token", "JWT validation failed");
+                        AuthenticationError::InvalidToken(format!("{e}"))
+                    }
                 }
             })?;
 
@@ -78,43 +86,39 @@ impl JwtValidationEngine {
 
         // exp check — reject if exp <= now
         if let Some(exp_val) = all_claims.get("exp") {
-            if let Some(exp_secs) = exp_val
-                .as_i64()
-                .or_else(|| exp_val.as_u64().and_then(|u| i64::try_from(u).ok()))
-            {
-                let exp_dt =
-                    chrono::DateTime::<chrono::Utc>::from_timestamp(exp_secs, 0).ok_or_else(
-                        || AuthenticationError::InvalidToken("invalid exp timestamp".into()),
-                    )?;
-                if now >= exp_dt {
-                    return Err(AuthenticationError::ExpiredToken);
+            match parse_timestamp(exp_val) {
+                Some(exp_dt) => {
+                    if now >= exp_dt {
+                        warn!(error = "expired_token", "JWT validation failed");
+                        return Err(AuthenticationError::ExpiredToken);
+                    }
                 }
-            } else {
-                return Err(AuthenticationError::InvalidToken(
-                    "exp claim is not a valid integer".into(),
-                ));
+                None => {
+                    warn!(error = "invalid_token", "JWT validation failed");
+                    return Err(AuthenticationError::InvalidToken(
+                        "exp claim is not a valid integer".into(),
+                    ));
+                }
             }
         }
 
         // nbf check — reject if nbf > now
         if let Some(nbf_val) = all_claims.get("nbf") {
-            if let Some(nbf_secs) = nbf_val
-                .as_i64()
-                .or_else(|| nbf_val.as_u64().and_then(|u| i64::try_from(u).ok()))
-            {
-                let nbf_dt =
-                    chrono::DateTime::<chrono::Utc>::from_timestamp(nbf_secs, 0).ok_or_else(
-                        || AuthenticationError::InvalidToken("invalid nbf timestamp".into()),
-                    )?;
-                if now < nbf_dt {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "token not yet valid (nbf: {nbf_dt})"
-                    )));
+            match parse_timestamp(nbf_val) {
+                Some(nbf_dt) => {
+                    if now < nbf_dt {
+                        warn!(error = "invalid_token", "JWT validation failed");
+                        return Err(AuthenticationError::InvalidToken(
+                            "token not yet valid".into(),
+                        ));
+                    }
                 }
-            } else {
-                return Err(AuthenticationError::InvalidToken(
-                    "nbf claim is not a valid integer".into(),
-                ));
+                None => {
+                    warn!(error = "invalid_token", "JWT validation failed");
+                    return Err(AuthenticationError::InvalidToken(
+                        "nbf claim is not a valid integer".into(),
+                    ));
+                }
             }
         }
 
@@ -122,15 +126,17 @@ impl JwtValidationEngine {
         if let Some(expected_iss) = params.expected_iss {
             match all_claims.get("iss") {
                 Some(Value::String(iss)) if iss == expected_iss => {}
-                Some(other) => {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "iss mismatch: expected '{expected_iss}', got '{other}'"
-                    )))
+                Some(_) => {
+                    warn!(error = "invalid_token", "JWT validation failed");
+                    return Err(AuthenticationError::InvalidToken(
+                        "issuer mismatch".into(),
+                    ));
                 }
                 None => {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "iss mismatch: expected '{expected_iss}', got none"
-                    )))
+                    warn!(error = "invalid_token", "JWT validation failed");
+                    return Err(AuthenticationError::InvalidToken(
+                        "issuer mismatch".into(),
+                    ));
                 }
             }
         }
@@ -143,20 +149,30 @@ impl JwtValidationEngine {
                     .iter()
                     .filter_map(|v| v.as_str().map(str::to_owned))
                     .collect(),
-                _ => vec![],
+                None => vec![],
+                Some(_) => {
+                    warn!(error = "invalid_token", "JWT validation failed");
+                    return Err(AuthenticationError::InvalidToken(
+                        "aud claim is not a string or array".into(),
+                    ));
+                }
             };
             let any_match = expected_auds.iter().any(|ea| token_auds.contains(ea));
             if !any_match {
-                return Err(AuthenticationError::InvalidToken(format!(
-                    "aud mismatch: expected one of {expected_auds:?}, got {token_auds:?}"
-                )));
+                warn!(error = "invalid_token", "JWT validation failed");
+                return Err(AuthenticationError::InvalidToken(
+                    "aud mismatch".into(),
+                ));
             }
         }
 
         // Build StandardClaims
         let standard = build_standard_claims(&all_claims);
 
-        let (subject, all_claims) = extract_subject(all_claims)?;
+        let (subject, all_claims) = extract_subject(all_claims).map_err(|e| {
+            warn!(error = "invalid_token", "JWT validation failed");
+            e
+        })?;
         let (tenant_id, all_claims) = extract_tenant_id(all_claims);
         let (roles, all_claims) = extract_roles(all_claims);
 
@@ -165,8 +181,10 @@ impl JwtValidationEngine {
 
         let mut principal = Principal::new(
             PrincipalKind::User,
-            SubjectId::new(subject)
-                .map_err(|_| AuthenticationError::InvalidToken("invalid subject id".into()))?,
+            SubjectId::new(subject).map_err(|_| {
+                warn!(error = "invalid_token", "JWT validation failed");
+                AuthenticationError::InvalidToken("invalid subject id".into())
+            })?,
         );
         for role in roles {
             principal = principal.with_role(Role(role));
@@ -179,6 +197,21 @@ impl JwtValidationEngine {
 
         Ok(SecurityContext::new(principal, claims))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp parsing helper
+// ---------------------------------------------------------------------------
+
+/// Parse a JSON value as a Unix timestamp, returning `None` if the value is
+/// not representable as a valid `i64` second count.
+///
+/// Accepts both `i64` and `u64`-shaped JSON numbers. Rejects floats, strings,
+/// booleans, and out-of-range `u64` values.
+fn parse_timestamp(val: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    val.as_i64()
+        .or_else(|| val.as_u64().and_then(|u| i64::try_from(u).ok()))
+        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -198,21 +231,9 @@ struct RawClaims {
 
 /// Build [`StandardClaims`] from the raw claims map.
 fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
-    let exp = map.get("exp").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
-    let nbf = map.get("nbf").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
-    let iat = map.get("iat").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
+    let exp = map.get("exp").and_then(parse_timestamp);
+    let nbf = map.get("nbf").and_then(parse_timestamp);
+    let iat = map.get("iat").and_then(parse_timestamp);
     let jti = map.get("jti").and_then(|v| v.as_str().map(str::to_owned));
     let iss = map.get("iss").and_then(|v| v.as_str().map(str::to_owned));
     let aud = map.get("aud").and_then(|v| match v {
@@ -228,11 +249,14 @@ fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
     StandardClaims { exp, nbf, iat, jti, iss, aud }
 }
 
-/// Extract `sub`. Absent → `MissingClaim("sub")`; non-string → `InvalidToken`.
+/// Extract `sub`. Absent → `MissingClaim("sub")`; non-string or empty → `InvalidToken`.
 fn extract_subject(
     mut map: BTreeMap<String, Value>,
 ) -> Result<(String, BTreeMap<String, Value>), AuthenticationError> {
     match map.remove("sub") {
+        Some(Value::String(s)) if s.is_empty() => Err(AuthenticationError::InvalidToken(
+            "sub claim is empty".into(),
+        )),
         Some(Value::String(s)) => Ok((s, map)),
         Some(_) => Err(AuthenticationError::InvalidToken(
             "sub claim is not a string".into(),
@@ -312,15 +336,6 @@ mod tests {
 
     fn no_params<'a>() -> ValidationParams<'a> {
         ValidationParams { expected_iss: None, expected_aud: None }
-    }
-
-    // -----------------------------------------------------------------------
-    // engine_exists — Task 1.1 anchor
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn engine_exists() {
-        let _ = JwtValidationEngine;
     }
 
     // -----------------------------------------------------------------------
@@ -505,6 +520,24 @@ mod tests {
         assert!(!ctx.claims.custom.contains_key("tenant_id"));
     }
 
+    #[test]
+    fn tenant_id_takes_precedence_over_tid_when_both_present() {
+        let claims = json!({ "sub": "u1", "tenant_id": "primary", "tid": "secondary" });
+        let token = make_hs256_token(&claims);
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            now_clock().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.tenant_id.as_deref(), Some("primary"));
+        // tid must remain in custom since it was not consumed
+        assert_eq!(ctx.claims.custom.get("tid"), Some(&json!("secondary")));
+        assert!(!ctx.claims.custom.contains_key("tenant_id"));
+    }
+
     // -----------------------------------------------------------------------
     // FR-024: past exp → accepted
     // -----------------------------------------------------------------------
@@ -582,6 +615,97 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // W-4: nbf == now → accepted (boundary: not yet valid means strictly after now)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nbf_equal_to_now_is_valid() {
+        let now = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let nbf_secs = now.timestamp();
+        let claims = json!({ "sub": "u1", "nbf": nbf_secs });
+        let token = make_hs256_token(&claims);
+        // nbf == now: the check is `now < nbf_dt`, so equal → accepted
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    // -----------------------------------------------------------------------
+    // W-4: aud scalar string is accepted
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aud_scalar_string_is_accepted() {
+        let claims = json!({ "sub": "u1", "aud": "my-api" });
+        let token = make_hs256_token(&claims);
+        let expected_aud = vec!["my-api".to_string()];
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            now_clock().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    // -----------------------------------------------------------------------
+    // W-4: aud wrong type (numeric) returns InvalidToken
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aud_wrong_type_returns_invalid_token() {
+        let claims = json!({ "sub": "u1", "aud": 42 });
+        let token = make_hs256_token(&claims);
+        let expected_aud = vec!["my-api".to_string()];
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            now_clock().as_ref(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AuthenticationError::InvalidToken(_)),
+            "expected InvalidToken for numeric aud, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // W-4: roles null → empty set, raw claim preserved
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn roles_null_produces_empty_set_raw_preserved() {
+        let claims = json!({ "sub": "u1", "roles": null });
+        let token = make_hs256_token(&claims);
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            now_clock().as_ref(),
+        )
+        .unwrap();
+        assert!(ctx.principal.roles.is_empty(), "roles should be empty for null value");
+        assert_eq!(
+            ctx.claims.custom.get("roles"),
+            Some(&serde_json::Value::Null),
+            "null roles should be preserved in custom claims"
+        );
     }
 
     // -----------------------------------------------------------------------

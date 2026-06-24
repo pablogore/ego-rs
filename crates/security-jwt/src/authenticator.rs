@@ -82,8 +82,6 @@ impl AuthenticationProvider for JwtAuthenticator {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AuthenticationError::InvalidToken(format!("{e}")))?;
 
-        let kid = header.kid.as_deref();
-
         // Map jsonwebtoken Algorithm to our JwtAlgorithm discriminant
         let requested_alg = match header.alg {
             Algorithm::HS256 => JwtAlgorithm::Hs256,
@@ -96,27 +94,49 @@ impl AuthenticationProvider for JwtAuthenticator {
             }
         };
 
-        // Resolve the verification key — block_on is safe because KeyResolver
-        // is cache-first (AD-013): LocalKeyResolver completes immediately from
-        // memory with no I/O, so block_on never parks the thread.
-        let verification_key =
-            futures_executor::block_on(self.resolver.resolve(kid, requested_alg)).map_err(
-                |e| match e {
-                    KeyResolverError::KeyNotFound { .. } => AuthenticationError::InvalidSignature,
-                    KeyResolverError::AlgorithmMismatch { .. } => {
-                        AuthenticationError::AlgorithmNotSupported(format!(
-                            "{:?}",
-                            self.config.algorithm
-                        ))
-                    }
-                    KeyResolverError::InvalidKeyMaterial(msg) => {
-                        AuthenticationError::InvalidToken(format!("key material: {msg}"))
-                    }
-                },
-            )?;
+        // B-1: Enforce config.algorithm — reject tokens whose header alg differs
+        // from what this authenticator was configured to accept.
+        if requested_alg != self.config.algorithm {
+            return Err(AuthenticationError::AlgorithmNotSupported(format!(
+                "token uses {requested_alg:?} but authenticator is configured for {:?}",
+                self.config.algorithm
+            )));
+        }
+
+        // Resolve the verification key.
+        //
+        // B-2: `futures_executor::block_on` panics when called from inside a Tokio
+        // worker thread (the Tokio runtime is already parked on the thread and
+        // `block_on` tries to build a second executor on the same OS thread).
+        // To avoid this, we always spawn a fresh OS thread before calling `block_on`.
+        // A fresh thread has no ambient Tokio context, so `block_on` is safe.
+        // The KeyResolver is cache-first (AD-013), so the resolve future is cheap.
+        let resolver = Arc::clone(&self.resolver);
+        let kid_owned = header.kid.clone(); // Option<String> — clone before move
+        let alg = requested_alg;
+        let config_alg = self.config.algorithm;
+        let verification_key = std::thread::spawn(move || {
+            futures_executor::block_on(resolver.resolve(kid_owned.as_deref(), alg))
+        })
+        .join()
+        .map_err(|_| AuthenticationError::InvalidToken("key resolver panicked".into()))?
+        .map_err(|e| match e {
+            KeyResolverError::KeyNotFound { .. } => AuthenticationError::InvalidSignature,
+            KeyResolverError::AlgorithmMismatch { .. } => {
+                AuthenticationError::AlgorithmNotSupported(format!("{config_alg:?}"))
+            }
+            KeyResolverError::InvalidKeyMaterial(msg) => {
+                AuthenticationError::InvalidToken(format!("key material: {msg}"))
+            }
+        })?;
 
         // Build decoding key — each provider owns only key-build and alg enforcement (AD-014).
         // Claim/time validation is fully delegated to JwtValidationEngine below (AD-019).
+        // The wildcard arm is required for correctness because VerificationKey is
+        // #[non_exhaustive] — callers outside this crate may encounter future variants.
+        // The allow attribute suppresses the unreachable_patterns lint that fires
+        // inside the defining crate (where all current variants are visible).
+        #[allow(unreachable_patterns)]
         let (decoding_key, algorithm) = match verification_key {
             VerificationKey::Hmac(ref bytes) => (DecodingKey::from_secret(bytes), Algorithm::HS256),
             VerificationKey::RsaPem(ref pem) => (
@@ -131,6 +151,11 @@ impl AuthenticationProvider for JwtAuthenticator {
                 })?,
                 Algorithm::ES256,
             ),
+            _ => {
+                return Err(AuthenticationError::InvalidToken(
+                    "unsupported verification key variant".into(),
+                ))
+            }
         };
 
         let params = ValidationParams {
@@ -188,18 +213,6 @@ mod tests {
         }
     }
 
-    fn hs256_authenticator(secret: &[u8], clock: Arc<dyn Clock>) -> JwtAuthenticator {
-        let resolver = Arc::new(LocalKeyResolver::new(
-            JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(secret.to_vec()),
-        ));
-        JwtAuthenticator::new(
-            JwtConfig { algorithm: JwtAlgorithm::Hs256, expected_iss: None, expected_aud: None },
-            resolver,
-            clock,
-        )
-    }
-
     // -----------------------------------------------------------------------
     // RS256 key helpers — 2048-bit test keys (generated offline, not real)
     // -----------------------------------------------------------------------
@@ -247,6 +260,89 @@ mod tests {
             expected_iss: None,
             expected_aud: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ES256 key helpers — P-256 test keys (generated offline, not real)
+    // -----------------------------------------------------------------------
+
+    // NOTE: These are TEST ONLY keys. Never use in production.
+    fn ec_private_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_private.pem")
+    }
+
+    fn ec_public_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_public.pem")
+    }
+
+    fn ec_other_public_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_other_public.pem")
+    }
+
+    fn ec_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Es256,
+            VerificationKey::EcPem(ec_public_key_pem().to_string()),
+        ))
+    }
+
+    fn make_ec_token(claims: &serde_json::Value) -> String {
+        let header = Header::new(Algorithm::ES256);
+        encode(
+            &header,
+            claims,
+            &EncodingKey::from_ec_pem(ec_private_key_pem().as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn ec_config() -> JwtConfig {
+        JwtConfig { algorithm: JwtAlgorithm::Es256, expected_iss: None, expected_aud: None }
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 valid token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_valid_token_returns_security_context() {
+        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600) });
+        let token = make_ec_token(&claims);
+        let auth = JwtAuthenticator::new(ec_config(), ec_resolver(), now_clock());
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "es256-user");
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 mismatched key → InvalidSignature
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_mismatched_key_returns_invalid_signature() {
+        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600) });
+        let token = make_ec_token(&claims);
+        // Verify with the OTHER public key — signature mismatch
+        let other_resolver = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Es256,
+            VerificationKey::EcPem(ec_other_public_key_pem().to_string()),
+        ));
+        let auth = JwtAuthenticator::new(ec_config(), other_resolver, now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert_eq!(err, AuthenticationError::InvalidSignature);
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 authenticator configured for ES256 rejects HS256 token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_provider_rejects_hs256_token() {
+        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
+        let hs256_token = make_hs256_token(&claims);
+        // Authenticator configured for ES256 — HS256 header alg must be rejected
+        let auth = JwtAuthenticator::new(ec_config(), ec_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(hs256_token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -471,10 +567,9 @@ mod tests {
         let rs256_token = make_rs256_token(&json!({ "sub": "user-1" }));
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(&Credential::Bearer(rs256_token)).unwrap_err();
-        assert!(matches!(
-            err,
-            AuthenticationError::AlgorithmNotSupported(_) | AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)
-        ));
+        // Fix B-1: config.algorithm mismatch is now detected immediately after header parse,
+        // before the resolver is called — so this MUST be AlgorithmNotSupported.
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -812,19 +907,6 @@ mod tests {
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken for absent aud, got {err:?}"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // Helper function test (hs256_authenticator)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn hs256_authenticator_helper_works() {
-        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
-        let token = make_hs256_token(&claims);
-        let auth = hs256_authenticator(&hs256_secret(), now_clock());
-        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
-        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
