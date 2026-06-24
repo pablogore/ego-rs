@@ -1597,6 +1597,132 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // W2: AlgorithmMismatch + InvalidKeyMaterial per provider
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hs256_provider_algorithm_mismatch_maps_to_not_supported() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::AlgorithmMismatch {
+                expected: JwtAlgorithm::Rs256,
+                requested: JwtAlgorithm::Hs256,
+            },
+        });
+        let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
+        let token = make_hs256_token(&claims);
+        let err = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
+    }
+
+    #[test]
+    fn hs256_provider_invalid_key_material_maps_to_invalid_token() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::InvalidKeyMaterial("corrupt key".into()),
+        });
+        let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
+        let token = make_hs256_token(&claims);
+        let err = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn rs256_provider_algorithm_mismatch_maps_to_not_supported() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::AlgorithmMismatch {
+                expected: JwtAlgorithm::Hs256,
+                requested: JwtAlgorithm::Rs256,
+            },
+        });
+        let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
+        let token = make_rs256_token(&claims);
+        let err = Rs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
+    }
+
+    #[test]
+    fn rs256_provider_invalid_key_material_maps_to_invalid_token() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::InvalidKeyMaterial("corrupt pem".into()),
+        });
+        let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
+        let token = make_rs256_token(&claims);
+        let err = Rs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn es256_provider_algorithm_mismatch_maps_to_not_supported() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::AlgorithmMismatch {
+                expected: JwtAlgorithm::Hs256,
+                requested: JwtAlgorithm::Es256,
+            },
+        });
+        let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
+        let token = make_ec_token(&claims);
+        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
+    }
+
+    #[test]
+    fn es256_provider_invalid_key_material_maps_to_invalid_token() {
+        let resolver = Arc::new(FailingResolver {
+            error: KeyResolverError::InvalidKeyMaterial("corrupt ec pem".into()),
+        });
+        let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
+        let token = make_ec_token(&claims);
+        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // W3: Es256 wrong-variant key (HMAC returned for EC provider)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_wrong_variant_hmac_key_returns_invalid_token() {
+        let resolver = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Es256,
+            VerificationKey::Hmac(hs256_secret()),
+        ));
+        let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
+        let token = make_ec_token(&claims);
+        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // W4: hs256_no_kid_forwards_none at provider level
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hs256_provider_no_kid_forwards_none_to_resolver() {
+        let (capturing, received_kid) =
+            CapturingResolver::new(VerificationKey::Hmac(hs256_secret()), None);
+        let resolver: Arc<dyn KeyResolver> = capturing;
+        let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
+        let token = make_hs256_token(&claims);
+        Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+            .authenticate(&Credential::Bearer(token))
+            .unwrap();
+        assert_eq!(*received_kid.lock().unwrap(), Some(None));
+    }
+
+    // -----------------------------------------------------------------------
     // Send + Sync compile-time assertions for all three providers
     // -----------------------------------------------------------------------
 
