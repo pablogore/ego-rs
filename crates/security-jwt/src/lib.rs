@@ -14,6 +14,7 @@
 //! |-----------|----------|
 //! | HS256 | Shared HMAC secret (`Vec<u8>`) via `VerificationKey::Hmac` |
 //! | RS256 | RSA public key (PEM) via `VerificationKey::RsaPem` |
+//! | ES256 | EC P-256 public key (PEM) via `VerificationKey::EcPem` |
 //!
 //! ## Example
 //!
@@ -50,6 +51,9 @@ pub mod config;
 pub mod authenticator;
 
 mod key_resolver;
+mod validation;
+#[cfg(test)]
+mod test_helpers;
 
 pub use authenticator::JwtAuthenticator;
 pub use config::{JwtAlgorithm, JwtConfig};

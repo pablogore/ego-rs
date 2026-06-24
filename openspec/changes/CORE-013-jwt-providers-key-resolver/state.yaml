@@ -1,0 +1,58 @@
+change: CORE-013-jwt-providers-key-resolver
+title: "JWT Providers + KeyResolver"
+status: tasks-complete
+artifact_store: hybrid
+created: "2026-06-24"
+
+phases:
+  proposal: complete
+  spec: complete
+  design: complete
+  tasks: complete
+  apply: pending
+  verify: pending
+  archive: pending
+
+delivery:
+  strategy: stacked-to-develop
+  chain_strategy: stacked-to-main
+  prs:
+    - id: PR1
+      scope: "Phase 0–1: fixtures + variants + JwtValidationEngine"
+      base: develop
+      status: pending
+    - id: PR2
+      scope: "Phase 2–4: Hs256 + Rs256 + Es256AuthenticationProvider"
+      base: develop
+      status: pending
+    - id: PR3
+      scope: "Phase 5: remove JwtAuthenticator/JwtConfig + cleanup"
+      base: develop
+      status: pending
+
+github:
+  issue: 57
+  branch: feature/CORE-013-jwt-providers-key-resolver
+
+engram:
+  proposal: 970
+  design: 972
+  spec: 973
+  tasks: 974
+
+decisions:
+  - AD-008
+  - AD-009
+  - AD-010
+  - AD-011
+  - AD-012
+  - AD-013
+  - AD-014
+  - AD-015
+  - AD-016
+  - AD-017
+  - AD-018
+  - AD-019
+
+strict_tdd: true
+test_command: "cargo test --workspace"
