@@ -26,7 +26,7 @@ pub struct Identity {
 ```
 
 **Invariants**:
-- `subject` is never empty (guaranteed by AuthenticationProvider implementations)
+- `subject` is the empty string `""` when `sub` is present but cannot be decoded as a string (graceful degradation per CLAR-005); it reflects the decoded string value when `sub` is a valid string claim
 - `roles` and `attributes` use BTreeSet/BTreeMap for deterministic iteration order
 - No HashMap or HashSet used anywhere in public API
 
@@ -63,7 +63,7 @@ pub struct Claims {
 **Invariants**:
 - Custom claims are never merged into StandardClaims
 - Custom map uses BTreeMap for deterministic ordering
-- Identity fields (`sub`, `roles`, `tenant_id`/`tid`) are extracted into Identity and also preserved in custom map if their types are wrong (graceful degradation per CLAR-003)
+- Identity fields (`sub`, `roles`, `tenant_id`/`tid`) are extracted into Identity and also preserved in custom map if their types are wrong (graceful degradation per CLAR-005)
 
 ### SecurityContext
 
@@ -104,7 +104,7 @@ Errors that can occur during authentication.
 
 ```rust
 pub enum AuthenticationError {
-    InvalidToken(String),           // Malformed token or other structural issue
+    InvalidToken(String),           // Malformed token, invalid structure, or security claim with unexpected type (see CLAR-005)
     ExpiredToken,                    // exp claim indicates token has expired
     MissingClaim(String),            // Required claim is absent (e.g., 'sub')
     InvalidSignature,                // Signature validation failed
@@ -163,7 +163,7 @@ pub trait Clock: Send + Sync {
 
 5. **Clock injection**: All time-sensitive validation uses an injected Clock abstraction, enabling deterministic testing without mocking system calls.
 
-6. **Claim classification**: Claims are split into two categories with different wrong-type behaviors. Identity claims (`sub`, `tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives an empty/null value and the raw claim is preserved in `Claims.custom`. Security claims (`exp`, `nbf`, `iat`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
+6. **Claim classification**: Claims are split into two categories with different wrong-type behaviors. Identity claims (`sub`, `tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives its zero value (`""` for `String`, `None` for `Option<String>`, empty set for `BTreeSet`) and the raw claim is preserved in `Claims.custom` under its original key. Security claims (`exp`, `nbf`, `iat`, `jti`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
 
 7. **No type merging**: Identity, StandardClaims, and Claims.custom are separate. Standard claims are never merged into a flat map.
 
@@ -176,11 +176,11 @@ JWT claims fall into two categories with distinct wrong-type behaviors:
 **Identity Claims**: `sub`, `tenant_id`, `tid`, `roles`
 
 - Wrong type MUST NOT fail authentication.
-- Implementation MUST degrade gracefully: the nominal identity field receives an empty/null value.
+- Implementation MUST degrade gracefully: the nominal identity field receives its zero value (`""` for `String`, `None` for `Option<String>`, empty set for `BTreeSet`).
 - The original raw claim value MUST be preserved in `Claims.custom` under its original key.
 - Rationale: identity enrichment fields are not security-critical; a token with an unexpected claim encoding is still a valid, authenticated token.
 
-**Security Claims**: `exp`, `nbf`, `iat`, `iss`, `aud`
+**Security Claims**: `exp`, `nbf`, `iat`, `jti`, `iss`, `aud`
 
 - Wrong type MUST fail authentication with `AuthenticationError::InvalidToken`.
 - The raw value is NOT preserved; the request is rejected immediately before `SecurityContext` is produced.
@@ -196,7 +196,10 @@ Then `Err(AuthenticationError::InvalidToken("exp claim is not a valid integer"))
 
 Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
 When `JwtAuthenticator::authenticate` is called  
-Then `Ok(SecurityContext)` is returned with `identity.subject == ""` and `claims.custom["sub"] == 123`
+Then `Ok(SecurityContext)` is returned with:
+- `identity.subject == ""` (graceful degradation)
+- `claims.custom["sub"] == 123` (raw value preserved)
+- `claims.custom` does NOT contain `"exp"` (security claim values are never preserved in `Claims.custom`)
 
 ---
 
@@ -219,13 +222,13 @@ Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
 
 **Scenario B — present claim, wrong type**
 
-Given a JWT with `{ "sub": 123 }` (integer, not a string)  
+Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
 When `JwtAuthenticator::authenticate` is called  
 Then `Ok(SecurityContext)` is returned with:
 - `identity.subject == ""` (empty string, not an error)
 - `claims.custom["sub"] == 123` (raw value preserved under original key)
 
-This behavior applies to all identity claims as defined in CLAR-005. CLAR-006 uses `sub` as the canonical example because it is the only required identity claim.
+Wrong-type handling (graceful degradation) applies to all identity claims as defined in CLAR-005. Missing-claim semantics apply only to identity claims that are required by contract — `sub` is the only required identity claim. Absent optional claims (`tenant_id`, `tid`, `roles`) are simply not present in the token; no error is produced.
 
 ---
 
@@ -237,7 +240,7 @@ The `crates/security-jwt` crate provides a reference implementation of Authentic
 - **JwtConfig** struct: algorithm selection, key material (secret bytes or PEM), optional iss/aud constraints
 - **JwtAuthenticator** struct: implements AuthenticationProvider for JWT tokens
 
-JwtAuthenticator verifies signatures, validates exp/nbf time claims using the injected Clock, and extracts Identity fields with graceful degradation.
+JwtAuthenticator verifies signatures, validates present exp, nbf, and iat time claims using the injected Clock, and extracts Identity fields with graceful degradation.
 
 ## Dependency Graph
 
@@ -260,4 +263,5 @@ crates/security-jwt (HS256/RS256 implementation)
 - RFC 7519: JSON Web Token (JWT)
 - ADR-009A: Sync authentication boundary decision
 - CORE-011: JWT Authentication Provider implementation
-- CLAR-001–006: JWT Authentication clarifications
+- CLAR-005–006: JWT Authentication clarifications (defined in this document)
+- CLAR-001–004: Earlier JWT authentication clarifications (see change artifact history)
