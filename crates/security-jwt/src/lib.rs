@@ -1,12 +1,12 @@
 //! # security-jwt
 //!
-//! JWT-based implementation of [`ego_domain::auth::AuthenticationProvider`].
+//! JWT-based implementation of [`ego_security_sdk::AuthenticationProvider`].
 //!
 //! ## Overview
 //!
 //! This crate provides [`JwtAuthenticator`] — a synchronous, thread-safe
 //! authenticator that validates JSON Web Tokens (JWTs) and extracts a
-//! [`ego_domain::auth::SecurityContext`] from verified tokens.
+//! [`ego_security_sdk::SecurityContext`] from verified tokens.
 //!
 //! ## Supported algorithms
 //!
@@ -20,7 +20,8 @@
 //! ```rust,no_run
 //! use std::sync::Arc;
 //! use security_jwt::{JwtAuthenticator, JwtConfig, JwtAlgorithm, LocalKeyResolver, VerificationKey};
-//! use ego_domain::auth::{AuthenticationProvider, Credential, SystemClock};
+//! use ego_security_sdk::{AuthenticationProvider, Credential};
+//! use ego_domain::auth::SystemClock;
 //!
 //! let resolver = Arc::new(LocalKeyResolver::new(
 //!     JwtAlgorithm::Hs256,
@@ -32,25 +33,20 @@
 //!     expected_aud: None,
 //! };
 //! let auth = JwtAuthenticator::new(config, resolver, Arc::new(SystemClock));
-//! // let ctx = auth.authenticate(Credential::BearerToken(raw_token))?;
+//! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;
 //! ```
 //!
 //! ## Layer constraint (NFR-001)
 //!
 //! `security-jwt` is classified as `infrastructure` in `layers.toml`.
 //! It MUST NOT be a dependency of `ego-runtime`.
-//!
-//! ## No `ego-security-sdk` dependency (CLAR-004)
-//!
-//! This crate MUST NOT import `ego-security-sdk`. The domain contracts
-//! in `ego-domain::auth` are the only external ego-rs dependency.
 
 #![deny(missing_docs)]
 
 /// JWT configuration — algorithm selection and validation parameters.
 pub mod config;
 
-/// JWT authenticator — the [`ego_domain::auth::AuthenticationProvider`] implementation.
+/// JWT authenticator — the [`ego_security_sdk::AuthenticationProvider`] implementation.
 pub mod authenticator;
 
 mod key_resolver;

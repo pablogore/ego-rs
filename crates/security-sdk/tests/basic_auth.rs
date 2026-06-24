@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use ego_security_sdk::{
     authentication::AuthenticationProvider,
     credential::Credential,
@@ -8,15 +7,15 @@ use ego_security_sdk::{
     principal::{Principal, PrincipalKind, SubjectId},
     providers::basic::{BasicAuthenticationProvider, CredentialVerifier},
 };
+use ego_domain::auth::AuthenticationError;
 
 struct StaticVerifier {
     username: String,
     secret: String,
 }
 
-#[async_trait]
 impl CredentialVerifier for StaticVerifier {
-    async fn verify(
+    fn verify(
         &self,
         username: &str,
         secret: &str,
@@ -32,72 +31,69 @@ impl CredentialVerifier for StaticVerifier {
 
 struct ErrorVerifier;
 
-#[async_trait]
 impl CredentialVerifier for ErrorVerifier {
-    async fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
+    fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
         Err(SecurityError::ProviderError("io".into()))
     }
 }
 
-#[tokio::test]
-async fn injected_verifier_returns_principal() {
+#[test]
+fn injected_verifier_returns_security_context() {
     let provider = BasicAuthenticationProvider::new(Arc::new(StaticVerifier {
         username: "alice".into(),
         secret: "s3cr3t".into(),
     }));
 
-    let result = provider
-        .authenticate(&Credential::Basic {
-            username: "alice".into(),
-            secret: "s3cr3t".into(),
-        })
-        .await;
+    let result = provider.authenticate(&Credential::Basic {
+        username: "alice".into(),
+        secret: "s3cr3t".into(),
+    });
     assert!(result.is_ok());
-    let p = result.unwrap();
-    assert_eq!(p.subject.as_str(), "user:alice");
+    let ctx = result.unwrap();
+    assert_eq!(ctx.principal().subject.as_str(), "user:alice");
 }
 
-#[tokio::test]
-async fn injected_verifier_returns_none_gives_auth_failed() {
+#[test]
+fn injected_verifier_returns_none_gives_invalid_token() {
     let provider = BasicAuthenticationProvider::new(Arc::new(StaticVerifier {
         username: "alice".into(),
         secret: "s3cr3t".into(),
     }));
 
-    let result = provider
-        .authenticate(&Credential::Basic {
-            username: "alice".into(),
-            secret: "wrong".into(),
-        })
-        .await;
+    let result = provider.authenticate(&Credential::Basic {
+        username: "alice".into(),
+        secret: "wrong".into(),
+    });
     assert!(matches!(
         result,
-        Err(SecurityError::AuthenticationFailed(_))
+        Err(AuthenticationError::InvalidToken(_))
     ));
 }
 
-#[tokio::test]
-async fn non_basic_credential_returns_invalid_credential() {
+#[test]
+fn non_basic_credential_returns_invalid_token() {
     let provider = BasicAuthenticationProvider::new(Arc::new(StaticVerifier {
         username: "alice".into(),
         secret: "s3cr3t".into(),
     }));
 
-    let result = provider
-        .authenticate(&Credential::Bearer("tok".into()))
-        .await;
-    assert!(matches!(result, Err(SecurityError::InvalidCredential(_))));
+    let result = provider.authenticate(&Credential::Bearer("tok".into()));
+    assert!(matches!(
+        result,
+        Err(AuthenticationError::InvalidToken(_))
+    ));
 }
 
-#[tokio::test]
-async fn verifier_backend_error_gives_provider_error() {
+#[test]
+fn verifier_backend_error_gives_invalid_token() {
     let provider = BasicAuthenticationProvider::new(Arc::new(ErrorVerifier));
 
-    let result = provider
-        .authenticate(&Credential::Basic {
-            username: "alice".into(),
-            secret: "s3cr3t".into(),
-        })
-        .await;
-    assert!(matches!(result, Err(SecurityError::ProviderError(_))));
+    let result = provider.authenticate(&Credential::Basic {
+        username: "alice".into(),
+        secret: "s3cr3t".into(),
+    });
+    assert!(matches!(
+        result,
+        Err(AuthenticationError::InvalidToken(_))
+    ));
 }

@@ -47,35 +47,35 @@ pub struct Principal {
     pub kind: PrincipalKind,
     /// Canonical, validated subject id.
     pub subject: SubjectId,
+    /// Tenant/workspace this principal belongs to, if any.
+    pub tenant_id: Option<String>,
     /// Roles assigned to this principal.
     pub roles: HashSet<Role>,
-    /// Claims asserted about this principal.
-    pub claims: Vec<Claim>,
     /// Free-form attributes.
     pub attributes: HashMap<String, String>,
 }
 
 impl Principal {
-    /// Creates a principal with the given kind and subject; empty roles/claims/attributes.
+    /// Creates a principal with the given kind and subject; empty roles/attributes.
     pub fn new(kind: PrincipalKind, subject: SubjectId) -> Self {
         Self {
             kind,
             subject,
+            tenant_id: None,
             roles: HashSet::new(),
-            claims: Vec::new(),
             attributes: HashMap::new(),
         }
+    }
+
+    /// Builder: sets the tenant id.
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
     }
 
     /// Builder: adds a role (duplicates are silently deduplicated via [`HashSet`] semantics).
     pub fn with_role(mut self, role: Role) -> Self {
         self.roles.insert(role);
-        self
-    }
-
-    /// Builder: appends a claim.
-    pub fn with_claim(mut self, claim: Claim) -> Self {
-        self.claims.push(claim);
         self
     }
 
@@ -93,7 +93,7 @@ impl Principal {
 
 #[cfg(test)]
 mod tests {
-    use super::{Claim, Principal, PrincipalKind, Role};
+    use super::{Principal, PrincipalKind, Role};
     use crate::principal::SubjectId;
 
     fn make_subject(s: &str) -> SubjectId {
@@ -106,8 +106,8 @@ mod tests {
         let p = Principal::new(PrincipalKind::User, subject.clone());
         assert_eq!(p.kind, PrincipalKind::User);
         assert_eq!(p.subject.as_str(), "user:abc");
+        assert!(p.tenant_id.is_none());
         assert!(p.roles.is_empty(), "roles should start empty");
-        assert!(p.claims.is_empty(), "claims should start empty");
         assert!(p.attributes.is_empty(), "attributes should start empty");
     }
 
@@ -125,26 +125,26 @@ mod tests {
     }
 
     #[test]
+    fn with_tenant_id_sets_field() {
+        let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
+            .with_tenant_id("acme");
+        assert_eq!(p.tenant_id, Some("acme".into()));
+    }
+
+    #[test]
+    fn with_tenant_id_overwrites() {
+        let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
+            .with_tenant_id("acme")
+            .with_tenant_id("contoso");
+        assert_eq!(p.tenant_id, Some("contoso".into()));
+    }
+
+    #[test]
     fn with_role_adds_to_set() {
-        // Adding the same role twice should keep only one entry (HashSet semantics).
         let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
             .with_role(Role("admin".into()))
             .with_role(Role("admin".into()));
         assert_eq!(p.roles.len(), 1, "duplicate role should be deduplicated");
-    }
-
-    #[test]
-    fn with_claim_appends() {
-        let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
-            .with_claim(Claim {
-                name: "email".into(),
-                value: "a@b.com".into(),
-            })
-            .with_claim(Claim {
-                name: "iss".into(),
-                value: "https://auth.example.com".into(),
-            });
-        assert_eq!(p.claims.len(), 2);
     }
 
     #[test]
@@ -186,22 +186,15 @@ mod tests {
 
     #[test]
     fn subject_id_and_attributes() {
-        // TS-001: full construction scenario
         let p = Principal::new(PrincipalKind::User, make_subject("user:42"))
             .with_role(Role("admin".into()))
-            .with_claim(Claim {
-                name: "email".into(),
-                value: "alice@example.com".into(),
-            })
+            .with_tenant_id("acme")
             .with_attribute("region", "eu-west-1");
 
         assert_eq!(p.kind, PrincipalKind::User);
         assert_eq!(p.subject.as_str(), "user:42");
         assert!(p.has_role(&Role("admin".into())));
-        assert!(p
-            .claims
-            .iter()
-            .any(|c| c.name == "email" && c.value == "alice@example.com"));
+        assert_eq!(p.tenant_id, Some("acme".into()));
         assert_eq!(
             p.attributes.get("region").map(String::as_str),
             Some("eu-west-1")

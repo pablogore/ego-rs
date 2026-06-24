@@ -27,7 +27,7 @@
 //! | `actor`         | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
-//! | `auth`          | `Identity`, `Claims`, `SecurityContext`, `AuthenticationProvider`, `Clock` |
+//! | `auth`          | `Claims`, `Credential`, `Clock`, `AuthenticationError` |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -63,7 +63,7 @@ pub mod envelope;
 /// Read side projection engine — processors, sessions, runners, and storage SPIs.
 pub mod read_side;
 
-/// Authentication domain contracts — Identity, Claims, SecurityContext, AuthenticationProvider, Clock.
+/// Authentication domain contracts — Claims, Credential, Clock, AuthenticationError.
 pub mod auth;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
@@ -80,6 +80,5 @@ pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
 pub use auth::{
-    AuthenticationError, AuthenticationProvider, Claims, Clock, Credential, Identity,
-    SecurityContext, StandardClaims, SystemClock,
+    AuthenticationError, Claims, Clock, Credential, StandardClaims, SystemClock,
 };

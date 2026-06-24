@@ -91,19 +91,21 @@ mod tests {
     use ego_security_sdk::authorization::{
         AuthorizationDecision, AuthorizationProvider,
     };
+    use ego_security_sdk::context::SecurityContext;
     use ego_security_sdk::credential::Credential;
     use ego_security_sdk::error::SecurityError;
     use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
+    use ego_security_sdk::AuthenticationError;
 
     use super::{Runtime, RuntimeBuilder};
 
     struct StubAuthn;
 
-    #[async_trait]
     impl AuthenticationProvider for StubAuthn {
-        async fn authenticate(&self, _credential: &Credential) -> Result<Principal, SecurityError> {
+        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
             let subject = SubjectId::new("user:stub").unwrap();
-            Ok(Principal::new(PrincipalKind::User, subject))
+            let principal = Principal::new(PrincipalKind::User, subject);
+            Ok(SecurityContext::new(principal))
         }
     }
 
