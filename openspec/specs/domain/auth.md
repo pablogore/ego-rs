@@ -236,9 +236,12 @@ Wrong-type handling (graceful degradation) applies to all identity claims as def
 
 The `crates/security-jwt` crate provides a reference implementation of AuthenticationProvider for JWT tokens:
 
-- **JwtAlgorithm** enum: HS256 (HMAC-SHA256), RS256 (RSA-SHA256)
-- **JwtConfig** struct: algorithm selection, key material (secret bytes or PEM), optional iss/aud constraints
-- **JwtAuthenticator** struct: implements AuthenticationProvider for JWT tokens
+- **JwtAlgorithm** enum: HS256, RS256 (marker enum — key material removed). Previously embedded key material has moved to `VerificationKey` inside a `KeyResolver` (introduced in CORE-011A).
+- **JwtConfig** struct: algorithm selection (JwtAlgorithm marker), optional iss/aud constraints. No key material. Previously embedded key material has moved to `VerificationKey` behind the resolver.
+- **JwtAuthenticator** struct: implements AuthenticationProvider for JWT tokens. Key resolution now delegates to `Arc<dyn KeyResolver>` injected at construction via `JwtAuthenticator::new(config, resolver, clock)`.
+- **KeyResolver** trait (`crates/security-jwt`): async trait returning `Result<VerificationKey, KeyResolverError>`. Accepts `kid: Option<&str>` and `algorithm: JwtAlgorithm`. Resolver MUST be cache-first — return from locally available state; network I/O MUST occur outside the auth hot path.
+- **VerificationKey** enum (`crates/security-jwt`): `Hmac(Vec<u8>)` for HS256, `RsaPem(String)` for RS256. `#[non_exhaustive]` — extensible for future key types (e.g., ES256, JWK).
+- **LocalKeyResolver** struct (`crates/security-jwt`): concrete `KeyResolver` holding a single `(algorithm, VerificationKey)` pair. Ignores `kid` (advisory). Satisfies the cache-first contract trivially.
 
 JwtAuthenticator verifies signatures, validates present exp, nbf, and iat time claims using the injected Clock, and extracts Identity fields with graceful degradation.
 
@@ -255,8 +258,8 @@ crates/security-jwt (HS256/RS256 implementation)
 ## Future Capabilities
 
 - **CORE-012**: Authorization provider (RBAC/ABAC based on Identity roles/attributes)
-- **CORE-011A**: ES256/EdDSA algorithm support (extend JwtAlgorithm and JwtAuthenticator)
-- **CORE-011B**: JWKS remote key resolver (decouple key material from JwtConfig)
+- **Future**: ES256/EdDSA algorithm support (extend JwtAlgorithm and VerificationKey)
+- **CORE-011B**: JWKS remote key resolver (cache-backed, OIDC discovery, multi-issuer routing)
 
 ## References
 
