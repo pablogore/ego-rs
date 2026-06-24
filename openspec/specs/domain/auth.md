@@ -6,29 +6,9 @@
 
 ## Overview
 
-The domain authentication module (`crates/domain/src/auth/`) defines the synchronous authentication contract for ego-rs. It separates the authenticated principal (Identity) from raw token claims (Claims), and exposes a trait-based authentication port (AuthenticationProvider) for infrastructure implementations.
-
-All authentication happens synchronously; async wrappers are scoped to future capabilities (e.g., CORE-012).
+The domain authentication module (`crates/domain/src/auth/`) defines the synchronous authentication data model for ego-rs. It separates the authenticated principal from raw token claims (`Claims`). The canonical principal type (`Principal`) lives in `security-sdk`; domain keeps pure data models only (`Claims`, `Credential`, `AuthenticationError`).
 
 ## Core Types
-
-### Identity
-
-The authenticated principal extracted from a credential.
-
-```rust
-pub struct Identity {
-    pub subject: String,                    // JWT 'sub' claim
-    pub tenant_id: Option<String>,          // Optional org/tenant scope
-    pub roles: BTreeSet<String>,            // Role assignments (deterministic order)
-    pub attributes: BTreeMap<String, String>, // Arbitrary metadata (deterministic order)
-}
-```
-
-**Invariants**:
-- `subject` is the empty string `""` when `sub` is present but cannot be decoded as a string (graceful degradation per CLAR-005); it reflects the decoded string value when `sub` is a valid string claim
-- `roles` and `attributes` use BTreeSet/BTreeMap for deterministic iteration order
-- No HashMap or HashSet used anywhere in public API
 
 ### StandardClaims
 
@@ -63,23 +43,7 @@ pub struct Claims {
 **Invariants**:
 - Custom claims are never merged into StandardClaims
 - Custom map uses BTreeMap for deterministic ordering
-- Identity fields (`sub`, `roles`, `tenant_id`/`tid`) are extracted into Identity and also preserved in custom map if their types are wrong (graceful degradation per CLAR-005)
-
-### SecurityContext
-
-The resolved, authenticated execution context.
-
-```rust
-pub struct SecurityContext {
-    pub identity: Identity,
-    pub claims: Claims,
-}
-```
-
-**Invariants**:
-- Always produced by successful AuthenticationProvider::authenticate call
-- Is a concrete struct (not a trait object)
-- Implements Clone, Debug, PartialEq
+- Identity fields (`sub`, `roles`, `tenant_id`/`tid`) are extracted into Principal (from `security-sdk`) and also preserved in custom map if their types are wrong (graceful degradation per CLAR-005)
 
 ### Credential
 
@@ -117,25 +81,6 @@ pub enum AuthenticationError {
 - Implementations MUST NOT panic; all errors are recoverable
 - InvalidToken carries a message for context
 
-### AuthenticationProvider
-
-The synchronous authentication port.
-
-```rust
-pub trait AuthenticationProvider: Send + Sync {
-    fn authenticate(
-        &self,
-        credential: Credential,
-    ) -> Result<SecurityContext, AuthenticationError>;
-}
-```
-
-**Invariants**:
-- Synchronous: no async I/O (JWT verification is CPU-bound)
-- Send + Sync: implementations can be shared across threads via Arc<dyn AuthenticationProvider>
-- Credential is consumed by value (no references)
-- No authentication state is passed into the trait; implementations are stateless ports
-
 ### Clock
 
 An injectable time source for deterministic testing.
@@ -155,9 +100,9 @@ pub trait Clock: Send + Sync {
 
 1. **Synchronous boundary**: All authentication is synchronous. Async wrappers (e.g., async task spawning) are left for higher layers or future work.
 
-2. **No ambient context**: The AuthenticationProvider trait carries no implicit state. Identity and claims are always explicit in the SecurityContext return value.
+2. **No ambient context**: Authentication carries no implicit state. Principal and claims are always explicit in the SecurityContext return value.
 
-3. **Deterministic ordering**: All collection types in Identity and Claims use BTreeSet/BTreeMap. HashMap and HashSet MUST NOT appear in public API.
+3. **Deterministic ordering**: All collection types in Claims use BTreeMap. HashMap and HashSet MUST NOT appear in public API.
 
 4. **Thread safety**: All public types and traits have Send + Sync bounds, enabling safe concurrent use via Arc.
 
@@ -165,7 +110,7 @@ pub trait Clock: Send + Sync {
 
 6. **Claim classification**: Claims are split into two categories with different wrong-type behaviors. Identity claims (`sub`, `tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives its zero value (`""` for `String`, `None` for `Option<String>`, empty set for `BTreeSet`) and the raw claim is preserved in `Claims.custom` under its original key. Security claims (`exp`, `nbf`, `iat`, `jti`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
 
-7. **No type merging**: Identity, StandardClaims, and Claims.custom are separate. Standard claims are never merged into a flat map.
+7. **No type merging**: StandardClaims and Claims.custom are separate. Standard claims are never merged into a flat map.
 
 ## Clarifications
 
@@ -197,7 +142,7 @@ Then `Err(AuthenticationError::InvalidToken("exp claim is not a valid integer"))
 Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
 When `JwtAuthenticator::authenticate` is called  
 Then `Ok(SecurityContext)` is returned with:
-- `identity.subject == ""` (graceful degradation)
+- `principal.subject_id == ""` (graceful degradation)
 - `claims.custom["sub"] == 123` (raw value preserved)
 - `claims.custom` does NOT contain `"exp"` (security claim values are never preserved in `Claims.custom`)
 
@@ -225,7 +170,7 @@ Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
 Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
 When `JwtAuthenticator::authenticate` is called  
 Then `Ok(SecurityContext)` is returned with:
-- `identity.subject == ""` (empty string, not an error)
+- `principal.subject_id == ""` (empty string, not an error)
 - `claims.custom["sub"] == 123` (raw value preserved under original key)
 
 Wrong-type handling (graceful degradation) applies to all identity claims as defined in CLAR-005. Missing-claim semantics apply only to identity claims that are required by contract — `sub` is the only required identity claim. Absent optional claims (`tenant_id`, `tid`, `roles`) are simply not present in the token; no error is produced.
@@ -243,12 +188,14 @@ The `crates/security-jwt` crate provides a reference implementation of Authentic
 - **VerificationKey** enum (`crates/security-jwt`): `Hmac(Vec<u8>)` for HS256, `RsaPem(String)` for RS256. `#[non_exhaustive]` — extensible for future key types (e.g., ES256, JWK).
 - **LocalKeyResolver** struct (`crates/security-jwt`): concrete `KeyResolver` holding a single `(algorithm, VerificationKey)` pair. Ignores `kid` (advisory). Satisfies the cache-first contract trivially.
 
-JwtAuthenticator verifies signatures, validates present exp, nbf, and iat time claims using the injected Clock, and extracts Identity fields with graceful degradation.
+JwtAuthenticator verifies signatures, validates present exp, nbf, and iat time claims using the injected Clock, and extracts Principal fields with graceful degradation.
 
 ## Dependency Graph
 
 ```
-crates/domain/auth (port)
+crates/domain/auth (data models: Claims, Credential, AuthenticationError)
+  ↑ (Claims re-exported)
+crates/security-sdk (authN + authZ traits, SecurityContext, Principal)
   ↑
 crates/security-jwt (HS256/RS256 implementation)
 ```
@@ -257,9 +204,9 @@ crates/security-jwt (HS256/RS256 implementation)
 
 ## Future Capabilities
 
-- **CORE-012**: Authorization provider (RBAC/ABAC based on Identity roles/attributes)
-- **Future**: ES256/EdDSA algorithm support (extend JwtAlgorithm and VerificationKey)
 - **CORE-011B**: JWKS remote key resolver (cache-backed, OIDC discovery, multi-issuer routing)
+- **Future**: ES256/EdDSA algorithm support (extend JwtAlgorithm and VerificationKey)
+- **Future**: Additional domain auth types as needed by new providers
 
 ## References
 

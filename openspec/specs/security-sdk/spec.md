@@ -13,15 +13,17 @@ Introduce `crates/security-sdk` — a transport-agnostic, provider-agnostic secu
 `Principal` is a value type representing a successfully authenticated actor. It MUST carry:
 - `kind: PrincipalKind` — one of `User`, `Service`, `Process`, `Agent`
 - `subject_id: SubjectId` — an opaque non-empty string (e.g. `user:123`, `service:billing`, `machine:agent` — illustrative examples, no format enforced at the core level)
+- `tenant_id: Option<String>` — optional org/tenant scope
 - `roles: HashSet<Role>` — a set of zero or more assigned roles
-- `claims: Vec<Claim>` — zero or more name/value claims
 - `attributes: HashMap<String, String>` — arbitrary key-value metadata
 
-**Given** the required fields `kind`, `subject_id`, and empty collections for roles, claims, and attributes
-**When** `Principal::new(kind, subject_id)` (or builder equivalent) is called
-**Then** a valid `Principal` is returned with `kind` and `subject_id` set and empty collections
+(Previously: no `tenant_id`. `claims: Vec<Claim>` was a native field — claims are now exclusive to `SecurityContext.claims` per AD-008.)
 
-**Test**: `principal::tests::constructs_with_required_fields` — assert each field matches the input; roles/claims/attributes are empty.
+**Given** the required fields `kind`, `subject_id`, and empty collections for roles and attributes
+**When** `Principal::new(kind, subject_id)` (or builder equivalent) is called
+**Then** a valid `Principal` is returned with `kind` and `subject_id` set, `tenant_id` is `None`, and roles/attributes are empty
+
+**Test**: `principal::tests::constructs_with_required_fields` — assert each field matches the input; roles/attributes are empty.
 
 ---
 
@@ -70,21 +72,22 @@ No variant contains transport types (no `http::HeaderValue`, no `tonic::metadata
 
 ---
 
-### FR-005: AuthenticationProvider — object-safe async trait
+### FR-005: AuthenticationProvider — object-safe sync trait, returns SecurityContext
 
-`AuthenticationProvider` MUST be an object-safe async trait with the following signature:
+`AuthenticationProvider` MUST be an object-safe, synchronous trait with the following signature:
 
 ```rust
-#[async_trait]
 pub trait AuthenticationProvider: Send + Sync {
-    async fn authenticate(
+    fn authenticate(
         &self,
         credential: &Credential,
-    ) -> Result<Principal, SecurityError>;
+    ) -> Result<SecurityContext, AuthenticationError>;
 }
 ```
 
 The trait MUST contain no generic methods, no `Self`-returning methods, and no transport types anywhere in its signature. It MUST be storable as `Arc<dyn AuthenticationProvider>`. Providers that need tenant or environment context receive it at construction time via dependency injection, not at call time.
+
+(Previously: async trait returning `Result<Principal, SecurityError>`. AD-004: auth is CPU-bound, no I/O. Q7: AuthenticationProvider uses domain's `AuthenticationError` — `SecurityError` is reserved for authorization.)
 
 **Given** a concrete struct that implements `AuthenticationProvider`
 **When** it is stored as `Arc<dyn AuthenticationProvider>`
@@ -99,28 +102,28 @@ The trait MUST contain no generic methods, no `Self`-returning methods, and no t
 `BasicAuthenticationProvider` MUST be constructed with an injected `Arc<dyn CredentialVerifier>` that owns the verification logic. The provider itself holds no credentials — it delegates all username/secret validation to the injected verifier.
 
 `BasicAuthenticationProvider` MUST:
-- Accept a `Credential::Basic` and delegate to `CredentialVerifier::verify` → return `Ok(Principal)` on success
-- Return `Err(SecurityError::AuthenticationFailed)` when the verifier rejects the credential
-- Return `Err(SecurityError::ProviderError)` when the verifier returns a backend error
-- Reject any non-`Basic` credential variant → return `Err(SecurityError::InvalidCredential)`
+- Accept a `Credential::Basic` and delegate to `CredentialVerifier::verify` → return `Ok(SecurityContext)` on success
+- Return `Err(AuthenticationError::InvalidToken)` when the verifier rejects the credential
+- Return `Err(AuthenticationError::ProviderUnavailable)` when the verifier returns a backend error
+- Reject any non-`Basic` credential variant → return `Err(AuthenticationError::InvalidToken)`
 
 **Given** a `BasicAuthenticationProvider` constructed with a `CredentialVerifier` that accepts `("alice", "s3cr3t")`
 **When** `authenticate(Credential::Basic { username: "alice", secret: "s3cr3t" })` is called
-**Then** `Ok(principal)` is returned where `principal.subject_id()` encodes the username
+**Then** `Ok(SecurityContext)` is returned where `ctx.principal().subject_id.as_str()` encodes the username
 
 **Given** the same provider
 **When** `authenticate(Credential::Basic { username: "alice", secret: "wrong" })` is called
-**Then** `Err(SecurityError::AuthenticationFailed)` is returned
+**Then** `Err(AuthenticationError::InvalidToken(_))` is returned
 
 **Given** the same provider
 **When** `authenticate(Credential::Bearer("some-token".to_string()))` is called
-**Then** `Err(SecurityError::InvalidCredential)` is returned (no verifier call is made)
+**Then** `Err(AuthenticationError::InvalidToken(_))` is returned (no verifier call is made)
 
 **Given** the same provider and a verifier that returns a backend error
 **When** `authenticate(Credential::Basic { username: "alice", secret: "s3cr3t" })` is called
-**Then** `Err(SecurityError::ProviderError)` is returned
+**Then** `Err(AuthenticationError::ProviderUnavailable(_))` is returned
 
-**Test**: `providers::basic::tests::valid_credential_authenticates`, `invalid_secret_fails`, `non_basic_credential_rejected`, `backend_error_maps_to_provider_error`.
+**Test**: `providers::basic::tests::valid_credential_authenticates`, `invalid_secret_fails`, `non_basic_credential_rejected`, `verifier_backend_error_gives_provider_unavailable`.
 
 ---
 
@@ -210,23 +213,26 @@ pub trait RoleStore: Send + Sync {
 
 ---
 
-### FR-011: SecurityContext — requires Principal, explicit construction
+### FR-011: SecurityContext — requires Principal and Claims, explicit construction
 
 `SecurityContext` MUST:
 - Hold an authenticated `Principal` as a **required, non-optional field** — `SecurityContext` cannot exist without a `Principal`. Invariant: if `SecurityContext` is present, a `Principal` is guaranteed.
-- Be constructable from a `Principal` without ambient state, thread-locals, or globals
-- Expose `principal(&self) -> &Principal`
-- Be `Clone`, `Send`, and `Sync`
+- Hold a `claims: Claims` field (from `domain::auth`) — request-scoped claims are separate from the persisted Principal.
+- Be constructable as `SecurityContext::new(principal, claims)` without ambient state, thread-locals, or globals.
+- Expose `principal(&self) -> &Principal` and `claims(&self) -> &Claims`.
+- Be `Clone`, `Send`, and `Sync`.
 
-**Given** a `Principal` value
-**When** `SecurityContext::new(principal)` is called
-**Then** `ctx.principal()` returns a reference to that principal
+(Previously: no `claims` field. AD-002: claims are request-scoped, not persisted. AD-008: Principal no longer carries claims.)
+
+**Given** a `Principal` and `Claims` value
+**When** `SecurityContext::new(principal, claims)` is called
+**Then** `ctx.principal()` returns a reference to that principal and `ctx.claims()` returns the claims
 
 **Given** two threads constructing `SecurityContext` independently
 **When** each accesses its own context
 **Then** neither context leaks state to the other (no shared global/thread-local)
 
-**Test**: `context::tests::constructs_from_principal`, `context::tests::no_ambient_state_leak` — construct two contexts in parallel; assert each holds its own principal independently.
+**Test**: `context::tests::constructs_from_principal_and_claims`, `context::tests::no_ambient_state_leak` — construct two contexts in parallel; assert each holds its own principal and claims independently.
 
 ---
 
@@ -291,6 +297,38 @@ When `security == None`, `authorize_in_context` MUST return `SecurityError::Capa
 
 ---
 
+### FR-015: Claims integration — re-export from domain::auth
+
+`SecurityContext.claims` MUST use `domain::auth::Claims` (`{ standard: StandardClaims, custom: BTreeMap<String, Value> }`). `security-sdk` MUST re-export `Claims` and `StandardClaims` so consumers avoid a direct `domain::auth` dependency.
+
+- GIVEN ctx with `Claims { standard: _, custom: _ }`
+- WHEN `ctx.claims().standard.iss` is accessed
+- THEN it matches the constructed value
+
+- GIVEN a crate depending only on `security-sdk`
+- WHEN it writes `use ego_security_sdk::Claims`
+- THEN it compiles
+
+---
+
+### FR-016: ServiceContext — security propagation field
+
+`ServiceContext` MUST carry an `security: Option<Arc<SecurityContext>>` field. The field is additive — all existing code compiles unchanged with the field defaulting to `None`. All access to authenticated identity and authorization flows exclusively through `ServiceContext`.
+
+(Added by CORE-012. AD-007: explicit propagation via ServiceContext, no ambient state.)
+
+- GIVEN a ServiceContext constructed without security providers
+- WHEN `.security` is accessed
+- THEN it returns `None`
+
+- GIVEN a ServiceContext after successful authentication
+- WHEN `.security` is accessed
+- THEN it returns `Some(ctx)` where `ctx.principal()` and `ctx.claims()` are populated
+
+**Tests**: `security_defaults_to_none`, `security_populated_after_auth`.
+
+---
+
 ### FR-013: Extensibility — new providers without modifying public contracts
 
 The public contracts (`AuthenticationProvider`, `AuthorizationProvider`, `RoleStore`) MUST be stable enough that a new provider crate can implement any of them without modifying `security-sdk`'s source.
@@ -340,8 +378,8 @@ No public trait, type, or method signature in `security-sdk` may import from `ht
 ### NFR-005: No Ambient Security State
 
 No code in `security-sdk` or `service-sdk` MUST store `SecurityContext` or `ServiceContext`
-in a thread-local, task-local (`tokio::task_local!`), or global (`static`, `once_cell`,
-`lazy_static`). The security field travels exclusively through explicit `ServiceContext`
+in a thread-local, task-local (`tokio::task_local!`), or global (`static`, `OnceCell`, `LazyLock`,
+`once_cell`, `lazy_static`). The security field travels exclusively through explicit `ServiceContext`
 passing. The service context itself MUST also travel exclusively through explicit parameter
 passing — no task-local `CURRENT_CONTEXT` for `ServiceContext` is permitted.
 
@@ -362,8 +400,8 @@ to `ServiceContext` task-local/thread-local/global patterns, aligning with CORE-
 
 #### Scenario: SecurityContext constructed without ambient side effects
 
-- GIVEN a `Principal` value
-- WHEN `SecurityContext::new(principal)` is called from two independent async tasks
+- GIVEN a `Principal` and `Claims` value
+- WHEN `SecurityContext::new(principal, claims)` is called from two independent async tasks
 - THEN neither task's context is visible from the other task
 - AND no shared static or task-local storage is written
 
@@ -398,7 +436,7 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 
 **INV-004**: JWT locality — deferred to CORE-009A. No JWT dependency exists in the security-sdk.
 
-**INV-005**: SecurityContext origin — a `SecurityContext` can only be constructed explicitly with a `Principal`. There is no `SecurityContext::default()`, no `SecurityContext::unauthenticated()`, no constructor without a `Principal`, and no ambient constructor. The `principal` field is `Principal`, not `Option<Principal>`.
+**INV-005**: SecurityContext origin — a `SecurityContext` can only be constructed explicitly with `SecurityContext::new(principal, claims)`. There is no `SecurityContext::default()`, no `SecurityContext::unauthenticated()`, no constructor without both parameters, and no ambient constructor. The `principal` field is `Principal`, not `Option<Principal>`; the `claims` field is `Claims`, not `Option<Claims>`.
 
 **INV-006**: ServiceContext additive-only — the `security` field is the only change to `ServiceContext` in this change. No existing field is renamed, retyped, removed, or made non-`pub`. The nesting refactor (`ServiceContext { TelemetryContext, SecurityContext }`) is deferred and not part of the Security SDK.
 
@@ -410,8 +448,8 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 
 | Condition | Trigger | Expected Result |
 |-----------|---------|-----------------|
-| Invalid Basic credential | Wrong secret in `BasicAuthenticationProvider` | `Err(SecurityError::AuthenticationFailed)` |
-| Wrong credential type | Non-`Basic` credential passed to `BasicAuthenticationProvider` | `Err(SecurityError::InvalidCredential)` |
+| Invalid Basic credential | Wrong secret in `BasicAuthenticationProvider` | `Err(AuthenticationError::InvalidToken(_))` |
+| Wrong credential type | Non-`Basic` credential passed to `BasicAuthenticationProvider` | `Err(AuthenticationError::InvalidToken(_))` |
 | RBAC role not found | Principal's role not present in `RoleStore` | `Ok(AuthorizationDecision::Deny { reason })` |
 | RBAC permission missing | Role present but lacks the requested `Resource:Action` | `Ok(AuthorizationDecision::Deny { reason })` |
 | Provider internal error | `RoleStore` backend fails (I/O, store unreachable) | `Err(SecurityError::ProviderError(_))` — opaque, no store-specific type |
@@ -424,12 +462,11 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 ## Test Scenarios
 
 ### TS-001: Principal full construction
-1. Construct `Principal` with kind `User`, `subject_id = "user:42"`, roles `["admin"]`, claims `[("email", "alice@example.com")]`, attributes `{"region": "eu-west-1"}`.
+1. Construct `Principal` with kind `User`, `subject_id = "user:42"`, roles `["admin"]`, attributes `{"region": "eu-west-1"}`.
 2. Assert `kind()` is `User`.
 3. Assert `subject_id()` is `"user:42"`.
 4. Assert `roles()` contains `Role("admin")`.
-5. Assert `claims()` contains the email claim.
-6. Assert `attribute("region")` returns `Some("eu-west-1")`.
+5. Assert `attribute("region")` returns `Some("eu-west-1")`.
 
 ### TS-002: Credential variant coverage
 1. Construct `Credential::Basic { username: "bob", secret: "pw" }` — pattern-match; assert fields.
@@ -439,10 +476,10 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 ### TS-003: Basic authentication — valid and invalid paths
 1. Create a mock `CredentialVerifier` that accepts `("alice", "s3cr3t")` and rejects all other pairs.
 2. Construct `BasicAuthenticationProvider::new(Arc::new(mock_verifier))`.
-3. Call `authenticate(Basic { "alice", "s3cr3t" })` — assert `Ok(principal)`.
-4. Call `authenticate(Basic { "alice", "bad" })` — assert `Err(AuthenticationFailed)`.
-5. Call `authenticate(Bearer("…"))` — assert `Err(InvalidCredential)` (verifier is never called).
-6. Create a mock verifier that returns a backend error; call `authenticate(Basic { … })` — assert `Err(ProviderError)`.
+3. Call `authenticate(Basic { "alice", "s3cr3t" })` — assert `Ok(SecurityContext)`.
+4. Call `authenticate(Basic { "alice", "bad" })` — assert `Err(AuthenticationError::InvalidToken(_))`.
+5. Call `authenticate(Bearer("…"))` — assert `Err(AuthenticationError::InvalidToken(_))` (verifier is never called).
+6. Create a mock verifier that returns a backend error; call `authenticate(Basic { … })` — assert `Err(AuthenticationError::ProviderUnavailable(_))`.
 
 ### TS-006: RBAC allow path
 1. Create `InMemoryRoleStore` with `Role("editor") → [Permission("posts", "write")]`.
@@ -459,8 +496,8 @@ The `security` field MUST be reachable via a builder method (e.g. `.with_securit
 
 ### TS-008: SecurityContext propagation through ServiceContext
 1. Authenticate a `Principal` via `BasicAuthenticationProvider::new(Arc::new(mock_verifier))`.
-2. Construct `SecurityContext::new(principal)`.
-3. Construct `ServiceContext` with `security: Some(Arc::new(ctx))`.
+2. Construct `SecurityContext::new(principal, claims)`.
+3. Construct `ServiceContext` with `security: Some(ctx)`.
 4. Pass `ServiceContext` to a mock service handler.
 5. Inside the handler, assert `service_ctx.security.is_some()`.
 6. Assert `service_ctx.security.as_ref().unwrap().principal().subject_id()` equals the original subject ID.
@@ -521,10 +558,10 @@ The following requirements are **out of scope for the Security SDK** and will be
 ### FR-007 [DEFERRED]: JwtAuthenticationProvider — local validation, HS256/RS256/ES256
 
 `JwtAuthenticationProvider` MUST:
-- Accept a `Credential::Bearer` containing a structurally valid JWT with a matching signature and non-expired `exp` claim, using algorithm-appropriate key material from `LocalKeyStore` → return `Ok(Principal)` with claims extracted
-- Reject an expired token (past `exp`) → return `Err(SecurityError::AuthenticationFailed)`
-- Reject a token with a tampered payload → return `Err(SecurityError::AuthenticationFailed)`
-- Reject a token signed with a different key than the one in `LocalKeyStore` → return `Err(SecurityError::AuthenticationFailed)`
+- Accept a `Credential::Bearer` containing a structurally valid JWT with a matching signature and non-expired `exp` claim, using algorithm-appropriate key material from `LocalKeyStore` → return `Ok(SecurityContext)` with claims extracted
+- Reject an expired token (past `exp`) → return `Err(AuthenticationError::ExpiredToken)`
+- Reject a token with a tampered payload → return `Err(AuthenticationError::InvalidSignature)`
+- Reject a token signed with a different key than the one in `LocalKeyStore` → return `Err(AuthenticationError::InvalidSignature)`
 - Make NO network calls at any point during validation
 - Support three algorithms: `HS256` (symmetric, HMAC secret), `RS256` (asymmetric, RSA key pair), `ES256` (asymmetric, EC key pair)
 
