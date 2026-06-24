@@ -1,4 +1,4 @@
-//! JWT authenticator — implements [`AuthenticationProvider`] for JWT tokens.
+//! JWT authenticator — implements [`ego_domain::auth::AuthenticationProvider`] for JWT tokens.
 //!
 //! Validates JWT signatures, standard time claims (`exp`, `nbf`), and
 //! optional issuer/audience constraints. Identity fields (`sub`, `roles`,
@@ -17,6 +17,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
 use crate::config::{JwtAlgorithm, JwtConfig};
+use crate::key_resolver::{KeyResolver, KeyResolverError, VerificationKey};
 
 // ---------------------------------------------------------------------------
 // Internal raw-claims structure for serde deserialization
@@ -37,29 +38,41 @@ struct RawClaims {
 /// A synchronous JWT authenticator.
 ///
 /// Validates a `BearerToken` credential by:
-/// 1. Verifying the token signature using the configured algorithm and key.
-/// 2. Rejecting tokens whose `exp` has passed (using the injected [`Clock`]).
-/// 3. Rejecting tokens whose `nbf` has not yet been reached.
-/// 4. Optionally validating `iss` and `aud` claims.
-/// 5. Extracting `sub`, `roles`, and `tenant_id`/`tid` into [`Identity`],
+/// 1. Resolving the verification key via the injected [`KeyResolver`].
+/// 2. Verifying the token signature using the resolved key and algorithm.
+/// 3. Rejecting tokens whose `exp` has passed (using the injected [`Clock`]).
+/// 4. Rejecting tokens whose `nbf` has not yet been reached.
+/// 5. Optionally validating `iss` and `aud` claims.
+/// 6. Extracting `sub`, `roles`, and `tenant_id`/`tid` into [`Identity`],
 ///    with graceful degradation for wrong-type values (CLAR-003).
 ///
 /// # Clocks
 ///
 /// This authenticator NEVER calls `Utc::now()` directly. All time-sensitive
 /// checks go through the injected `Arc<dyn Clock>`.
+///
+/// # Key Resolver
+///
+/// Key material is not embedded in this struct. The injected `Arc<dyn KeyResolver>`
+/// is called on every `authenticate()` invocation. The resolver MUST satisfy
+/// the cache-first contract (AD-013): `resolve` must complete from local state
+/// without I/O.
 pub struct JwtAuthenticator {
     config: JwtConfig,
+    resolver: Arc<dyn KeyResolver>,
     clock: Arc<dyn Clock>,
 }
 
 impl JwtAuthenticator {
     /// Constructs a new authenticator.
     ///
-    /// - `config`: algorithm, key material, and optional iss/aud constraints.
+    /// - `config`: algorithm discriminant and optional iss/aud constraints.
+    ///   Key material is NOT stored here — it lives in `resolver`.
+    /// - `resolver`: provides the [`VerificationKey`] for each authenticate call.
+    ///   Multiple authenticators MAY share one `Arc<dyn KeyResolver>` (NFR-010).
     /// - `clock`: injectable time source — use a mock in tests.
-    pub fn new(config: JwtConfig, clock: Arc<dyn Clock>) -> Self {
-        Self { config, clock }
+    pub fn new(config: JwtConfig, resolver: Arc<dyn KeyResolver>, clock: Arc<dyn Clock>) -> Self {
+        Self { config, resolver, clock }
     }
 }
 
@@ -77,14 +90,51 @@ impl AuthenticationProvider for JwtAuthenticator {
             }
         };
 
-        // Build decoding key and validation parameters
-        let (decoding_key, algorithm) = match &self.config.algorithm {
-            JwtAlgorithm::Hs256 { secret } => (
-                DecodingKey::from_secret(secret),
-                Algorithm::HS256,
-            ),
-            JwtAlgorithm::Rs256 { public_key_pem } => (
-                DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).map_err(|e| {
+        // Parse the JWT header to extract kid and requested algorithm
+        let header = jsonwebtoken::decode_header(&token)
+            .map_err(|e| AuthenticationError::InvalidToken(format!("{e}")))?;
+
+        let kid = header.kid.as_deref();
+
+        // Map jsonwebtoken Algorithm to our JwtAlgorithm discriminant
+        let requested_alg = match header.alg {
+            Algorithm::HS256 => JwtAlgorithm::Hs256,
+            Algorithm::RS256 => JwtAlgorithm::Rs256,
+            other => {
+                return Err(AuthenticationError::AlgorithmNotSupported(format!(
+                    "{other:?}"
+                )))
+            }
+        };
+
+        // Resolve the verification key — block_on is safe because KeyResolver
+        // is cache-first (AD-013): LocalKeyResolver completes immediately from
+        // memory with no I/O, so block_on never parks the thread.
+        let verification_key =
+            futures_executor::block_on(self.resolver.resolve(kid, requested_alg)).map_err(
+                |e| match e {
+                    KeyResolverError::KeyNotFound { .. } => AuthenticationError::InvalidSignature,
+                    KeyResolverError::AlgorithmMismatch { .. } => {
+                        AuthenticationError::AlgorithmNotSupported(format!(
+                            "{:?}",
+                            self.config.algorithm
+                        ))
+                    }
+                    KeyResolverError::InvalidKeyMaterial(msg) => {
+                        AuthenticationError::InvalidToken(format!("key material: {msg}"))
+                    }
+                },
+            )?;
+
+        // Build decoding key and algorithm from the resolved VerificationKey.
+        // Note: VerificationKey is #[non_exhaustive] — when new variants are
+        // added (ES256, EdDSA, JWK), the compiler will require updating this match.
+        let (decoding_key, algorithm) = match verification_key {
+            VerificationKey::Hmac(ref bytes) => {
+                (DecodingKey::from_secret(bytes), Algorithm::HS256)
+            }
+            VerificationKey::RsaPem(ref pem) => (
+                DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|e| {
                     AuthenticationError::InvalidToken(format!("bad RSA public key: {e}"))
                 })?,
                 Algorithm::RS256,
@@ -118,7 +168,7 @@ impl AuthenticationProvider for JwtAuthenticator {
                 },
             )?;
 
-        // Also check for algorithm mismatch in the header
+        // Also check for algorithm mismatch in the header vs what we used
         let header_alg = token_data.header.alg;
         if header_alg != algorithm {
             return Err(AuthenticationError::AlgorithmNotSupported(format!(
@@ -352,6 +402,8 @@ mod tests {
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::json;
 
+    use crate::key_resolver::{LocalKeyResolver, VerificationKey};
+
     // -----------------------------------------------------------------------
     // Test clock
     // -----------------------------------------------------------------------
@@ -384,12 +436,38 @@ mod tests {
         b"wrong-secret".to_vec()
     }
 
+    fn hs256_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Hs256,
+            VerificationKey::Hmac(hs256_secret()),
+        ))
+    }
+
+    fn hs256_wrong_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Hs256,
+            VerificationKey::Hmac(hs256_wrong_secret()),
+        ))
+    }
+
     fn hs256_config() -> JwtConfig {
         JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: None,
             expected_aud: None,
         }
+    }
+
+    fn hs256_authenticator(secret: &[u8], clock: Arc<dyn Clock>) -> JwtAuthenticator {
+        let resolver = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Hs256,
+            VerificationKey::Hmac(secret.to_vec()),
+        ));
+        JwtAuthenticator::new(
+            JwtConfig { algorithm: JwtAlgorithm::Hs256, expected_iss: None, expected_aud: None },
+            resolver,
+            clock,
+        )
     }
 
     fn make_hs256_token(claims: &serde_json::Value) -> String {
@@ -414,6 +492,20 @@ mod tests {
         include_str!("../tests/fixtures/test_rsa_other_public.pem")
     }
 
+    fn rs256_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Rs256,
+            VerificationKey::RsaPem(rs256_public_key_pem().to_string()),
+        ))
+    }
+
+    fn rs256_other_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Rs256,
+            VerificationKey::RsaPem(rs256_other_public_key_pem().to_string()),
+        ))
+    }
+
     fn make_rs256_token(claims: &serde_json::Value) -> String {
         let header = Header::new(Algorithm::RS256);
         encode(
@@ -426,9 +518,7 @@ mod tests {
 
     fn rs256_config() -> JwtConfig {
         JwtConfig {
-            algorithm: JwtAlgorithm::Rs256 {
-                public_key_pem: rs256_public_key_pem().to_string(),
-            },
+            algorithm: JwtAlgorithm::Rs256,
             expected_iss: None,
             expected_aud: None,
         }
@@ -454,7 +544,7 @@ mod tests {
     fn hs256_valid_token_returns_security_context() {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -467,12 +557,7 @@ mod tests {
     fn hs256_wrong_secret_returns_invalid_signature() {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_wrong_secret() },
-            expected_iss: None,
-            expected_aud: None,
-        };
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_wrong_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -485,7 +570,7 @@ mod tests {
     fn rs256_valid_token_returns_security_context() {
         let claims = json!({ "sub": "rs256-user", "exp": future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let auth = JwtAuthenticator::new(rs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(rs256_config(), rs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "rs256-user");
     }
@@ -499,14 +584,7 @@ mod tests {
         let claims = json!({ "sub": "rs256-user", "exp": future_ts(3600) });
         // Signed with primary key but verified with OTHER public key
         let token = make_rs256_token(&claims);
-        let config = JwtConfig {
-            algorithm: JwtAlgorithm::Rs256 {
-                public_key_pem: rs256_other_public_key_pem().to_string(),
-            },
-            expected_iss: None,
-            expected_aud: None,
-        };
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(rs256_config(), rs256_other_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -521,7 +599,7 @@ mod tests {
         let exp_secs = past_ts(60);
         let claims = json!({ "sub": "user-1", "exp": exp_secs });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
@@ -537,7 +615,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": exp_secs });
         let token = make_hs256_token(&claims);
         // clock returns exactly `now`, which equals exp
-        let auth = JwtAuthenticator::new(hs256_config(), fixed_clock(now));
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), fixed_clock(now));
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
@@ -550,7 +628,7 @@ mod tests {
     fn token_without_exp_is_accepted() {
         let claims = json!({ "sub": "user-1" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -564,7 +642,7 @@ mod tests {
         let nbf_secs = future_ts(300); // not valid for 5 minutes
         let claims = json!({ "sub": "user-1", "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
@@ -578,7 +656,7 @@ mod tests {
         let nbf_secs = past_ts(300);
         let claims = json!({ "sub": "user-1", "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -589,7 +667,7 @@ mod tests {
 
     #[test]
     fn malformed_token_returns_invalid_token() {
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth
             .authenticate(Credential::BearerToken("not.a.jwt".into()))
             .unwrap_err();
@@ -603,13 +681,13 @@ mod tests {
     #[test]
     fn unexpected_iss_returns_invalid_token() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: Some("my-service".into()),
             expected_aud: None,
         };
         let claims = json!({ "sub": "user-1", "iss": "other-service" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
@@ -619,7 +697,7 @@ mod tests {
         // No expected_iss → accept any iss or absent iss
         let claims = json!({ "sub": "user-1", "iss": "random-issuer" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -627,13 +705,13 @@ mod tests {
     #[test]
     fn correct_iss_is_accepted() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: Some("trusted-iss".into()),
             expected_aud: None,
         };
         let claims = json!({ "sub": "user-1", "iss": "trusted-iss" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -645,13 +723,13 @@ mod tests {
     #[test]
     fn unexpected_aud_returns_invalid_token() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: None,
             expected_aud: Some(vec!["my-api".into()]),
         };
         let claims = json!({ "sub": "user-1", "aud": ["other-api"] });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
@@ -659,13 +737,13 @@ mod tests {
     #[test]
     fn correct_aud_is_accepted() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: None,
             expected_aud: Some(vec!["my-api".into()]),
         };
         let claims = json!({ "sub": "user-1", "aud": ["my-api"] });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "user-1");
     }
@@ -687,9 +765,10 @@ mod tests {
         // The simplest verifiable case: present a valid RS256 token to HS256 config.
         let rs256_claims = json!({ "sub": "user-1" });
         let rs256_token = make_rs256_token(&rs256_claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(rs256_token)).unwrap_err();
-        // jsonwebtoken will report InvalidAlgorithm or InvalidSignature for alg mismatch
+        // The new code detects alg mismatch at header-decode time: RS256 header
+        // presented to HS256 resolver → AlgorithmMismatch → AlgorithmNotSupported
         assert!(matches!(
             err,
             AuthenticationError::AlgorithmNotSupported(_) | AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)
@@ -706,7 +785,7 @@ mod tests {
         // sub is an integer, not a string
         let claims = json!({ "sub": 12345 });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "");
         // Raw value preserved in custom claims
@@ -722,7 +801,7 @@ mod tests {
         // roles is a string instead of an array
         let claims = json!({ "sub": "user-1", "roles": "admin" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert!(ctx.identity.roles.is_empty());
         assert_eq!(ctx.claims.custom.get("roles"), Some(&json!("admin")));
@@ -732,7 +811,7 @@ mod tests {
     fn roles_array_of_strings_is_extracted_correctly() {
         let claims = json!({ "sub": "user-1", "roles": ["admin", "editor"] });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert!(ctx.identity.roles.contains("admin"));
         assert!(ctx.identity.roles.contains("editor"));
@@ -752,7 +831,7 @@ mod tests {
             "m_custom": "middle"
         });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         let keys: Vec<&str> = ctx.claims.custom.keys().map(|s| s.as_str()).collect();
         let mut sorted = keys.clone();
@@ -780,7 +859,7 @@ mod tests {
     fn tenant_id_claim_is_extracted() {
         let claims = json!({ "sub": "user-1", "tenant_id": "acme" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.tenant_id, Some("acme".into()));
     }
@@ -789,7 +868,7 @@ mod tests {
     fn tid_claim_is_extracted_as_tenant_id() {
         let claims = json!({ "sub": "user-1", "tid": "contoso" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.tenant_id, Some("contoso".into()));
     }
@@ -798,7 +877,7 @@ mod tests {
     fn wrong_type_tenant_id_produces_none_and_preserves_raw() {
         let claims = json!({ "sub": "user-1", "tenant_id": 999 });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert!(ctx.identity.tenant_id.is_none());
         assert_eq!(ctx.claims.custom.get("tenant_id"), Some(&json!(999)));
@@ -810,7 +889,7 @@ mod tests {
         // NOT renamed to "tenant_id" in custom claims.
         let claims = json!({ "sub": "user-1", "tid": 42 });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert!(ctx.identity.tenant_id.is_none());
         assert_eq!(ctx.claims.custom.get("tid"), Some(&json!(42)));
@@ -833,7 +912,7 @@ mod tests {
             "jti": "my-jti-123"
         });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert!(ctx.claims.standard.exp.is_some());
         assert!(ctx.claims.standard.iat.is_some());
@@ -849,7 +928,7 @@ mod tests {
     fn mixed_type_roles_array_produces_empty_set() {
         let claims = json!({ "sub": "user-1", "roles": ["admin", 42] });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         // Mixed array → graceful degradation
         assert!(ctx.identity.roles.is_empty());
@@ -863,7 +942,7 @@ mod tests {
     fn exp_as_string_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "exp": "never" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -875,7 +954,7 @@ mod tests {
     fn exp_as_float_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "exp": 9_999_999_999.5_f64 });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -887,7 +966,7 @@ mod tests {
     fn exp_as_bool_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "exp": true });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -899,7 +978,7 @@ mod tests {
     fn nbf_as_string_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "nbf": "yesterday" });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -911,7 +990,7 @@ mod tests {
     fn nbf_as_float_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "nbf": 0.5_f64 });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -923,7 +1002,7 @@ mod tests {
     fn nbf_as_bool_returns_invalid_token() {
         let claims = json!({ "sub": "user-1", "nbf": false });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -940,7 +1019,7 @@ mod tests {
         // Token has no "sub" key at all
         let claims = json!({ "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(&err, AuthenticationError::MissingClaim(s) if s == "sub"),
@@ -952,7 +1031,7 @@ mod tests {
     fn token_with_valid_sub_returns_security_context() {
         let claims = json!({ "sub": "happy-user", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(hs256_config(), now_clock());
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
         assert_eq!(ctx.identity.subject, "happy-user");
     }
@@ -964,14 +1043,14 @@ mod tests {
     #[test]
     fn expected_iss_configured_but_token_has_no_iss_returns_invalid_token() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: Some("https://auth.example.com".into()),
             expected_aud: None,
         };
         // Token has no "iss" key
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
@@ -986,18 +1065,215 @@ mod tests {
     #[test]
     fn expected_aud_configured_but_token_has_no_aud_returns_invalid_token() {
         let config = JwtConfig {
-            algorithm: JwtAlgorithm::Hs256 { secret: hs256_secret() },
+            algorithm: JwtAlgorithm::Hs256,
             expected_iss: None,
             expected_aud: Some(vec!["api.example.com".into()]),
         };
         // Token has no "aud" key
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let auth = JwtAuthenticator::new(config, now_clock());
+        let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
         let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken for absent aud, got {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper function test (hs256_authenticator)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hs256_authenticator_helper_works() {
+        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
+        let token = make_hs256_token(&claims);
+        let auth = hs256_authenticator(&hs256_secret(), now_clock());
+        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        assert_eq!(ctx.identity.subject, "user-1");
+    }
+
+    // -----------------------------------------------------------------------
+    // CapturingResolver — records the kid received from the authenticator
+    // -----------------------------------------------------------------------
+
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct CapturingResolver {
+        captured_kid: Arc<Mutex<Option<String>>>,
+        key: VerificationKey,
+        algorithm: JwtAlgorithm,
+    }
+
+    #[async_trait]
+    impl KeyResolver for CapturingResolver {
+        async fn resolve(
+            &self,
+            kid: Option<&str>,
+            algorithm: JwtAlgorithm,
+        ) -> Result<VerificationKey, KeyResolverError> {
+            let mut guard = self.captured_kid.lock().unwrap();
+            *guard = kid.map(|s| s.to_owned());
+            drop(guard);
+            if algorithm != self.algorithm {
+                return Err(KeyResolverError::AlgorithmMismatch {
+                    expected: self.algorithm,
+                    requested: algorithm,
+                });
+            }
+            Ok(self.key.clone())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.1: kid from JWT header passed to resolver
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn authenticator_passes_kid_from_header_to_resolver() {
+        let captured_kid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let resolver: Arc<dyn KeyResolver> = Arc::new(CapturingResolver {
+            captured_kid: Arc::clone(&captured_kid),
+            key: VerificationKey::Hmac(hs256_secret()),
+            algorithm: JwtAlgorithm::Hs256,
+        });
+
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("primary-key".into());
+        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
+        let token =
+            jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(&hs256_secret()))
+                .unwrap();
+
+        let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
+        let _ = auth.authenticate(Credential::BearerToken(token)).unwrap();
+
+        let kid = captured_kid.lock().unwrap().take();
+        assert_eq!(kid, Some("primary-key".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.2: kid = None when JWT has no kid field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn authenticator_passes_none_when_token_has_no_kid() {
+        let captured_kid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let resolver: Arc<dyn KeyResolver> = Arc::new(CapturingResolver {
+            captured_kid: Arc::clone(&captured_kid),
+            key: VerificationKey::Hmac(hs256_secret()),
+            algorithm: JwtAlgorithm::Hs256,
+        });
+
+        // Default Header::new has kid = None
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
+        let token =
+            jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(&hs256_secret()))
+                .unwrap();
+
+        let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
+        let _ = auth.authenticate(Credential::BearerToken(token)).unwrap();
+
+        let kid = captured_kid.lock().unwrap().take();
+        assert_eq!(kid, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // FailingResolver — always returns a specific KeyResolverError
+    // -----------------------------------------------------------------------
+
+    struct FailingResolver {
+        error: KeyResolverError,
+    }
+
+    #[async_trait]
+    impl KeyResolver for FailingResolver {
+        async fn resolve(
+            &self,
+            _kid: Option<&str>,
+            _algorithm: JwtAlgorithm,
+        ) -> Result<VerificationKey, KeyResolverError> {
+            Err(self.error.clone())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.3: KeyNotFound → InvalidSignature
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn key_not_found_maps_to_invalid_signature() {
+        let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver {
+            error: KeyResolverError::KeyNotFound { kid: None },
+        });
+
+        let claims = json!({ "sub": "user-1" });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
+        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        assert_eq!(err, AuthenticationError::InvalidSignature);
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.4: AlgorithmMismatch → AlgorithmNotSupported
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn algorithm_mismatch_maps_to_not_supported() {
+        let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver {
+            error: KeyResolverError::AlgorithmMismatch {
+                expected: JwtAlgorithm::Hs256,
+                requested: JwtAlgorithm::Rs256,
+            },
+        });
+
+        let claims = json!({ "sub": "user-1" });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
+        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.5: InvalidKeyMaterial → InvalidToken
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_key_material_maps_to_invalid_token() {
+        let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver {
+            error: KeyResolverError::InvalidKeyMaterial("bad pem".into()),
+        });
+
+        let claims = json!({ "sub": "user-1" });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
+        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // 5.6: Shared resolver — two authenticators sharing one Arc (AC-019)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shared_resolver_authenticates_across_multiple_instances() {
+        let shared: Arc<dyn KeyResolver> = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Hs256,
+            VerificationKey::Hmac(hs256_secret()),
+        ));
+
+        let auth_a = JwtAuthenticator::new(hs256_config(), Arc::clone(&shared), now_clock());
+        let auth_b = JwtAuthenticator::new(hs256_config(), Arc::clone(&shared), now_clock());
+
+        let claims = json!({ "sub": "shared-user", "exp": future_ts(3600) });
+        let token = make_hs256_token(&claims);
+
+        let ctx_a = auth_a.authenticate(Credential::BearerToken(token.clone())).unwrap();
+        let ctx_b = auth_b.authenticate(Credential::BearerToken(token)).unwrap();
+
+        assert_eq!(ctx_a.identity.subject, "shared-user");
+        assert_eq!(ctx_b.identity.subject, "shared-user");
     }
 }

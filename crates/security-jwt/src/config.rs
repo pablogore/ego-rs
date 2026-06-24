@@ -1,30 +1,27 @@
 //! JWT configuration types — algorithm selection and validation parameters.
 
-/// The signing algorithm (and associated key material) used to verify JWTs.
+/// The signing algorithm used to verify JWTs.
 ///
-/// Each variant owns the relevant key material so that the authenticator is
-/// fully self-contained once constructed.
+/// This is a pure marker enum — key material has been moved to
+/// [`crate::VerificationKey`] inside a [`crate::KeyResolver`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JwtAlgorithm {
-    /// HMAC-SHA256. The shared secret is a raw byte sequence.
-    Hs256 {
-        /// The HMAC secret key bytes.
-        secret: Vec<u8>,
-    },
+    /// HMAC-SHA256.
+    Hs256,
 
     /// RSA-PKCS1-SHA256. Only the public key is needed for verification.
-    Rs256 {
-        /// PEM-encoded RSA public key (begins with `-----BEGIN PUBLIC KEY-----`
-        /// or `-----BEGIN RSA PUBLIC KEY-----`).
-        public_key_pem: String,
-    },
+    Rs256,
 }
 
 /// Full configuration for a [`super::JwtAuthenticator`].
 ///
 /// Pass this to [`super::JwtAuthenticator::new`] together with a
-/// [`ego_domain::auth::Clock`] to construct an authenticator.
+/// [`crate::KeyResolver`] and an [`ego_domain::auth::Clock`] to construct
+/// an authenticator. This struct holds only functional validation parameters —
+/// key material lives in the resolver.
 pub struct JwtConfig {
-    /// The algorithm and key material used to verify token signatures.
+    /// Algorithm discriminant — selects HS256 or RS256. Key material is
+    /// provided separately via [`crate::KeyResolver`].
     pub algorithm: JwtAlgorithm,
 
     /// If `Some`, the token's `iss` claim MUST equal this value.
