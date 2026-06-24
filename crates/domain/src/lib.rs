@@ -21,23 +21,13 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | `command` | `Command` marker trait for mutating operations |
-//! | `event` | `DomainEvent` trait for event-sourced state |
-//! | `query` | `Query` trait with typed `Output` for reads |
-//! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
+//! | `command`       | `Command` marker trait for mutating operations |
+//! | `event`         | `DomainEvent` trait for event-sourced state |
+//! | `query`         | `Query` trait with typed `Output` for reads |
+//! | `actor`         | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
-//!
-//! ## Modules
-//!
-//! | Module | Purpose |
-//! |--------|---------|
-//! | `command` | `Command` marker trait for mutating operations |
-//! | `event` | `DomainEvent` trait for event-sourced state |
-//! | `query` | `Query` trait with typed `Output` for reads |
-//! | `actor` | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
-//! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
-//! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
+//! | `auth`          | `Identity`, `Claims`, `SecurityContext`, `AuthenticationProvider`, `Clock` |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -73,6 +63,9 @@ pub mod envelope;
 /// Read side projection engine — processors, sessions, runners, and storage SPIs.
 pub mod read_side;
 
+/// Authentication domain contracts — Identity, Claims, SecurityContext, AuthenticationProvider, Clock.
+pub mod auth;
+
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use context::{
@@ -86,3 +79,7 @@ pub use event::DomainEvent;
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
+pub use auth::{
+    AuthenticationError, AuthenticationProvider, Claims, Clock, Credential, Identity,
+    SecurityContext, StandardClaims, SystemClock,
+};
