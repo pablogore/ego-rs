@@ -1,43 +1,52 @@
-//! Security context — explicit propagation of the authenticated principal.
+//! Security context — authenticated principal + raw claims.
+//!
+//! Propagated **explicitly** through `ServiceContext` — no ambient state.
 
-use std::collections::HashMap;
+use ego_domain::auth::Claims;
 
 use crate::principal::Principal;
 
-/// Carries the authenticated [`Principal`] plus decision-relevant scope.
+/// Carries the authenticated [`Principal`] plus raw [`Claims`] from the credential.
 ///
 /// Propagated **explicitly** through `ServiceContext` — no thread-local,
-/// no task-local, no global, no implicit ambient state.
+/// no task-local, no global, no implicit ambient state (AD-005).
 ///
 /// **Invariant**: if a `SecurityContext` exists, a [`Principal`] is guaranteed.
 /// `principal` is non-optional by design: `SecurityContext` cannot be constructed
 /// without a `Principal`.
+///
+/// Claims are request-scoped (AD-002) and MUST NOT be persisted in aggregates,
+/// events, snapshots, projections, or repositories.
 #[derive(Debug, Clone)]
 pub struct SecurityContext {
     /// The authenticated principal — always present.
     pub principal: Principal,
-    /// Decision-relevant scope key/values (e.g. tenant, environment).
-    pub scope: HashMap<String, String>,
+    /// Raw authentication claims from the credential (request-scoped only).
+    pub claims: Claims,
 }
 
 impl SecurityContext {
-    /// Creates a context for the given authenticated principal.
-    pub fn new(principal: Principal) -> Self {
-        Self {
-            principal,
-            scope: HashMap::new(),
-        }
+    /// Creates a context with the given authenticated principal and claims.
+    pub fn new(principal: Principal, claims: Claims) -> Self {
+        Self { principal, claims }
     }
 
-    /// Builder: adds a scope entry.
-    pub fn with_scope(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.scope.insert(key.into(), value.into());
-        self
+    /// Creates a context with the given principal and empty claims.
+    pub fn empty(principal: Principal) -> Self {
+        Self {
+            principal,
+            claims: Claims::empty(),
+        }
     }
 
     /// Returns the authenticated principal.
     pub fn principal(&self) -> &Principal {
         &self.principal
+    }
+
+    /// Returns the raw authentication claims.
+    pub fn claims(&self) -> &Claims {
+        &self.claims
     }
 }
 
@@ -45,48 +54,41 @@ impl SecurityContext {
 mod tests {
     use super::SecurityContext;
     use crate::principal::{Principal, PrincipalKind, SubjectId};
+    use ego_domain::auth::Claims;
 
     fn make_principal(subject: &str) -> Principal {
         Principal::new(PrincipalKind::User, SubjectId::new(subject).unwrap())
     }
 
     #[test]
-    fn constructs_from_principal() {
+    fn constructs_from_principal_and_claims() {
         let p = make_principal("user:42");
-        let ctx = SecurityContext::new(p.clone());
-        assert_eq!(ctx.principal().subject.as_str(), "user:42");
+        let claims = Claims::empty();
+        let ctx = SecurityContext::new(p.clone(), claims.clone());
+        assert_eq!(ctx.principal().subject_id.as_str(), "user:42");
+        assert!(ctx.claims().custom.is_empty());
     }
 
     #[test]
-    fn with_scope_adds_entry() {
-        let ctx = SecurityContext::new(make_principal("u:1")).with_scope("tenant", "t1");
-        assert_eq!(ctx.scope.get("tenant").map(String::as_str), Some("t1"));
-    }
-
-    #[test]
-    fn principal_is_non_optional() {
-        // principal() returns &Principal directly — no Option unwrap needed.
-        let ctx = SecurityContext::new(make_principal("u:1"));
-        let subject: &str = ctx.principal().subject.as_str();
-        assert_eq!(subject, "u:1");
+    fn empty_creates_context_without_claims() {
+        let ctx = SecurityContext::empty(make_principal("u:1"));
+        assert!(ctx.claims().custom.is_empty());
     }
 
     #[test]
     fn no_ambient_state_leak() {
-        // Two contexts from different principals must not share state.
-        let ctx_a = SecurityContext::new(make_principal("user:a"));
-        let ctx_b = SecurityContext::new(make_principal("user:b"));
-        assert_eq!(ctx_a.principal().subject.as_str(), "user:a");
-        assert_eq!(ctx_b.principal().subject.as_str(), "user:b");
+        let ctx_a = SecurityContext::empty(make_principal("user:a"));
+        let ctx_b = SecurityContext::empty(make_principal("user:b"));
+        assert_eq!(ctx_a.principal().subject_id.as_str(), "user:a");
+        assert_eq!(ctx_b.principal().subject_id.as_str(), "user:b");
         assert_ne!(
-            ctx_a.principal().subject.as_str(),
-            ctx_b.principal().subject.as_str()
+            ctx_a.principal().subject_id.as_str(),
+            ctx_b.principal().subject_id.as_str()
         );
     }
 
     #[test]
     fn is_clone_and_send_sync() {
-        // Compile-time check: SecurityContext must be Send + Sync + Clone.
         fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
         assert_send_sync_clone::<SecurityContext>();
     }

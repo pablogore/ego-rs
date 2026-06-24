@@ -9,7 +9,7 @@ use ego_security_sdk::{
     credential::Credential,
     error::SecurityError,
     policy::{Permission, RoleStore},
-    principal::{Principal, Role},
+    principal::Role,
     providers::rbac::RbacProvider,
 };
 
@@ -49,21 +49,24 @@ fn provider_error_display_contains_no_vendor_name() {
     assert!(!display.contains("openfga"));
 }
 
-#[tokio::test]
-async fn authentication_provider_error_is_neutral() {
+#[test]
+fn authentication_provider_error_is_neutral() {
+    use ego_security_sdk::context::SecurityContext;
+    use ego_domain::auth::AuthenticationError;
+
     struct ErrorAuthProvider;
 
-    #[async_trait]
     impl AuthenticationProvider for ErrorAuthProvider {
-        async fn authenticate(&self, _: &Credential) -> Result<Principal, SecurityError> {
-            Err(SecurityError::ProviderError("internal".into()))
+        fn authenticate(
+            &self,
+            _: &Credential,
+        ) -> Result<SecurityContext, AuthenticationError> {
+            Err(AuthenticationError::InvalidToken("provider error".into()))
         }
     }
 
-    let result = ErrorAuthProvider
-        .authenticate(&Credential::Bearer("tok".into()))
-        .await;
-    assert!(matches!(result, Err(SecurityError::ProviderError(_))));
+    let result = ErrorAuthProvider.authenticate(&Credential::Bearer("tok".into()));
+    assert!(matches!(result, Err(AuthenticationError::InvalidToken(_))));
     if let Err(e) = result {
         assert!(!e.to_string().contains("jsonwebtoken"));
     }

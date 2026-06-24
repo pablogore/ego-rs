@@ -127,7 +127,7 @@ async fn full_path_allow() {
     let provider = RbacProvider::new(Arc::new(store));
     let sub = SubjectId::new("user:ed").unwrap();
     let principal = Principal::new(PrincipalKind::User, sub).with_role(Role("editor".into()));
-    let ctx = SecurityContext::new(principal);
+    let ctx = SecurityContext::empty(principal);
     let result = authorize_in_context(
         Some(&ctx),
         Resource {
@@ -169,7 +169,7 @@ async fn full_path_deny() {
     let provider = RbacProvider::new(Arc::new(store));
     let sub = SubjectId::new("user:viewer").unwrap();
     let principal = Principal::new(PrincipalKind::User, sub).with_role(Role("viewer".into()));
-    let ctx = SecurityContext::new(principal);
+    let ctx = SecurityContext::empty(principal);
     let result = authorize_in_context(
         Some(&ctx),
         Resource {

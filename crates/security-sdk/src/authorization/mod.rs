@@ -109,7 +109,7 @@ mod tests {
     fn make_ctx() -> SecurityContext {
         let subject = SubjectId::new("user:test").unwrap();
         let principal = Principal::new(PrincipalKind::User, subject);
-        SecurityContext::new(principal)
+        SecurityContext::empty(principal)
     }
 
     #[test]

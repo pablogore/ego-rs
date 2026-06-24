@@ -8,8 +8,7 @@
 //! (`authorization::AuthorizationProvider`), and security-context propagation
 //! (`context::SecurityContext`).
 //!
-//! Depends on no ego crate — only on third-party libraries — so any layer may
-//! import it without risking a dependency cycle.
+//! Depends on `ego-domain` for canonical data models (`AuthenticationError`, `Claims`).
 
 pub mod authentication;
 pub mod authorization;
@@ -27,6 +26,7 @@ pub use authorization::{
 };
 pub use context::SecurityContext;
 pub use credential::Credential;
+pub use ego_domain::auth::{AuthenticationError, Claims, StandardClaims};
 pub use error::SecurityError;
 pub use policy::{InMemoryRoleStore, Permission, RoleStore};
 pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};

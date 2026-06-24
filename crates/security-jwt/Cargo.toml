@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ego-domain = { path = "../domain" }
+ego-security-sdk = { path = "../security-sdk" }
 jsonwebtoken = "9"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

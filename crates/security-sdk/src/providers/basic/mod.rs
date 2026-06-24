@@ -1,36 +1,28 @@
-//! Basic authentication provider.
+//! Basic authentication provider — synchronous.
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::{
-    authentication::AuthenticationProvider, credential::Credential, error::SecurityError,
-    principal::Principal,
+    authentication::AuthenticationProvider, context::SecurityContext, credential::Credential,
+    error::SecurityError, principal::Principal,
 };
+use ego_domain::auth::AuthenticationError;
 
 /// Verifies a username/secret pair against a backing store.
 ///
-/// Returns `Ok(Some(principal))` on success, `Ok(None)` when credentials
-/// don't match, and `Err(SecurityError::ProviderError)` for backend failure.
-#[cfg_attr(test, mockall::automock)]
-#[async_trait]
+/// Synchronous per AD-004: authentication performs no I/O.
+/// Backend data MUST be loaded before authentication execution.
 pub trait CredentialVerifier: Send + Sync {
     /// Verifies `secret` for `username`.
     ///
     /// Returns `Ok(Some(principal))` on match, `Ok(None)` on mismatch,
     /// and `Err(SecurityError::ProviderError)` for backend failure.
-    async fn verify(
-        &self,
-        username: &str,
-        secret: &str,
-    ) -> Result<Option<Principal>, SecurityError>;
+    fn verify(&self, username: &str, secret: &str) -> Result<Option<Principal>, SecurityError>;
 }
 
 /// Authentication provider for the HTTP Basic scheme.
 ///
-/// Delegates credential verification to a [`CredentialVerifier`], keeping
-/// the provider independent from any specific storage backend.
+/// Delegates credential verification to a [`CredentialVerifier`].
 pub struct BasicAuthenticationProvider {
     verifier: Arc<dyn CredentialVerifier>,
 }
@@ -42,19 +34,22 @@ impl BasicAuthenticationProvider {
     }
 }
 
-#[async_trait]
 impl AuthenticationProvider for BasicAuthenticationProvider {
-    async fn authenticate(&self, credential: &Credential) -> Result<Principal, SecurityError> {
+    fn authenticate(
+        &self,
+        credential: &Credential,
+    ) -> Result<SecurityContext, AuthenticationError> {
         match credential {
             Credential::Basic { username, secret } => {
-                match self.verifier.verify(username, secret).await? {
-                    Some(p) => Ok(p),
-                    None => Err(SecurityError::AuthenticationFailed(
+                match self.verifier.verify(username, secret) {
+                    Ok(Some(principal)) => Ok(SecurityContext::empty(principal)),
+                    Ok(None) => Err(AuthenticationError::InvalidToken(
                         "invalid username or password".into(),
                     )),
+                    Err(e) => Err(AuthenticationError::ProviderUnavailable(e.to_string())),
                 }
             }
-            _ => Err(SecurityError::InvalidCredential(
+            _ => Err(AuthenticationError::InvalidToken(
                 "BasicAuthenticationProvider requires a Basic credential".into(),
             )),
         }
@@ -65,21 +60,24 @@ impl AuthenticationProvider for BasicAuthenticationProvider {
 mod tests {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
-    use super::*;
     use crate::{
+        credential::Credential,
         error::SecurityError,
         principal::{Principal, PrincipalKind, SubjectId},
     };
+
+    use super::*;
 
     #[test]
     fn verifier_is_object_safe() {
         struct StubVerifier;
 
-        #[async_trait]
         impl CredentialVerifier for StubVerifier {
-            async fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
+            fn verify(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<Principal>, SecurityError> {
                 unimplemented!()
             }
         }
@@ -98,9 +96,8 @@ mod tests {
         secret: String,
     }
 
-    #[async_trait]
     impl CredentialVerifier for InMemoryVerifier {
-        async fn verify(
+        fn verify(
             &self,
             username: &str,
             secret: &str,
@@ -116,69 +113,66 @@ mod tests {
 
     struct ErrorVerifier;
 
-    #[async_trait]
     impl CredentialVerifier for ErrorVerifier {
-        async fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
+        fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
             Err(SecurityError::ProviderError("io".into()))
         }
     }
 
-    #[tokio::test]
-    async fn valid_credential_authenticates() {
+    #[test]
+    fn valid_credential_authenticates() {
         let provider = BasicAuthenticationProvider::new(Arc::new(InMemoryVerifier {
             username: "alice".into(),
             secret: "s3cr3t".into(),
         }));
-        let result = provider
-            .authenticate(&Credential::Basic {
-                username: "alice".into(),
-                secret: "s3cr3t".into(),
-            })
-            .await;
+        let result = provider.authenticate(&Credential::Basic {
+            username: "alice".into(),
+            secret: "s3cr3t".into(),
+        });
         assert!(result.is_ok());
-        let p = result.unwrap();
-        assert_eq!(p.subject.as_str(), "user:alice");
+        let ctx = result.unwrap();
+        assert_eq!(ctx.principal().subject_id.as_str(), "user:alice");
     }
 
-    #[tokio::test]
-    async fn invalid_secret_fails() {
+    #[test]
+    fn invalid_secret_fails() {
         let provider = BasicAuthenticationProvider::new(Arc::new(InMemoryVerifier {
             username: "alice".into(),
             secret: "s3cr3t".into(),
         }));
-        let result = provider
-            .authenticate(&Credential::Basic {
-                username: "alice".into(),
-                secret: "wrong".into(),
-            })
-            .await;
+        let result = provider.authenticate(&Credential::Basic {
+            username: "alice".into(),
+            secret: "wrong".into(),
+        });
         assert!(matches!(
             result,
-            Err(SecurityError::AuthenticationFailed(_))
+            Err(AuthenticationError::InvalidToken(_))
         ));
     }
 
-    #[tokio::test]
-    async fn non_basic_credential_rejected() {
+    #[test]
+    fn non_basic_credential_rejected() {
         let provider = BasicAuthenticationProvider::new(Arc::new(InMemoryVerifier {
             username: "alice".into(),
             secret: "s3cr3t".into(),
         }));
-        let result = provider
-            .authenticate(&Credential::Bearer("tok".into()))
-            .await;
-        assert!(matches!(result, Err(SecurityError::InvalidCredential(_))));
+        let result = provider.authenticate(&Credential::Bearer("tok".into()));
+        assert!(matches!(
+            result,
+            Err(AuthenticationError::InvalidToken(_))
+        ));
     }
 
-    #[tokio::test]
-    async fn verifier_backend_error_surfaces_provider_error() {
+    #[test]
+    fn verifier_backend_error_surfaces_provider_unavailable() {
         let provider = BasicAuthenticationProvider::new(Arc::new(ErrorVerifier));
-        let result = provider
-            .authenticate(&Credential::Basic {
-                username: "alice".into(),
-                secret: "s3cr3t".into(),
-            })
-            .await;
-        assert!(matches!(result, Err(SecurityError::ProviderError(_))));
+        let result = provider.authenticate(&Credential::Basic {
+            username: "alice".into(),
+            secret: "s3cr3t".into(),
+        });
+        assert!(matches!(
+            result,
+            Err(AuthenticationError::ProviderUnavailable(_))
+        ));
     }
 }

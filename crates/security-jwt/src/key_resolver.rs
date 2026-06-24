@@ -40,7 +40,7 @@ pub enum KeyResolverError {
 ///
 /// This enum is `#[non_exhaustive]` — future variants (ES256, EdDSA, JWK-backed)
 /// may be added without changing [`KeyResolver`] or
-/// [`ego_domain::auth::AuthenticationProvider`].
+/// [`ego_security_sdk::AuthenticationProvider`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum VerificationKey {

@@ -1,17 +1,22 @@
-//! JWT authenticator — implements [`ego_domain::auth::AuthenticationProvider`] for JWT tokens.
+//! JWT authenticator — implements [`ego_security_sdk::AuthenticationProvider`] for JWT tokens.
 //!
 //! Validates JWT signatures, standard time claims (`exp`, `nbf`), and
-//! optional issuer/audience constraints. Identity fields (`sub`, `roles`,
-//! `tenant_id`/`tid`) are extracted with graceful degradation per CLAR-003:
-//! a wrong-type claim is skipped and the raw value is preserved in
-//! `Claims.custom`.
+//! optional issuer/audience constraints.
+//!
+//! **Claim extraction policy**:
+//! - `sub` absent → `AuthenticationError::MissingClaim("sub")`
+//! - `sub` present but not a string → `AuthenticationError::InvalidToken`
+//! - `sub` present but empty → `AuthenticationError::InvalidToken`
+//! - `roles` / `tenant_id` / `tid`: wrong type → skip (graceful degradation); raw value preserved in `Claims.custom`
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ego_domain::auth::{
-    AuthenticationError, AuthenticationProvider, Claims, Clock, Credential, Identity,
-    SecurityContext, StandardClaims,
+    AuthenticationError, Claims, Clock, StandardClaims,
+};
+use ego_security_sdk::{
+    AuthenticationProvider, Credential, Principal, PrincipalKind, Role, SecurityContext, SubjectId,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::Value;
@@ -37,14 +42,14 @@ struct RawClaims {
 
 /// A synchronous JWT authenticator.
 ///
-/// Validates a `BearerToken` credential by:
+/// Validates a `Bearer` credential by:
 /// 1. Resolving the verification key via the injected [`KeyResolver`].
 /// 2. Verifying the token signature using the resolved key and algorithm.
 /// 3. Rejecting tokens whose `exp` has passed (using the injected [`Clock`]).
 /// 4. Rejecting tokens whose `nbf` has not yet been reached.
 /// 5. Optionally validating `iss` and `aud` claims.
-/// 6. Extracting `sub`, `roles`, and `tenant_id`/`tid` into [`Identity`],
-///    with graceful degradation for wrong-type values (CLAR-003).
+/// 6. Extracting `sub` (strict — absent or non-string → error), and
+///    `roles`/`tenant_id`/`tid` (graceful — wrong type is skipped) into a [`Principal`].
 ///
 /// # Clocks
 ///
@@ -79,10 +84,10 @@ impl JwtAuthenticator {
 impl AuthenticationProvider for JwtAuthenticator {
     fn authenticate(
         &self,
-        credential: Credential,
+        credential: &Credential,
     ) -> Result<SecurityContext, AuthenticationError> {
-        let token = match credential {
-            Credential::BearerToken(t) => t,
+        let token: &str = match credential {
+            Credential::Bearer(t) => t.as_str(),
             _ => {
                 return Err(AuthenticationError::InvalidToken(
                     "unsupported credential type".into(),
@@ -91,7 +96,7 @@ impl AuthenticationProvider for JwtAuthenticator {
         };
 
         // Parse the JWT header to extract kid and requested algorithm
-        let header = jsonwebtoken::decode_header(&token)
+        let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AuthenticationError::InvalidToken(format!("{e}")))?;
 
         let kid = header.kid.as_deref();
@@ -152,7 +157,7 @@ impl AuthenticationProvider for JwtAuthenticator {
 
         // Decode the token
         let token_data =
-            jsonwebtoken::decode::<RawClaims>(&token, &decoding_key, &validation).map_err(
+            jsonwebtoken::decode::<RawClaims>(token, &decoding_key, &validation).map_err(
                 |e| {
                     use jsonwebtoken::errors::ErrorKind;
                     match e.kind() {
@@ -168,20 +173,12 @@ impl AuthenticationProvider for JwtAuthenticator {
                 },
             )?;
 
-        // Also check for algorithm mismatch in the header vs what we used
-        let header_alg = token_data.header.alg;
-        if header_alg != algorithm {
-            return Err(AuthenticationError::AlgorithmNotSupported(format!(
-                "token uses {header_alg:?} but configured for {algorithm:?}"
-            )));
-        }
-
         let all_claims = token_data.claims.all;
         let now = self.clock.now();
 
         // exp check — reject if exp <= now (expired means exp is in the past or equal to now)
         if let Some(exp_val) = all_claims.get("exp") {
-            if let Some(exp_secs) = exp_val.as_i64().or_else(|| exp_val.as_u64().map(|u| u as i64)) {
+            if let Some(exp_secs) = exp_val.as_i64().or_else(|| exp_val.as_u64().and_then(|u| i64::try_from(u).ok())) {
                 let exp_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(exp_secs, 0)
                     .ok_or_else(|| AuthenticationError::InvalidToken("invalid exp timestamp".into()))?;
                 if now >= exp_dt {
@@ -196,7 +193,7 @@ impl AuthenticationProvider for JwtAuthenticator {
 
         // nbf check — reject if nbf > now (not yet valid)
         if let Some(nbf_val) = all_claims.get("nbf") {
-            if let Some(nbf_secs) = nbf_val.as_i64().or_else(|| nbf_val.as_u64().map(|u| u as i64)) {
+            if let Some(nbf_secs) = nbf_val.as_i64().or_else(|| nbf_val.as_u64().and_then(|u| i64::try_from(u).ok())) {
                 let nbf_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(nbf_secs, 0)
                     .ok_or_else(|| AuthenticationError::InvalidToken("invalid nbf timestamp".into()))?;
                 if now < nbf_dt {
@@ -249,27 +246,33 @@ impl AuthenticationProvider for JwtAuthenticator {
         // Build StandardClaims
         let standard = build_standard_claims(&all_claims);
 
-        // Extract identity fields (CLAR-003: graceful degradation on wrong type)
+        // sub: strict — absent or non-string rejects the token (CLAR-005)
+        // tenant_id / roles: graceful — wrong type skipped, raw preserved (CLAR-005)
         let (subject, all_claims) = extract_subject(all_claims)?;
         let (tenant_id, all_claims) = extract_tenant_id(all_claims);
         let (roles, all_claims) = extract_roles(all_claims);
 
-        // Remove fields that are now in StandardClaims / Identity from custom
+        // Remove fields that are now in StandardClaims from custom
         let custom = remove_standard_keys(all_claims);
 
-        let identity = Identity {
-            subject,
-            tenant_id,
-            roles,
-            attributes: BTreeMap::new(),
-        };
+        let mut principal = Principal::new(
+            PrincipalKind::User,
+            SubjectId::new(subject)
+                .map_err(|_| AuthenticationError::InvalidToken("invalid subject id".into()))?,
+        );
+        for role in roles {
+            principal = principal.with_role(Role(role));
+        }
+        if let Some(tid) = tenant_id {
+            principal = principal.with_tenant_id(tid);
+        }
 
         let claims = Claims {
             standard,
             custom,
         };
 
-        Ok(SecurityContext::new(identity, claims))
+        Ok(SecurityContext::new(principal, claims))
     }
 }
 
@@ -281,17 +284,17 @@ impl AuthenticationProvider for JwtAuthenticator {
 fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
     let exp = map.get("exp").and_then(|v| {
         v.as_i64()
-            .or_else(|| v.as_u64().map(|u| u as i64))
+            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
             .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
     });
     let nbf = map.get("nbf").and_then(|v| {
         v.as_i64()
-            .or_else(|| v.as_u64().map(|u| u as i64))
+            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
             .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
     });
     let iat = map.get("iat").and_then(|v| {
         v.as_i64()
-            .or_else(|| v.as_u64().map(|u| u as i64))
+            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
             .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
     });
     let jti = map.get("jti").and_then(|v| v.as_str().map(str::to_owned));
@@ -316,28 +319,32 @@ fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
     }
 }
 
-/// Extract `sub` from the map. Returns `Ok((subject, map))` on success.
-/// - Absent `sub`: returns `Err(MissingClaim("sub"))`.
-/// - CLAR-003: if `sub` is present but not a string, use "" and keep raw in map.
+/// Extract `sub` from the map. Returns `Ok((subject_string, map))` on success.
+///
+/// - Absent `sub` → `Err(MissingClaim("sub"))`.
+/// - `sub` present but not a string → `Err(InvalidToken("sub claim is not a string"))`.
+/// - `sub` present and a string → `Ok((s, map))`; the caller validates `s` is non-empty
+///   via [`SubjectId::new`], which returns `InvalidToken("invalid subject id")` on failure.
+///
+/// Unlike `roles` and `tenant_id`, `sub` is a required identity claim and does NOT
+/// degrade gracefully — any wrong-type or empty value rejects the token.
 fn extract_subject(
     mut map: BTreeMap<String, Value>,
 ) -> Result<(String, BTreeMap<String, Value>), AuthenticationError> {
     match map.remove("sub") {
         Some(Value::String(s)) => Ok((s, map)),
-        Some(other) => {
-            // Wrong type — graceful degradation: empty subject, raw value preserved
-            map.insert("sub".into(), other);
-            Ok((String::new(), map))
-        }
+        Some(_) => Err(AuthenticationError::InvalidToken(
+            "sub claim is not a string".into(),
+        )),
         None => Err(AuthenticationError::MissingClaim("sub".into())),
     }
 }
 
 /// Extract `tenant_id` or `tid` from the map. Returns (tenant_id, map).
-/// CLAR-003: wrong type → None, raw value stays in map under its original key.
+/// CLAR-005: wrong type → None, raw value stays in map under its original key.
 fn extract_tenant_id(mut map: BTreeMap<String, Value>) -> (Option<String>, BTreeMap<String, Value>) {
     // Prefer "tenant_id" over "tid"; track which key was actually removed so
-    // wrong-type values are re-inserted under the original key (CLAR-003).
+    // wrong-type values are re-inserted under the original key (CLAR-005).
     let (orig_key, val) = if let Some(v) = map.remove("tenant_id") {
         ("tenant_id", Some(v))
     } else {
@@ -355,7 +362,7 @@ fn extract_tenant_id(mut map: BTreeMap<String, Value>) -> (Option<String>, BTree
 }
 
 /// Extract `roles` from the map as a `BTreeSet<String>`.
-/// CLAR-003: if present but wrong type, skip (empty set) and keep raw in map.
+/// CLAR-005: if present but wrong type, skip (empty set) and keep raw in map.
 fn extract_roles(mut map: BTreeMap<String, Value>) -> (BTreeSet<String>, BTreeMap<String, Value>) {
     match map.remove("roles") {
         Some(Value::Array(arr)) => {
@@ -398,7 +405,7 @@ fn remove_standard_keys(mut map: BTreeMap<String, Value>) -> BTreeMap<String, Va
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use ego_domain::auth::{AuthenticationError, Credential};
+    use ego_domain::auth::AuthenticationError;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::json;
 
@@ -545,8 +552,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -558,7 +565,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_wrong_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
 
@@ -571,8 +578,8 @@ mod tests {
         let claims = json!({ "sub": "rs256-user", "exp": future_ts(3600) });
         let token = make_rs256_token(&claims);
         let auth = JwtAuthenticator::new(rs256_config(), rs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "rs256-user");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "rs256-user");
     }
 
     // -----------------------------------------------------------------------
@@ -585,7 +592,7 @@ mod tests {
         // Signed with primary key but verified with OTHER public key
         let token = make_rs256_token(&claims);
         let auth = JwtAuthenticator::new(rs256_config(), rs256_other_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
 
@@ -600,7 +607,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": exp_secs });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
 
@@ -616,7 +623,7 @@ mod tests {
         let token = make_hs256_token(&claims);
         // clock returns exactly `now`, which equals exp
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), fixed_clock(now));
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
 
@@ -629,8 +636,8 @@ mod tests {
         let claims = json!({ "sub": "user-1" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -643,7 +650,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
@@ -657,8 +664,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -669,7 +676,7 @@ mod tests {
     fn malformed_token_returns_invalid_token() {
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth
-            .authenticate(Credential::BearerToken("not.a.jwt".into()))
+            .authenticate(&Credential::Bearer("not.a.jwt".into()))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
@@ -688,7 +695,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "iss": "other-service" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
@@ -698,8 +705,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "iss": "random-issuer" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     #[test]
@@ -712,8 +719,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "iss": "trusted-iss" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -730,7 +737,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "aud": ["other-api"] });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
@@ -744,8 +751,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "aud": ["my-api"] });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -766,7 +773,7 @@ mod tests {
         let rs256_claims = json!({ "sub": "user-1" });
         let rs256_token = make_rs256_token(&rs256_claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(rs256_token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(rs256_token)).unwrap_err();
         // The new code detects alg mismatch at header-decode time: RS256 header
         // presented to HS256 resolver → AlgorithmMismatch → AlgorithmNotSupported
         assert!(matches!(
@@ -777,23 +784,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CLAR-003: wrong-type sub → graceful degradation
+    // CLAR-005: sub claim — all failure modes reject the token
     // -----------------------------------------------------------------------
 
     #[test]
-    fn wrong_type_sub_produces_empty_subject_and_preserves_raw() {
-        // sub is an integer, not a string
+    fn sub_integer_returns_invalid_token() {
         let claims = json!({ "sub": 12345 });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "");
-        // Raw value preserved in custom claims
-        assert_eq!(ctx.claims.custom.get("sub"), Some(&json!(12345)));
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_boolean_returns_invalid_token() {
+        let claims = json!({ "sub": true });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_object_returns_invalid_token() {
+        let claims = json!({ "sub": { "id": "user-1" } });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_array_returns_invalid_token() {
+        let claims = json!({ "sub": ["user-1"] });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_empty_string_returns_invalid_token() {
+        let claims = json!({ "sub": "" });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
     // -----------------------------------------------------------------------
-    // CLAR-003: wrong-type roles → graceful degradation
+    // CLAR-005: wrong-type roles → graceful degradation
     // -----------------------------------------------------------------------
 
     #[test]
@@ -802,8 +842,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "roles": "admin" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert!(ctx.identity.roles.is_empty());
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert!(ctx.principal.roles.is_empty());
         assert_eq!(ctx.claims.custom.get("roles"), Some(&json!("admin")));
     }
 
@@ -812,10 +852,10 @@ mod tests {
         let claims = json!({ "sub": "user-1", "roles": ["admin", "editor"] });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert!(ctx.identity.roles.contains("admin"));
-        assert!(ctx.identity.roles.contains("editor"));
-        assert_eq!(ctx.identity.roles.len(), 2);
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert!(ctx.principal.roles.contains(&Role("admin".into())));
+        assert!(ctx.principal.roles.contains(&Role("editor".into())));
+        assert_eq!(ctx.principal.roles.len(), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -832,7 +872,7 @@ mod tests {
         });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
         let keys: Vec<&str> = ctx.claims.custom.keys().map(|s| s.as_str()).collect();
         let mut sorted = keys.clone();
         sorted.sort();
@@ -860,8 +900,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "tenant_id": "acme" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.tenant_id, Some("acme".into()));
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.tenant_id, Some("acme".into()));
     }
 
     #[test]
@@ -869,8 +909,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "tid": "contoso" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.tenant_id, Some("contoso".into()));
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.tenant_id, Some("contoso".into()));
     }
 
     #[test]
@@ -878,20 +918,20 @@ mod tests {
         let claims = json!({ "sub": "user-1", "tenant_id": 999 });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert!(ctx.identity.tenant_id.is_none());
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.tenant_id, None);
         assert_eq!(ctx.claims.custom.get("tenant_id"), Some(&json!(999)));
     }
 
     #[test]
     fn wrong_type_tid_alias_preserves_raw_under_tid_key() {
-        // CLAR-003: wrong-type `tid` (the alias) must reappear under "tid",
+        // CLAR-005: wrong-type `tid` (the alias) must reappear under "tid",
         // NOT renamed to "tenant_id" in custom claims.
         let claims = json!({ "sub": "user-1", "tid": 42 });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert!(ctx.identity.tenant_id.is_none());
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.tenant_id, None);
         assert_eq!(ctx.claims.custom.get("tid"), Some(&json!(42)));
         assert!(!ctx.claims.custom.contains_key("tenant_id"));
     }
@@ -913,7 +953,7 @@ mod tests {
         });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
         assert!(ctx.claims.standard.exp.is_some());
         assert!(ctx.claims.standard.iat.is_some());
         assert_eq!(ctx.claims.standard.iss, Some("test-iss".into()));
@@ -929,9 +969,9 @@ mod tests {
         let claims = json!({ "sub": "user-1", "roles": ["admin", 42] });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
         // Mixed array → graceful degradation
-        assert!(ctx.identity.roles.is_empty());
+        assert!(ctx.principal.roles.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -943,7 +983,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": "never" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -955,7 +995,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": 9_999_999_999.5_f64 });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -967,7 +1007,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": true });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -979,7 +1019,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "nbf": "yesterday" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -991,7 +1031,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "nbf": 0.5_f64 });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -1003,7 +1043,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "nbf": false });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken, got {err:?}"
@@ -1020,7 +1060,7 @@ mod tests {
         let claims = json!({ "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(&err, AuthenticationError::MissingClaim(s) if s == "sub"),
             "expected MissingClaim(\"sub\"), got {err:?}"
@@ -1032,8 +1072,8 @@ mod tests {
         let claims = json!({ "sub": "happy-user", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "happy-user");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "happy-user");
     }
 
     // -----------------------------------------------------------------------
@@ -1051,7 +1091,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken for absent iss, got {err:?}"
@@ -1073,7 +1113,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(config, hs256_resolver(), now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken for absent aud, got {err:?}"
@@ -1089,8 +1129,8 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let auth = hs256_authenticator(&hs256_secret(), now_clock());
-        let ctx = auth.authenticate(Credential::BearerToken(token)).unwrap();
-        assert_eq!(ctx.identity.subject, "user-1");
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
@@ -1147,7 +1187,7 @@ mod tests {
                 .unwrap();
 
         let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
-        let _ = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        let _ = auth.authenticate(&Credential::Bearer(token)).unwrap();
 
         let kid = captured_kid.lock().unwrap().take();
         assert_eq!(kid, Some("primary-key".into()));
@@ -1174,7 +1214,7 @@ mod tests {
                 .unwrap();
 
         let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
-        let _ = auth.authenticate(Credential::BearerToken(token)).unwrap();
+        let _ = auth.authenticate(&Credential::Bearer(token)).unwrap();
 
         let kid = captured_kid.lock().unwrap().take();
         assert_eq!(kid, None);
@@ -1212,7 +1252,7 @@ mod tests {
         let claims = json!({ "sub": "user-1" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
 
@@ -1232,7 +1272,7 @@ mod tests {
         let claims = json!({ "sub": "user-1" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
@@ -1249,7 +1289,7 @@ mod tests {
         let claims = json!({ "sub": "user-1" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), resolver, now_clock());
-        let err = auth.authenticate(Credential::BearerToken(token)).unwrap_err();
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
@@ -1270,10 +1310,10 @@ mod tests {
         let claims = json!({ "sub": "shared-user", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
 
-        let ctx_a = auth_a.authenticate(Credential::BearerToken(token.clone())).unwrap();
-        let ctx_b = auth_b.authenticate(Credential::BearerToken(token)).unwrap();
+        let ctx_a = auth_a.authenticate(&Credential::Bearer(token.clone())).unwrap();
+        let ctx_b = auth_b.authenticate(&Credential::Bearer(token)).unwrap();
 
-        assert_eq!(ctx_a.identity.subject, "shared-user");
-        assert_eq!(ctx_b.identity.subject, "shared-user");
+        assert_eq!(ctx_a.principal.subject_id.as_str(), "shared-user");
+        assert_eq!(ctx_b.principal.subject_id.as_str(), "shared-user");
     }
 }

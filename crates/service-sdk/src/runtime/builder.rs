@@ -7,6 +7,9 @@ use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use crate::runtime::runtime_builder::RuntimeInner;
 
+/// The pair of security providers registered with a [`Runtime`].
+pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
+
 /// Builder for constructing a [`Runtime`] with optional security providers.
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
@@ -27,6 +30,10 @@ impl RuntimeBuilder {
     }
 
     /// Registers authentication and authorization providers for this runtime.
+    ///
+    /// The providers are stored and exposed via [`Runtime::security_providers`].
+    /// The runtime does not automatically enforce authentication — callers are
+    /// responsible for invoking the provider and populating `ServiceContext` on each request.
     pub fn with_security(
         self,
         authn: Arc<dyn AuthenticationProvider>,
@@ -77,7 +84,7 @@ impl Runtime {
     /// Returns the registered security providers, if any.
     pub fn security_providers(
         &self,
-    ) -> Option<&(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)> {
+    ) -> Option<&SecurityProviders> {
         self.inner.security_providers.as_ref()
     }
 }
@@ -91,19 +98,21 @@ mod tests {
     use ego_security_sdk::authorization::{
         AuthorizationDecision, AuthorizationProvider,
     };
+    use ego_security_sdk::context::SecurityContext;
     use ego_security_sdk::credential::Credential;
     use ego_security_sdk::error::SecurityError;
     use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
+    use ego_security_sdk::AuthenticationError;
 
     use super::{Runtime, RuntimeBuilder};
 
     struct StubAuthn;
 
-    #[async_trait]
     impl AuthenticationProvider for StubAuthn {
-        async fn authenticate(&self, _credential: &Credential) -> Result<Principal, SecurityError> {
+        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
             let subject = SubjectId::new("user:stub").unwrap();
-            Ok(Principal::new(PrincipalKind::User, subject))
+            let principal = Principal::new(PrincipalKind::User, subject);
+            Ok(SecurityContext::empty(principal))
         }
     }
 

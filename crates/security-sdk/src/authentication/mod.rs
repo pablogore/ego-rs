@@ -1,44 +1,45 @@
-//! Authentication provider contract.
+//! Authentication provider contract — synchronous, returns [`SecurityContext`].
 
-use async_trait::async_trait;
+use crate::{context::SecurityContext, credential::Credential};
+use ego_domain::auth::AuthenticationError;
 
-use crate::{credential::Credential, error::SecurityError, principal::Principal};
-
-/// Resolves a presented [`Credential`] into an authenticated [`Principal`].
+/// Resolves a presented [`Credential`] into an authenticated [`SecurityContext`].
 ///
-/// Object-safe and async: stored and invoked as `Arc<dyn AuthenticationProvider>`.
-/// No transport types appear in this contract. Providers needing tenant or
-/// environment context receive it at construction time via dependency injection.
+/// Synchronous per AD-004: authentication is CPU-bound, performs no I/O.
+/// Object-safe: stored and invoked as `Arc<dyn AuthenticationProvider>`.
 #[cfg_attr(test, mockall::automock)]
-#[async_trait]
 pub trait AuthenticationProvider: Send + Sync {
-    /// Authenticates `credential` and returns the resolved [`Principal`].
+    /// Authenticates `credential` and returns the resolved [`SecurityContext`].
     ///
     /// # Errors
-    /// - [`SecurityError::AuthenticationFailed`] — credential rejected.
-    /// - [`SecurityError::InvalidCredential`] — wrong scheme or malformed.
-    /// - [`SecurityError::ProviderError`] — backend failure.
-    async fn authenticate(&self, credential: &Credential) -> Result<Principal, SecurityError>;
+    /// Returns [`AuthenticationError`] on invalid credentials, expired tokens,
+    /// unsupported algorithms, missing required claims, or signature mismatch.
+    fn authenticate(&self, credential: &Credential) -> Result<SecurityContext, AuthenticationError>;
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use crate::context::SecurityContext;
+    use crate::credential::Credential;
+    use crate::principal::{Principal, PrincipalKind, SubjectId};
+
     use super::*;
 
     struct StubAuthProvider;
 
-    #[async_trait]
     impl AuthenticationProvider for StubAuthProvider {
-        async fn authenticate(&self, _credential: &Credential) -> Result<Principal, SecurityError> {
+        fn authenticate(
+            &self,
+            _credential: &Credential,
+        ) -> Result<SecurityContext, AuthenticationError> {
             unimplemented!()
         }
     }
 
     #[test]
     fn provider_is_object_safe() {
-        // Proves dyn-compatibility and Arc-injectability.
         let _: Arc<dyn AuthenticationProvider> = Arc::new(StubAuthProvider);
     }
 
@@ -48,26 +49,36 @@ mod tests {
         assert_send_sync::<dyn AuthenticationProvider>();
     }
 
-    #[tokio::test]
-    async fn authenticate_accepts_credential_by_ref() {
-        use crate::principal::{Principal, PrincipalKind, SubjectId};
+    #[test]
+    fn mock_provider_returns_configured_result() {
+        let mut mock = MockAuthenticationProvider::new();
+        mock.expect_authenticate().times(1).return_once(|_| {
+            let principal =
+                Principal::new(PrincipalKind::User, SubjectId::new("mock:user").unwrap());
+            Ok(SecurityContext::empty(principal))
+        });
+        let result = mock.authenticate(&Credential::Bearer("tok".into()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().principal().subject_id.as_str(), "mock:user");
+    }
 
+    #[test]
+    fn authenticate_returns_security_context() {
         struct ReturnsUser;
 
-        #[async_trait]
         impl AuthenticationProvider for ReturnsUser {
-            async fn authenticate(
+            fn authenticate(
                 &self,
                 _credential: &Credential,
-            ) -> Result<Principal, SecurityError> {
-                let subject = SubjectId::new("user:stub").unwrap();
-                Ok(Principal::new(PrincipalKind::User, subject))
+            ) -> Result<SecurityContext, AuthenticationError> {
+                let principal = Principal::new(PrincipalKind::User, SubjectId::new("user:stub").unwrap());
+                Ok(SecurityContext::empty(principal))
             }
         }
 
         let cred = Credential::Bearer("tok".into());
-        let result = ReturnsUser.authenticate(&cred).await;
+        let result = ReturnsUser.authenticate(&cred);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().subject.as_str(), "user:stub");
+        assert_eq!(result.unwrap().principal().subject_id.as_str(), "user:stub");
     }
 }
