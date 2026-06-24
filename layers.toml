@@ -16,3 +16,6 @@
 "ego-runtime" = "foundation"
 "ego-runtime-tokio" = "infrastructure"
 "ego-scheduler" = "foundation"
+# security-jwt is infrastructure: it depends on ego-domain and implements JWT auth.
+# CONSTRAINT: ego-runtime MUST NOT depend on security-jwt (would create a layer violation).
+"security-jwt" = "infrastructure"

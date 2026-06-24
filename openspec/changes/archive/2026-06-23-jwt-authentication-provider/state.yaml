@@ -1,0 +1,91 @@
+---
+# CORE-011 JWT Authentication Provider — Final State Record
+# Archived: 2026-06-23
+
+core_id: CORE-011
+change_name: jwt-authentication-provider
+archive_date: "2026-06-23"
+status: CLOSED
+scope_qualifier: "JWT local validation only"
+
+# Engagement phases completed
+phases:
+  proposal:
+    status: COMPLETE
+    engagement_id: "940"
+  spec:
+    status: COMPLETE
+    engagement_id: "941"
+  clarifications:
+    status: COMPLETE
+    count: 4
+    engagement_id: "942"
+  design:
+    status: COMPLETE
+    ad_decisions: ["AD-007"]
+    engagement_id: "943"
+  tasks:
+    status: COMPLETE
+    count: 5
+    engagement_id: (implicit in apply-progress)
+  apply:
+    status: COMPLETE
+    tdd_mode: strict
+    files_created: 8
+    files_modified: 3
+    test_count: 37
+    engagement_id: "957"
+  judgment_day:
+    status: APPROVED
+    round_1_findings: 4
+    round_2_findings: 0
+    engagement_id: "959"
+  archive:
+    status: COMPLETE
+    engagement_id: (this report)
+
+# Requirement compliance
+requirements:
+  functional: 14
+  non_functional: 4
+  all_met: true
+
+# Test coverage
+tests:
+  ego_domain_unit: 151
+  ego_domain_doc: 9
+  security_jwt_unit: 37
+  security_jwt_doc: 1
+  total: 198
+  all_pass: true
+
+# Layer compliance
+layers:
+  security_jwt: infrastructure
+  ego_domain: domain
+  ego_runtime_dependent_on_security_jwt: false
+  constraint_verified: true
+
+# Files in archive folder
+artifacts:
+  - archive-report.md
+  - state.yaml
+  - apply-progress.md (moved from change folder)
+
+# Related changes
+related_changes:
+  - CORE-009A-auth-contract-rationalization (archived separately; sync boundary decision now canonical)
+
+# Recommended follow-up
+follow_ups:
+  - CORE-012 (Authorization provider)
+  - CORE-011A (ES256/EdDSA algorithm support)
+  - CORE-011B (JWKS remote key resolver)
+
+# Technical notes
+technical_notes:
+  - Clock trait allows for fully deterministic testing
+  - BTreeMap used throughout for deterministic claim ordering
+  - All types Send + Sync safe for concurrent use
+  - No external dependencies on ego-runtime
+  - Zero blockers remaining after Judgment Day Round 2
