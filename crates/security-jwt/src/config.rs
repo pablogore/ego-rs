@@ -11,6 +11,9 @@ pub enum JwtAlgorithm {
 
     /// RSA-PKCS1-SHA256. Only the public key is needed for verification.
     Rs256,
+
+    /// ECDSA-P256-SHA256. Only the public key is needed for verification.
+    Es256,
 }
 
 /// Full configuration for a [`super::JwtAuthenticator`].
@@ -20,7 +23,7 @@ pub enum JwtAlgorithm {
 /// an authenticator. This struct holds only functional validation parameters —
 /// key material lives in the resolver.
 pub struct JwtConfig {
-    /// Algorithm discriminant — selects HS256 or RS256. Key material is
+    /// Algorithm discriminant — selects HS256, RS256, or ES256. Key material is
     /// provided separately via [`crate::KeyResolver`].
     pub algorithm: JwtAlgorithm,
 
@@ -31,4 +34,18 @@ pub struct JwtConfig {
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
     /// If `None`, the `aud` claim is not validated.
     pub expected_aud: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn es256_variant_equality() {
+        assert_eq!(JwtAlgorithm::Es256, JwtAlgorithm::Es256);
+    }
 }

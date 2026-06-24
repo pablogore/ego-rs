@@ -9,32 +9,15 @@
 //! - `sub` present but empty → `AuthenticationError::InvalidToken`
 //! - `roles` / `tenant_id` / `tid`: wrong type → skip (graceful degradation); raw value preserved in `Claims.custom`
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ego_domain::auth::{
-    AuthenticationError, Claims, Clock, StandardClaims,
-};
-use ego_security_sdk::{
-    AuthenticationProvider, Credential, Principal, PrincipalKind, Role, SecurityContext, SubjectId,
-};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use serde_json::Value;
+use ego_domain::auth::{AuthenticationError, Clock};
+use ego_security_sdk::{AuthenticationProvider, Credential, SecurityContext};
+use jsonwebtoken::{Algorithm, DecodingKey};
 
 use crate::config::{JwtAlgorithm, JwtConfig};
 use crate::key_resolver::{KeyResolver, KeyResolverError, VerificationKey};
-
-// ---------------------------------------------------------------------------
-// Internal raw-claims structure for serde deserialization
-// ---------------------------------------------------------------------------
-
-/// Raw deserialized JWT payload — all fields are optional because any claim
-/// may be absent. We deserialize into a generic map to capture everything.
-#[derive(serde::Deserialize)]
-struct RawClaims {
-    #[serde(flatten)]
-    all: BTreeMap<String, Value>,
-}
+use crate::validation::{JwtValidationEngine, ValidationParams};
 
 // ---------------------------------------------------------------------------
 // JwtAuthenticator
@@ -99,12 +82,11 @@ impl AuthenticationProvider for JwtAuthenticator {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AuthenticationError::InvalidToken(format!("{e}")))?;
 
-        let kid = header.kid.as_deref();
-
         // Map jsonwebtoken Algorithm to our JwtAlgorithm discriminant
         let requested_alg = match header.alg {
             Algorithm::HS256 => JwtAlgorithm::Hs256,
             Algorithm::RS256 => JwtAlgorithm::Rs256,
+            Algorithm::ES256 => JwtAlgorithm::Es256,
             other => {
                 return Err(AuthenticationError::AlgorithmNotSupported(format!(
                     "{other:?}"
@@ -112,289 +94,77 @@ impl AuthenticationProvider for JwtAuthenticator {
             }
         };
 
-        // Resolve the verification key — block_on is safe because KeyResolver
-        // is cache-first (AD-013): LocalKeyResolver completes immediately from
-        // memory with no I/O, so block_on never parks the thread.
-        let verification_key =
-            futures_executor::block_on(self.resolver.resolve(kid, requested_alg)).map_err(
-                |e| match e {
-                    KeyResolverError::KeyNotFound { .. } => AuthenticationError::InvalidSignature,
-                    KeyResolverError::AlgorithmMismatch { .. } => {
-                        AuthenticationError::AlgorithmNotSupported(format!(
-                            "{:?}",
-                            self.config.algorithm
-                        ))
-                    }
-                    KeyResolverError::InvalidKeyMaterial(msg) => {
-                        AuthenticationError::InvalidToken(format!("key material: {msg}"))
-                    }
-                },
-            )?;
+        // B-1: Enforce config.algorithm — reject tokens whose header alg differs
+        // from what this authenticator was configured to accept.
+        if requested_alg != self.config.algorithm {
+            return Err(AuthenticationError::AlgorithmNotSupported(format!(
+                "token uses {requested_alg:?} but authenticator is configured for {:?}",
+                self.config.algorithm
+            )));
+        }
 
-        // Build decoding key and algorithm from the resolved VerificationKey.
-        // Note: VerificationKey is #[non_exhaustive] — when new variants are
-        // added (ES256, EdDSA, JWK), the compiler will require updating this match.
-        let (decoding_key, algorithm) = match verification_key {
-            VerificationKey::Hmac(ref bytes) => {
-                (DecodingKey::from_secret(bytes), Algorithm::HS256)
+        // Resolve the verification key.
+        //
+        // B-2: `futures_executor::block_on` panics when called from inside a Tokio
+        // worker thread (the Tokio runtime is already parked on the thread and
+        // `block_on` tries to build a second executor on the same OS thread).
+        // To avoid this, we always spawn a fresh OS thread before calling `block_on`.
+        // A fresh thread has no ambient Tokio context, so `block_on` is safe.
+        // The KeyResolver is cache-first (AD-013), so the resolve future is cheap.
+        let resolver = Arc::clone(&self.resolver);
+        let kid_owned = header.kid.clone(); // Option<String> — clone before move
+        let alg = requested_alg;
+        let config_alg = self.config.algorithm;
+        let verification_key = std::thread::spawn(move || {
+            futures_executor::block_on(resolver.resolve(kid_owned.as_deref(), alg))
+        })
+        .join()
+        .map_err(|_| AuthenticationError::InvalidToken("key resolver panicked".into()))?
+        .map_err(|e| match e {
+            KeyResolverError::KeyNotFound { .. } => AuthenticationError::InvalidSignature,
+            KeyResolverError::AlgorithmMismatch { .. } => {
+                AuthenticationError::AlgorithmNotSupported(format!("{config_alg:?}"))
             }
+            KeyResolverError::InvalidKeyMaterial(msg) => {
+                AuthenticationError::InvalidToken(format!("key material: {msg}"))
+            }
+        })?;
+
+        // Build decoding key — each provider owns only key-build and alg enforcement (AD-014).
+        // Claim/time validation is fully delegated to JwtValidationEngine below (AD-019).
+        // The wildcard arm is required for correctness because VerificationKey is
+        // #[non_exhaustive] — callers outside this crate may encounter future variants.
+        // The allow attribute suppresses the unreachable_patterns lint that fires
+        // inside the defining crate (where all current variants are visible).
+        #[allow(unreachable_patterns)]
+        let (decoding_key, algorithm) = match verification_key {
+            VerificationKey::Hmac(ref bytes) => (DecodingKey::from_secret(bytes), Algorithm::HS256),
             VerificationKey::RsaPem(ref pem) => (
                 DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|e| {
                     AuthenticationError::InvalidToken(format!("bad RSA public key: {e}"))
                 })?,
                 Algorithm::RS256,
             ),
+            VerificationKey::EcPem(ref pem) => (
+                DecodingKey::from_ec_pem(pem.as_bytes()).map_err(|e| {
+                    AuthenticationError::InvalidToken(format!("bad EC public key: {e}"))
+                })?,
+                Algorithm::ES256,
+            ),
+            _ => {
+                return Err(AuthenticationError::InvalidToken(
+                    "unsupported verification key variant".into(),
+                ))
+            }
         };
 
-        // Disable jsonwebtoken's built-in exp/nbf/aud/iss so we do it ourselves
-        // (we need clock injection for time checks and custom aud matching)
-        let mut validation = Validation::new(algorithm);
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.set_required_spec_claims::<&str>(&[]);
-        // Disable built-in aud so we can do our own matching
-        validation.validate_aud = false;
-
-        // Decode the token
-        let token_data =
-            jsonwebtoken::decode::<RawClaims>(token, &decoding_key, &validation).map_err(
-                |e| {
-                    use jsonwebtoken::errors::ErrorKind;
-                    match e.kind() {
-                        ErrorKind::InvalidSignature => AuthenticationError::InvalidSignature,
-                        ErrorKind::InvalidAlgorithm => {
-                            AuthenticationError::AlgorithmNotSupported(format!("{e}"))
-                        }
-                        ErrorKind::InvalidAlgorithmName => {
-                            AuthenticationError::AlgorithmNotSupported(format!("{e}"))
-                        }
-                        _ => AuthenticationError::InvalidToken(format!("{e}")),
-                    }
-                },
-            )?;
-
-        let all_claims = token_data.claims.all;
-        let now = self.clock.now();
-
-        // exp check — reject if exp <= now (expired means exp is in the past or equal to now)
-        if let Some(exp_val) = all_claims.get("exp") {
-            if let Some(exp_secs) = exp_val.as_i64().or_else(|| exp_val.as_u64().and_then(|u| i64::try_from(u).ok())) {
-                let exp_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(exp_secs, 0)
-                    .ok_or_else(|| AuthenticationError::InvalidToken("invalid exp timestamp".into()))?;
-                if now >= exp_dt {
-                    return Err(AuthenticationError::ExpiredToken);
-                }
-            } else {
-                return Err(AuthenticationError::InvalidToken(
-                    "exp claim is not a valid integer".into(),
-                ));
-            }
-        }
-
-        // nbf check — reject if nbf > now (not yet valid)
-        if let Some(nbf_val) = all_claims.get("nbf") {
-            if let Some(nbf_secs) = nbf_val.as_i64().or_else(|| nbf_val.as_u64().and_then(|u| i64::try_from(u).ok())) {
-                let nbf_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(nbf_secs, 0)
-                    .ok_or_else(|| AuthenticationError::InvalidToken("invalid nbf timestamp".into()))?;
-                if now < nbf_dt {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "token not yet valid (nbf: {nbf_dt})"
-                    )));
-                }
-            } else {
-                return Err(AuthenticationError::InvalidToken(
-                    "nbf claim is not a valid integer".into(),
-                ));
-            }
-        }
-
-        // iss check
-        if let Some(expected_iss) = &self.config.expected_iss {
-            match all_claims.get("iss") {
-                Some(Value::String(iss)) if iss == expected_iss => {}
-                Some(other) => {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "iss mismatch: expected '{expected_iss}', got '{other}'"
-                    )))
-                }
-                None => {
-                    return Err(AuthenticationError::InvalidToken(format!(
-                        "iss mismatch: expected '{expected_iss}', got none"
-                    )))
-                }
-            }
-        }
-
-        // aud check — at least one expected aud must be present in the token's aud
-        if let Some(expected_auds) = &self.config.expected_aud {
-            let token_auds: Vec<String> = match all_claims.get("aud") {
-                Some(Value::String(s)) => vec![s.clone()],
-                Some(Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect(),
-                _ => vec![],
-            };
-            let any_match = expected_auds.iter().any(|ea| token_auds.contains(ea));
-            if !any_match {
-                return Err(AuthenticationError::InvalidToken(format!(
-                    "aud mismatch: expected one of {expected_auds:?}, got {token_auds:?}"
-                )));
-            }
-        }
-
-        // Build StandardClaims
-        let standard = build_standard_claims(&all_claims);
-
-        // sub: strict — absent or non-string rejects the token (CLAR-005)
-        // tenant_id / roles: graceful — wrong type skipped, raw preserved (CLAR-005)
-        let (subject, all_claims) = extract_subject(all_claims)?;
-        let (tenant_id, all_claims) = extract_tenant_id(all_claims);
-        let (roles, all_claims) = extract_roles(all_claims);
-
-        // Remove fields that are now in StandardClaims from custom
-        let custom = remove_standard_keys(all_claims);
-
-        let mut principal = Principal::new(
-            PrincipalKind::User,
-            SubjectId::new(subject)
-                .map_err(|_| AuthenticationError::InvalidToken("invalid subject id".into()))?,
-        );
-        for role in roles {
-            principal = principal.with_role(Role(role));
-        }
-        if let Some(tid) = tenant_id {
-            principal = principal.with_tenant_id(tid);
-        }
-
-        let claims = Claims {
-            standard,
-            custom,
+        let params = ValidationParams {
+            expected_iss: self.config.expected_iss.as_deref(),
+            expected_aud: self.config.expected_aud.as_deref(),
         };
 
-        Ok(SecurityContext::new(principal, claims))
+        JwtValidationEngine::validate(token, &decoding_key, algorithm, params, self.clock.as_ref())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build [`StandardClaims`] from the raw claims map (values remain there too).
-fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
-    let exp = map.get("exp").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
-    let nbf = map.get("nbf").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
-    let iat = map.get("iat").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-    });
-    let jti = map.get("jti").and_then(|v| v.as_str().map(str::to_owned));
-    let iss = map.get("iss").and_then(|v| v.as_str().map(str::to_owned));
-    let aud = map.get("aud").and_then(|v| match v {
-        Value::String(s) => Some(vec![s.clone()]),
-        Value::Array(arr) => Some(
-            arr.iter()
-                .filter_map(|x| x.as_str().map(str::to_owned))
-                .collect(),
-        ),
-        _ => None,
-    });
-
-    StandardClaims {
-        exp,
-        nbf,
-        iat,
-        jti,
-        iss,
-        aud,
-    }
-}
-
-/// Extract `sub` from the map. Returns `Ok((subject_string, map))` on success.
-///
-/// - Absent `sub` → `Err(MissingClaim("sub"))`.
-/// - `sub` present but not a string → `Err(InvalidToken("sub claim is not a string"))`.
-/// - `sub` present and a string → `Ok((s, map))`; the caller validates `s` is non-empty
-///   via [`SubjectId::new`], which returns `InvalidToken("invalid subject id")` on failure.
-///
-/// Unlike `roles` and `tenant_id`, `sub` is a required identity claim and does NOT
-/// degrade gracefully — any wrong-type or empty value rejects the token.
-fn extract_subject(
-    mut map: BTreeMap<String, Value>,
-) -> Result<(String, BTreeMap<String, Value>), AuthenticationError> {
-    match map.remove("sub") {
-        Some(Value::String(s)) => Ok((s, map)),
-        Some(_) => Err(AuthenticationError::InvalidToken(
-            "sub claim is not a string".into(),
-        )),
-        None => Err(AuthenticationError::MissingClaim("sub".into())),
-    }
-}
-
-/// Extract `tenant_id` or `tid` from the map. Returns (tenant_id, map).
-/// CLAR-005: wrong type → None, raw value stays in map under its original key.
-fn extract_tenant_id(mut map: BTreeMap<String, Value>) -> (Option<String>, BTreeMap<String, Value>) {
-    // Prefer "tenant_id" over "tid"; track which key was actually removed so
-    // wrong-type values are re-inserted under the original key (CLAR-005).
-    let (orig_key, val) = if let Some(v) = map.remove("tenant_id") {
-        ("tenant_id", Some(v))
-    } else {
-        ("tid", map.remove("tid"))
-    };
-    match val {
-        Some(Value::String(s)) => (Some(s), map),
-        Some(other) => {
-            // Wrong type — graceful degradation: preserve under original key
-            map.insert(orig_key.into(), other);
-            (None, map)
-        }
-        None => (None, map),
-    }
-}
-
-/// Extract `roles` from the map as a `BTreeSet<String>`.
-/// CLAR-005: if present but wrong type, skip (empty set) and keep raw in map.
-fn extract_roles(mut map: BTreeMap<String, Value>) -> (BTreeSet<String>, BTreeMap<String, Value>) {
-    match map.remove("roles") {
-        Some(Value::Array(arr)) => {
-            let all_strings = arr.iter().all(|v| v.is_string());
-            if all_strings {
-                let roles = arr
-                    .into_iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect();
-                (roles, map)
-            } else {
-                // Mixed or wrong types — graceful degradation
-                map.insert("roles".into(), Value::Array(arr));
-                (BTreeSet::new(), map)
-            }
-        }
-        Some(other) => {
-            map.insert("roles".into(), other);
-            (BTreeSet::new(), map)
-        }
-        None => (BTreeSet::new(), map),
-    }
-}
-
-/// Remove well-known standard claim keys from the custom map.
-/// These are already captured in `StandardClaims`; keeping them in `custom`
-/// would be redundant.
-fn remove_standard_keys(mut map: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
-    for key in &["exp", "nbf", "iat", "jti", "iss", "aud"] {
-        map.remove(*key);
-    }
-    map
 }
 
 // ---------------------------------------------------------------------------
@@ -406,38 +176,16 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use ego_domain::auth::AuthenticationError;
+    use ego_security_sdk::principal::Role;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::json;
 
     use crate::key_resolver::{LocalKeyResolver, VerificationKey};
-
-    // -----------------------------------------------------------------------
-    // Test clock
-    // -----------------------------------------------------------------------
-
-    struct FixedClock(chrono::DateTime<Utc>);
-
-    impl Clock for FixedClock {
-        fn now(&self) -> chrono::DateTime<Utc> {
-            self.0
-        }
-    }
-
-    fn fixed_clock(ts: chrono::DateTime<Utc>) -> Arc<dyn Clock> {
-        Arc::new(FixedClock(ts))
-    }
-
-    fn now_clock() -> Arc<dyn Clock> {
-        fixed_clock(Utc::now())
-    }
+    use crate::test_helpers::{fixed_clock, future_ts, hs256_secret, make_hs256_token, now_clock, past_ts};
 
     // -----------------------------------------------------------------------
     // HS256 key helpers
     // -----------------------------------------------------------------------
-
-    fn hs256_secret() -> Vec<u8> {
-        b"super-secret-key-for-testing-only".to_vec()
-    }
 
     fn hs256_wrong_secret() -> Vec<u8> {
         b"wrong-secret".to_vec()
@@ -463,23 +211,6 @@ mod tests {
             expected_iss: None,
             expected_aud: None,
         }
-    }
-
-    fn hs256_authenticator(secret: &[u8], clock: Arc<dyn Clock>) -> JwtAuthenticator {
-        let resolver = Arc::new(LocalKeyResolver::new(
-            JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(secret.to_vec()),
-        ));
-        JwtAuthenticator::new(
-            JwtConfig { algorithm: JwtAlgorithm::Hs256, expected_iss: None, expected_aud: None },
-            resolver,
-            clock,
-        )
-    }
-
-    fn make_hs256_token(claims: &serde_json::Value) -> String {
-        let header = Header::new(Algorithm::HS256);
-        encode(&header, claims, &EncodingKey::from_secret(&hs256_secret())).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -532,15 +263,86 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
+    // ES256 key helpers — P-256 test keys (generated offline, not real)
     // -----------------------------------------------------------------------
 
-    fn future_ts(offset_secs: i64) -> i64 {
-        (Utc::now() + chrono::Duration::seconds(offset_secs)).timestamp()
+    // NOTE: These are TEST ONLY keys. Never use in production.
+    fn ec_private_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_private.pem")
     }
 
-    fn past_ts(offset_secs: i64) -> i64 {
-        (Utc::now() - chrono::Duration::seconds(offset_secs)).timestamp()
+    fn ec_public_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_public.pem")
+    }
+
+    fn ec_other_public_key_pem() -> &'static str {
+        include_str!("../tests/fixtures/test_ec_other_public.pem")
+    }
+
+    fn ec_resolver() -> Arc<dyn KeyResolver> {
+        Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Es256,
+            VerificationKey::EcPem(ec_public_key_pem().to_string()),
+        ))
+    }
+
+    fn make_ec_token(claims: &serde_json::Value) -> String {
+        let header = Header::new(Algorithm::ES256);
+        encode(
+            &header,
+            claims,
+            &EncodingKey::from_ec_pem(ec_private_key_pem().as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn ec_config() -> JwtConfig {
+        JwtConfig { algorithm: JwtAlgorithm::Es256, expected_iss: None, expected_aud: None }
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 valid token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_valid_token_returns_security_context() {
+        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600) });
+        let token = make_ec_token(&claims);
+        let auth = JwtAuthenticator::new(ec_config(), ec_resolver(), now_clock());
+        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "es256-user");
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 mismatched key → InvalidSignature
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_mismatched_key_returns_invalid_signature() {
+        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600) });
+        let token = make_ec_token(&claims);
+        // Verify with the OTHER public key — signature mismatch
+        let other_resolver = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Es256,
+            VerificationKey::EcPem(ec_other_public_key_pem().to_string()),
+        ));
+        let auth = JwtAuthenticator::new(ec_config(), other_resolver, now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert_eq!(err, AuthenticationError::InvalidSignature);
+    }
+
+    // -----------------------------------------------------------------------
+    // C-1: ES256 authenticator configured for ES256 rejects HS256 token
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn es256_provider_rejects_hs256_token() {
+        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
+        let hs256_token = make_hs256_token(&claims);
+        // Authenticator configured for ES256 — HS256 header alg must be rejected
+        let auth = JwtAuthenticator::new(ec_config(), ec_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(hs256_token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -761,26 +563,13 @@ mod tests {
 
     #[test]
     fn algorithm_mismatch_returns_not_supported() {
-        // ES256 token presented to an HS256 config → jsonwebtoken rejects it
-        // with an algorithm error before we even get to our checks.
-        // We simulate this by crafting a header that claims RS256 but signing with HS256 key.
-        // The real ES256 case can't be easily fabricated without an EC key.
-        // Instead, directly test the mapping through a header mismatch.
-        let claims = json!({ "sub": "user-1" });
-        // Encode with HS256 but validator expects HS256 — let's produce one with
-        // wrong algorithm by encoding with RS256 (which will fail differently).
-        // The simplest verifiable case: present a valid RS256 token to HS256 config.
-        let rs256_claims = json!({ "sub": "user-1" });
-        let rs256_token = make_rs256_token(&rs256_claims);
+        // Present a valid RS256 token to an HS256 config — alg mismatch detected at header time.
+        let rs256_token = make_rs256_token(&json!({ "sub": "user-1" }));
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(&Credential::Bearer(rs256_token)).unwrap_err();
-        // The new code detects alg mismatch at header-decode time: RS256 header
-        // presented to HS256 resolver → AlgorithmMismatch → AlgorithmNotSupported
-        assert!(matches!(
-            err,
-            AuthenticationError::AlgorithmNotSupported(_) | AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)
-        ));
-        let _ = claims; // suppress unused warning
+        // Fix B-1: config.algorithm mismatch is now detected immediately after header parse,
+        // before the resolver is called — so this MUST be AlgorithmNotSupported.
+        assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -1118,19 +907,6 @@ mod tests {
             matches!(err, AuthenticationError::InvalidToken(_)),
             "expected InvalidToken for absent aud, got {err:?}"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // Helper function test (hs256_authenticator)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn hs256_authenticator_helper_works() {
-        let claims = json!({ "sub": "user-1", "exp": future_ts(3600) });
-        let token = make_hs256_token(&claims);
-        let auth = hs256_authenticator(&hs256_secret(), now_clock());
-        let ctx = auth.authenticate(&Credential::Bearer(token)).unwrap();
-        assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
 
     // -----------------------------------------------------------------------
