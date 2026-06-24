@@ -7,6 +7,9 @@ use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use crate::runtime::runtime_builder::RuntimeInner;
 
+/// The pair of security providers registered with a [`Runtime`].
+pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
+
 /// Builder for constructing a [`Runtime`] with optional security providers.
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
@@ -30,7 +33,7 @@ impl RuntimeBuilder {
     ///
     /// The providers are stored and exposed via [`Runtime::security_providers`].
     /// The runtime does not automatically enforce authentication — callers are
-    /// responsible for invoking the provider and populating [`ServiceContext::security`].
+    /// responsible for invoking the provider and populating `ServiceContext` on each request.
     pub fn with_security(
         self,
         authn: Arc<dyn AuthenticationProvider>,
@@ -81,7 +84,7 @@ impl Runtime {
     /// Returns the registered security providers, if any.
     pub fn security_providers(
         &self,
-    ) -> Option<&(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)> {
+    ) -> Option<&SecurityProviders> {
         self.inner.security_providers.as_ref()
     }
 }

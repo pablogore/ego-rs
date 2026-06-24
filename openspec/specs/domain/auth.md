@@ -52,14 +52,16 @@ The authentication credential supplied by the caller.
 ```rust
 #[non_exhaustive]
 pub enum Credential {
-    BearerToken(String),
-    // Future variants: ApiKey(String), ClientCertificate(Vec<u8>), etc.
+    Basic { username: String, secret: String },
+    Bearer(String),
+    Custom { scheme: String, payload: Vec<u8> },
 }
 ```
 
 **Invariants**:
-- #[non_exhaustive] allows future variants without breaking existing implementors
-- BearerToken is the initial variant for JWT/OIDC tokens
+- `#[non_exhaustive]` allows future variants without breaking existing match arms
+- `Bearer` carries the raw token string (without the `"Bearer "` prefix)
+- `Debug` impl redacts `Bearer` and `Basic.secret` — token material never appears in logs
 - Credential is consumed by value to ensure sensitive material is dropped after validation
 
 ### AuthenticationError
@@ -73,13 +75,15 @@ pub enum AuthenticationError {
     MissingClaim(String),            // Required claim is absent (e.g., 'sub')
     InvalidSignature,                // Signature validation failed
     AlgorithmNotSupported(String),   // Token algorithm not supported by provider
+    ProviderUnavailable(String),     // Backing store / verifier is unreachable
 }
 ```
 
 **Invariants**:
 - Each variant carries enough context for logging without additional state
 - Implementations MUST NOT panic; all errors are recoverable
-- InvalidToken carries a message for context
+- `InvalidToken` is used for both structural failures and wrong-type `sub` (see CLAR-005)
+- `ProviderUnavailable` MUST be used when the failure is transient infrastructure, not a bad token
 
 ### Clock
 
@@ -108,7 +112,7 @@ pub trait Clock: Send + Sync {
 
 5. **Clock injection**: All time-sensitive validation uses an injected Clock abstraction, enabling deterministic testing without mocking system calls.
 
-6. **Claim classification**: Claims are split into two categories with different wrong-type behaviors. Identity claims (`sub`, `tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives its zero value (`""` for `String`, `None` for `Option<String>`, empty set for `BTreeSet`) and the raw claim is preserved in `Claims.custom` under its original key. Security claims (`exp`, `nbf`, `iat`, `jti`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
+6. **Claim classification**: Claims are split into three categories with distinct wrong-type behaviors. The `sub` claim is a required identity anchor — absent or non-string values reject the token immediately. Optional identity claims (`tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives its zero value and the raw claim is preserved in `Claims.custom`. Security claims (`exp`, `nbf`, `iat`, `jti`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
 
 7. **No type merging**: StandardClaims and Claims.custom are separate. Standard claims are never merged into a flat map.
 
@@ -116,20 +120,39 @@ pub trait Clock: Send + Sync {
 
 ### CLAR-005 — Claim Classification
 
-JWT claims fall into two categories with distinct wrong-type behaviors:
+JWT claims fall into three categories with distinct wrong-type behaviors:
 
-**Identity Claims**: `sub`, `tenant_id`, `tid`, `roles`
+**`sub` (required identity anchor)**
+
+- Absent → `Err(AuthenticationError::MissingClaim("sub"))`.
+- Present but not a string → `Err(AuthenticationError::InvalidToken("sub claim is not a string"))`.
+- Present but empty string → `Err(AuthenticationError::InvalidToken("invalid subject id"))`.
+- Rationale: `sub` is the only claim that uniquely identifies an authenticated principal. An unknown or unrepresentable subject cannot form a valid `SecurityContext`.
+
+**Optional identity claims**: `tenant_id`, `tid`, `roles`
 
 - Wrong type MUST NOT fail authentication.
-- Implementation MUST degrade gracefully: the nominal identity field receives its zero value (`""` for `String`, `None` for `Option<String>`, empty set for `BTreeSet`).
+- Implementation MUST degrade gracefully: the nominal field receives its zero value (`None` for `Option<String>`, empty set for `BTreeSet<Role>`).
 - The original raw claim value MUST be preserved in `Claims.custom` under its original key.
-- Rationale: identity enrichment fields are not security-critical; a token with an unexpected claim encoding is still a valid, authenticated token.
+- Rationale: these are enrichment fields; a token with an unexpected encoding is still a valid, authenticated token — the principal is still identified by `sub`.
 
-**Security Claims**: `exp`, `nbf`, `iat`, `jti`, `iss`, `aud`
+**Security claims**: `exp`, `nbf`, `iat`, `jti`, `iss`, `aud`
 
 - Wrong type MUST fail authentication with `AuthenticationError::InvalidToken`.
 - The raw value is NOT preserved; the request is rejected immediately before `SecurityContext` is produced.
 - Rationale: these claims govern time-bound validity and trust constraints. Accepting a non-parseable value would silently bypass security checks.
+
+**Scenario — `sub` absent**
+
+Given a JWT with no `sub` key  
+When `JwtAuthenticator::authenticate` is called  
+Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
+
+**Scenario — `sub` present but wrong type**
+
+Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
+When `JwtAuthenticator::authenticate` is called  
+Then `Err(AuthenticationError::InvalidToken("sub claim is not a string"))` is returned
 
 **Scenario — security claim, wrong type**
 
@@ -137,43 +160,30 @@ Given a JWT with `{ "sub": "user-1", "exp": "not-a-number" }` (exp as string)
 When `JwtAuthenticator::authenticate` is called  
 Then `Err(AuthenticationError::InvalidToken("exp claim is not a valid integer"))` is returned
 
-**Scenario — identity claim, wrong type**
+**Scenario — optional identity claim, wrong type**
 
-Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
+Given a JWT with `{ "sub": "user-1", "tenant_id": 999, "exp": 9999999999 }`  
 When `JwtAuthenticator::authenticate` is called  
 Then `Ok(SecurityContext)` is returned with:
-- `principal.subject_id == ""` (graceful degradation)
-- `claims.custom["sub"] == 123` (raw value preserved)
+- `principal.tenant_id == None` (graceful degradation)
+- `claims.custom["tenant_id"] == 999` (raw value preserved)
 - `claims.custom` does NOT contain `"exp"` (security claim values are never preserved in `Claims.custom`)
 
 ---
 
-### CLAR-006 — Required Claim Semantics: Absent vs. Wrong Type
+### CLAR-006 — Required Claim Semantics: `sub`
 
-"Absent claim" and "wrong-type claim" are distinct failure modes with different outcomes for identity claims:
+`sub` is the sole required identity claim. All three failure modes reject the token:
 
 | Scenario | Example payload | Result |
 |---|---|---|
-| Claim absent | `{}` (no `sub` key) | `Err(AuthenticationError::MissingClaim("sub"))` |
-| Claim present, wrong type | `{"sub": 123}` | `Ok(SecurityContext)` with graceful degradation |
+| `sub` absent | `{}` | `Err(MissingClaim("sub"))` |
+| `sub` present, not a string | `{"sub": 123}` | `Err(InvalidToken("sub claim is not a string"))` |
+| `sub` present, empty string | `{"sub": ""}` | `Err(InvalidToken("invalid subject id"))` |
 
-**Rationale**: a missing `sub` indicates a structurally invalid token — no authenticated identity was issued. A `sub` of the wrong type indicates a valid token with an unexpected encoding; the token is authenticated but the subject cannot be reliably extracted as a string.
+**Rationale**: `sub` is the only claim that uniquely identifies an authenticated principal. If it is absent, malformed, or unrepresentable as a non-empty `SubjectId`, no authenticated identity exists and the token is rejected. This is distinct from optional identity claims (`tenant_id`, `tid`, `roles`) which degrade gracefully per CLAR-005.
 
-**Scenario A — absent claim**
-
-Given a JWT with no `sub` claim  
-When `JwtAuthenticator::authenticate` is called  
-Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
-
-**Scenario B — present claim, wrong type**
-
-Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
-When `JwtAuthenticator::authenticate` is called  
-Then `Ok(SecurityContext)` is returned with:
-- `principal.subject_id == ""` (empty string, not an error)
-- `claims.custom["sub"] == 123` (raw value preserved under original key)
-
-Wrong-type handling (graceful degradation) applies to all identity claims as defined in CLAR-005. Missing-claim semantics apply only to identity claims that are required by contract — `sub` is the only required identity claim. Absent optional claims (`tenant_id`, `tid`, `roles`) are simply not present in the token; no error is produced.
+Absent optional claims (`tenant_id`, `tid`, `roles`) are simply not present; no error is produced.
 
 ---
 

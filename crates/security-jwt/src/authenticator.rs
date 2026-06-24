@@ -1,10 +1,13 @@
 //! JWT authenticator — implements [`ego_security_sdk::AuthenticationProvider`] for JWT tokens.
 //!
 //! Validates JWT signatures, standard time claims (`exp`, `nbf`), and
-//! optional issuer/audience constraints. Claims fields (`sub`, `roles`,
-//! `tenant_id`/`tid`) are extracted with graceful degradation per CLAR-003:
-//! a wrong-type claim is skipped and the raw value is preserved in
-//! `Claims.custom`.
+//! optional issuer/audience constraints.
+//!
+//! **Claim extraction policy**:
+//! - `sub` absent → `AuthenticationError::MissingClaim("sub")`
+//! - `sub` present but not a string → `AuthenticationError::InvalidToken`
+//! - `sub` present but empty → `AuthenticationError::InvalidToken`
+//! - `roles` / `tenant_id` / `tid`: wrong type → skip (graceful degradation); raw value preserved in `Claims.custom`
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -45,8 +48,8 @@ struct RawClaims {
 /// 3. Rejecting tokens whose `exp` has passed (using the injected [`Clock`]).
 /// 4. Rejecting tokens whose `nbf` has not yet been reached.
 /// 5. Optionally validating `iss` and `aud` claims.
-/// 6. Extracting `sub`, `roles`, and `tenant_id`/`tid` into a [`Principal`],
-///    with graceful degradation for wrong-type values (CLAR-003).
+/// 6. Extracting `sub` (strict — absent or non-string → error), and
+///    `roles`/`tenant_id`/`tid` (graceful — wrong type is skipped) into a [`Principal`].
 ///
 /// # Clocks
 ///
@@ -315,23 +318,23 @@ fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
     }
 }
 
-/// Extract `sub` from the map. Returns `Ok((subject, map))` on success.
+/// Extract `sub` from the map. Returns `Ok((subject_string, map))` on success.
 ///
-/// - Absent `sub`: returns `Err(MissingClaim("sub"))`.
-/// - CLAR-003: if `sub` is present but not a non-empty string, returns `("")` with the raw
-///   value re-inserted under `"sub"`. Callers MUST validate that the returned subject is
-///   non-empty before constructing a [`SubjectId`] — `SubjectId::new("")` returns an error,
-///   which surfaces as `InvalidToken("invalid subject id")` to the caller.
+/// - Absent `sub` → `Err(MissingClaim("sub"))`.
+/// - `sub` present but not a string → `Err(InvalidToken("sub claim is not a string"))`.
+/// - `sub` present and a string → `Ok((s, map))`; the caller validates `s` is non-empty
+///   via [`SubjectId::new`], which returns `InvalidToken("invalid subject id")` on failure.
+///
+/// Unlike `roles` and `tenant_id`, `sub` is a required identity claim and does NOT
+/// degrade gracefully — any wrong-type or empty value rejects the token.
 fn extract_subject(
     mut map: BTreeMap<String, Value>,
 ) -> Result<(String, BTreeMap<String, Value>), AuthenticationError> {
     match map.remove("sub") {
         Some(Value::String(s)) => Ok((s, map)),
-        Some(other) => {
-            // Wrong type — graceful degradation: empty subject, raw value preserved
-            map.insert("sub".into(), other);
-            Ok((String::new(), map))
-        }
+        Some(_) => Err(AuthenticationError::InvalidToken(
+            "sub claim is not a string".into(),
+        )),
         None => Err(AuthenticationError::MissingClaim("sub".into())),
     }
 }
