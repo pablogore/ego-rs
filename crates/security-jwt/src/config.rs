@@ -23,7 +23,7 @@ pub enum JwtAlgorithm {
 /// an authenticator. This struct holds only functional validation parameters —
 /// key material lives in the resolver.
 pub struct JwtConfig {
-    /// Algorithm discriminant — selects HS256 or RS256. Key material is
+    /// Algorithm discriminant — selects HS256, RS256, or ES256. Key material is
     /// provided separately via [`crate::KeyResolver`].
     pub algorithm: JwtAlgorithm,
 
