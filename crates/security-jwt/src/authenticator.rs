@@ -246,7 +246,8 @@ impl AuthenticationProvider for JwtAuthenticator {
         // Build StandardClaims
         let standard = build_standard_claims(&all_claims);
 
-        // Extract identity fields (CLAR-003: graceful degradation on wrong type)
+        // sub: strict — absent or non-string rejects the token (CLAR-005)
+        // tenant_id / roles: graceful — wrong type skipped, raw preserved (CLAR-005)
         let (subject, all_claims) = extract_subject(all_claims)?;
         let (tenant_id, all_claims) = extract_tenant_id(all_claims);
         let (roles, all_claims) = extract_roles(all_claims);
@@ -340,10 +341,10 @@ fn extract_subject(
 }
 
 /// Extract `tenant_id` or `tid` from the map. Returns (tenant_id, map).
-/// CLAR-003: wrong type → None, raw value stays in map under its original key.
+/// CLAR-005: wrong type → None, raw value stays in map under its original key.
 fn extract_tenant_id(mut map: BTreeMap<String, Value>) -> (Option<String>, BTreeMap<String, Value>) {
     // Prefer "tenant_id" over "tid"; track which key was actually removed so
-    // wrong-type values are re-inserted under the original key (CLAR-003).
+    // wrong-type values are re-inserted under the original key (CLAR-005).
     let (orig_key, val) = if let Some(v) = map.remove("tenant_id") {
         ("tenant_id", Some(v))
     } else {
@@ -361,7 +362,7 @@ fn extract_tenant_id(mut map: BTreeMap<String, Value>) -> (Option<String>, BTree
 }
 
 /// Extract `roles` from the map as a `BTreeSet<String>`.
-/// CLAR-003: if present but wrong type, skip (empty set) and keep raw in map.
+/// CLAR-005: if present but wrong type, skip (empty set) and keep raw in map.
 fn extract_roles(mut map: BTreeMap<String, Value>) -> (BTreeSet<String>, BTreeMap<String, Value>) {
     match map.remove("roles") {
         Some(Value::Array(arr)) => {
@@ -832,7 +833,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CLAR-003: wrong-type roles → graceful degradation
+    // CLAR-005: wrong-type roles → graceful degradation
     // -----------------------------------------------------------------------
 
     #[test]
@@ -924,7 +925,7 @@ mod tests {
 
     #[test]
     fn wrong_type_tid_alias_preserves_raw_under_tid_key() {
-        // CLAR-003: wrong-type `tid` (the alias) must reappear under "tid",
+        // CLAR-005: wrong-type `tid` (the alias) must reappear under "tid",
         // NOT renamed to "tenant_id" in custom claims.
         let claims = json!({ "sub": "user-1", "tid": 42 });
         let token = make_hs256_token(&claims);
