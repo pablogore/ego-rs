@@ -1,0 +1,7 @@
+core_id: CORE-011A
+change_name: key-resolver-architecture
+status: PROPOSING
+artifact_store: openspec
+strict_tdd: true
+test_command: cargo test --workspace
+parent_change: CORE-011
