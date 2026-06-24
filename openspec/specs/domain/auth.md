@@ -163,9 +163,71 @@ pub trait Clock: Send + Sync {
 
 5. **Clock injection**: All time-sensitive validation uses an injected Clock abstraction, enabling deterministic testing without mocking system calls.
 
-6. **Graceful degradation**: When a claim has the wrong type (e.g., exp as string instead of i64), the value is preserved in Claims.custom under its original claim key, and a validation error is returned. No panic.
+6. **Claim classification**: Claims are split into two categories with different wrong-type behaviors. Identity claims (`sub`, `tenant_id`/`tid`, `roles`) degrade gracefully — the nominal field receives an empty/null value and the raw claim is preserved in `Claims.custom`. Security claims (`exp`, `nbf`, `iat`, `iss`, `aud`) fail immediately with `AuthenticationError::InvalidToken` — no raw value is preserved. See CLAR-005.
 
 7. **No type merging**: Identity, StandardClaims, and Claims.custom are separate. Standard claims are never merged into a flat map.
+
+## Clarifications
+
+### CLAR-005 — Claim Classification
+
+JWT claims fall into two categories with distinct wrong-type behaviors:
+
+**Identity Claims**: `sub`, `tenant_id`, `tid`, `roles`
+
+- Wrong type MUST NOT fail authentication.
+- Implementation MUST degrade gracefully: the nominal identity field receives an empty/null value.
+- The original raw claim value MUST be preserved in `Claims.custom` under its original key.
+- Rationale: identity enrichment fields are not security-critical; a token with an unexpected claim encoding is still a valid, authenticated token.
+
+**Security Claims**: `exp`, `nbf`, `iat`, `iss`, `aud`
+
+- Wrong type MUST fail authentication with `AuthenticationError::InvalidToken`.
+- The raw value is NOT preserved; the request is rejected immediately before `SecurityContext` is produced.
+- Rationale: these claims govern time-bound validity and trust constraints. Accepting a non-parseable value would silently bypass security checks.
+
+**Scenario — security claim, wrong type**
+
+Given a JWT with `{ "sub": "user-1", "exp": "not-a-number" }` (exp as string)  
+When `JwtAuthenticator::authenticate` is called  
+Then `Err(AuthenticationError::InvalidToken("exp claim is not a valid integer"))` is returned
+
+**Scenario — identity claim, wrong type**
+
+Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
+When `JwtAuthenticator::authenticate` is called  
+Then `Ok(SecurityContext)` is returned with `identity.subject == ""` and `claims.custom["sub"] == 123`
+
+---
+
+### CLAR-006 — Required Claim Semantics: Absent vs. Wrong Type
+
+"Absent claim" and "wrong-type claim" are distinct failure modes with different outcomes for identity claims:
+
+| Scenario | Example payload | Result |
+|---|---|---|
+| Claim absent | `{}` (no `sub` key) | `Err(AuthenticationError::MissingClaim("sub"))` |
+| Claim present, wrong type | `{"sub": 123}` | `Ok(SecurityContext)` with graceful degradation |
+
+**Rationale**: a missing `sub` indicates a structurally invalid token — no authenticated identity was issued. A `sub` of the wrong type indicates a valid token with an unexpected encoding; the token is authenticated but the subject cannot be reliably extracted as a string.
+
+**Scenario A — absent claim**
+
+Given a JWT with no `sub` claim  
+When `JwtAuthenticator::authenticate` is called  
+Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
+
+**Scenario B — present claim, wrong type**
+
+Given a JWT with `{ "sub": 123 }` (integer, not a string)  
+When `JwtAuthenticator::authenticate` is called  
+Then `Ok(SecurityContext)` is returned with:
+- `identity.subject == ""` (empty string, not an error)
+- `claims.custom["sub"] == 123` (raw value preserved under original key)
+
+This behavior applies to all identity claims as defined in CLAR-005. CLAR-006 uses `sub` as the canonical example because it is the only required identity claim.
+
+---
 
 ## Infrastructure Implementation Reference
 
@@ -198,4 +260,4 @@ crates/security-jwt (HS256/RS256 implementation)
 - RFC 7519: JSON Web Token (JWT)
 - ADR-009A: Sync authentication boundary decision
 - CORE-011: JWT Authentication Provider implementation
-- CLAR-001–004: JWT Authentication clarifications
+- CLAR-001–006: JWT Authentication clarifications
