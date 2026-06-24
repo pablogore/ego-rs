@@ -783,13 +783,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CLAR-003: wrong-type sub → graceful degradation
+    // CLAR-005: sub claim — all failure modes reject the token
     // -----------------------------------------------------------------------
 
     #[test]
-    fn wrong_type_sub_returns_invalid_token() {
-        // sub is an integer, not a string — SubjectId requires non-empty string
+    fn sub_integer_returns_invalid_token() {
         let claims = json!({ "sub": 12345 });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_boolean_returns_invalid_token() {
+        let claims = json!({ "sub": true });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_object_returns_invalid_token() {
+        let claims = json!({ "sub": { "id": "user-1" } });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_array_returns_invalid_token() {
+        let claims = json!({ "sub": ["user-1"] });
+        let token = make_hs256_token(&claims);
+        let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
+        let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn sub_empty_string_returns_invalid_token() {
+        let claims = json!({ "sub": "" });
         let token = make_hs256_token(&claims);
         let auth = JwtAuthenticator::new(hs256_config(), hs256_resolver(), now_clock());
         let err = auth.authenticate(&Credential::Bearer(token)).unwrap_err();
