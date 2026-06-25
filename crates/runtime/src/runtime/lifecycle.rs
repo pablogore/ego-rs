@@ -33,7 +33,3 @@ pub enum ExecutionState {
     Failed,
 }
 
-// Safety: ExecutionState contains only unit variants with no data,
-// so it is trivially Send + Sync.
-unsafe impl Send for ExecutionState {}
-unsafe impl Sync for ExecutionState {}

@@ -93,5 +93,3 @@ impl RuntimeHandle {
     }
 }
 
-unsafe impl Send for RuntimeHandle {}
-unsafe impl Sync for RuntimeHandle {}
