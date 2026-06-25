@@ -5,7 +5,6 @@ members = [
     "crates/infrastructure",
     "crates/persistence",
     "crates/transport",
-    "core/runtime-slice",
     "crates/runtime",
     "crates/runtime-tokio",
     "crates/event-adapter",

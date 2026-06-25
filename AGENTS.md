@@ -1,30 +1,36 @@
-# Agent Execution Guide
+# ego-rs — Agent Skills Index
 
-Execution behavior for coding agents operating in this repository. Focused on operational rules — not architecture principles or engineering law.
+When working on this project, load the relevant skill(s) BEFORE writing any code.
 
-## Operational Rules
+Naming convention: `ego-rs-*` skills are repo-specific workflow skills. Unprefixed skills are portable writing or work-unit skills and intentionally keep their canonical names. `sdd-*` skills drive the Spec-Driven Development cycle.
 
-- **Patch over rewrite** — extend existing modules to add functionality. Create new files only when existing structure cannot accommodate the change without violating layer rules in `docs/architecture.md`.
-- **Update existing modules** — when adding functionality, modify the appropriate existing module. Do not create parallel or duplicate modules.
-- **Explicit file paths** — when modifying code, reference specific file paths. Avoid vague descriptions like "update persistence layer."
-- **Stop on architectural ambiguity** — if a change's effect on architecture (layering, crate boundaries, dependency direction) is unclear, stop and ask for guidance. Do not proceed based on assumptions.
-- **Respect governing documents** — this file, `docs/architecture.md`, and `.speckit/constitution.md` SHALL be followed. When conflict exists, `.speckit/constitution.md` takes precedence.
-- **Ignore generated/vendor/tool folders** — `node_modules/`, `target/`, `graphify-out/`, `.specs-fire/`, `.specsmd/`, `.specify/` and similar generated directories SHOULD be ignored unless evidence requires otherwise.
-- **Avoid duplicate code** — check existing modules before writing new code. If similar functionality exists, extend or reuse rather than duplicate.
-- **Avoid duplicate modules** — do not create modules that overlap in responsibility with existing modules in `crates/`.
-- **Do not invent structure** — follow existing module organization, naming conventions, and code patterns. Do not introduce new directories, module hierarchies, or structural patterns unless required by the plan.
-- **Modify before duplicate** — before creating a new module, trait, file, or abstraction, verify whether an equivalent implementation already exists. Duplication requires justification per `.speckit/constitution.md`.
-- **Task precision** — every task MUST include: exact file path, modification type (Create/Modify/Refactor/Delete), section identifier, expected outcome, and validation criteria.
+## Project Context
 
-## Governing Document Hierarchy
+- **Product**: [`PRD.md`](PRD.md) — vision, principles, architecture, roadmap
+- **Engineering architecture**: [`docs/architecture.md`](docs/architecture.md)
+- **Canonical specs**: [`openspec/specs/`](openspec/specs/)
 
-1. **`.speckit/constitution.md`** — engineering law (TDD, coverage >= 85%, mock-based isolation, deterministic tests, testability by design, compliance)
-2. **`docs/architecture.md`** — engineering structure (crate boundaries, design preferences, spec integration)
-3. **`ARCHITECTURE.md`** — runtime architecture (layers, actors, CQRS/ES)
-4. **This file** — agent execution behavior (operational rules)
+## How to Use
 
-<!-- Active feature is resolved from .speckit/state.yaml (Single Source Of Truth). The block below is informational only. -->
+1. Check the trigger column to find skills that match your current task
+2. Load the skill by reading the SKILL.md file at the listed path
+3. Follow ALL patterns and rules from the loaded skill
+4. Multiple skills can apply simultaneously
 
-<!-- SPECKIT START -->
-<!-- Feature: 008-service-sdk | Plan: specs/008-service-sdk/plan.md -->
-<!-- SPECKIT END -->
+## Skills
+
+| Skill | Trigger | Path |
+|-------|---------|------|
+| `ego-rs-issue-creation` | When creating a GitHub issue, reporting a bug, or requesting a feature. | [`skills/issue-creation/SKILL.md`](skills/issue-creation/SKILL.md) |
+| `ego-rs-branch-pr` | When creating a pull request, opening a PR, or preparing changes for review. | [`skills/branch-pr/SKILL.md`](skills/branch-pr/SKILL.md) |
+| `ego-rs-chained-pr` | When a change is too large for one review, or when creating chained/stacked pull requests. | [`skills/chained-pr/SKILL.md`](skills/chained-pr/SKILL.md) |
+| `cognitive-doc-design` | When writing docs that must reduce cognitive load for readers or reviewers. | [`skills/cognitive-doc-design/SKILL.md`](skills/cognitive-doc-design/SKILL.md) |
+| `comment-writer` | When drafting human comments, PR feedback, issue replies, or async updates. | [`skills/comment-writer/SKILL.md`](skills/comment-writer/SKILL.md) |
+| `work-unit-commits` | When splitting implementation work into deliverable commits or chained PRs. | [`skills/work-unit-commits/SKILL.md`](skills/work-unit-commits/SKILL.md) |
+| `sdd-explore` | When exploring an idea or feature before committing to a change. | `~/.claude/skills/sdd-explore/SKILL.md` |
+| `sdd-init` | When initializing SDD context for the first time in a session. | `~/.claude/skills/sdd-init/SKILL.md` |
+| `sdd-apply` | When implementing SDD tasks — writes code following specs and design. | `~/.claude/skills/sdd-apply/SKILL.md` |
+| `sdd-verify` | When validating that implementation matches specs, design, and tasks. | `~/.claude/skills/sdd-verify/SKILL.md` |
+| `sdd-archive` | When closing a completed and verified SDD change. | `~/.claude/skills/sdd-archive/SKILL.md` |
+| `judgment-day` | When running blind dual review or adversarial review before merging. | `~/.claude/skills/judgment-day/SKILL.md` |
+| `skill-creator` | When creating new skills or documenting AI usage patterns. | `~/.claude/skills/skill-creator/SKILL.md` |
