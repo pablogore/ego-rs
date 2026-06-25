@@ -30,6 +30,8 @@ pub enum EntityError {
         /// The actual version.
         actual: u64,
     },
+    /// The mailbox was closed and the queue is fully drained.
+    MailboxClosed,
 }
 
 impl fmt::Display for EntityError {
@@ -48,6 +50,7 @@ impl fmt::Display for EntityError {
                 "Version conflict: expected {}, actual {}",
                 expected, actual
             ),
+            EntityError::MailboxClosed => write!(f, "Mailbox closed"),
         }
     }
 }

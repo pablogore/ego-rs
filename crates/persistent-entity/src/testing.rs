@@ -121,10 +121,10 @@ impl DomainEvent for TestEvent {
     }
 
     fn occurred_at(&self) -> &DateTime<Utc> {
-        // Per-call timestamp. Box::leak is acceptable in test-only code
-        // to satisfy the `&DateTime<Utc>` return type without storing a
-        // timestamp on the enum variant.
-        Box::leak(Box::new(Utc::now()))
+        static PINNED: OnceLock<DateTime<Utc>> = OnceLock::new();
+        PINNED.get_or_init(|| {
+            DateTime::from_timestamp(1_750_000_000, 0).expect("valid pinned timestamp")
+        })
     }
 }
 
@@ -274,7 +274,7 @@ impl<E: Clone + Send + Sync + 'static + DomainEvent> EventStore<E> for InMemoryE
         let mut streams = self.streams.lock().unwrap();
         let stream = streams
             .entry(stream_id.to_string())
-            .or_insert_with(Vec::new);
+            .or_default();
 
         // Check expected version
         if stream.len() as i64 != version {

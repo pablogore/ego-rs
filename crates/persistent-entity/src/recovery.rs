@@ -38,6 +38,11 @@ impl RecoveryManager {
         }
     }
 
+    /// Returns the maximum number of events kept in memory during recovery.
+    pub fn max_events_in_memory(&self) -> usize {
+        self.max_events_in_memory
+    }
+
     /// Replay events to reconstruct the entity state.
     pub async fn replay_events<E, S>(
         &self,
@@ -48,11 +53,15 @@ impl RecoveryManager {
         E: Clone + Send + Sync + 'static,
         S: Clone + Send + Sync + 'static,
     {
-        unimplemented!("RecoveryManager::replay_events is not yet implemented")
+        Err(EntityError::Internal(
+            "RecoveryManager::replay_events is not yet implemented".to_string(),
+        ))
     }
 
     /// Load a snapshot.
     pub async fn load_snapshot<T>(&self, _snapshot: &Snapshot<T>) -> Result<T, EntityError> {
-        unimplemented!("RecoveryManager::load_snapshot is not yet implemented")
+        Err(EntityError::Internal(
+            "RecoveryManager::load_snapshot is not yet implemented".to_string(),
+        ))
     }
 }

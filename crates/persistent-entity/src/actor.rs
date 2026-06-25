@@ -111,7 +111,7 @@ where
                         )
                         .await
                         .unwrap_or_else(|e| {
-                            warn!(error = %e, "snapshot deserialization failed, falling back to initial state");
+                            warn!(error = %e, "event replay failed, falling back to initial state");
                             self.entity_handler.initial_state()
                         });
                     state = new_state;
@@ -209,7 +209,10 @@ where
                                 Some(&self.entity_id.tenant_id),
                             )
                             .await;
-                        let (snap_data, stored_events) = reload.unwrap_or((None, Vec::new()));
+                        let (snap_data, stored_events) = reload.unwrap_or_else(|e| {
+                            warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist reload failed, using empty state");
+                            (None, Vec::new())
+                        });
                         let mut state = match snap_data {
                             Some(snap) => serde_json::from_slice(&snap.data)
                                 .unwrap_or_else(|e| {
@@ -229,7 +232,10 @@ where
                                         .collect::<Vec<_>>(),
                                 )
                                 .await
-                                .unwrap_or_else(|_| self.entity_handler.initial_state());
+                                .unwrap_or_else(|e| {
+                                    warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist event replay failed, using initial state");
+                                    self.entity_handler.initial_state()
+                                });
                             state = new_state;
                         }
                         self.state = Some(state.clone());
@@ -272,17 +278,24 @@ where
                             stored_events.iter().map(|s| s.event.clone()).collect();
                         let _ = self.publisher.publish(&published_events).await;
                     }
-                    Err(_e) => {
-                        // Handle persistence error
+                    Err(e) => {
                         let _ = self.lifecycle.transition_to(EntityState::Failed);
-                        // The error will be handled by the caller
+                        error!(
+                            error = %e,
+                            entity_id = %self.entity_id.aggregate_id(),
+                            "event persistence failed — entity transitioned to Failed state"
+                        );
                         return;
                     }
                 }
             }
-            Err(_err_string) => {
+            Err(err_string) => {
                 let _ = self.lifecycle.transition_to(EntityState::Failed);
-                // The error will be handled by the caller
+                error!(
+                    error = %err_string,
+                    entity_id = %self.entity_id.aggregate_id(),
+                    "command handler failed — entity transitioned to Failed state"
+                );
                 return;
             }
         };
@@ -292,6 +305,10 @@ where
     /// marks as passivated in registry, and transitions to Passivated state.
     async fn passivate(&mut self) {
         let _ = self.lifecycle.transition_to(EntityState::Passivating);
+
+        // Close the mailbox first so recv() returns MailboxClosed once empty,
+        // rather than blocking forever waiting for the next command.
+        self.mailbox.close();
 
         while let Ok(envelope) = self.mailbox.recv().await {
             self.execute_command(envelope).await;
