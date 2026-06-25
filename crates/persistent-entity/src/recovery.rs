@@ -4,7 +4,6 @@
 
 use crate::error::EntityError;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 
 /// A snapshot of an entity's state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,46 +38,30 @@ impl RecoveryManager {
         }
     }
 
+    /// Returns the maximum number of events kept in memory during recovery.
+    pub fn max_events_in_memory(&self) -> usize {
+        self.max_events_in_memory
+    }
+
     /// Replay events to reconstruct the entity state.
     pub async fn replay_events<E, S>(
         &self,
-        events: Vec<ReplayableEvent<E>>,
-        initial_state: S,
+        _events: Vec<ReplayableEvent<E>>,
+        _initial_state: S,
     ) -> Result<S, EntityError>
     where
         E: Clone + Send + Sync + 'static,
         S: Clone + Send + Sync + 'static,
     {
-        let state = initial_state;
-        let mut event_queue = VecDeque::new();
-
-        // Process events in order
-        for event in events {
-            // Add to queue
-            event_queue.push_back(event);
-
-            // Keep only the maximum number of events in memory
-            if event_queue.len() > self.max_events_in_memory {
-                event_queue.pop_front();
-            }
-        }
-
-        // Apply all events to reconstruct state
-        for _event in event_queue {
-            // In a real implementation, this would call the entity's apply_events method
-            // For now, we just return the state as-is
-            // Placeholder - in a real implementation, we would process events here
-        }
-
-        Ok(state)
+        Err(EntityError::Internal(
+            "RecoveryManager::replay_events is not yet implemented".to_string(),
+        ))
     }
 
     /// Load a snapshot.
     pub async fn load_snapshot<T>(&self, _snapshot: &Snapshot<T>) -> Result<T, EntityError> {
-        // In a real implementation, this would deserialize the snapshot
-        // For now, we just return an error to indicate this is not implemented
         Err(EntityError::Internal(
-            "Snapshot loading not implemented".to_string(),
+            "RecoveryManager::load_snapshot is not yet implemented".to_string(),
         ))
     }
 }

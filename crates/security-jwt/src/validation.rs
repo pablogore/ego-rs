@@ -84,21 +84,23 @@ impl JwtValidationEngine {
         let all_claims = token_data.claims.all;
         let now = clock.now();
 
-        // exp check — reject if exp <= now
-        if let Some(exp_val) = all_claims.get("exp") {
-            match parse_timestamp(exp_val) {
-                Some(exp_dt) => {
-                    if now >= exp_dt {
-                        warn!(error = "expired_token", "JWT validation failed");
-                        return Err(AuthenticationError::ExpiredToken);
-                    }
+        // exp check — exp is required; reject missing or invalid exp
+        let exp_val = all_claims.get("exp").ok_or_else(|| {
+            warn!(error = "invalid_token", "JWT validation failed");
+            AuthenticationError::InvalidToken("missing required claim: exp".to_string())
+        })?;
+        match parse_timestamp(exp_val) {
+            Some(exp_dt) => {
+                if now >= exp_dt {
+                    warn!(error = "expired_token", "JWT validation failed");
+                    return Err(AuthenticationError::ExpiredToken);
                 }
-                None => {
-                    warn!(error = "invalid_token", "JWT validation failed");
-                    return Err(AuthenticationError::InvalidToken(
-                        "exp claim is not a valid integer".into(),
-                    ));
-                }
+            }
+            None => {
+                warn!(error = "invalid_token", "JWT validation failed");
+                return Err(AuthenticationError::InvalidToken(
+                    "exp claim is not a valid integer".into(),
+                ));
             }
         }
 
@@ -387,7 +389,7 @@ mod tests {
     #[test]
     fn nbf_future_returns_invalid_token() {
         let nbf_secs = future_ts(300);
-        let claims = json!({ "sub": "u1", "nbf": nbf_secs });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
         let err = JwtValidationEngine::validate(
             &token,
@@ -420,6 +422,29 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // BL-03: missing exp → InvalidToken (Closes #68)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_exp_claim_is_rejected() {
+        // Token has sub and nbf but no exp — must be rejected
+        let claims = json!({ "sub": "u1", "nbf": past_ts(300) });
+        let token = make_hs256_token(&claims);
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            now_clock().as_ref(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, AuthenticationError::InvalidToken(msg) if msg.contains("missing required claim: exp")),
+            "expected InvalidToken with missing exp message, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // FR-024: missing sub → MissingClaim("sub")
     // -----------------------------------------------------------------------
 
@@ -447,7 +472,7 @@ mod tests {
 
     #[test]
     fn sub_integer_returns_invalid_token() {
-        let claims = json!({ "sub": 42 });
+        let claims = json!({ "sub": 42, "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let err = JwtValidationEngine::validate(
             &token,
@@ -466,7 +491,7 @@ mod tests {
 
     #[test]
     fn sub_empty_string_returns_invalid_token() {
-        let claims = json!({ "sub": "" });
+        let claims = json!({ "sub": "", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let err = JwtValidationEngine::validate(
             &token,
@@ -485,7 +510,7 @@ mod tests {
 
     #[test]
     fn wrong_type_roles_graceful_skip_raw_preserved() {
-        let claims = json!({ "sub": "u1", "roles": "admin" });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "roles": "admin" });
         let token = make_hs256_token(&claims);
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -505,7 +530,7 @@ mod tests {
 
     #[test]
     fn wrong_type_tid_graceful_skip_preserved_under_original_key() {
-        let claims = json!({ "sub": "u1", "tid": 42 });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "tid": 42 });
         let token = make_hs256_token(&claims);
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -522,7 +547,7 @@ mod tests {
 
     #[test]
     fn tenant_id_takes_precedence_over_tid_when_both_present() {
-        let claims = json!({ "sub": "u1", "tenant_id": "primary", "tid": "secondary" });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "tenant_id": "primary", "tid": "secondary" });
         let token = make_hs256_token(&claims);
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -545,7 +570,7 @@ mod tests {
     #[test]
     fn past_nbf_is_accepted() {
         let nbf_secs = past_ts(300);
-        let claims = json!({ "sub": "u1", "nbf": nbf_secs });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -564,7 +589,7 @@ mod tests {
 
     #[test]
     fn iss_mismatch_returns_invalid_token() {
-        let claims = json!({ "sub": "u1", "iss": "wrong" });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "wrong" });
         let token = make_hs256_token(&claims);
         let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None };
         let err = JwtValidationEngine::validate(
@@ -580,7 +605,7 @@ mod tests {
 
     #[test]
     fn iss_absent_with_expected_returns_invalid_token() {
-        let claims = json!({ "sub": "u1" });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let params =
             ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None };
@@ -601,7 +626,7 @@ mod tests {
 
     #[test]
     fn aud_mismatch_returns_invalid_token() {
-        let claims = json!({ "sub": "u1", "aud": ["other-api"] });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": ["other-api"] });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
         let params =
@@ -625,7 +650,9 @@ mod tests {
     fn nbf_equal_to_now_is_valid() {
         let now = Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
         let nbf_secs = now.timestamp();
-        let claims = json!({ "sub": "u1", "nbf": nbf_secs });
+        // exp must be after `now` (use +1h)
+        let exp_secs = (now + chrono::Duration::hours(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs, "nbf": nbf_secs });
         let token = make_hs256_token(&claims);
         // nbf == now: the check is `now < nbf_dt`, so equal → accepted
         let ctx = JwtValidationEngine::validate(
@@ -645,7 +672,7 @@ mod tests {
 
     #[test]
     fn aud_scalar_string_is_accepted() {
-        let claims = json!({ "sub": "u1", "aud": "my-api" });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "my-api" });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
         let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
@@ -666,7 +693,7 @@ mod tests {
 
     #[test]
     fn aud_wrong_type_returns_invalid_token() {
-        let claims = json!({ "sub": "u1", "aud": 42 });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": 42 });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
         let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
@@ -690,7 +717,7 @@ mod tests {
 
     #[test]
     fn roles_null_produces_empty_set_raw_preserved() {
-        let claims = json!({ "sub": "u1", "roles": null });
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "roles": null });
         let token = make_hs256_token(&claims);
         let ctx = JwtValidationEngine::validate(
             &token,

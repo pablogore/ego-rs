@@ -5,7 +5,7 @@ use crate::context::{
 /// Transport-neutral carrier for execution input.
 ///
 /// Carries the payload (command, event, workflow message, etc.) alongside
-/// i/spdentity, correlation, and metadata from the incoming message.
+/// identity, correlation, and metadata from the incoming message.
 ///
 /// # Type parameters
 ///

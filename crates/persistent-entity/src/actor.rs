@@ -18,7 +18,7 @@ use crate::registry::EntityRegistry;
 use crate::scheduler::EntityTriple;
 use crate::scheduler_event::{SchedulerEvent, SchedulerEventSender};
 use crate::snapshot::SnapshotStrategy;
-use tracing::info;
+use tracing::{error, warn};
 
 /// Core actor that owns entity state, mailbox, and lifecycle.
 ///
@@ -89,7 +89,10 @@ where
                 let (mut state, snap_version): (S, u64) = match snap_data {
                     Some(ref snap) => {
                         let s = serde_json::from_slice(&snap.data)
-                            .unwrap_or_else(|_| self.entity_handler.initial_state());
+                            .unwrap_or_else(|e| {
+                                warn!(error = %e, "snapshot deserialization failed, falling back to initial state");
+                                self.entity_handler.initial_state()
+                            });
                         (s, snap.version)
                     }
                     None => (self.entity_handler.initial_state(), 0),
@@ -107,7 +110,10 @@ where
                                 .collect::<Vec<_>>(),
                         )
                         .await
-                        .unwrap_or_else(|_| self.entity_handler.initial_state());
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "event replay failed, falling back to initial state");
+                            self.entity_handler.initial_state()
+                        });
                     state = new_state;
                     version += stored_events.len() as u64;
                 }
@@ -116,17 +122,19 @@ where
                 self.version = version;
                 let _ = self.lifecycle.transition_to(EntityState::Active);
 
-                self.event_sender.emit(SchedulerEvent::RecoveryCompleted {
+                if !self.event_sender.emit(SchedulerEvent::RecoveryCompleted {
                     entity: self.entity_id.clone(),
                     state_version: version,
-                });
+                }) {
+                    warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                }
             }
             Err(e) => {
                 let _ = self.lifecycle.transition_to(EntityState::Failed);
-                info!(
-                    "Recovery failed for {}: {}",
-                    self.entity_id.aggregate_id(),
-                    e
+                error!(
+                    error = %e,
+                    entity_id = %self.entity_id.aggregate_id(),
+                    "entity recovery failed — entity transitioned to Failed state"
                 );
             }
         }
@@ -201,10 +209,16 @@ where
                                 Some(&self.entity_id.tenant_id),
                             )
                             .await;
-                        let (snap_data, stored_events) = reload.unwrap_or((None, Vec::new()));
+                        let (snap_data, stored_events) = reload.unwrap_or_else(|e| {
+                            warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist reload failed, using empty state");
+                            (None, Vec::new())
+                        });
                         let mut state = match snap_data {
                             Some(snap) => serde_json::from_slice(&snap.data)
-                                .unwrap_or_else(|_| self.entity_handler.initial_state()),
+                                .unwrap_or_else(|e| {
+                                    warn!(error = %e, "snapshot deserialization failed, falling back to initial state");
+                                    self.entity_handler.initial_state()
+                                }),
                             None => self.entity_handler.initial_state(),
                         };
                         if !stored_events.is_empty() {
@@ -218,21 +232,28 @@ where
                                         .collect::<Vec<_>>(),
                                 )
                                 .await
-                                .unwrap_or_else(|_| self.entity_handler.initial_state());
+                                .unwrap_or_else(|e| {
+                                    warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist event replay failed, using initial state");
+                                    self.entity_handler.initial_state()
+                                });
                             state = new_state;
                         }
                         self.state = Some(state.clone());
                         self.version = new_version;
 
-                        self.event_sender.emit(SchedulerEvent::ExecutionCompleted {
+                        if !self.event_sender.emit(SchedulerEvent::ExecutionCompleted {
                             entity: self.entity_id.clone(),
                             state_version: new_version,
-                        });
+                        }) {
+                            warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                        }
 
-                        self.event_sender.emit(SchedulerEvent::EntityStateUpdated {
+                        if !self.event_sender.emit(SchedulerEvent::EntityStateUpdated {
                             entity: self.entity_id.clone(),
                             state_version: new_version,
-                        });
+                        }) {
+                            warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                        }
 
                         // Check if we should take a snapshot
                         let should_snapshot = self
@@ -257,17 +278,24 @@ where
                             stored_events.iter().map(|s| s.event.clone()).collect();
                         let _ = self.publisher.publish(&published_events).await;
                     }
-                    Err(_e) => {
-                        // Handle persistence error
+                    Err(e) => {
                         let _ = self.lifecycle.transition_to(EntityState::Failed);
-                        // The error will be handled by the caller
+                        error!(
+                            error = %e,
+                            entity_id = %self.entity_id.aggregate_id(),
+                            "event persistence failed — entity transitioned to Failed state"
+                        );
                         return;
                     }
                 }
             }
-            Err(_err_string) => {
+            Err(err_string) => {
                 let _ = self.lifecycle.transition_to(EntityState::Failed);
-                // The error will be handled by the caller
+                error!(
+                    error = %err_string,
+                    entity_id = %self.entity_id.aggregate_id(),
+                    "command handler failed — entity transitioned to Failed state"
+                );
                 return;
             }
         };
@@ -277,6 +305,10 @@ where
     /// marks as passivated in registry, and transitions to Passivated state.
     async fn passivate(&mut self) {
         let _ = self.lifecycle.transition_to(EntityState::Passivating);
+
+        // Close the mailbox first so recv() returns MailboxClosed once empty,
+        // rather than blocking forever waiting for the next command.
+        self.mailbox.close();
 
         while let Ok(envelope) = self.mailbox.recv().await {
             self.execute_command(envelope).await;
@@ -289,7 +321,7 @@ where
                     &self.entity_id.aggregate_id(),
                     Some(&self.entity_id.tenant_id),
                     self.version,
-                    &serde_json::to_value(&state).unwrap(),
+                    &serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
                 )
                 .await;
         }
