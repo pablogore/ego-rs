@@ -47,7 +47,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
     fn append(
         &mut self,
         _aggregate_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
         _expected_version: i64,
         _events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
@@ -57,14 +57,14 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
     fn load(
         &self,
         _aggregate_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         Ok(Vec::new())
     }
 
     fn list_aggregate_ids(
         &self,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError> {
         Ok(Vec::new())
     }
@@ -76,7 +76,7 @@ impl Snapshot for NoopSnapshotStore {
     fn save_snapshot(
         &mut self,
         _aggregate_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
         _version: i64,
         _payload: serde_json::Value,
     ) -> Result<(), PersistenceError> {
@@ -86,7 +86,7 @@ impl Snapshot for NoopSnapshotStore {
     fn load_snapshot(
         &self,
         _aggregate_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Option<(i64, serde_json::Value)>, PersistenceError> {
         Ok(None)
     }
@@ -272,7 +272,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     fn append(
         &mut self,
         stream_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
@@ -299,7 +299,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     fn load(
         &self,
         stream_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         Ok(self
             .streams
@@ -310,7 +310,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
 
     fn list_aggregate_ids(
         &self,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError> {
         Ok(self.streams.keys().cloned().collect())
     }
@@ -336,7 +336,7 @@ impl Snapshot for InMemorySnapshotStore {
     fn save_snapshot(
         &mut self,
         stream_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
         version: i64,
         payload: serde_json::Value,
     ) -> Result<(), PersistenceError> {
@@ -347,7 +347,7 @@ impl Snapshot for InMemorySnapshotStore {
     fn load_snapshot(
         &self,
         stream_id: &str,
-        tenant_id: Option<&str>,
+        _tenant_id: Option<&str>,
     ) -> Result<Option<(i64, serde_json::Value)>, PersistenceError> {
         Ok(self.snapshots.get(stream_id).cloned())
     }
