@@ -337,7 +337,11 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     }
 
     fn stream_version_offset(&self, aggregate_id: &str, _tenant_id: Option<&str>) -> u64 {
-        self.version_offsets.get(aggregate_id).copied().unwrap_or(0) as u64
+        self.version_offsets
+            .get(aggregate_id)
+            .copied()
+            .unwrap_or(0)
+            .max(0) as u64
     }
 }
 

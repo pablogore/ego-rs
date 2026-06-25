@@ -112,10 +112,7 @@ where
                         .collect::<Vec<_>>(),
                 )
                 .await
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "event replay failed, falling back to initial state");
-                    self.entity_handler.initial_state()
-                });
+                .map_err(|e| format!("event replay failed: {e}"))?;
             state = new_state;
             version += stored_events.len() as u64;
         }
@@ -316,11 +313,11 @@ where
     /// Removes the entity from the active registry, closes the mailbox, and
     /// drains all pending envelopes by sending `err` to each caller.
     async fn drain_mailbox_with_error(&mut self, err: crate::error::EntityError) {
-        self.registry.remove_active(&self.entity_id.aggregate_id());
         self.mailbox.close();
         while let Ok(envelope) = self.mailbox.recv().await {
             let _ = envelope.reply.send(Err(err.clone()));
         }
+        self.registry.remove_active(&self.entity_id.aggregate_id());
     }
 
     /// Drains the mailbox, snapshots state, and marks the entity passivated in the registry.
@@ -328,6 +325,7 @@ where
         // Close the mailbox first so recv() returns MailboxClosed once empty,
         // rather than blocking forever waiting for the next command.
         self.mailbox.close();
+        self.registry.remove_active(&self.entity_id.aggregate_id());
 
         while let Ok(actor_envelope) = self.mailbox.recv().await {
             self.execute_command(actor_envelope).await;
@@ -339,7 +337,8 @@ where
                         ),
                     ));
                 }
-                self.registry.remove_active(&self.entity_id.aggregate_id());
+                self.registry
+                    .mark_passivated(self.entity_id.aggregate_id(), self.version);
                 return;
             }
         }
