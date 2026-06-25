@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use ego_domain::event::DomainEvent;
 
-use crate::command_envelope::CommandEnvelope;
+use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
 use crate::lifecycle::{EntityState, LifecycleStateMachine};
-use crate::mailbox::BoundedMailbox;
+use crate::mailbox::{BoundedMailbox, CommandErasedResult};
+use crate::passivation_signal::PassivationSignal;
 use crate::persistence::PersistenceFacade;
-use crate::persistent_entity::PersistentEntity;
+use crate::persistent_entity::{CommandResult, PersistentEntity};
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::scheduler::EntityTriple;
@@ -24,51 +25,123 @@ use tracing::{error, warn};
 ///
 /// Runs recovery on start, processes commands from its mailbox,
 /// persists events, publishes them, and passivates after inactivity.
-pub struct EntityActor<C, E: DomainEvent, S> {
+///
+/// Generic over `Sig: PassivationSignal` so the passivation timing strategy
+/// can be swapped without Tokio coupling — production code uses
+/// [`TokioPassivationSignal`](crate::passivation_signal::TokioPassivationSignal),
+/// tests use [`ManualSignal`](crate::passivation_signal::ManualSignal).
+pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     /// The entity's identity (tenant/type/id).
-    pub entity_id: EntityTriple,
-    /// Bounded mailbox for incoming command envelopes.
-    pub mailbox: BoundedMailbox<CommandEnvelope<C>>,
+    pub(crate) entity_id: EntityTriple,
+    /// Bounded mailbox for incoming actor envelopes (command + reply channel).
+    pub(crate) mailbox: BoundedMailbox<ActorEnvelope<C>>,
     /// Current entity state, if recovered.
-    pub state: Option<S>,
+    pub(crate) state: Option<S>,
     /// Current version number (number of committed events).
-    pub version: u64,
+    pub(crate) version: u64,
     /// Lifecycle state machine.
-    pub lifecycle: LifecycleStateMachine,
+    pub(crate) lifecycle: LifecycleStateMachine,
     /// Shared entity registry.
-    pub registry: Arc<EntityRegistry>,
+    pub(crate) registry: Arc<EntityRegistry>,
     /// Persistence facade for loading and storing events/snapshots.
-    pub persistence: Arc<PersistenceFacade<E>>,
+    pub(crate) persistence: Arc<PersistenceFacade<E>>,
     /// Event publisher for notifying downstream consumers.
-    pub publisher: Arc<dyn EventPublisher<E>>,
+    pub(crate) publisher: Arc<dyn EventPublisher<E>>,
     /// Snapshot strategy for periodic state snapshots.
-    pub snapshot_strategy: Arc<dyn SnapshotStrategy>,
+    pub(crate) snapshot_strategy: Arc<dyn SnapshotStrategy>,
     /// Domain handler that implements command → events and event application.
-    pub entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
+    pub(crate) entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
     /// Sender for emitting scheduler lifecycle events.
-    pub event_sender: SchedulerEventSender,
-    pub _phantom: PhantomData<(C, S)>,
+    pub(crate) event_sender: SchedulerEventSender,
+    /// Passivation signal that fires when the actor should stop.
+    pub(crate) signal: Sig,
+    pub(crate) _phantom: PhantomData<(C, S)>,
 }
 
-impl<C, E, S> EntityActor<C, E, S>
+impl<C, E, S, Sig> EntityActor<C, E, S, Sig>
 where
     C: Send + Sync + serde::Serialize + 'static,
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + 'static,
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
+    Sig: PassivationSignal,
 {
     /// Runs the actor lifecycle: recover → process commands → passivate.
     ///
-    /// If recovery fails, the actor transitions to Failed and exits immediately.
+    /// If recovery fails, the actor drains any pending mailbox items with an
+    /// error reply (so callers are not left hanging on their oneshot receivers),
+    /// then exits.
     pub async fn run(&mut self) {
         self.recover_state().await;
         if self.lifecycle.current_state == EntityState::Failed {
             self.registry
                 .remove_active(&self.entity_id.aggregate_id())
                 .await;
+            // Drain pending commands so callers get an error rather than hanging.
+            self.mailbox.close();
+            while let Ok(envelope) = self.mailbox.recv().await {
+                let _ = envelope
+                    .reply
+                    .send(Err(crate::error::EntityError::EntityNotActive));
+            }
             return;
         }
         self.process_commands().await;
         self.passivate().await;
+    }
+
+    /// Rebuilds entity state from persistence.
+    ///
+    /// Loads the latest snapshot (if any), then replays events on top of it.
+    /// Returns the reconstituted state and the current version number, or an
+    /// error string if the load failed.
+    ///
+    /// This is the single canonical implementation of the load-snapshot →
+    /// replay-events pattern; both `recover_state` and `execute_command`
+    /// delegate to it.
+    async fn rebuild_state_from_persistence(&self) -> Result<(S, u64), String> {
+        let (snap_data, stored_events) = self
+            .persistence
+            .load_for_recovery(
+                &self.entity_id.aggregate_id(),
+                Some(&self.entity_id.tenant_id),
+            )
+            .await?;
+
+        let (mut state, snap_version): (S, u64) = match snap_data {
+            Some(ref snap) => {
+                let s = serde_json::from_slice(&snap.data).unwrap_or_else(|e| {
+                    warn!(
+                        error = %e,
+                        "snapshot deserialization failed, falling back to initial state"
+                    );
+                    self.entity_handler.initial_state()
+                });
+                (s, snap.version)
+            }
+            None => (self.entity_handler.initial_state(), 0),
+        };
+        let mut version = snap_version;
+
+        if !stored_events.is_empty() {
+            let new_state = self
+                .entity_handler
+                .apply_events(
+                    &state,
+                    &stored_events
+                        .iter()
+                        .map(|e| e.event.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "event replay failed, falling back to initial state");
+                    self.entity_handler.initial_state()
+                });
+            state = new_state;
+            version += stored_events.len() as u64;
+        }
+
+        Ok((state, version))
     }
 
     /// Loads persisted state and replays events to recover the entity.
@@ -76,49 +149,9 @@ where
     /// On success, transitions to Active and emits a RecoveryCompleted event.
     /// On failure, transitions to Failed.
     async fn recover_state(&mut self) {
-        let load_result = self
-            .persistence
-            .load_for_recovery(
-                &self.entity_id.aggregate_id(),
-                Some(&self.entity_id.tenant_id),
-            )
-            .await;
-
-        match load_result {
-            Ok((snap_data, stored_events)) => {
-                let (mut state, snap_version): (S, u64) = match snap_data {
-                    Some(ref snap) => {
-                        let s = serde_json::from_slice(&snap.data)
-                            .unwrap_or_else(|e| {
-                                warn!(error = %e, "snapshot deserialization failed, falling back to initial state");
-                                self.entity_handler.initial_state()
-                            });
-                        (s, snap.version)
-                    }
-                    None => (self.entity_handler.initial_state(), 0),
-                };
-                let mut version = snap_version;
-
-                if !stored_events.is_empty() {
-                    let new_state = self
-                        .entity_handler
-                        .apply_events(
-                            &state,
-                            &stored_events
-                                .iter()
-                                .map(|e| e.event.clone())
-                                .collect::<Vec<_>>(),
-                        )
-                        .await
-                        .unwrap_or_else(|e| {
-                            warn!(error = %e, "event replay failed, falling back to initial state");
-                            self.entity_handler.initial_state()
-                        });
-                    state = new_state;
-                    version += stored_events.len() as u64;
-                }
-
-                self.state = Some(state.clone());
+        match self.rebuild_state_from_persistence().await {
+            Ok((state, version)) => {
+                self.state = Some(state);
                 self.version = version;
                 let _ = self.lifecycle.transition_to(EntityState::Active);
 
@@ -126,7 +159,10 @@ where
                     entity: self.entity_id.clone(),
                     state_version: version,
                 }) {
-                    warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                    warn!(
+                        entity_id = %self.entity_id.aggregate_id(),
+                        "scheduler bus full, event dropped"
+                    );
                 }
             }
             Err(e) => {
@@ -140,16 +176,20 @@ where
         }
     }
 
-    /// Processes commands from the mailbox until passivation timeout or mailbox close.
+    /// Processes commands from the mailbox until the passivation signal fires or the
+    /// mailbox is closed.
+    ///
+    /// `tokio::select!` composes two trait-provided futures without directly
+    /// importing `tokio::time` or `tokio::sync` — per AD-6 this is acceptable
+    /// because the Tokio runtime coupling now lives in the `PassivationSignal`
+    /// implementation, not in the actor loop itself.
     async fn process_commands(&mut self) {
-        let timeout = std::time::Duration::from_secs(300);
-
         loop {
             tokio::select! {
                 result = self.mailbox.recv() => {
                     match result {
-                        Ok(envelope) => {
-                            self.execute_command(envelope).await;
+                        Ok(actor_envelope) => {
+                            self.execute_command(actor_envelope).await;
                             if !self.lifecycle.is_active() {
                                 break;
                             }
@@ -159,7 +199,7 @@ where
                         }
                     }
                 }
-                _ = tokio::time::sleep(timeout) => {
+                _ = self.signal.passivated() => {
                     break;
                 }
             }
@@ -168,25 +208,41 @@ where
 
     /// Executes a single command: handle → persist → publish.
     ///
+    /// Sends the result back to the caller via `actor_envelope.reply` on
+    /// **every** exit path. Failing to do so would cause callers to block
+    /// forever on the oneshot receiver.
+    ///
     /// On success, persists events, reloads state, emits scheduler events,
     /// optionally snapshots, and publishes events to downstream consumers.
-    /// On failure, transitions the actor to Failed.
-    async fn execute_command(&mut self, envelope: CommandEnvelope<C>) {
+    /// On persistence failure, transitions the actor to Failed.
+    /// On domain-level handler errors, returns the error to the caller without
+    /// failing the actor (the entity stays Active and processes subsequent commands).
+    async fn execute_command(&mut self, actor_envelope: ActorEnvelope<C>) {
+        let ActorEnvelope { envelope, reply } = actor_envelope;
+        let CommandEnvelope { command, context } = envelope;
+
         let current_state = match &self.state {
             Some(s) => s.clone(),
-            None => return,
+            None => {
+                // Actor has no recovered state — reply with an error and return.
+                let _ = reply.send(Err(crate::error::EntityError::EntityNotActive));
+                return;
+            }
         };
 
         let handler_result = self
             .entity_handler
-            .handle_command(&envelope.command, &current_state, &envelope.context)
+            .handle_command(&command, &current_state, &context)
             .await;
 
-        // Process the command result directly without serialization concerns
         match handler_result {
             Ok(events) if events.is_empty() => {
-                // No events case - just update state
-                self.state = Some(current_state);
+                // No events — return the unchanged state to the caller.
+                let result: CommandResult<E, S> = CommandResult::NoEvents {
+                    state: current_state,
+                };
+                let boxed: CommandErasedResult = Box::new(result);
+                let _ = reply.send(Ok(boxed));
             }
             Ok(events) => {
                 let events_clone = events.clone();
@@ -202,42 +258,17 @@ where
 
                 match persist_result {
                     Ok(new_version) => {
-                        let reload = self
-                            .persistence
-                            .load_for_recovery(
-                                &self.entity_id.aggregate_id(),
-                                Some(&self.entity_id.tenant_id),
-                            )
-                            .await;
-                        let (snap_data, stored_events) = reload.unwrap_or_else(|e| {
-                            warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist reload failed, using empty state");
-                            (None, Vec::new())
-                        });
-                        let mut state = match snap_data {
-                            Some(snap) => serde_json::from_slice(&snap.data)
-                                .unwrap_or_else(|e| {
-                                    warn!(error = %e, "snapshot deserialization failed, falling back to initial state");
-                                    self.entity_handler.initial_state()
-                                }),
-                            None => self.entity_handler.initial_state(),
-                        };
-                        if !stored_events.is_empty() {
-                            let new_state = self
-                                .entity_handler
-                                .apply_events(
-                                    &state,
-                                    &stored_events
-                                        .iter()
-                                        .map(|e| e.event.clone())
-                                        .collect::<Vec<_>>(),
-                                )
-                                .await
-                                .unwrap_or_else(|e| {
-                                    warn!(error = %e, entity_id = %self.entity_id.aggregate_id(), "post-persist event replay failed, using initial state");
-                                    self.entity_handler.initial_state()
-                                });
-                            state = new_state;
-                        }
+                        // Rebuild state from persistence (single canonical path).
+                        let (state, _) =
+                            self.rebuild_state_from_persistence().await.unwrap_or_else(|e| {
+                                warn!(
+                                    error = %e,
+                                    entity_id = %self.entity_id.aggregate_id(),
+                                    "post-persist reload failed, using empty state"
+                                );
+                                (self.entity_handler.initial_state(), new_version)
+                            });
+
                         self.state = Some(state.clone());
                         self.version = new_version;
 
@@ -245,17 +276,23 @@ where
                             entity: self.entity_id.clone(),
                             state_version: new_version,
                         }) {
-                            warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                            warn!(
+                                entity_id = %self.entity_id.aggregate_id(),
+                                "scheduler bus full, event dropped"
+                            );
                         }
 
                         if !self.event_sender.emit(SchedulerEvent::EntityStateUpdated {
                             entity: self.entity_id.clone(),
                             state_version: new_version,
                         }) {
-                            warn!(entity_id = %self.entity_id.aggregate_id(), "scheduler bus full, event dropped");
+                            warn!(
+                                entity_id = %self.entity_id.aggregate_id(),
+                                "scheduler bus full, event dropped"
+                            );
                         }
 
-                        // Check if we should take a snapshot
+                        // Check if we should take a snapshot.
                         let should_snapshot = self
                             .snapshot_strategy
                             .should_take_snapshot(new_version, events.len() as u64)
@@ -274,9 +311,15 @@ where
                                 .await;
                         }
 
-                        let published_events: Vec<E> =
-                            stored_events.iter().map(|s| s.event.clone()).collect();
-                        let _ = self.publisher.publish(&published_events).await;
+                        let _ = self.publisher.publish(&events).await;
+
+                        // Reply to caller with success result.
+                        let result: CommandResult<E, S> = CommandResult::Events {
+                            new_state: state,
+                            events,
+                        };
+                        let boxed: CommandErasedResult = Box::new(result);
+                        let _ = reply.send(Ok(boxed));
                     }
                     Err(e) => {
                         let _ = self.lifecycle.transition_to(EntityState::Failed);
@@ -285,18 +328,21 @@ where
                             entity_id = %self.entity_id.aggregate_id(),
                             "event persistence failed — entity transitioned to Failed state"
                         );
-                        return;
+                        // Reply with error so caller is not left hanging.
+                        let _ = reply.send(Err(crate::error::EntityError::PersistenceError(
+                            e.to_string(),
+                        )));
                     }
                 }
             }
             Err(err_string) => {
-                let _ = self.lifecycle.transition_to(EntityState::Failed);
-                error!(
-                    error = %err_string,
-                    entity_id = %self.entity_id.aggregate_id(),
-                    "command handler failed — entity transitioned to Failed state"
-                );
-                return;
+                // Domain-level handler errors are returned to the caller but
+                // do NOT fail the actor.  The entity remains Active and ready
+                // for the next command.  Only system-level failures (e.g.
+                // persistence errors) should transition the actor to Failed.
+                let _ = reply.send(Err(crate::error::EntityError::Internal(
+                    err_string.to_string(),
+                )));
             }
         };
     }
@@ -310,8 +356,8 @@ where
         // rather than blocking forever waiting for the next command.
         self.mailbox.close();
 
-        while let Ok(envelope) = self.mailbox.recv().await {
-            self.execute_command(envelope).await;
+        while let Ok(actor_envelope) = self.mailbox.recv().await {
+            self.execute_command(actor_envelope).await;
         }
 
         if let Some(state) = &self.state {

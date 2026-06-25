@@ -9,8 +9,10 @@ use tokio::sync::Mutex;
 /// A simple registry for tracking entities.
 #[derive(Debug)]
 pub struct EntityRegistry {
-    /// The active entities.
+    /// Currently active entities (aggregate_id → true).
     active_entities: Arc<Mutex<HashMap<String, bool>>>,
+    /// Entities that have passivated (aggregate_id → final version).
+    passivated_entities: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl EntityRegistry {
@@ -18,6 +20,7 @@ impl EntityRegistry {
     pub fn new() -> Self {
         Self {
             active_entities: Arc::new(Mutex::new(HashMap::new())),
+            passivated_entities: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -28,13 +31,16 @@ impl EntityRegistry {
 
     /// Get the count of passivated entities.
     pub async fn passivated_count(&self) -> usize {
-        // For now, we'll just return 0
-        0
+        self.passivated_entities.lock().await.len()
     }
 
-    /// Mark an entity as passivated.
-    pub async fn mark_passivated(&self, _entity_id: String, _version: u64) {
-        // For now, we'll do nothing
+    /// Mark an entity as passivated, removing it from the active set.
+    pub async fn mark_passivated(&self, entity_id: String, version: u64) {
+        self.active_entities.lock().await.remove(&entity_id);
+        self.passivated_entities
+            .lock()
+            .await
+            .insert(entity_id, version);
     }
 
     /// Mark an entity as active.

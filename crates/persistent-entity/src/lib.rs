@@ -11,6 +11,7 @@
 //! # Modules
 //!
 //! - [`entity_ref`]: The main API for interacting with persistent entities
+//! - [`entity_ref_tokio`]: Tokio-backed production [`EntityRef`] implementation
 //! - [`persistent_entity`]: Trait defining the interface for persistent entities
 //! - [`command_context`]: Context information available during command processing
 //! - [`runtime`]: The main runtime manager for entity lifecycle
@@ -19,6 +20,7 @@
 //! - [`mailbox`]: Bounded FIFO mailbox for command queuing
 //! - [`recovery`]: State recovery and snapshotting logic
 //! - [`passivation`]: Passivation policy and registry
+//! - [`passivation_signal`]: Runtime-agnostic passivation signal trait
 //! - [`snapshot`]: Snapshot strategy definitions
 //! - [`error`]: Error types for the persistent entity system
 //! - [`testing`]: Test helpers and utilities
@@ -28,12 +30,14 @@ pub mod builder;
 pub mod command_context;
 pub mod command_envelope;
 pub mod entity_ref;
+pub mod entity_ref_tokio;
 pub mod error;
 pub mod execution_backend;
 pub mod execution_backend_tokio;
 pub mod lifecycle;
 pub mod mailbox;
 pub mod passivation;
+pub mod passivation_signal;
 pub mod persistence;
 pub mod persistent_entity;
 pub mod publisher;
@@ -48,5 +52,4 @@ pub mod test_entity;
 pub mod testing;
 
 // Re-export test types for easier access in tests
-pub use execution_backend_tokio::TokioExecutionBackend;
 pub use testing::{TestCommand, TestEvent, TestState};
