@@ -329,9 +329,90 @@ When `security == None`, `authorize_in_context` MUST return `SecurityError::Capa
 
 ---
 
+### FR-017: AllowAllAuthorizationProvider — public reference implementation
+
+`AllowAllAuthorizationProvider` MUST be a public struct in `crates/security-sdk`.
+It MUST implement `AuthorizationProvider` (FR-008) and MUST always return
+`Ok(AuthorizationDecision::Allow)` regardless of the `Principal`, `AccessRequest`,
+or `SecurityContext` inputs.
+The type MUST be `Send + Sync` and MUST be storable as `Arc<dyn AuthorizationProvider>`.
+It MUST carry a `#[doc]` comment that explicitly states it is intended for
+development, integration tests, and demo runtimes only — NOT for production use.
+The existing private `AlwaysAllow` stub in `authorization/mod.rs` MUST be replaced
+or superseded by this public type; the private stub MUST NOT be re-exported.
+
+**Given** an `AllowAllAuthorizationProvider` instance
+**And** any valid `Principal`, `AccessRequest`, and `SecurityContext`
+**When** `authorize(principal, request, ctx).await` is called
+**Then** `Ok(AuthorizationDecision::Allow)` is returned
+
+**Test**: `providers::allow_all::tests::allow_all_returns_allow_for_any_principal_and_request`, `allow_all_is_send_sync`, `allow_all_arc_injectable`.
+
+---
+
+### FR-018: DenyAllAuthorizationProvider — public reference implementation
+
+`DenyAllAuthorizationProvider` MUST be a public struct in `crates/security-sdk`.
+It MUST implement `AuthorizationProvider` (FR-008) and MUST always return
+`Ok(AuthorizationDecision::Deny { reason: "deny-all".to_string() })` regardless
+of the `Principal`, `AccessRequest`, or `SecurityContext` inputs.
+The `reason` string MUST be exactly `"deny-all"`.
+The type MUST be `Send + Sync` and MUST be storable as `Arc<dyn AuthorizationProvider>`.
+It MUST carry a `#[doc]` comment that explicitly states it is intended for
+lockdown / hardening mode and secure-by-default configurations.
+The existing private `AlwaysDeny` stub in `authorization/mod.rs` MUST be replaced
+or superseded by this public type; the private stub MUST NOT be re-exported.
+
+**Given** a `DenyAllAuthorizationProvider` instance
+**And** any valid `Principal`, `AccessRequest`, and `SecurityContext`
+**When** `authorize(principal, request, ctx).await` is called
+**Then** `Ok(AuthorizationDecision::Deny { reason: "deny-all".to_string() })` is returned
+
+**Test**: `providers::deny_all::tests::deny_all_returns_deny_for_any_principal_and_request`, `deny_all_reason_is_deny_all`, `deny_all_is_send_sync`, `deny_all_arc_injectable`.
+
+---
+
+### FR-019: Public re-export of built-in providers
+
+`AllowAllAuthorizationProvider` and `DenyAllAuthorizationProvider` MUST be
+re-exported from the crate's public API alongside `RbacProvider`.
+They MUST be accessible via `ego_security_sdk::AllowAllAuthorizationProvider`
+and `ego_security_sdk::DenyAllAuthorizationProvider` without requiring callers
+to navigate internal module paths.
+The `providers` module (or equivalent re-export path) MUST list both new types
+in the same logical grouping as `RbacProvider` (FR-010).
+
+**Given** a crate depending only on `security-sdk`
+**When** it writes `use ego_security_sdk::{AllowAllAuthorizationProvider, DenyAllAuthorizationProvider}`
+**Then** it compiles without errors
+
+**Test**: `providers::allow_all::tests::crate_root_reexport_compiles`.
+
+---
+
+### FR-020: Missing-docs compliance for new public items
+
+Every new public item introduced in CORE-014 MUST carry a `///` doc comment.
+This requirement is a direct extension of NFR-001 to the new items.
+The workspace build MUST fail (`#![deny(missing_docs)]` is already active per NFR-001)
+if any of the new public types, methods, or impls lack documentation.
+
+**Given** all new public items carry doc comments describing purpose and intended use context
+**When** `cargo build --workspace` is executed
+**Then** the build succeeds with exit code 0
+
+**Test**: `cargo doc --no-deps` succeeds with zero missing_docs warnings.
+
+---
+
 ### FR-013: Extensibility — new providers without modifying public contracts
 
-The public contracts (`AuthenticationProvider`, `AuthorizationProvider`, `RoleStore`) MUST be stable enough that a new provider crate can implement any of them without modifying `security-sdk`'s source.
+The public contracts (`AuthenticationProvider`, `AuthorizationProvider`, `RoleStore`) MUST be
+stable enough that a new provider crate can implement any of them without modifying
+`security-sdk`'s source. The built-in `AllowAllAuthorizationProvider` and
+`DenyAllAuthorizationProvider` (FR-017, FR-018) serve as reference implementations
+demonstrating this contract in the crate itself.
+(Previously: only external-crate extensibility was demonstrated via test stubs.)
 
 **Given** a new crate `security-custom` that depends on `security-sdk` and implements `AuthorizationProvider`
 **When** `security-custom` is compiled
@@ -341,7 +422,11 @@ The public contracts (`AuthenticationProvider`, `AuthorizationProvider`, `RoleSt
 **When** its `RoleStore` dependency is swapped to a hypothetical `PostgresRoleStore: RoleStore`
 **Then** `RbacProvider`'s source code requires no modification
 
-**Test**: `extensibility::tests::external_provider_impl_compiles` — define a stub `struct AlwaysAllow` implementing `AuthorizationProvider` in the test module; assert it compiles and is injectable as `Arc<dyn AuthorizationProvider>`. `extensibility::tests::custom_role_store_wires_into_rbac_provider` — define a stub `RoleStore` impl; construct `RbacProvider` with it; assert compilation succeeds.
+**Given** `AllowAllAuthorizationProvider` and `DenyAllAuthorizationProvider` in `security-sdk`
+**When** their implementations are inspected
+**Then** both implement `AuthorizationProvider` without modifying the trait's definition
+
+**Test**: `extensibility::tests::external_provider_impl_compiles` — existing test. `extensibility::tests::custom_role_store_wires_into_rbac_provider` — existing test. `providers::allow_all` and `providers::deny_all` modules provide in-crate extensibility evidence.
 
 ---
 
@@ -411,6 +496,18 @@ to `ServiceContext` task-local/thread-local/global patterns, aligning with CORE-
 - WHEN its source code is inspected
 - THEN the `ServiceContext` value appears in at least one of: function parameter, constructor
   argument, or owned struct field — never in a `current()` call or task-local read
+
+---
+
+## Architectural Constraints
+
+The following constraints apply to the CORE-014 implementation and all future providers built on this SPI:
+
+- **SPI stability**: `AuthorizationProvider` trait signature MUST remain unchanged by CORE-014. Future providers are added as new implementations, not trait modifications.
+- **No transport coupling**: The `AuthorizationProvider` trait MUST NOT introduce HTTP-specific types, headers, or transport concepts. Authorization logic is transport-agnostic.
+- **No new extension points**: CORE-014 MUST NOT introduce additional extension traits (`PolicyProvider`, `PermissionProvider`, etc.). `AuthorizationProvider` remains the sole extension point.
+- **Future provider compatibility**: The SPI design MUST allow new Level 2/3 providers (ABAC, ReBAC, OpenFGA, SpiceDB) to be added in separate crates without modifying `security-sdk`.
+- **Composition reserved**: Multi-provider composition is NOT part of CORE-014. Any future `CompositeAuthorizationProvider` MUST itself implement `AuthorizationProvider`; the composition is additive, not a trait change.
 
 ---
 

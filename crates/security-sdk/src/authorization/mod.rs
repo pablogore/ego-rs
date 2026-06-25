@@ -76,10 +76,12 @@ mod tests {
 
     // ── AuthorizationProvider object-safety tests (TASK-017) ──────────────────
 
-    struct AlwaysAllow;
+    /// Inline test stub — always grants access. NOT a public type; see
+    /// `providers::allow_all::AllowAllAuthorizationProvider` for the public variant.
+    struct InlineAllow;
 
     #[async_trait]
-    impl AuthorizationProvider for AlwaysAllow {
+    impl AuthorizationProvider for InlineAllow {
         async fn authorize(
             &self,
             _: &Principal,
@@ -87,22 +89,6 @@ mod tests {
             _: &SecurityContext,
         ) -> Result<AuthorizationDecision, SecurityError> {
             Ok(AuthorizationDecision::Allow)
-        }
-    }
-
-    struct AlwaysDeny;
-
-    #[async_trait]
-    impl AuthorizationProvider for AlwaysDeny {
-        async fn authorize(
-            &self,
-            _: &Principal,
-            _: &AccessRequest,
-            _: &SecurityContext,
-        ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Deny {
-                reason: "denied".into(),
-            })
         }
     }
 
@@ -114,7 +100,7 @@ mod tests {
 
     #[test]
     fn provider_is_object_safe() {
-        let _: Arc<dyn AuthorizationProvider> = Arc::new(AlwaysAllow);
+        let _: Arc<dyn AuthorizationProvider> = Arc::new(InlineAllow);
     }
 
     #[test]
@@ -134,13 +120,29 @@ mod tests {
             Action("act".into()),
         );
 
-        let allow_result = AlwaysAllow
+        let allow_result = InlineAllow
             .authorize(ctx.principal(), &req, &ctx)
             .await
             .unwrap();
         assert!(matches!(allow_result, AuthorizationDecision::Allow));
 
-        let deny_result = AlwaysDeny
+        struct InlineDeny;
+
+        #[async_trait]
+        impl AuthorizationProvider for InlineDeny {
+            async fn authorize(
+                &self,
+                _: &Principal,
+                _: &AccessRequest,
+                _: &SecurityContext,
+            ) -> Result<AuthorizationDecision, SecurityError> {
+                Ok(AuthorizationDecision::Deny {
+                    reason: "denied".into(),
+                })
+            }
+        }
+
+        let deny_result = InlineDeny
             .authorize(ctx.principal(), &req, &ctx)
             .await
             .unwrap();
@@ -159,7 +161,7 @@ mod tests {
                 id: None,
             },
             Action("read".into()),
-            &AlwaysAllow,
+            &InlineAllow,
         )
         .await;
         assert!(result.is_ok());
@@ -209,7 +211,7 @@ mod tests {
                 id: None,
             },
             Action("read".into()),
-            &AlwaysAllow,
+            &InlineAllow,
         )
         .await;
         assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));

@@ -1,0 +1,23 @@
+change: CORE-014-authorization-providers
+status: archived
+branch: opsx/CORE-014-authorization-providers
+created: "2026-06-25"
+archived: "2026-06-25"
+phases:
+  proposal: complete
+  spec: complete
+  design: complete
+  tasks: complete
+  apply: complete
+  verify: complete
+  archive: complete
+engram_ids:
+  proposal: 984
+  spec: 986
+  design: 987
+  tasks: 988
+  apply_progress: 989
+  verify_report: 991
+pr:
+  number: 65
+  branch: opsx/CORE-014-authorization-providers
