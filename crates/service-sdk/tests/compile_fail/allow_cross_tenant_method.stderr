@@ -1,0 +1,11 @@
+error[E0599]: no method named `allow_cross_tenant` found for struct `ServiceContext` in the current scope
+ --> tests/compile_fail/allow_cross_tenant_method.rs:5:17
+  |
+5 |     let _ = ctx.allow_cross_tenant();
+  |                 ^^^^^^^^^^^^^^^^^^ private field, not a method
+  |
+help: there is a method `has_tenant` with a similar name
+  |
+5 -     let _ = ctx.allow_cross_tenant();
+5 +     let _ = ctx.has_tenant();
+  |
