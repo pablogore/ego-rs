@@ -39,10 +39,12 @@ impl<T> BoundedMailbox<T> {
     }
 
     /// Close the mailbox. Any `recv()` calls waiting on an empty queue will
-    /// return `Err(EntityError::MailboxClosed)` after the queue drains.
+    /// return `Err(EntityError::MailboxClosed)` after the queue drains. Senders
+    /// blocked on a full queue are also woken so they can observe the closed flag.
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.not_empty.notify_waiters();
+        self.not_full.notify_waiters();
     }
 
     /// Send a command to the mailbox.
