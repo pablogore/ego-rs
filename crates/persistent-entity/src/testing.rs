@@ -16,8 +16,11 @@ use crate::registry::EntityRegistry;
 use crate::scheduler::EntityTriple;
 use crate::snapshot::SnapshotStrategy;
 use crate::test_entity::TestEntity;
-use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use ego_domain::DomainEvent;
+
+// Re-export persistence stores so integration tests and external crates can
+// use them without importing from `persistence` directly.
+pub use crate::persistence::{InMemoryEventStore, InMemorySnapshotStore};
 
 /// Convenience constructor that returns a fresh, isolated test store.
 pub struct TestStore;
@@ -145,6 +148,9 @@ impl TestState {
 }
 
 /// A test entity reference for use in tests.
+///
+/// Handles commands inline without spawning an actor. Suitable for unit
+/// tests that do not need the full actor lifecycle.
 #[derive(Debug, Clone)]
 pub struct TestEntityRef {
     /// The entity type.
@@ -192,25 +198,22 @@ impl TestEntityRef {
 
 #[async_trait]
 impl EntityRef for TestEntityRef {
-    async fn send_command<T, C>(
+    type Command = TestCommand;
+
+    async fn send_command<T>(
         &self,
-        command: C,
+        command: TestCommand,
         context: CommandContext,
     ) -> Result<T, EntityError>
     where
         T: Send + 'static,
-        C: Serialize + Send + 'static,
     {
-        let tc: &TestCommand = (&command as &dyn Any)
-            .downcast_ref::<TestCommand>()
-            .ok_or_else(|| EntityError::Internal("expected TestCommand".to_string()))?;
-
         let entity = TestEntity::new();
         let k = self.key();
+        let tc = &command;
 
-        // Register entity as active in registry
         if let Some(ref reg) = self.registry {
-            reg.mark_active(&self.entity_id).await;
+            reg.mark_active(&self.entity_id);
         }
 
         // Load current state (drop lock before await)
@@ -225,14 +228,12 @@ impl EntityRef for TestEntityRef {
         // Execute command (no lock held across await)
         let events = entity.handle_command(tc, &current_state, &context).await?;
 
-        // Update state
         let result = if events.is_empty() {
             CommandResult::NoEvents {
                 state: current_state,
             }
         } else {
             let new_state = entity.apply_events(&current_state, &events).await?;
-            // Persist updated state
             let mut store = self.store.lock().unwrap();
             store.insert(k, new_state.clone());
             CommandResult::Events { new_state, events }
@@ -245,118 +246,6 @@ impl EntityRef for TestEntityRef {
             )
         })?;
         Ok(*downcast)
-    }
-}
-
-/// In-memory event store for testing.
-///
-/// Stores events per aggregate per tenant. Enforces optimistic concurrency.
-pub struct InMemoryEventStore<E> {
-    streams: Mutex<HashMap<String, Vec<StoredEvent<E>>>>,
-}
-
-impl<E> InMemoryEventStore<E> {
-    pub fn new() -> Self {
-        InMemoryEventStore {
-            streams: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl<E: Clone + Send + Sync + 'static + DomainEvent> EventStore<E> for InMemoryEventStore<E> {
-    fn append(
-        &mut self,
-        stream_id: &str,
-        _tenant_id: Option<&str>,
-        version: i64,
-        events: Vec<StoredEvent<E>>,
-    ) -> Result<i64, PersistenceError> {
-        let mut streams = self.streams.lock().unwrap();
-        let stream = streams
-            .entry(stream_id.to_string())
-            .or_default();
-
-        // Check expected version
-        if stream.len() as i64 != version {
-            return Err(PersistenceError::Conflict {
-                aggregate_id: stream_id.to_string(),
-                expected: version,
-                actual: stream.len() as i64,
-            });
-        }
-
-        for event in events {
-            stream.push(event);
-        }
-
-        Ok(stream.len() as i64)
-    }
-
-    fn load(
-        &self,
-        stream_id: &str,
-        _tenant_id: Option<&str>,
-    ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
-        let streams = self.streams.lock().unwrap();
-        if let Some(stream) = streams.get(stream_id) {
-            Ok(stream.clone())
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    fn list_aggregate_ids(
-        &self,
-        _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
-        let streams = self.streams.lock().unwrap();
-        Ok(streams.keys().cloned().collect())
-    }
-}
-
-/// In-memory snapshot store for testing.
-///
-/// Stores the latest snapshot per aggregate per tenant.
-pub struct InMemorySnapshotStore {
-    snapshots: Mutex<HashMap<String, (i64, Vec<u8>)>>,
-}
-
-impl InMemorySnapshotStore {
-    pub fn new() -> Self {
-        InMemorySnapshotStore {
-            snapshots: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl Snapshot for InMemorySnapshotStore {
-    fn save_snapshot(
-        &mut self,
-        stream_id: &str,
-        _tenant_id: Option<&str>,
-        version: i64,
-        snapshot: serde_json::Value,
-    ) -> Result<(), PersistenceError> {
-        let mut snapshots = self.snapshots.lock().unwrap();
-        snapshots.insert(
-            stream_id.to_string(),
-            (version, serde_json::to_vec(&snapshot).unwrap()),
-        );
-        Ok(())
-    }
-
-    fn load_snapshot(
-        &self,
-        stream_id: &str,
-        _tenant_id: Option<&str>,
-    ) -> Result<Option<(i64, serde_json::Value)>, PersistenceError> {
-        let snapshots = self.snapshots.lock().unwrap();
-        if let Some((version, data)) = snapshots.get(stream_id) {
-            let snapshot = serde_json::from_slice(data).unwrap();
-            Ok(Some((*version, snapshot)))
-        } else {
-            Ok(None)
-        }
     }
 }
 

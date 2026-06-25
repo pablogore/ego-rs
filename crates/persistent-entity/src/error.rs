@@ -5,7 +5,7 @@
 use std::fmt;
 
 /// An error that can occur in the persistent entity system.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EntityError {
     /// An entity was not found.
     EntityNotFound,

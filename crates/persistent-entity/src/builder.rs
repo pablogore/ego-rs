@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::DomainEvent;
 
-use crate::persistence::PersistenceFacade;
+use crate::persistence::{InMemoryEventStore, InMemorySnapshotStore, PersistenceFacade};
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::runtime::{EntityRuntime, RuntimeConfig};
@@ -12,7 +13,7 @@ use crate::scheduler_policy::RoundRobinPolicy;
 use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
 
 pub struct EntityRuntimeBuilder<
-    E: DomainEvent + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
+    E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
 > {
     mailbox_capacity: usize,
     concurrency_budget: usize,
@@ -23,9 +24,13 @@ pub struct EntityRuntimeBuilder<
     tenant_id: String,
     registry: Option<Arc<EntityRegistry>>,
     event_bus_capacity: usize,
+    /// Optionally injected event store. Defaults to in-memory.
+    event_store: Option<Arc<Mutex<dyn EventStore<E> + Send>>>,
+    /// Optionally injected snapshot store. Defaults to in-memory.
+    snapshot_store: Option<Arc<Mutex<dyn Snapshot + Send>>>,
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRuntimeBuilder<E> {
+impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static> EntityRuntimeBuilder<E> {
     pub fn new() -> Self {
         EntityRuntimeBuilder {
             mailbox_capacity: 1000,
@@ -37,6 +42,8 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             tenant_id: String::new(),
             registry: None,
             event_bus_capacity: 4096,
+            event_store: None,
+            snapshot_store: None,
         }
     }
 
@@ -89,6 +96,24 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
         self
     }
 
+    /// Inject a custom event store.  If not set, an [`InMemoryEventStore`] is used.
+    pub fn with_event_store(
+        mut self,
+        store: Arc<Mutex<dyn EventStore<E> + Send>>,
+    ) -> Self {
+        self.event_store = Some(store);
+        self
+    }
+
+    /// Inject a custom snapshot store.  If not set, an [`InMemorySnapshotStore`] is used.
+    pub fn with_snapshot_store(
+        mut self,
+        store: Arc<Mutex<dyn Snapshot + Send>>,
+    ) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
     pub fn build(self) -> EntityRuntime<E> {
         let publisher = self
             .publisher
@@ -105,7 +130,15 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
             tenant_id: self.tenant_id,
         };
 
-        let persistence = PersistenceFacade::new();
+        let event_store: Arc<Mutex<dyn EventStore<E> + Send>> = self
+            .event_store
+            .unwrap_or_else(|| Arc::new(Mutex::new(InMemoryEventStore::new())));
+
+        let snapshot_store: Arc<Mutex<dyn Snapshot + Send>> = self
+            .snapshot_store
+            .unwrap_or_else(|| Arc::new(Mutex::new(InMemorySnapshotStore::new())));
+
+        let persistence = PersistenceFacade::with_stores(event_store, snapshot_store);
 
         // Use the provided registry or create a new one
         let registry = self
@@ -134,7 +167,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> EntityRunti
     }
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + 'static> Default
+impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static> Default
     for EntityRuntimeBuilder<E>
 {
     fn default() -> Self {

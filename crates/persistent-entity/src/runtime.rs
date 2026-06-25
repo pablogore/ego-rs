@@ -6,7 +6,10 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use ego_domain::event::DomainEvent;
+
 use crate::entity_ref::EntityRef;
+use crate::entity_ref_tokio::TokioEntityRef;
 use crate::persistence::PersistenceFacade;
 use crate::persistent_entity::PersistentEntity;
 use crate::publisher::EventPublisher;
@@ -14,7 +17,6 @@ use crate::registry::EntityRegistry;
 use crate::scheduler::{EntityTriple, Scheduler};
 use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
-use crate::testing::{TestEntityRef, TestStore};
 
 /// Configuration for the entity runtime.
 ///
@@ -67,7 +69,10 @@ pub struct EntityRuntime<E> {
     _event: PhantomData<E>,
 }
 
-impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
+impl<E> EntityRuntime<E>
+where
+    E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+{
     /// Creates a new [`EntityRuntime`] with the given components.
     pub fn new(
         registry: Arc<EntityRegistry>,
@@ -90,18 +95,20 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
         }
     }
 
-    /// Returns an [`EntityRef`] for sending commands to the identified entity.
+    /// Returns a [`TokioEntityRef`] for sending commands to the identified entity.
     ///
-    /// Creates a [`TestEntityRef`] wired to the runtime's shared components.
+    /// Spawns a real [`EntityActor`] via `tokio::spawn` and returns a ref
+    /// backed by its mailbox.  This method MUST be called from within a Tokio
+    /// runtime context (e.g., inside an `async fn` or `#[tokio::test]`).
     pub fn entity_ref<C, S>(
         &self,
         entity_type: &'static str,
         entity_id: impl Into<String>,
         entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
-    ) -> impl EntityRef
+    ) -> impl EntityRef<Command = C>
     where
-        C: Send + 'static,
-        S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + 'static,
+        C: Send + Sync + serde::Serialize + 'static,
+        S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     {
         let tenant_id = if self.config.single_tenant_mode {
             "default".to_string()
@@ -111,25 +118,26 @@ impl<E: Clone + serde::de::DeserializeOwned + 'static> EntityRuntime<E> {
 
         let triple = EntityTriple::new(tenant_id, entity_type, entity_id);
 
-        TestEntityRef::new(
+        TokioEntityRef::new(
             triple,
             self.registry.clone(),
             self.persistence.clone(),
             self.publisher.clone(),
-            self.config.mailbox_capacity,
             self.snapshot_strategy.clone(),
             entity_handler,
-            TestStore::new(),
+            self.event_sender.clone(),
+            self.config.mailbox_capacity,
+            self.config.passivation_timeout,
         )
     }
 
     /// Returns the number of currently active entities.
-    pub async fn active_count(&self) -> usize {
-        self.registry.active_count().await
+    pub fn active_count(&self) -> usize {
+        self.registry.active_count()
     }
 
     /// Returns the number of passivated entities.
-    pub async fn passivated_count(&self) -> usize {
-        self.registry.passivated_count().await
+    pub fn passivated_count(&self) -> usize {
+        self.registry.passivated_count()
     }
 }

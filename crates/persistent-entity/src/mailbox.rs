@@ -9,10 +9,18 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
 /// Type alias for erased command results.
-pub type CommandErasedResult = Box<dyn Send>;
+///
+/// Boxed as `Box<dyn Any + Send>` so that callers can downcast back to the
+/// concrete [`CommandResult<E, S>`](crate::persistent_entity::CommandResult)
+/// they expect. The `Any` bound is required for `downcast`.
+pub type CommandErasedResult = Box<dyn std::any::Any + Send>;
 
 /// A bounded FIFO mailbox for commands.
-#[derive(Debug, Clone)]
+///
+/// `Clone` is implemented manually so that the clone bound does NOT propagate
+/// to `T`.  All inner fields are `Arc`-backed, so cloning merely increments
+/// reference counts and both halves refer to the same underlying queue.
+#[derive(Debug)]
 pub struct BoundedMailbox<T> {
     /// The underlying queue.
     queue: Arc<Mutex<VecDeque<T>>>,
@@ -24,6 +32,23 @@ pub struct BoundedMailbox<T> {
     not_empty: Arc<Notify>,
     /// Set to true once the mailbox has been closed; unblocks any waiting recv().
     closed: Arc<AtomicBool>,
+}
+
+impl<T> Clone for BoundedMailbox<T> {
+    /// Clones the mailbox, sharing all underlying `Arc`-backed state.
+    ///
+    /// Both the original and the clone refer to the same queue, so a send on
+    /// either is visible to a recv on the other.  No `T: Clone` bound is
+    /// required because `T` is never stored by value inside `Clone`.
+    fn clone(&self) -> Self {
+        Self {
+            queue: Arc::clone(&self.queue),
+            capacity: self.capacity,
+            not_full: Arc::clone(&self.not_full),
+            not_empty: Arc::clone(&self.not_empty),
+            closed: Arc::clone(&self.closed),
+        }
+    }
 }
 
 impl<T> BoundedMailbox<T> {
