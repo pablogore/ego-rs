@@ -17,7 +17,7 @@ impl SubjectId {
     /// Returns [`SecurityError::InvalidSubjectId`] if `value` is empty.
     pub fn new(value: impl Into<String>) -> Result<Self, SecurityError> {
         let v = value.into();
-        if v.is_empty() {
+        if v.trim().is_empty() {
             return Err(SecurityError::InvalidSubjectId(
                 "subject id must not be empty".into(),
             ));
@@ -55,6 +55,16 @@ mod tests {
         assert!(
             matches!(result, Err(SecurityError::InvalidSubjectId(_))),
             "expected Err(InvalidSubjectId) for empty string, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn whitespace_only_subject_id_is_rejected() {
+        let result = SubjectId::new("   ");
+        assert!(
+            matches!(result, Err(SecurityError::InvalidSubjectId(_))),
+            "expected Err(InvalidSubjectId) for whitespace-only string, got: {:?}",
             result
         );
     }
