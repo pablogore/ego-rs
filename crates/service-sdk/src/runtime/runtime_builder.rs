@@ -152,7 +152,11 @@ impl RuntimeInner {
         self.resolved.resolve_config::<C>()
     }
 
-    /// Enforces tenant isolation. Currently a no-op until TASK-014.
+    /// Enforces tenant isolation at the dispatch boundary.
+    ///
+    /// Currently a no-op pending TASK-014 (runtime tenant enforcement). This PR
+    /// (fix-73) closes the self-escalation vector in the public API but does not
+    /// implement runtime enforcement — that is tracked separately.
     pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
 }
 
