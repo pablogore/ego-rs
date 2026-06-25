@@ -31,6 +31,7 @@ pub use error::SecurityError;
 pub use policy::{InMemoryRoleStore, Permission, RoleStore};
 pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
 pub use providers::{
+    allow_all::AllowAllAuthorizationProvider,
     basic::{BasicAuthenticationProvider, CredentialVerifier},
     rbac::RbacProvider,
 };
