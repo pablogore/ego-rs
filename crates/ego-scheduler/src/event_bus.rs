@@ -118,6 +118,12 @@ pub enum DropPolicy {
     /// Incoming event silently dropped.
     DropNewest,
     /// Oldest buffered event evicted.
+    ///
+    /// NOTE: True eviction requires access to the receiver side, which the
+    /// sender does not hold. Current behaviour falls back to DropNewest —
+    /// the incoming event is silently accepted (Ok) rather than returning an
+    /// error.
+    /// TODO #79: implement true DropOldest via shared receiver.
     DropOldest,
 }
 
@@ -156,7 +162,10 @@ impl SchedulerEventSender {
             Err(mpsc::error::TrySendError::Full(_)) => match self.drop_policy {
                 DropPolicy::Block => Err(SchedulerError::BusFull),
                 DropPolicy::DropNewest => Ok(()),
-                DropPolicy::DropOldest => Err(SchedulerError::BusFull),
+                // TODO #79: implement true DropOldest (requires shared rx).
+                // Falls back to DropNewest: silently discard the incoming
+                // event rather than returning an error.
+                DropPolicy::DropOldest => Ok(()),
             },
             Err(mpsc::error::TrySendError::Closed(_)) => Err(SchedulerError::ChannelClosed),
         }
