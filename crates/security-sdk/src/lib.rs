@@ -33,5 +33,6 @@ pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
 pub use providers::{
     allow_all::AllowAllAuthorizationProvider,
     basic::{BasicAuthenticationProvider, CredentialVerifier},
+    deny_all::DenyAllAuthorizationProvider,
     rbac::RbacProvider,
 };

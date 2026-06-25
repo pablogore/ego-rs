@@ -91,4 +91,13 @@ mod tests {
         let _: Arc<dyn AuthorizationProvider> = Arc::new(AllowAllAuthorizationProvider);
     }
 
+    // TS-019 — asserts both built-in authorization providers are accessible
+    // from the crate root without navigating internal module paths (FR-019).
+    #[test]
+    fn crate_root_reexport_compiles() {
+        let _: Arc<dyn AuthorizationProvider> =
+            Arc::new(crate::AllowAllAuthorizationProvider);
+        let _: Arc<dyn AuthorizationProvider> =
+            Arc::new(crate::DenyAllAuthorizationProvider);
+    }
 }
