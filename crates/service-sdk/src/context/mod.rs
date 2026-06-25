@@ -52,7 +52,7 @@ pub struct ServiceContext {
     /// The additional context.
     pub additional_context: HashMap<String, String>,
     /// Whether cross-tenant access is allowed.
-    pub allow_cross_tenant: bool,
+    allow_cross_tenant: bool,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
@@ -150,11 +150,8 @@ impl ServiceContext {
         self
     }
 
-    /// Allows cross-tenant access.
-    ///
-    /// # Returns
-    /// A new `ServiceContext` with cross-tenant access enabled
-    pub fn allow_cross_tenant(mut self) -> Self {
+    /// Grants cross-tenant access. Only callable by trusted infrastructure within this crate.
+    pub(crate) fn with_cross_tenant_access(mut self) -> Self {
         self.allow_cross_tenant = true;
         self
     }

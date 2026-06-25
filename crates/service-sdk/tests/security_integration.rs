@@ -75,7 +75,6 @@ fn existing_construction_sites_compile() {
     let _ = ServiceContext::new().with_deadline(SystemTime::now());
     let _ = ServiceContext::new().with_timeout(Duration::from_secs(30));
     let _ = ServiceContext::new().with_additional_context(HashMap::new());
-    let _ = ServiceContext::new().allow_cross_tenant();
     // Chain combining existing and new builder methods
     let _ = ServiceContext::new()
         .with_tenant_id("t1")

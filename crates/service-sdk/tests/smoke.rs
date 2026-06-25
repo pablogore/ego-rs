@@ -207,7 +207,6 @@ async fn test_tenant_isolation() {
     assert_eq!(a.tenant_id(), Some("tenant-a"));
     assert_eq!(b.tenant_id(), Some("tenant-b"));
     assert!(!a.is_cross_tenant_allowed());
-    assert!(a.allow_cross_tenant().is_cross_tenant_allowed());
 }
 
 #[tokio::test]
