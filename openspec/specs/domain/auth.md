@@ -1,6 +1,7 @@
 # Domain Authentication Module — Canonical Specification
 
 **Introduced by**: CORE-011 JWT Authentication Provider (2026-06-23)
+**Last updated**: CORE-013 JWT Providers + KeyResolver (2026-06-25)
 **Decision Record**: ADR-009A (sync authentication boundary)
 **Status**: Production
 
@@ -145,25 +146,25 @@ JWT claims fall into three categories with distinct wrong-type behaviors:
 **Scenario — `sub` absent**
 
 Given a JWT with no `sub` key  
-When `JwtAuthenticator::authenticate` is called  
+When an `AuthenticationProvider::authenticate` is called  
 Then `Err(AuthenticationError::MissingClaim("sub"))` is returned
 
 **Scenario — `sub` present but wrong type**
 
 Given a JWT with `{ "sub": 123, "exp": 9999999999 }` (sub as integer, exp valid)  
-When `JwtAuthenticator::authenticate` is called  
+When an `AuthenticationProvider::authenticate` is called  
 Then `Err(AuthenticationError::InvalidToken("sub claim is not a string"))` is returned
 
 **Scenario — security claim, wrong type**
 
 Given a JWT with `{ "sub": "user-1", "exp": "not-a-number" }` (exp as string)  
-When `JwtAuthenticator::authenticate` is called  
+When an `AuthenticationProvider::authenticate` is called  
 Then `Err(AuthenticationError::InvalidToken("exp claim is not a valid integer"))` is returned
 
 **Scenario — optional identity claim, wrong type**
 
 Given a JWT with `{ "sub": "user-1", "tenant_id": 999, "exp": 9999999999 }`  
-When `JwtAuthenticator::authenticate` is called  
+When an `AuthenticationProvider::authenticate` is called  
 Then `Ok(SecurityContext)` is returned with:
 - `principal.tenant_id == None` (graceful degradation)
 - `claims.custom["tenant_id"] == 999` (raw value preserved)
@@ -189,16 +190,18 @@ Absent optional claims (`tenant_id`, `tid`, `roles`) are simply not present; no 
 
 ## Infrastructure Implementation Reference
 
-The `crates/security-jwt` crate provides a reference implementation of AuthenticationProvider for JWT tokens:
+The `crates/security-jwt` crate provides three single-algorithm `AuthenticationProvider` implementations over a `KeyResolver` abstraction (CORE-013):
 
-- **JwtAlgorithm** enum: HS256, RS256 (marker enum — key material removed). Previously embedded key material has moved to `VerificationKey` inside a `KeyResolver` (introduced in CORE-011A).
-- **JwtConfig** struct: algorithm selection (JwtAlgorithm marker), optional iss/aud constraints. No key material. Previously embedded key material has moved to `VerificationKey` behind the resolver.
-- **JwtAuthenticator** struct: implements AuthenticationProvider for JWT tokens. Key resolution now delegates to `Arc<dyn KeyResolver>` injected at construction via `JwtAuthenticator::new(config, resolver, clock)`.
-- **KeyResolver** trait (`crates/security-jwt`): async trait returning `Result<VerificationKey, KeyResolverError>`. Accepts `kid: Option<&str>` and `algorithm: JwtAlgorithm`. Resolver MUST be cache-first — return from locally available state; network I/O MUST occur outside the auth hot path.
-- **VerificationKey** enum (`crates/security-jwt`): `Hmac(Vec<u8>)` for HS256, `RsaPem(String)` for RS256. `#[non_exhaustive]` — extensible for future key types (e.g., ES256, JWK).
+- **JwtAlgorithm** enum: `Hs256`, `Rs256`, `Es256` (closed set — `#[non_exhaustive]` removed so providers can exhaustively match). Key material lives in `VerificationKey` behind the `KeyResolver`.
+- **Hs256AuthenticationProvider** / **Rs256AuthenticationProvider** / **Es256AuthenticationProvider**: three concrete types each implementing `AuthenticationProvider`. Accept their matching config type (`Hs256Config`, `Rs256Config`, `Es256Config` — each carries `expected_iss: Option<String>` and `expected_aud: Option<Vec<String>>`), an `Arc<dyn KeyResolver>`, and an `Arc<dyn Clock>`. All are `Send + Sync`.
+- **JwtValidationEngine** (`pub(crate)`, in `src/validation.rs`): internal shared engine for claim/time/iss/aud/sub/roles/tenant validation. Never re-exported. Providers delegate to it after resolving the key.
+- **KeyResolver** trait (`crates/security-jwt`): async trait returning `Result<VerificationKey, KeyResolverError>`. Accepts `kid: Option<&str>` and `algorithm: JwtAlgorithm`. Resolver MUST be cache-first — network I/O MUST occur outside the auth hot path (AD-013).
+- **VerificationKey** enum (`crates/security-jwt`): `Hmac(Vec<u8>)` for HS256, `RsaPem(String)` for RS256, `EcPem(String)` for ES256. `#[non_exhaustive]` — additive extension.
 - **LocalKeyResolver** struct (`crates/security-jwt`): concrete `KeyResolver` holding a single `(algorithm, VerificationKey)` pair. Ignores `kid` (advisory). Satisfies the cache-first contract trivially.
 
-JwtAuthenticator verifies signatures, validates present exp, nbf, and iat time claims using the injected Clock, and extracts Principal fields with graceful degradation.
+Each provider: decodes the JWT header → asserts `header.alg == provider algorithm` (else `AlgorithmNotSupported`) → `block_on(resolver.resolve(kid, alg))` → builds `DecodingKey` from the matching `VerificationKey` variant → delegates to `JwtValidationEngine` for signature verification and CLAR-005 claim validation.
+
+**Removed** (CORE-013, AD-013): `JwtAuthenticator` and `JwtConfig` are no longer part of the public API. No shims — pre-stable leaf crate with no external consumers.
 
 ## Dependency Graph
 
@@ -215,7 +218,8 @@ crates/security-jwt (HS256/RS256 implementation)
 ## Future Capabilities
 
 - **CORE-011B**: JWKS remote key resolver (cache-backed, OIDC discovery, multi-issuer routing)
-- **Future**: ES256/EdDSA algorithm support (extend JwtAlgorithm and VerificationKey)
+- **CORE-014**: `#[authorize]` / authorization macro support
+- **Future**: EdDSA algorithm support
 - **Future**: Additional domain auth types as needed by new providers
 
 ## References
@@ -223,5 +227,6 @@ crates/security-jwt (HS256/RS256 implementation)
 - RFC 7519: JSON Web Token (JWT)
 - ADR-009A: Sync authentication boundary decision
 - CORE-011: JWT Authentication Provider implementation
+- CORE-013: JWT Providers + KeyResolver (replaced JwtAuthenticator/JwtConfig with three single-algorithm providers)
 - CLAR-005–006: JWT Authentication clarifications (defined in this document)
 - CLAR-001–004: Earlier JWT authentication clarifications (see change artifact history)

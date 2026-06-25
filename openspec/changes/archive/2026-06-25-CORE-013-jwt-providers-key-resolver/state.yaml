@@ -1,6 +1,6 @@
 change: CORE-013-jwt-providers-key-resolver
 title: "JWT Providers + KeyResolver"
-status: tasks-complete
+status: archived
 artifact_store: hybrid
 created: "2026-06-24"
 
@@ -9,9 +9,9 @@ phases:
   spec: complete
   design: complete
   tasks: complete
-  apply: pending
-  verify: pending
-  archive: pending
+  apply: complete
+  verify: complete
+  archive: complete
 
 delivery:
   strategy: stacked-to-develop
