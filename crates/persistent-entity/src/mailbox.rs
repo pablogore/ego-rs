@@ -3,6 +3,7 @@
 //! This module implements a bounded FIFO mailbox for queuing commands to entities.
 
 use crate::error::EntityError;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
@@ -13,7 +14,7 @@ pub type CommandErasedResult = Box<dyn Send>;
 #[derive(Debug, Clone)]
 pub struct BoundedMailbox<T> {
     /// The underlying queue.
-    queue: Arc<Mutex<Vec<T>>>,
+    queue: Arc<Mutex<VecDeque<T>>>,
     /// The maximum capacity of the mailbox.
     capacity: usize,
     /// A notification for when the mailbox is not full.
@@ -26,7 +27,7 @@ impl<T> BoundedMailbox<T> {
     /// Create a new bounded mailbox.
     pub fn new(capacity: usize) -> Self {
         Self {
-            queue: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            queue: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
             capacity,
             not_full: Arc::new(Notify::new()),
             not_empty: Arc::new(Notify::new()),
@@ -39,7 +40,7 @@ impl<T> BoundedMailbox<T> {
             {
                 let mut queue = self.queue.lock().await;
                 if queue.len() < self.capacity {
-                    queue.push(command);
+                    queue.push_back(command);
                     self.not_empty.notify_waiters();
                     return Ok(());
                 }
@@ -54,7 +55,7 @@ impl<T> BoundedMailbox<T> {
         loop {
             {
                 let mut queue = self.queue.lock().await;
-                if let Some(command) = queue.pop() {
+                if let Some(command) = queue.pop_front() {
                     self.not_full.notify_waiters();
                     return Ok(command);
                 }
@@ -77,10 +78,5 @@ impl<T> BoundedMailbox<T> {
     /// Get the current size of the mailbox.
     pub async fn len(&self) -> usize {
         self.queue.lock().await.len()
-    }
-
-    /// Check if the mailbox is empty.
-    pub async fn is_empty_check(&self) -> bool {
-        self.queue.lock().await.is_empty()
     }
 }
