@@ -198,25 +198,22 @@ impl TestEntityRef {
 
 #[async_trait]
 impl EntityRef for TestEntityRef {
-    async fn send_command<T, C>(
+    type Command = TestCommand;
+
+    async fn send_command<T>(
         &self,
-        command: C,
+        command: TestCommand,
         context: CommandContext,
     ) -> Result<T, EntityError>
     where
         T: Send + 'static,
-        C: Serialize + Send + 'static,
     {
-        let tc: &TestCommand = (&command as &dyn Any)
-            .downcast_ref::<TestCommand>()
-            .ok_or_else(|| EntityError::Internal("expected TestCommand".to_string()))?;
-
         let entity = TestEntity::new();
         let k = self.key();
+        let tc = &command;
 
-        // Register entity as active in registry
         if let Some(ref reg) = self.registry {
-            reg.mark_active(&self.entity_id).await;
+            reg.mark_active(&self.entity_id);
         }
 
         // Load current state (drop lock before await)
@@ -231,14 +228,12 @@ impl EntityRef for TestEntityRef {
         // Execute command (no lock held across await)
         let events = entity.handle_command(tc, &current_state, &context).await?;
 
-        // Update state
         let result = if events.is_empty() {
             CommandResult::NoEvents {
                 state: current_state,
             }
         } else {
             let new_state = entity.apply_events(&current_state, &events).await?;
-            // Persist updated state
             let mut store = self.store.lock().unwrap();
             store.insert(k, new_state.clone());
             CommandResult::Events { new_state, events }

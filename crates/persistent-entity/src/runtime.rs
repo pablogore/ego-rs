@@ -105,7 +105,7 @@ where
         entity_type: &'static str,
         entity_id: impl Into<String>,
         entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
-    ) -> impl EntityRef
+    ) -> impl EntityRef<Command = C>
     where
         C: Send + Sync + serde::Serialize + 'static,
         S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
@@ -132,12 +132,12 @@ where
     }
 
     /// Returns the number of currently active entities.
-    pub async fn active_count(&self) -> usize {
-        self.registry.active_count().await
+    pub fn active_count(&self) -> usize {
+        self.registry.active_count()
     }
 
     /// Returns the number of passivated entities.
-    pub async fn passivated_count(&self) -> usize {
-        self.registry.passivated_count().await
+    pub fn passivated_count(&self) -> usize {
+        self.registry.passivated_count()
     }
 }

@@ -18,8 +18,8 @@ use ego_domain::DomainEvent;
 /// Snapshot data loaded during recovery.
 #[derive(Debug)]
 pub struct SnapshotData {
-    /// The snapshot payload as raw bytes (JSON-serialised state).
-    pub data: Vec<u8>,
+    /// The snapshot payload as a JSON value.
+    pub data: serde_json::Value,
     /// The aggregate version at which the snapshot was taken.
     pub version: u64,
 }
@@ -158,27 +158,33 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         };
 
         let snap_data = snap.map(|(version, data)| SnapshotData {
-            data: serde_json::to_vec(&data).unwrap_or_default(),
+            data,
             version: version as u64,
         });
 
         let snap_version = snap_data.as_ref().map(|s| s.version).unwrap_or(0);
 
-        let stored: Vec<StoredEvent<E>> = {
+        let (stored, stored_base): (Vec<StoredEvent<E>>, u64) = {
             let store = self.event_store.lock().unwrap();
-            store
+            // TODO: EventStore::load returns the full stream; events before snap_version are loaded
+            // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
+            // to skip pre-snapshot events server-side and avoid the O(N) full load.
+            let events = store
                 .load(entity_id, tenant_id)
-                .unwrap_or_default()
+                .map_err(|e| e.to_string())?;
+            let base = store.stream_version_offset(entity_id, tenant_id);
+            (events, base)
         };
 
-        // Skip events that are part of the snapshot (already applied).
+        // Physical index `idx` maps to logical version `idx + stored_base`; events
+        // with logical version < snap_version are already covered by the snapshot.
         let rows: Vec<StoredEventRow<E>> = stored
             .into_iter()
             .enumerate()
-            .filter(|(idx, _)| (*idx as u64) >= snap_version)
+            .filter(|(idx, _)| (*idx as u64 + stored_base) >= snap_version)
             .map(|(idx, se)| StoredEventRow {
                 event: se.event,
-                version: idx as u64 + 1,
+                version: idx as u64 + stored_base + 1,
             })
             .collect();
 
@@ -193,10 +199,11 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         entity_id: &str,
         tenant_id: Option<&str>,
         version: u64,
-        events: Vec<E>,
+        events: &[E],
     ) -> Result<u64, String> {
         let stored: Vec<StoredEvent<E>> = events
-            .into_iter()
+            .iter()
+            .cloned()
             .map(StoredEvent::without_correlation)
             .collect();
 
@@ -257,6 +264,8 @@ pub struct StoredEventRow<E> {
 /// key (e.g. `"{tenant}/{aggregate_id}"`).
 pub struct InMemoryEventStore<E> {
     streams: HashMap<String, Vec<StoredEvent<E>>>,
+    /// Per-stream version offset — simulates events already covered by a snapshot.
+    version_offsets: HashMap<String, i64>,
 }
 
 impl<E> InMemoryEventStore<E> {
@@ -264,7 +273,17 @@ impl<E> InMemoryEventStore<E> {
     pub fn new() -> Self {
         InMemoryEventStore {
             streams: HashMap::new(),
+            version_offsets: HashMap::new(),
         }
+    }
+
+    /// Declares that `offset` events were already persisted for `stream_id` before
+    /// this store was created (e.g. covered by a pre-seeded snapshot). The store
+    /// treats those events as implicitly present for version-check purposes without
+    /// requiring dummy event payloads to be added.
+    pub fn with_version_offset(mut self, stream_id: &str, offset: i64) -> Self {
+        self.version_offsets.insert(stream_id.to_string(), offset);
+        self
     }
 }
 
@@ -276,16 +295,18 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
+        let offset = self.version_offsets.get(stream_id).copied().unwrap_or(0);
         let stream = self
             .streams
             .entry(stream_id.to_string())
             .or_default();
 
-        if stream.len() as i64 != expected_version {
+        let current_version = stream.len() as i64 + offset;
+        if current_version != expected_version {
             return Err(PersistenceError::Conflict {
                 aggregate_id: stream_id.to_string(),
                 expected: expected_version,
-                actual: stream.len() as i64,
+                actual: current_version,
             });
         }
 
@@ -293,7 +314,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
             stream.push(event);
         }
 
-        Ok(stream.len() as i64)
+        Ok(stream.len() as i64 + offset)
     }
 
     fn load(
@@ -313,6 +334,10 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         _tenant_id: Option<&str>,
     ) -> Result<Vec<String>, PersistenceError> {
         Ok(self.streams.keys().cloned().collect())
+    }
+
+    fn stream_version_offset(&self, aggregate_id: &str, _tenant_id: Option<&str>) -> u64 {
+        self.version_offsets.get(aggregate_id).copied().unwrap_or(0) as u64
     }
 }
 

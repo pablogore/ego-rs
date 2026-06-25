@@ -21,15 +21,7 @@ use crate::scheduler_event::{SchedulerEvent, SchedulerEventSender};
 use crate::snapshot::SnapshotStrategy;
 use tracing::{error, warn};
 
-/// Core actor that owns entity state, mailbox, and lifecycle.
-///
-/// Runs recovery on start, processes commands from its mailbox,
-/// persists events, publishes them, and passivates after inactivity.
-///
-/// Generic over `Sig: PassivationSignal` so the passivation timing strategy
-/// can be swapped without Tokio coupling — production code uses
-/// [`TokioPassivationSignal`](crate::passivation_signal::TokioPassivationSignal),
-/// tests use [`ManualSignal`](crate::passivation_signal::ManualSignal).
+/// Owns the lifecycle of a single entity: recovery → command loop → passivation.
 pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     /// The entity's identity (tenant/type/id).
     pub(crate) entity_id: EntityTriple,
@@ -65,39 +57,26 @@ where
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     Sig: PassivationSignal,
 {
-    /// Runs the actor lifecycle: recover → process commands → passivate.
-    ///
-    /// If recovery fails, the actor drains any pending mailbox items with an
-    /// error reply (so callers are not left hanging on their oneshot receivers),
-    /// then exits.
+    /// Runs recovery, then the command loop, then passivation; drains mailbox on recovery failure.
     pub async fn run(&mut self) {
         self.recover_state().await;
         if self.lifecycle.current_state == EntityState::Failed {
-            self.registry
-                .remove_active(&self.entity_id.aggregate_id())
+            self.drain_mailbox_with_error(crate::error::EntityError::EntityNotActive)
                 .await;
-            // Drain pending commands so callers get an error rather than hanging.
-            self.mailbox.close();
-            while let Ok(envelope) = self.mailbox.recv().await {
-                let _ = envelope
-                    .reply
-                    .send(Err(crate::error::EntityError::EntityNotActive));
-            }
             return;
         }
         self.process_commands().await;
+        if self.lifecycle.current_state == EntityState::Failed {
+            self.drain_mailbox_with_error(crate::error::EntityError::PersistenceError(
+                "actor entered failed state during command processing".to_string(),
+            ))
+            .await;
+            return;
+        }
         self.passivate().await;
     }
 
-    /// Rebuilds entity state from persistence.
-    ///
-    /// Loads the latest snapshot (if any), then replays events on top of it.
-    /// Returns the reconstituted state and the current version number, or an
-    /// error string if the load failed.
-    ///
-    /// This is the single canonical implementation of the load-snapshot →
-    /// replay-events pattern; both `recover_state` and `execute_command`
-    /// delegate to it.
+    /// Loads the latest snapshot (if any) then replays events; returns `(state, version)` or an error.
     async fn rebuild_state_from_persistence(&self) -> Result<(S, u64), String> {
         let (snap_data, stored_events) = self
             .persistence
@@ -108,8 +87,8 @@ where
             .await?;
 
         let (mut state, snap_version): (S, u64) = match snap_data {
-            Some(ref snap) => {
-                let s = serde_json::from_slice(&snap.data).unwrap_or_else(|e| {
+            Some(snap) => {
+                let s = serde_json::from_value::<S>(snap.data).unwrap_or_else(|e| {
                     warn!(
                         error = %e,
                         "snapshot deserialization failed, falling back to initial state"
@@ -176,13 +155,7 @@ where
         }
     }
 
-    /// Processes commands from the mailbox until the passivation signal fires or the
-    /// mailbox is closed.
-    ///
-    /// `tokio::select!` composes two trait-provided futures without directly
-    /// importing `tokio::time` or `tokio::sync` — per AD-6 this is acceptable
-    /// because the Tokio runtime coupling now lives in the `PassivationSignal`
-    /// implementation, not in the actor loop itself.
+    /// Drives the mailbox loop until the passivation signal fires or the mailbox closes.
     async fn process_commands(&mut self) {
         loop {
             tokio::select! {
@@ -206,17 +179,7 @@ where
         }
     }
 
-    /// Executes a single command: handle → persist → publish.
-    ///
-    /// Sends the result back to the caller via `actor_envelope.reply` on
-    /// **every** exit path. Failing to do so would cause callers to block
-    /// forever on the oneshot receiver.
-    ///
-    /// On success, persists events, reloads state, emits scheduler events,
-    /// optionally snapshots, and publishes events to downstream consumers.
-    /// On persistence failure, transitions the actor to Failed.
-    /// On domain-level handler errors, returns the error to the caller without
-    /// failing the actor (the entity stays Active and processes subsequent commands).
+    /// Handles one command: validate state → persist events → apply in-memory → publish; replies on every path.
     async fn execute_command(&mut self, actor_envelope: ActorEnvelope<C>) {
         let ActorEnvelope { envelope, reply } = actor_envelope;
         let CommandEnvelope { command, context } = envelope;
@@ -224,7 +187,6 @@ where
         let current_state = match &self.state {
             Some(s) => s.clone(),
             None => {
-                // Actor has no recovered state — reply with an error and return.
                 let _ = reply.send(Err(crate::error::EntityError::EntityNotActive));
                 return;
             }
@@ -237,7 +199,6 @@ where
 
         match handler_result {
             Ok(events) if events.is_empty() => {
-                // No events — return the unchanged state to the caller.
                 let result: CommandResult<E, S> = CommandResult::NoEvents {
                     state: current_state,
                 };
@@ -245,29 +206,37 @@ where
                 let _ = reply.send(Ok(boxed));
             }
             Ok(events) => {
-                let events_clone = events.clone();
                 let persist_result = self
                     .persistence
                     .persist_events(
                         &self.entity_id.aggregate_id(),
                         Some(&self.entity_id.tenant_id),
                         self.version,
-                        events_clone,
+                        &events,
                     )
                     .await;
 
                 match persist_result {
                     Ok(new_version) => {
-                        // Rebuild state from persistence (single canonical path).
-                        let (state, _) =
-                            self.rebuild_state_from_persistence().await.unwrap_or_else(|e| {
-                                warn!(
+                        let state = match self
+                            .entity_handler
+                            .apply_events(&current_state, &events)
+                            .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = self.lifecycle.transition_to(EntityState::Failed);
+                                error!(
                                     error = %e,
                                     entity_id = %self.entity_id.aggregate_id(),
-                                    "post-persist reload failed, using empty state"
+                                    "post-persist apply_events failed — actor transitioned to Failed"
                                 );
-                                (self.entity_handler.initial_state(), new_version)
-                            });
+                                let _ = reply.send(Err(crate::error::EntityError::PersistenceError(
+                                    e.to_string(),
+                                )));
+                                return;
+                            }
+                        };
 
                         self.state = Some(state.clone());
                         self.version = new_version;
@@ -292,7 +261,6 @@ where
                             );
                         }
 
-                        // Check if we should take a snapshot.
                         let should_snapshot = self
                             .snapshot_strategy
                             .should_take_snapshot(new_version, events.len() as u64)
@@ -313,7 +281,6 @@ where
 
                         let _ = self.publisher.publish(&events).await;
 
-                        // Reply to caller with success result.
                         let result: CommandResult<E, S> = CommandResult::Events {
                             new_state: state,
                             events,
@@ -328,7 +295,6 @@ where
                             entity_id = %self.entity_id.aggregate_id(),
                             "event persistence failed — entity transitioned to Failed state"
                         );
-                        // Reply with error so caller is not left hanging.
                         let _ = reply.send(Err(crate::error::EntityError::PersistenceError(
                             e.to_string(),
                         )));
@@ -347,18 +313,38 @@ where
         };
     }
 
-    /// Passivates the actor: drains remaining mailbox, stores snapshot,
-    /// marks as passivated in registry, and transitions to Passivated state.
-    async fn passivate(&mut self) {
-        let _ = self.lifecycle.transition_to(EntityState::Passivating);
+    /// Removes the entity from the active registry, closes the mailbox, and
+    /// drains all pending envelopes by sending `err` to each caller.
+    async fn drain_mailbox_with_error(&mut self, err: crate::error::EntityError) {
+        self.registry.remove_active(&self.entity_id.aggregate_id());
+        self.mailbox.close();
+        while let Ok(envelope) = self.mailbox.recv().await {
+            let _ = envelope.reply.send(Err(err.clone()));
+        }
+    }
 
+    /// Drains the mailbox, snapshots state, and marks the entity passivated in the registry.
+    async fn passivate(&mut self) {
         // Close the mailbox first so recv() returns MailboxClosed once empty,
         // rather than blocking forever waiting for the next command.
         self.mailbox.close();
 
         while let Ok(actor_envelope) = self.mailbox.recv().await {
             self.execute_command(actor_envelope).await;
+            if self.lifecycle.current_state == EntityState::Failed {
+                while let Ok(envelope) = self.mailbox.recv().await {
+                    let _ = envelope.reply.send(Err(
+                        crate::error::EntityError::PersistenceError(
+                            "actor failed during passivation drain".to_string(),
+                        ),
+                    ));
+                }
+                self.registry.remove_active(&self.entity_id.aggregate_id());
+                return;
+            }
         }
+
+        let _ = self.lifecycle.transition_to(EntityState::Passivating);
 
         if let Some(state) = &self.state {
             let _ = self
@@ -373,8 +359,7 @@ where
         }
 
         self.registry
-            .mark_passivated(self.entity_id.aggregate_id(), self.version)
-            .await;
+            .mark_passivated(self.entity_id.aggregate_id(), self.version);
 
         let _ = self.lifecycle.transition_to(EntityState::Passivated);
     }

@@ -1,17 +1,10 @@
-//! Tokio-backed entity reference.
-//!
-//! [`TokioEntityRef`] is the production implementation of [`EntityRef`].  It
-//! spawns an [`EntityActor`] via `tokio::spawn` and forwards commands via a
-//! [`BoundedMailbox`].  Each [`send_command`](TokioEntityRef::send_command)
-//! call creates a per-command `oneshot` channel so the actor can deliver the
-//! result back to the caller without shared mutable state.
+//! Production [`EntityRef`] backed by a real [`EntityActor`] spawned via `tokio::spawn`.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Serialize;
 use tokio::sync::oneshot;
 
 use crate::actor::EntityActor;
@@ -31,11 +24,21 @@ use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use ego_domain::event::DomainEvent;
 
-/// A production [`EntityRef`] backed by a real [`EntityActor`] task.
-///
-/// Created by [`EntityRuntime::entity_ref`].  Spawns the actor once on
-/// construction and holds the write-side of the mailbox so that multiple
-/// callers can send commands concurrently.
+/// Calls `remove_active` on drop — guards against a leaked active entry when the spawned future
+/// is dropped before it ever polls (e.g. runtime teardown before task starts). `remove_active`
+/// is idempotent: calling it after normal passivation (which already removed the entry) is safe.
+struct SpawnGuard {
+    aggregate_id: String,
+    registry: Arc<EntityRegistry>,
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        self.registry.remove_active(&self.aggregate_id);
+    }
+}
+
+/// Production [`EntityRef`] — spawns one [`EntityActor`] and holds its mailbox write-side.
 pub struct TokioEntityRef<C, E, S> {
     /// The entity's identity (tenant/type/id).
     entity_id: EntityTriple,
@@ -52,11 +55,7 @@ impl<C, E, S> fmt::Debug for TokioEntityRef<C, E, S> {
     }
 }
 
-/// Manual `Clone` impl so that the `C: Clone` bound is not propagated.
-///
-/// `TokioEntityRef` only holds an `Arc`-backed [`BoundedMailbox`] and an
-/// [`EntityTriple`] (value type).  Cloning produces a second ref that shares
-/// the same actor mailbox — both can dispatch commands to the same actor.
+/// Clones share the same actor mailbox — both refs dispatch to the same actor.
 impl<C, E, S> Clone for TokioEntityRef<C, E, S> {
     fn clone(&self) -> Self {
         Self {
@@ -73,12 +72,7 @@ where
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
 {
-    /// Constructs a [`TokioEntityRef`] and spawns the backing [`EntityActor`].
-    ///
-    /// The actor task is launched via [`tokio::spawn`] and runs until the
-    /// passivation timeout fires or the mailbox is closed.  The returned ref
-    /// holds the write-side of the mailbox so commands can be dispatched at
-    /// any time after construction.
+    /// Marks the entity active, spawns the actor, and returns the mailbox write-side.
     pub fn new(
         triple: EntityTriple,
         registry: Arc<EntityRegistry>,
@@ -96,10 +90,6 @@ where
         let entity_id = triple.clone();
         let registry_for_actor = registry.clone();
 
-        // Mark the entity as active in the registry before spawning so that
-        // callers who inspect registry.active_count() immediately after
-        // entity_ref() observe the correct count.
-        let registry_for_mark = registry.clone();
         let aggregate_id = triple.aggregate_id();
 
         let mut actor = EntityActor {
@@ -118,11 +108,28 @@ where
             _phantom: PhantomData,
         };
 
+        // Mark the entity as active before spawning so that callers who inspect
+        // registry.active_count() immediately after entity_ref() observe the correct count.
+        // Registry ops use std::sync::Mutex (no await), so this is safe from a sync fn.
+        //
+        // Known window: active_count() is inflated by one between this line and the actor's
+        // first poll. Moving mark_active inside run() would hide the entity until the first
+        // Tokio context switch, which is worse. SpawnGuard handles the case where the spawned
+        // future is dropped before it ever polls (runtime teardown).
+        registry.mark_active(&aggregate_id);
+
+        // Guard calls remove_active on drop. If the runtime drops the spawned future before it
+        // ever polls (e.g. shutdown), the active entry is cleaned up. In the normal path,
+        // actor.run() already removes the entry; Drop is a safe no-op because remove_active
+        // is idempotent.
+        let _guard = SpawnGuard {
+            aggregate_id: aggregate_id.clone(),
+            registry: registry.clone(),
+        };
+
         tokio::spawn(async move {
-            // Mark entity active inside the spawned task so it runs within the
-            // Tokio runtime context.
-            registry_for_mark.mark_active(&aggregate_id).await;
             actor.run().await;
+            drop(_guard);
         });
 
         TokioEntityRef {
@@ -140,45 +147,21 @@ where
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
 {
-    /// Sends a command to the actor and awaits its result.
-    ///
-    /// Creates a per-command [`oneshot`] channel, wraps the command in an
-    /// [`ActorEnvelope`], enqueues it in the mailbox, and awaits the reply.
-    /// The reply is a type-erased [`CommandErasedResult`]; this method
-    /// downcasts it to `T`.
-    ///
-    /// # Errors
-    ///
-    /// - [`EntityError::MailboxClosed`] if the actor has already passivated.
-    /// - [`EntityError::Internal`] if the oneshot channel is dropped before
-    ///   a reply is sent (actor panicked or was cancelled).
-    /// - Any [`EntityError`] the actor itself sends back (handler failure,
-    ///   persistence failure, etc.).
-    async fn send_command<T, Cmd>(
+    type Command = C;
+
+    /// Enqueues a command on the actor mailbox and awaits the reply.
+    async fn send_command<T>(
         &self,
-        command: Cmd,
+        command: C,
         context: CommandContext,
     ) -> Result<T, EntityError>
     where
         T: Send + 'static,
-        Cmd: Serialize + Send + 'static,
     {
-        // `EntityRef::send_command` is generic over `Cmd`, but this concrete
-        // `TokioEntityRef<C, E, S>` only speaks `C`.  The `Any` downcast is a
-        // runtime type-check: it succeeds when the caller passes `Cmd = C`
-        // (which is the intended use) and fails with a clear error otherwise.
-        // This mirrors the pattern used by `TestEntityRef`.
-        let cmd_any: Box<dyn std::any::Any + Send> = Box::new(command);
-        let cmd_c: C = *cmd_any.downcast::<C>().map_err(|_| {
-            EntityError::Internal(
-                "TokioEntityRef::send_command: command type mismatch".to_string(),
-            )
-        })?;
-
         let (tx, rx) = oneshot::channel();
         let actor_envelope = ActorEnvelope {
             envelope: CommandEnvelope {
-                command: cmd_c,
+                command,
                 context,
             },
             reply: tx,
@@ -193,7 +176,6 @@ where
             EntityError::Internal("actor dropped reply channel without responding".to_string())
         })??;
 
-        // Downcast the erased result to T.
         let boxed_t: Box<T> = erased.downcast::<T>().map_err(|_| {
             EntityError::Internal(
                 "TokioEntityRef::send_command: result type mismatch".to_string(),

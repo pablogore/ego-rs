@@ -37,7 +37,13 @@ pub trait PassivationSignal: Send {
 
 /// Production passivation signal backed by `tokio::time::sleep`.
 ///
-/// Resolves after `timeout` elapses with no reset.
+/// Each call to [`passivated`](PassivationSignal::passivated) creates a fresh
+/// `sleep` future. Because `process_commands` calls `passivated()` inside a
+/// `tokio::select!` loop, Tokio cancels the sleep branch when a command
+/// arrives and a new sleep starts on the next iteration.  This implements
+/// **idle-based passivation**: the timer resets on every received command, and
+/// the actor only passivates after `timeout` elapses with no activity.  Under
+/// sustained load the actor will never passivate.
 pub struct TokioPassivationSignal {
     /// Duration of inactivity before passivation fires.
     pub timeout: std::time::Duration,

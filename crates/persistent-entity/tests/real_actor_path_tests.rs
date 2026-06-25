@@ -1,11 +1,4 @@
 /// Integration tests for the real `TokioEntityRef` → `EntityActor` path.
-///
-/// Covers the scenarios from CORE-015 spec that verify the live actor path:
-///
-/// - Command execution inside `current_thread` runtime (NFR-05)
-/// - Recovery from pre-seeded events
-/// - Passivation via timeout + registry bookkeeping
-/// - Recovery failure transitions actor to Failed and returns an error
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -62,10 +55,7 @@ impl Snapshot for FailingSnapshotStore {
 }
 
 // ---------------------------------------------------------------------------
-// Task 3.1 — Basic command execution inside current_thread runtime (NFR-05)
-//
-// Verifies that TokioEntityRef can be used inside a current_thread runtime
-// without block_on panics.
+// Basic command execution inside a current_thread runtime
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
@@ -90,10 +80,7 @@ async fn test_real_actor_command_reply() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 3.2 — Recovery from pre-seeded events
-//
-// Pre-seeding N events means the actor replays them on startup. A GetState
-// command returns the reconstituted state where state.version == N.
+// Recovery from pre-seeded events
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
@@ -145,11 +132,7 @@ async fn test_recovery_replays_seeded_events() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 3.3 — Passivation: actor exits after timeout, registry updated
-//
-// Uses a very short passivation timeout to trigger passivation quickly.
-// Verifies that the actor drains commands, exits, and the registry marks the
-// entity as passivated (passivated_count increments).
+// Passivation: actor exits after timeout, registry updated
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -173,7 +156,7 @@ async fn test_passivation_updates_registry() {
     // Wait for the actor to passivate.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if runtime.passivated_count().await >= 1 {
+        if runtime.passivated_count() >= 1 {
             break;
         }
         if std::time::Instant::now() > deadline {
@@ -183,17 +166,14 @@ async fn test_passivation_updates_registry() {
     }
 
     assert_eq!(
-        runtime.passivated_count().await,
+        runtime.passivated_count(),
         1,
         "registry must record one passivated entity"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Task 3.4 — Recovery failure returns an error; active_count stays zero
-//
-// Injects a FailingSnapshotStore so load_for_recovery returns Err.  The
-// actor must not hang — send_command must return an Err promptly.
+// Recovery failure: actor must not hang, active_count stays zero
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -228,7 +208,7 @@ async fn test_recovery_failure_returns_error() {
     // Give the task a moment to finalise.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        runtime.active_count().await,
+        runtime.active_count(),
         0,
         "failed actor must not appear as active"
     );
