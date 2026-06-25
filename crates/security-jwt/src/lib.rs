@@ -4,9 +4,10 @@
 //!
 //! ## Overview
 //!
-//! This crate provides [`JwtAuthenticator`] — a synchronous, thread-safe
-//! authenticator that validates JSON Web Tokens (JWTs) and extracts a
-//! [`ego_security_sdk::SecurityContext`] from verified tokens.
+//! This crate provides `Hs256AuthenticationProvider`, `Rs256AuthenticationProvider`,
+//! and `Es256AuthenticationProvider` — synchronous, thread-safe authenticators that
+//! validate JSON Web Tokens (JWTs) and extract a [`ego_security_sdk::SecurityContext`]
+//! from verified tokens. Each provider enforces a single algorithm at the type level.
 //!
 //! ## Supported algorithms
 //!
@@ -20,7 +21,10 @@
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
-//! use security_jwt::{JwtAuthenticator, JwtConfig, JwtAlgorithm, LocalKeyResolver, VerificationKey};
+//! use security_jwt::{
+//!     Hs256AuthenticationProvider, JwtProviderConfig, JwtAlgorithm,
+//!     LocalKeyResolver, VerificationKey,
+//! };
 //! use ego_security_sdk::{AuthenticationProvider, Credential};
 //! use ego_domain::auth::SystemClock;
 //!
@@ -28,14 +32,11 @@
 //!     JwtAlgorithm::Hs256,
 //!     VerificationKey::Hmac(b"my-secret".to_vec()),
 //! ));
-//! let config = JwtConfig {
-//!     algorithm: JwtAlgorithm::Hs256,
-//!     validation: security_jwt::JwtProviderConfig {
-//!         expected_iss: Some("my-service".into()),
-//!         expected_aud: None,
-//!     },
+//! let config = JwtProviderConfig {
+//!     expected_iss: Some("my-service".into()),
+//!     expected_aud: None,
 //! };
-//! let auth = JwtAuthenticator::new(config, resolver, Arc::new(SystemClock));
+//! let auth = Hs256AuthenticationProvider::new(config, resolver, Arc::new(SystemClock));
 //! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;
 //! ```
 //!
@@ -57,6 +58,6 @@ mod validation;
 #[cfg(test)]
 mod test_helpers;
 
-pub use authenticator::{Es256AuthenticationProvider, Hs256AuthenticationProvider, JwtAuthenticator, Rs256AuthenticationProvider};
-pub use config::{Es256Config, Hs256Config, JwtAlgorithm, JwtConfig, JwtProviderConfig, Rs256Config};
+pub use authenticator::{Es256AuthenticationProvider, Hs256AuthenticationProvider, Rs256AuthenticationProvider};
+pub use config::{Es256Config, Hs256Config, JwtAlgorithm, JwtProviderConfig, Rs256Config};
 pub use key_resolver::{KeyResolver, KeyResolverError, LocalKeyResolver, VerificationKey};

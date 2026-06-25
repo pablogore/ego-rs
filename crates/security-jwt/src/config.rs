@@ -16,22 +16,6 @@ pub enum JwtAlgorithm {
     Es256,
 }
 
-/// Full configuration for a [`super::JwtAuthenticator`].
-///
-/// Pass this to [`super::JwtAuthenticator::new`] together with a
-/// [`crate::KeyResolver`] and an [`ego_domain::auth::Clock`] to construct
-/// an authenticator. This struct holds only functional validation parameters —
-/// key material lives in the resolver.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JwtConfig {
-    /// Algorithm discriminant — selects HS256, RS256, or ES256. Key material is
-    /// provided separately via [`crate::KeyResolver`].
-    pub algorithm: JwtAlgorithm,
-
-    /// Issuer/audience validation constraints, composed from [`JwtProviderConfig`].
-    pub validation: JwtProviderConfig,
-}
-
 /// Shared validation configuration for the single-algorithm providers.
 ///
 /// Holds optional issuer and audience constraints. Key material lives in the
