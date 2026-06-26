@@ -6,6 +6,8 @@ fn is_cross_tenant_allowed_defaults_to_false() {
     assert!(!ctx.is_cross_tenant_allowed());
 }
 
+// If these tests fail after a signature change on with_cross_tenant_access,
+// regenerate the snapshots with: TRYBUILD=overwrite cargo test --test cross_tenant_access_contract
 #[test]
 fn cross_tenant_escalation_is_rejected_at_compile_time() {
     let t = trybuild::TestCases::new();

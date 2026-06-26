@@ -303,6 +303,12 @@ mod tests {
     }
 
     #[test]
+    fn with_cross_tenant_access_sets_flag() {
+        let ctx = ServiceContext::new().with_cross_tenant_access();
+        assert!(ctx.is_cross_tenant_allowed());
+    }
+
+    #[test]
     fn require_security_returns_err_when_none() {
         let ctx = ServiceContext::new();
         let result = ctx.require_security();
