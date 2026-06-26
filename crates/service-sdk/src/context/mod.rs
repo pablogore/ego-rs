@@ -150,7 +150,13 @@ impl ServiceContext {
         self
     }
 
-    /// Grants cross-tenant access. Only callable by trusted infrastructure within this crate.
+    /// Marks the context as permitted for cross-tenant access. Runtime authorization is
+    /// performed elsewhere.
+    ///
+    /// This method is `pub(crate)` as an intentional interim restriction, reserved for trusted
+    /// runtime infrastructure within this crate. Setting this flag does not enforce tenant
+    /// isolation at runtime — that enforcement is pending TASK-014. No cross-tenant access is
+    /// validated or audited until the enforcement layer is in place.
     pub(crate) fn with_cross_tenant_access(mut self) -> Self {
         self.allow_cross_tenant = true;
         self
