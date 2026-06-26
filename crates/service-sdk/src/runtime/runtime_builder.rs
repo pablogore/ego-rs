@@ -152,7 +152,7 @@ impl RuntimeInner {
         self.resolved.resolve_config::<C>()
     }
 
-    /// Enforces tenant isolation. Currently a no-op until TASK-014.
+    /// No-op stub — runtime tenant enforcement is pending TASK-014.
     pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
 }
 

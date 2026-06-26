@@ -1,0 +1,10 @@
+error[E0624]: method `with_cross_tenant_access` is private
+ --> tests/compile_fail/with_cross_tenant_access_external.rs:5:17
+  |
+5 |     let _ = ctx.with_cross_tenant_access();
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/context/mod.rs
+  |
+  |     pub(crate) fn with_cross_tenant_access(mut self) -> Self {
+  |     -------------------------------------------------------- private method defined here

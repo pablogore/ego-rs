@@ -52,7 +52,7 @@ pub struct ServiceContext {
     /// The additional context.
     pub additional_context: HashMap<String, String>,
     /// Whether cross-tenant access is allowed.
-    pub allow_cross_tenant: bool,
+    allow_cross_tenant: bool,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
@@ -150,11 +150,14 @@ impl ServiceContext {
         self
     }
 
-    /// Allows cross-tenant access.
+    /// Marks the context as permitted for cross-tenant access. Runtime authorization is
+    /// performed elsewhere.
     ///
-    /// # Returns
-    /// A new `ServiceContext` with cross-tenant access enabled
-    pub fn allow_cross_tenant(mut self) -> Self {
+    /// This method is `pub(crate)` as an intentional interim restriction, reserved for trusted
+    /// runtime infrastructure within this crate. Setting this flag does not enforce tenant
+    /// isolation at runtime — that enforcement is pending TASK-014. No cross-tenant access is
+    /// validated or audited until the enforcement layer is in place.
+    pub(crate) fn with_cross_tenant_access(mut self) -> Self {
         self.allow_cross_tenant = true;
         self
     }
@@ -303,6 +306,12 @@ mod tests {
         let subject = SubjectId::new("user:test").unwrap();
         let principal = Principal::new(PrincipalKind::User, subject);
         SecurityContext::empty(principal)
+    }
+
+    #[test]
+    fn with_cross_tenant_access_sets_flag() {
+        let ctx = ServiceContext::new().with_cross_tenant_access();
+        assert!(ctx.is_cross_tenant_allowed());
     }
 
     #[test]
