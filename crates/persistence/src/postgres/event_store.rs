@@ -40,7 +40,6 @@ impl<E, F> fmt::Debug for PostgreSQLEventStore<E, F> {
 }
 
 impl<E, F> PostgreSQLEventStore<E, F> {
-    /// Constructor and helper methods for `PostgreSQLEventStore`.
     /// Create a new PostgreSQL event store with the given connection pool and deserializer.
     pub fn new(pool: PgPool, deserialize: F) -> Self {
         Self {
@@ -72,51 +71,68 @@ where
             Some(t) => Some(t.to_string()),
             None => None,
         };
+        let pool = self.pool.clone();
+        let aggregate_id = aggregate_id.to_string();
 
-        let current_version: Option<i64> = self.block_on(async {
-            sqlx::query_scalar(
+        self.block_on(async move {
+            let mut tx = pool.begin().await.map_err(|e| {
+                PersistenceError::Internal(format!("failed to begin transaction: {}", e))
+            })?;
+
+            let current: i64 = sqlx::query_scalar(
                 r#"SELECT COALESCE(MAX(version), 0) FROM events WHERE aggregate_id = $1 AND tenant_id = $2"#,
             )
-            .bind(aggregate_id)
+            .bind(&aggregate_id)
             .bind(&tenant)
-            .fetch_optional(&self.pool)
+            .fetch_one(&mut *tx)
             .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to query current version: {}", e)))?;
+            .map_err(|e| PersistenceError::Internal(format!("failed to query current version: {}", e)))?;
 
-        let current = current_version.unwrap_or(0);
+            if current != expected_version {
+                return Err(PersistenceError::Conflict {
+                    aggregate_id: aggregate_id.clone(),
+                    expected: expected_version,
+                    actual: current,
+                });
+            }
 
-        if current != expected_version {
-            return Err(PersistenceError::Conflict {
-                aggregate_id: aggregate_id.to_string(),
-                expected: expected_version,
-                actual: current,
-            });
-        }
+            let new_version = current + events.len() as i64;
 
-        let new_version = current + events.len() as i64;
-
-        for (i, stored) in events.iter().enumerate() {
-            let event_version = current + (i as i64) + 1;
-            let event = &stored.event;
-            self.block_on(async {
+            for (i, stored) in events.iter().enumerate() {
+                let event_version = current + (i as i64) + 1;
+                let event = &stored.event;
                 sqlx::query(
                     r#"INSERT INTO events (aggregate_id, tenant_id, version, event_type, payload, created_at)
                        VALUES ($1, $2, $3, $4, $5, $6)"#,
                 )
-                .bind(aggregate_id)
+                .bind(&aggregate_id)
                 .bind(&tenant)
                 .bind(event_version)
                 .bind(event.event_type())
                 .bind(event.payload().clone())
                 .bind(*event.occurred_at())
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
-            })
-            .map_err(|e| PersistenceError::Internal(format!("failed to insert event: {}", e)))?;
-        }
+                .map_err(|e| {
+                    if let sqlx::Error::Database(db_err) = &e {
+                        if db_err.code().as_deref() == Some("23505") {
+                            return PersistenceError::Conflict {
+                                aggregate_id: aggregate_id.clone(),
+                                expected: expected_version,
+                                actual: current,
+                            };
+                        }
+                    }
+                    PersistenceError::Internal(format!("failed to insert event: {}", e))
+                })?;
+            }
 
-        Ok(new_version)
+            tx.commit().await.map_err(|e| {
+                PersistenceError::Internal(format!("failed to commit transaction: {}", e))
+            })?;
+
+            Ok(new_version)
+        })
     }
 
     fn load(
