@@ -6,7 +6,10 @@ pub mod decision;
 pub use access_request::{AccessRequest, Action, Resource};
 pub use decision::AuthorizationDecision;
 
+use std::panic::AssertUnwindSafe;
+
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 
 use crate::{context::SecurityContext, error::SecurityError, principal::Principal};
 
@@ -43,7 +46,8 @@ pub trait AuthorizationProvider: Send + Sync {
 /// # Errors
 /// - [`SecurityError::CapabilityNotEnabled`] if security is not enabled in the runtime.
 /// - [`SecurityError::AuthorizationDenied`] if the decision is `Deny`.
-/// - Propagates any provider error.
+/// - [`SecurityError::ProviderError`] if the provider returns an error or panics.
+///   A panicking provider maps to `ProviderError` — the system always fails closed.
 pub async fn authorize_in_context(
     security: Option<&SecurityContext>,
     resource: Resource,
@@ -53,7 +57,15 @@ pub async fn authorize_in_context(
     let sec = security.ok_or(SecurityError::CapabilityNotEnabled)?;
     let principal = sec.principal();
     let request = AccessRequest::new(resource, action);
-    match provider.authorize(principal, &request, sec).await? {
+    let decision = AssertUnwindSafe(provider.authorize(principal, &request, sec))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| {
+            Err(SecurityError::ProviderError(
+                "authorization provider panicked".into(),
+            ))
+        })?;
+    match decision {
         AuthorizationDecision::Allow => Ok(()),
         AuthorizationDecision::Deny { reason } => {
             Err(SecurityError::AuthorizationDenied { reason })
@@ -74,7 +86,7 @@ mod tests {
         principal::{Principal, PrincipalKind, SubjectId},
     };
 
-    // ── AuthorizationProvider object-safety tests (TASK-017) ──────────────────
+    // ── AuthorizationProvider object-safety tests ─────────────────────────────
 
     /// Inline test stub — always grants access. NOT a public type; see
     /// `providers::allow_all::AllowAllAuthorizationProvider` for the public variant.
@@ -149,7 +161,7 @@ mod tests {
         assert!(matches!(deny_result, AuthorizationDecision::Deny { .. }));
     }
 
-    // ── authorize_in_context tests (TASK-025) ─────────────────────────────────
+    // ── authorize_in_context tests ────────────────────────────────────────────
 
     #[tokio::test]
     async fn allow_returns_ok_unit() {
@@ -215,6 +227,39 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn panicking_provider_returns_provider_error() {
+        struct PanicProvider;
+
+        #[async_trait]
+        impl AuthorizationProvider for PanicProvider {
+            async fn authorize(
+                &self,
+                _: &Principal,
+                _: &AccessRequest,
+                _: &SecurityContext,
+            ) -> Result<AuthorizationDecision, SecurityError> {
+                panic!("provider bug")
+            }
+        }
+
+        let ctx = make_ctx();
+        let result = authorize_in_context(
+            Some(&ctx),
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
+            Action("read".into()),
+            &PanicProvider,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SecurityError::ProviderError(_))),
+            "expected ProviderError on panic, got: {result:?}"
+        );
     }
 
     #[tokio::test]
