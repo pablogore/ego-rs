@@ -486,6 +486,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ego-domain",
+ "futures-util",
  "mockall 0.12.1",
  "serde",
  "serde_json",
