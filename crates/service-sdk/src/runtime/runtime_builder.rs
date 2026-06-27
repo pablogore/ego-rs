@@ -19,6 +19,7 @@ use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, ProjectionRef};
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
+use super::permit::CrossTenantPermit;
 
 // ---------------------------------------------------------------------------
 // Internal: grouped resolved-instance tables
@@ -114,6 +115,14 @@ impl std::fmt::Debug for RuntimeInner {
 
 impl RuntimeInner {
     /// Creates a new `RuntimeInner`.
+    ///
+    /// # TASK-014 note
+    ///
+    /// Once the runtime authorization check is active inside
+    /// `issue_cross_tenant_permit`, consider restricting `RuntimeInner`
+    /// construction to `pub(crate)` or forcing it through `RuntimeBuilder`
+    /// to prevent rogue instances with custom `security_providers` from
+    /// bypassing the authorization check.
     pub fn new(
         registry: ServiceRegistry,
         interceptor_chain: Arc<InterceptorChain>,
@@ -154,9 +163,25 @@ impl RuntimeInner {
 
     /// No-op stub — runtime tenant enforcement is pending TASK-014.
     pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
+
+    /// Mints a cross-tenant permit. No-op authorization today; TASK-014 will run
+    /// the AuthorizationProvider check here and change this to a fallible signature.
+    ///
+    /// Compile-time gate only. TASK-014 adds the runtime authorization check.
+    // SAFETY: must remain pub(crate) — widening to pub would let external crates
+    // mint CrossTenantPermit without authorization. TASK-014 changes the body and
+    // signature, not the visibility.
+    // Used only in tests until TASK-014 wires up the runtime authorization check.
+    #[allow(dead_code)]
+    pub(crate) fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
+        CrossTenantPermit::new()
+    }
 }
 
 impl Default for RuntimeInner {
+    // TASK-014: see the note on RuntimeInner::new() — once the authorization
+    // check is active, Default may also need to be restricted or removed to
+    // prevent rogue instances with no security_providers.
     fn default() -> Self {
         Self {
             registry: ServiceRegistry::new(),
@@ -355,5 +380,13 @@ mod tests {
 
         t.configs.insert(TypeId::of::<i32>(), val);
         assert!(t.resolve_config::<i32>().is_ok());
+    }
+
+    // -- CrossTenantPermit issuer (S-2) ------------------------------------
+
+    #[test]
+    fn runtime_inner_issues_cross_tenant_permit() {
+        let inner = RuntimeInner::default();
+        let _permit = inner.issue_cross_tenant_permit();
     }
 }

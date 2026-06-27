@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/compile_fail/cross_tenant_permit_new_external.rs:6:33
+  |
+6 |     let _p = CrossTenantPermit::new();
+  |                                 ^^^ private associated function
+  |
+ ::: src/runtime/permit.rs
+  |
+  |     pub(super) fn new() -> Self {
+  |     --------------------------- private associated function defined here
