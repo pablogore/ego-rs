@@ -19,6 +19,7 @@ use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, ProjectionRef};
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
+use super::permit::CrossTenantPermit;
 
 // ---------------------------------------------------------------------------
 // Internal: grouped resolved-instance tables
@@ -154,6 +155,14 @@ impl RuntimeInner {
 
     /// No-op stub — runtime tenant enforcement is pending TASK-014.
     pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
+
+    /// Mints a cross-tenant permit. No-op authorization today; TASK-014 will run
+    /// the AuthorizationProvider check here and change this to a fallible signature.
+    ///
+    /// Compile-time gate only. TASK-014 adds the runtime authorization check.
+    pub fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
+        CrossTenantPermit::new()
+    }
 }
 
 impl Default for RuntimeInner {
@@ -355,5 +364,13 @@ mod tests {
 
         t.configs.insert(TypeId::of::<i32>(), val);
         assert!(t.resolve_config::<i32>().is_ok());
+    }
+
+    // -- CrossTenantPermit issuer (S-2) ------------------------------------
+
+    #[test]
+    fn runtime_inner_issues_cross_tenant_permit() {
+        let inner = RuntimeInner::default();
+        let _permit = inner.issue_cross_tenant_permit();
     }
 }
