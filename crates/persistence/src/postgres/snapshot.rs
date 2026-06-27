@@ -42,7 +42,7 @@ impl PostgreSQLSnapshotStore {
     }
 
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        Handle::current().block_on(future)
+        tokio::task::block_in_place(|| Handle::current().block_on(future))
     }
 }
 
