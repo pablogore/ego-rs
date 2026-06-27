@@ -9,9 +9,10 @@
 //! - `sub` present but empty → `AuthenticationError::InvalidToken`
 //! - `roles` / `tenant_id` / `tid`: wrong type → skip (graceful degradation); raw value preserved in `Claims.custom`
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ego_domain::auth::{AuthenticationError, Clock};
+use futures_executor::ThreadPool;
 use ego_security_sdk::{AuthenticationProvider, Credential, SecurityContext};
 use jsonwebtoken::{Algorithm, DecodingKey};
 
@@ -35,23 +36,36 @@ fn map_resolver_error(e: KeyResolverError) -> AuthenticationError {
     }
 }
 
+static RESOLVER_POOL: OnceLock<ThreadPool> = OnceLock::new();
+
+fn resolver_pool() -> &'static ThreadPool {
+    RESOLVER_POOL.get_or_init(|| {
+        ThreadPool::builder()
+            .pool_size(4)
+            .create()
+            .expect("failed to create JWT key resolver thread pool")
+    })
+}
+
 /// Bridge an async [`KeyResolver::resolve`] call into a sync context.
 ///
-/// Spawns a fresh OS thread so `futures_executor::block_on` is never called
-/// from inside a Tokio worker thread (B-2 fix). The resolver is cache-first
-/// (AD-013) so the spawned thread completes immediately.
+/// Submits the resolve future to a bounded thread pool (4 workers) so
+/// neither unbounded OS threads nor direct `block_on` inside a Tokio worker
+/// thread are used (B-2 fix). The calling thread blocks on an mpsc channel
+/// until the pool delivers the result.
 fn resolve_key_sync(
     resolver: &Arc<dyn KeyResolver>,
     kid: Option<String>,
     algorithm: JwtAlgorithm,
 ) -> Result<VerificationKey, AuthenticationError> {
     let resolver = Arc::clone(resolver);
-    std::thread::spawn(move || {
-        futures_executor::block_on(resolver.resolve(kid.as_deref(), algorithm))
-    })
-    .join()
-    .map_err(|_| AuthenticationError::InvalidToken("key resolver panicked".into()))?
-    .map_err(map_resolver_error)
+    let (tx, rx) = std::sync::mpsc::channel();
+    resolver_pool().spawn_ok(async move {
+        let _ = tx.send(resolver.resolve(kid.as_deref(), algorithm).await);
+    });
+    rx.recv()
+        .map_err(|_| AuthenticationError::InvalidToken("key resolver panicked".into()))?
+        .map_err(map_resolver_error)
 }
 
 /// Extract a bearer token string from a [`Credential`], or return
