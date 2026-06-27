@@ -1,5 +1,7 @@
 //! Proc-macro attributes for the Service SDK: `#[service]` and `#[operation]`.
 
+mod authorize;
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
