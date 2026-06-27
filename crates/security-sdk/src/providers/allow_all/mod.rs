@@ -11,6 +11,12 @@ use crate::{
 
 /// Development-only allow-all authorization provider. Always grants access.
 ///
+/// # Availability
+///
+/// This type is only compiled when the `dev-providers` Cargo feature is
+/// enabled. It is intentionally absent from default builds so production
+/// binaries cannot accidentally depend on it.
+///
 /// # Warning — NOT FOR PRODUCTION
 ///
 /// This provider unconditionally returns [`AuthorizationDecision::Allow`] for
@@ -65,7 +71,6 @@ mod tests {
         )
     }
 
-    // TS-014
     #[tokio::test]
     async fn allow_all_returns_allow_for_any_principal_and_request() {
         let provider = AllowAllAuthorizationProvider;
@@ -78,21 +83,17 @@ mod tests {
         );
     }
 
-    // TS-015
     #[test]
     fn allow_all_is_send_sync() {
         fn _assert<T: Send + Sync>() {}
         _assert::<AllowAllAuthorizationProvider>();
     }
 
-    // FR-017 arc-safety
     #[test]
     fn allow_all_arc_injectable() {
         let _: Arc<dyn AuthorizationProvider> = Arc::new(AllowAllAuthorizationProvider);
     }
 
-    // TS-019 — asserts both built-in authorization providers are accessible
-    // from the crate root without navigating internal module paths (FR-019).
     #[test]
     fn crate_root_reexport_compiles() {
         let _: Arc<dyn AuthorizationProvider> =
