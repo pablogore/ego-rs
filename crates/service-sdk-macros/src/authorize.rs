@@ -1,8 +1,9 @@
+use syn::parse::Parser;
+
 /// Parsed arguments from `#[authorize(context = <ident>, permission = "<resource>:<action>")]`.
 ///
 /// This struct is populated by [`parse_authorize_args`] after all validation passes.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct AuthorizeArgs {
     /// The identifier of the context parameter (e.g., `ctx`).
     pub(crate) context_ident: syn::Ident,
@@ -26,10 +27,111 @@ pub(crate) struct AuthorizeArgs {
 pub(crate) fn parse_authorize_args(
     tokens: proc_macro2::TokenStream,
 ) -> syn::Result<AuthorizeArgs> {
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "not implemented",
-    ))
+    let mut context_ident: Option<syn::Ident> = None;
+    let mut permission_lit: Option<syn::LitStr> = None;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("context") {
+            // context = <ident>
+            let value = meta.value()?;
+            // Peek for a string literal first — that's an AD-4 non-ident error.
+            if value.peek(syn::LitStr) {
+                let lit: syn::LitStr = value.parse()?;
+                return Err(syn::Error::new_spanned(
+                    &lit,
+                    "#[authorize] context must be a parameter name (identifier), not an expression",
+                ));
+            }
+            let ident: syn::Ident = value.parse().map_err(|_| {
+                syn::Error::new(meta.path.get_ident().unwrap().span(),
+                    "#[authorize] context must be a parameter name (identifier), not an expression")
+            })?;
+            context_ident = Some(ident);
+            Ok(())
+        } else if meta.path.is_ident("permission") {
+            // permission = "<resource>:<action>"
+            let value = meta.value()?;
+            // Non-literal is an AD-4 error — try parsing as LitStr; if that fails,
+            // the value is not a string literal.
+            if !value.peek(syn::LitStr) {
+                // Consume the remaining tokens so syn doesn't complain about unconsumed input.
+                let span = value.cursor().token_stream();
+                let _: proc_macro2::TokenStream = value.parse()?;
+                return Err(syn::Error::new_spanned(
+                    &span,
+                    "#[authorize] permission must be a string literal known at compile time",
+                ));
+            }
+            let lit: syn::LitStr = value.parse()?;
+            permission_lit = Some(lit);
+            Ok(())
+        } else {
+            let key = meta.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+            Err(syn::Error::new_spanned(
+                &meta.path,
+                format!("#[authorize] unknown argument '{key}'; expected 'context' and 'permission'"),
+            ))
+        }
+    });
+
+    parser.parse2(tokens)?;
+
+    // After the full parse, check that both required args are present.
+    match (context_ident, permission_lit) {
+        (Some(ctx_ident), Some(perm_lit)) => {
+            // Validate the permission format: exactly one ':', non-empty resource and action.
+            let perm_value = perm_lit.value();
+            let perm_span = perm_lit.span();
+            let colon_count = perm_value.chars().filter(|&c| c == ':').count();
+
+            if colon_count == 0 {
+                return Err(syn::Error::new_spanned(
+                    &perm_lit,
+                    format!(
+                        "#[authorize] permission \"{perm_value}\" must have the form \"resource:action\""
+                    ),
+                ));
+            }
+            if colon_count > 1 {
+                return Err(syn::Error::new_spanned(
+                    &perm_lit,
+                    format!(
+                        "#[authorize] permission \"{perm_value}\" must have exactly one ':' (form \"resource:action\")"
+                    ),
+                ));
+            }
+
+            // Exactly one colon — split and validate non-empty resource and action.
+            let (resource, action) = perm_value.split_once(':').unwrap();
+            if resource.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &perm_lit,
+                    format!(
+                        "#[authorize] resource in \"{perm_value}\" must not be empty"
+                    ),
+                ));
+            }
+            if action.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &perm_lit,
+                    format!(
+                        "#[authorize] action in \"{perm_value}\" must not be empty"
+                    ),
+                ));
+            }
+
+            Ok(AuthorizeArgs {
+                context_ident: ctx_ident,
+                resource: resource.to_string(),
+                action: action.to_string(),
+                permission_span: perm_span,
+            })
+        }
+        _ => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[authorize] missing required argument; both 'context' and 'permission' are required",
+        )),
+    }
 }
 
 /// Validates that `ident` names a typed parameter present in `sig`.
