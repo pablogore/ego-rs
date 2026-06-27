@@ -31,6 +31,10 @@ use crate::runtime::CrossTenantPermit;
 /// deep clone of string fields and the additional-context map. For typical request contexts
 /// (3-5 string fields, empty or small map), this is a few heap allocations.
 ///
+/// The `allow_cross_tenant` flag is preserved on clone — a cloned context retains the same
+/// cross-tenant permission as the original. This is intentional: the permit authorizes the
+/// context value, not a single use.
+///
 /// For hot paths that clone context frequently, prefer keeping `additional_context` empty
 /// and relying on the typed fields. Avoid storing large payloads in `additional_context`.
 ///
@@ -319,6 +323,16 @@ mod tests {
         let permit = inner.issue_cross_tenant_permit();
         let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
         assert!(ctx.is_cross_tenant_allowed());
+    }
+
+    #[test]
+    fn clone_preserves_cross_tenant_flag() {
+        use crate::runtime::RuntimeInner;
+        let rt = RuntimeInner::default();
+        let permit = rt.issue_cross_tenant_permit();
+        let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
+        let cloned = ctx.clone();
+        assert!(cloned.is_cross_tenant_allowed());
     }
 
     #[test]

@@ -115,6 +115,14 @@ impl std::fmt::Debug for RuntimeInner {
 
 impl RuntimeInner {
     /// Creates a new `RuntimeInner`.
+    ///
+    /// # TASK-014 note
+    ///
+    /// Once the runtime authorization check is active inside
+    /// `issue_cross_tenant_permit`, consider restricting `RuntimeInner`
+    /// construction to `pub(crate)` or forcing it through `RuntimeBuilder`
+    /// to prevent rogue instances with custom `security_providers` from
+    /// bypassing the authorization check.
     pub fn new(
         registry: ServiceRegistry,
         interceptor_chain: Arc<InterceptorChain>,
@@ -160,12 +168,20 @@ impl RuntimeInner {
     /// the AuthorizationProvider check here and change this to a fallible signature.
     ///
     /// Compile-time gate only. TASK-014 adds the runtime authorization check.
-    pub fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
+    // SAFETY: must remain pub(crate) — widening to pub would let external crates
+    // mint CrossTenantPermit without authorization. TASK-014 changes the body and
+    // signature, not the visibility.
+    // Used only in tests until TASK-014 wires up the runtime authorization check.
+    #[allow(dead_code)]
+    pub(crate) fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
         CrossTenantPermit::new()
     }
 }
 
 impl Default for RuntimeInner {
+    // TASK-014: see the note on RuntimeInner::new() — once the authorization
+    // check is active, Default may also need to be restricted or removed to
+    // prevent rogue instances with no security_providers.
     fn default() -> Self {
         Self {
             registry: ServiceRegistry::new(),
