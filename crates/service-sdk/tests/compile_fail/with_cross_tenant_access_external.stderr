@@ -1,10 +1,15 @@
-error[E0624]: method `with_cross_tenant_access` is private
- --> tests/compile_fail/with_cross_tenant_access_external.rs:5:17
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+ --> tests/compile_fail/with_cross_tenant_access_external.rs:6:17
   |
-5 |     let _ = ctx.with_cross_tenant_access();
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^ private method
+6 |     let _ = ctx.with_cross_tenant_access();
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `&CrossTenantPermit` is missing
   |
- ::: src/context/mod.rs
+note: method defined here
+ --> src/context/mod.rs
   |
-  |     pub(crate) fn with_cross_tenant_access(mut self) -> Self {
-  |     -------------------------------------------------------- private method defined here
+  |     pub fn with_cross_tenant_access(mut self, _permit: &CrossTenantPermit) -> Self {
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+  |
+6 |     let _ = ctx.with_cross_tenant_access(/* &CrossTenantPermit */);
+  |                                          ++++++++++++++++++++++++

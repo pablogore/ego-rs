@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `CrossTenantPermit` is private
+ --> tests/compile_fail/cross_tenant_permit_foreign_construction.rs:5:34
+  |
+5 |     let _p = CrossTenantPermit { _private: () };
+  |                                  ^^^^^^^^ private field

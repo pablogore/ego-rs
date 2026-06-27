@@ -14,4 +14,6 @@ fn cross_tenant_api_visibility_contract() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/with_cross_tenant_access_external.rs");
     t.compile_fail("tests/compile_fail/allow_cross_tenant_field.rs");
+    t.compile_fail("tests/compile_fail/cross_tenant_permit_foreign_construction.rs");
+    t.compile_fail("tests/compile_fail/cross_tenant_permit_new_external.rs");
 }
