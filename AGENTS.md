@@ -22,6 +22,7 @@ Naming convention: `ego-rs-*` skills are repo-specific workflow skills. Unprefix
 | Skill | Trigger | Path |
 |-------|---------|------|
 | `ego-rs-security` | When writing or reviewing queries, auth, JWT, tenant isolation, or any user-input boundary. | [`skills/security/SKILL.md`](skills/security/SKILL.md) |
+| `ego-rs-testing` | When writing tests, mocks, or deciding where a test belongs (unit vs. integration). | [`skills/testing/SKILL.md`](skills/testing/SKILL.md) |
 | `ego-rs-issue-creation` | When creating a GitHub issue, reporting a bug, or requesting a feature. | [`skills/issue-creation/SKILL.md`](skills/issue-creation/SKILL.md) |
 | `ego-rs-branch-pr` | When creating a pull request, opening a PR, or preparing changes for review. | [`skills/branch-pr/SKILL.md`](skills/branch-pr/SKILL.md) |
 | `ego-rs-chained-pr` | When a change is too large for one review, or when creating chained/stacked pull requests. | [`skills/chained-pr/SKILL.md`](skills/chained-pr/SKILL.md) |

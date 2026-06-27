@@ -1,0 +1,30 @@
+[package]
+name = "ego-integration-tests"
+version = "0.1.0"
+edition = "2021"
+# Exclude from default workspace test run — only CI triggers this.
+publish = false
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "kafka"] }
+
+# Add crates under test here, e.g.:
+# ego-persistence = { path = "../persistence" }
+
+[[test]]
+name = "postgres"
+path = "tests/postgres.rs"
+
+# Pattern for each test file:
+#
+# use testcontainers::{clients::Cli, images::postgres::Postgres};
+#
+# #[tokio::test]
+# async fn my_integration_test() {
+#     let docker = Cli::default();
+#     let pg = docker.run(Postgres::default());
+#     let url = format!("postgres://postgres@127.0.0.1:{}/postgres", pg.get_host_port_ipv4(5432));
+#     // ... test against real DB, container tears down at end of scope
+# }
