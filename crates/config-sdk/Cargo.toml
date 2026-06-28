@@ -3,16 +3,7 @@ name = "ego-config-sdk"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-test-helpers = []
-
 [dependencies]
 thiserror = "1.0"
-toml = "0.8"
-# serde_yml: maintained fork of serde_yaml 0.9 (drop-in API), crates.io version scheme is 0.0.x
-serde_yml = "0.0"
-serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-
-[dev-dependencies]
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+serde_json = "1.0"

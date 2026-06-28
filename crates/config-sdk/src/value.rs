@@ -1,6 +1,6 @@
 //! Configuration value types.
 
-/// A typed configuration value produced by a provider.
+/// A typed configuration value.
 ///
 /// # Note on `Float` equality
 ///
@@ -19,20 +19,8 @@ pub enum ConfigValue {
     /// A boolean value.
     Bool(bool),
     /// A list of scalar values.
-    ///
-    /// Reserved for OQ-04. No built-in provider populates this in v1.
     #[doc(hidden)]
     List(Vec<ConfigValue>),
-}
-
-/// Identifies which provider loaded a specific configuration key.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
-pub struct SourceAttribution {
-    /// The name of the provider that supplied this value.
-    pub provider_name: String,
-    /// The configuration key.
-    pub key: String,
 }
 
 #[cfg(test)]
@@ -44,15 +32,6 @@ mod tests {
         let v = ConfigValue::Str("hello".to_string());
         match v {
             ConfigValue::Str(s) => assert_eq!(s, "hello"),
-            _ => panic!("expected Str variant"),
-        }
-    }
-
-    #[test]
-    fn str_variant_different_value() {
-        let v = ConfigValue::Str("world".to_string());
-        match v {
-            ConfigValue::Str(s) => assert_eq!(s, "world"),
             _ => panic!("expected Str variant"),
         }
     }
@@ -87,8 +66,6 @@ mod tests {
 
     #[test]
     fn float_nan_is_not_equal_to_itself() {
-        // Documents IEEE 754 NaN behavior: NaN != NaN. Callers must not rely on
-        // equality for Float values that may be NaN.
         let a = ConfigValue::Float(f64::NAN);
         let b = ConfigValue::Float(f64::NAN);
         assert_ne!(a, b, "NaN != NaN per IEEE 754 — callers must handle this");
@@ -102,25 +79,5 @@ mod tests {
             ConfigValue::List(items) => assert_eq!(items.len(), 1),
             _ => panic!("expected List variant"),
         }
-    }
-
-    #[test]
-    fn source_attribution_fields() {
-        let attr = SourceAttribution {
-            provider_name: "env".to_string(),
-            key: "server.port".to_string(),
-        };
-        assert_eq!(attr.provider_name, "env");
-        assert_eq!(attr.key, "server.port");
-    }
-
-    #[test]
-    fn source_attribution_different_provider() {
-        let attr = SourceAttribution {
-            provider_name: "toml:/etc/app.toml".to_string(),
-            key: "database.url".to_string(),
-        };
-        assert_eq!(attr.provider_name, "toml:/etc/app.toml");
-        assert_eq!(attr.key, "database.url");
     }
 }
