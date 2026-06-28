@@ -111,7 +111,7 @@ pub struct BusItem {
 }
 
 /// Policy for handling buffer overflow at enqueue time (I5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum DropPolicy {
     /// Sender blocks until space available.
     Block,
@@ -128,6 +128,7 @@ pub enum DropPolicy {
 }
 
 /// Configuration for the event bus.
+#[derive(serde::Deserialize)]
 pub struct EventBusConfig {
     pub capacity: usize,
     pub drop_policy: DropPolicy,

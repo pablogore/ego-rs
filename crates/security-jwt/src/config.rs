@@ -21,7 +21,7 @@ pub enum JwtAlgorithm {
 /// Holds optional issuer and audience constraints. Key material lives in the
 /// injected [`crate::KeyResolver`] — not here. The algorithm is encoded at
 /// the type level by each provider, so no `algorithm` field is needed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct JwtProviderConfig {
     /// If `Some`, the token's `iss` claim MUST equal this value.
     pub expected_iss: Option<String>,

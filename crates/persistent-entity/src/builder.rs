@@ -125,7 +125,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         let config = RuntimeConfig {
             mailbox_capacity: self.mailbox_capacity,
             concurrency_budget: self.concurrency_budget,
-            passivation_timeout: self.passivation_timeout,
+            passivation_timeout_secs: self.passivation_timeout.as_secs(),
             single_tenant_mode: self.single_tenant_mode,
             tenant_id: self.tenant_id,
         };
