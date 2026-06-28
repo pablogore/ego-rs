@@ -1,4 +1,4 @@
-//! Converts kit-config `serde_json::Value` into ego-config-sdk `ConfigValue` entries.
+//! Converts `serde_json::Value` into ego-config-sdk `ConfigValue` entries.
 //!
 //! Nested objects are flattened into dotted-path keys:
 //! `{"server": {"host": "localhost"}}` → `"server.host" = Str("localhost")`
@@ -57,7 +57,7 @@ fn flatten(prefix: &str, value: &Value, out: &mut HashMap<String, ConfigValue>) 
                         }
                     }
                     Value::Bool(b) => Some(ConfigValue::Bool(*b)),
-                    _ => None, // objects and nulls inside arrays are dropped
+                    _ => None,
                 })
                 .collect();
             out.insert(prefix.to_owned(), ConfigValue::List(items));
@@ -145,7 +145,6 @@ mod tests {
 
     #[test]
     fn nested_objects_inside_array_are_dropped() {
-        // Objects inside arrays have no addressable dotted-key path — dropped intentionally.
         let v = json!({"items": [{"key": "val"}, "scalar"]});
         let m = value_to_config_map(v);
         assert_eq!(

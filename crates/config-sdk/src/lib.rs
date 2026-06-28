@@ -1,34 +1,15 @@
-//! Configuration framework SDK for ego-rs.
+//! Thin typed accessor over `serde_json::Value` for ego-rs services.
 //!
-//! Provides a composable, multi-source configuration system with
-//! priority-based resolution, type coercion, and conflict detection.
-//!
-//! # Quick start
-//!
-//! Use `builder::ConfigurationBuilder` to compose providers and resolve
-//! a `config::Configuration`.
-#![deny(missing_docs)]
+//! `ego-config-sdk` is NOT a config loading framework. It wraps the
+//! `serde_json::Value` output from `kit_config::ConfigLoader` and provides
+//! typed `get`/`require` access. Loading, merging, and file/env sources
+//! are kit-config's responsibility.
 
-/// Configuration value types.
-pub mod value;
+mod convert;
+mod config;
+mod error;
+mod value;
 
-/// Error types for the configuration framework.
-pub mod error;
-
-/// Provider trait and source snapshot.
-pub mod provider;
-
-/// Post-load configuration source snapshot.
-pub mod source;
-
-/// Priority-based resolver (crate-internal).
-pub(crate) mod resolver;
-
-/// Fluent builder for composing providers.
-pub mod builder;
-
-/// Resolved, immutable configuration handle.
-pub mod config;
-
-/// Built-in provider implementations.
-pub mod providers;
+pub use config::Configuration;
+pub use error::ConfigurationError;
+pub use value::ConfigValue;
