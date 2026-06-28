@@ -1,4 +1,4 @@
-//! Proc-macro attributes for the Service SDK: `#[service]` and `#[operation]`.
+//! Proc-macro attributes for the Service SDK: `#[service]`, `#[operation]`, and `#[authorize]`.
 
 mod authorize;
 
@@ -6,6 +6,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
 use syn::{parse_macro_input, Ident, ItemFn, ItemStruct, ItemTrait, TraitItem};
 
 #[derive(Debug)]
@@ -28,10 +29,7 @@ impl Parse for ServiceArgs {
     }
 }
 
-/// Declares a service contract on a trait or struct.
-///
-/// On a trait: emits `{TraitName}Tag` (registry key ZST), `{TraitName}Ref` (proxy), and `ServiceContract`.
-/// On a struct: emits `Injectable` with `dependencies()` for `ProjectionRef`, `AdapterRef`, `ConfigValue` fields.
+/// Declares a service contract on a trait (generates Tag, Ref, ServiceContract) or on a struct (generates Injectable).
 #[proc_macro_attribute]
 pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
     let service_args = parse_macro_input!(args as ServiceArgs);
@@ -80,6 +78,31 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             if has_operation {
                 let method_name = &method.sig.ident;
 
+                // Must detect and parse before stripping: consuming #[authorize] here prevents the E5 standalone sentinel from firing.
+                let authorize_attr = method
+                    .attrs
+                    .iter()
+                    .find(|a| a.path().is_ident("authorize"));
+
+                let authorize_args_result: Option<syn::Result<authorize::AuthorizeArgs>> =
+                    authorize_attr.map(|attr| {
+                        let tokens = attr.meta.require_list()?.tokens.clone();
+                        let args = authorize::parse_authorize_args(tokens)?;
+                        authorize::validate_context_ident_in_signature(
+                            &args.context_ident,
+                            &method.sig,
+                        )?;
+                        Ok(args)
+                    });
+
+                let maybe_authorize = match authorize_args_result {
+                    Some(Err(e)) => {
+                        return TokenStream::from(e.to_compile_error());
+                    }
+                    Some(Ok(args)) => Some(args),
+                    None => None,
+                };
+
                 let mut input_types = Vec::new();
                 let mut arg_names: Vec<proc_macro2::TokenStream> = Vec::new();
                 let mut arg_types: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -117,33 +140,90 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
                 let return_type = &method.sig.output;
 
-                // The first typed param after &self is ctx: ServiceContext (per ADR-2).
-                // Clone it when forwarding to the inner impl so the original
-                // stays alive for enforce_tenant and interceptor calls.
-                let inner_call_args: Vec<_> = if arg_names.is_empty() {
-                    vec![]
+                // Clone the first param (context) so the original stays alive for enforce_tenant and interceptor calls.
+                let (ctx_param, inner_call_args): (proc_macro2::TokenStream, Vec<_>) =
+                    if arg_names.is_empty() {
+                        (quote! { ctx }, vec![])
+                    } else {
+                        let first = &arg_names[0];
+                        let rest = &arg_names[1..];
+                        let call_args = std::iter::once(quote! { #first.clone() })
+                            .chain(rest.iter().cloned())
+                            .collect();
+                        (quote! { #first }, call_args)
+                    };
+
+                // Authorization guard — emitted at slot 1 only when #[authorize] is present.
+                let authorize_guard = if let Some(ref args) = maybe_authorize {
+                    let ctx_ident = &args.context_ident;
+                    let resource_str = &args.resource;
+                    let action_str = &args.action;
+
+                    let error_type = match &method.sig.output {
+                        syn::ReturnType::Type(_, ty) => extract_result_error_type(ty),
+                        _ => None,
+                    };
+
+                    if let Some(err_ty) = error_type {
+                        quote! {
+                            // Zero-size helper forces rustc's trait bound diagnostic when E doesn't impl From<SecurityError>.
+                            fn __assert_from_security_error<E: From<ego_service_sdk::security::SecurityError>>() {}
+                            __assert_from_security_error::<#err_ty>();
+
+                            // Guard: skipped when no security context is injected (dev/test path); fail-closed within — provider errors propagate as Err.
+                            let __sec_ctx = #ctx_ident.security();
+                            if __sec_ctx.is_some() {
+                                let __rt = self.runtime.upgrade().ok_or_else(|| {
+                                    <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                        ego_service_sdk::security::SecurityError::ProviderError(
+                                            "authorization provider unavailable: runtime dropped".into()
+                                        )
+                                    )
+                                })?;
+                                let __provider = __rt.authorization_provider().ok_or_else(|| {
+                                    <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                        ego_service_sdk::security::SecurityError::CapabilityNotEnabled
+                                    )
+                                })?;
+                                ego_service_sdk::security::authorize_in_context(
+                                    __sec_ctx,
+                                    ego_service_sdk::security::Resource {
+                                        kind: #resource_str.to_string(),
+                                        id: None,
+                                    },
+                                    ego_service_sdk::security::Action(#action_str.to_string()),
+                                    __provider.as_ref(),
+                                )
+                                .await
+                                .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
+                            }
+                        }
+                    } else {
+                        let err = syn::Error::new(
+                            method.sig.output.span(),
+                            "#[authorize] requires the method return type to be Result<_, E>",
+                        );
+                        return TokenStream::from(err.to_compile_error());
+                    }
                 } else {
-                    let first = &arg_names[0];
-                    let rest = &arg_names[1..];
-                    std::iter::once(quote! { #first.clone() })
-                        .chain(rest.iter().cloned())
-                        .collect()
+                    quote! {}
                 };
 
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#arg_names: #arg_types),*) #return_type {
+                        #authorize_guard
                         if let Some(rt) = self.runtime.upgrade() {
-                            rt.enforce_tenant(&ctx);
+                            rt.enforce_tenant(&#ctx_param);
                         }
                         let inner_ref = self.inner.clone();
                         let chain_ref = self.chain.clone();
-                        let _ = chain_ref.on_request(&ctx).await;
+                        let _ = chain_ref.on_request(&#ctx_param).await;
                         let result = inner_ref.#method_name(#(#inner_call_args),*).await;
                         match &result {
-                            Ok(_) => { chain_ref.on_response(&ctx).await.ok(); }
+                            Ok(_) => { chain_ref.on_response(&#ctx_param).await.ok(); }
                             Err(e) => {
                                 chain_ref
-                                    .on_error(&ctx, e as &dyn ego_service_sdk::error::ServiceErrorTrait)
+                                    .on_error(&#ctx_param, e as &dyn ego_service_sdk::error::ServiceErrorTrait)
                                     .await
                                     .ok();
                             }
@@ -153,7 +233,9 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 });
 
                 let mut clean = method.clone();
-                clean.attrs.retain(|a| !a.path().is_ident("operation"));
+                clean.attrs.retain(|a| {
+                    !a.path().is_ident("operation") && !a.path().is_ident("authorize")
+                });
                 output_items.push(TraitItem::Fn(clean));
             } else {
                 output_items.push(item.clone());
@@ -202,7 +284,6 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             #(#forwarding_methods)*
         }
 
-            // Tag impl — enables runtime resolution.
         impl ego_service_sdk::runtime::Resolvable for #tag_name {
             type Proxy = #ref_name;
 
@@ -295,10 +376,7 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Returns the resolver expression for a DI field type, e.g.
-/// `rt.resolve_projection::<UserProjection>()?`.
-/// Returns `None` for non-DI fields.
-/// `EntityRef<T>` is excluded — it is owned by entity-sdk (INV-008).
+/// Returns the DI resolver expression for a field type (e.g. `rt.resolve_projection::<T>()?`); None for non-DI fields.
 fn classify_field_init(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
     if let syn::Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
@@ -331,7 +409,6 @@ fn classify_field_init(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
 }
 
 /// Maps a field type to a `DepKey` variant; returns `None` for non-DI fields.
-/// `EntityRef<T>` is excluded — it is owned by entity-sdk (INV-008).
 fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
     if let syn::Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
@@ -388,6 +465,24 @@ fn extract_error_types(ty: &syn::Type) -> proc_macro2::TokenStream {
     quote! { vec![] }
 }
 
+/// Extracts the error type `E` from `Result<_, E>`; returns `None` for non-Result types.
+fn extract_result_error_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Result" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if args.args.len() >= 2 {
+                        if let syn::GenericArgument::Type(err_ty) = &args.args[1] {
+                            return Some(err_ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -396,4 +491,14 @@ mod tests;
 pub fn operation(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(input as ItemFn);
     TokenStream::from(quote! { #input_fn })
+}
+
+/// Authorization marker for `#[service]` methods — rejected at compile time when used outside `#[service]`.
+#[proc_macro_attribute]
+pub fn authorize(_args: TokenStream, _input: TokenStream) -> TokenStream {
+    let err = syn::Error::new(
+        Span::call_site(),
+        "#[authorize] can only be used on methods inside a #[service] trait",
+    );
+    TokenStream::from(err.to_compile_error())
 }

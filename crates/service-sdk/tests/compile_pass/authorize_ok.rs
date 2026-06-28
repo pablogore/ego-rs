@@ -1,8 +1,4 @@
-// Compile-pass smoke test: a valid `#[authorize]` annotation on a `#[service]` method.
-//
-// AC-1.1: `#[authorize(context = ctx, permission = "orders:read")]` on a service method
-// inside `#[service]` compiles and generates an authorization guard.
-// FR-6: The error type `AuthOrderError` implements `From<SecurityError>`, satisfying the bound.
+// Compile-pass: #[authorize] on a #[service] method whose error type implements From<SecurityError>.
 
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
