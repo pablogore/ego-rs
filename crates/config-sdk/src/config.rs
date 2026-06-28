@@ -1,0 +1,1 @@
+//! Resolved, immutable configuration handle.
