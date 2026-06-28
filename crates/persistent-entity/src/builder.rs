@@ -105,6 +105,30 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         self
     }
 
+    /// Apply all fields from a [`RuntimeConfig`] at once.
+    ///
+    /// Convenience for callers that obtain a typed config from kit-config:
+    /// ```ignore
+    /// let value: serde_json::Value = loader.get("persistent_entity")?;
+    /// let builder = EntityRuntimeBuilder::default().with_config(serde_json::from_value(value)?);
+    /// ```
+    pub fn with_config(self, config: RuntimeConfig) -> Self {
+        self.mailbox_capacity(config.mailbox_capacity)
+            .concurrency_budget(config.concurrency_budget)
+            .passivation_timeout(std::time::Duration::from_secs(config.passivation_timeout_secs))
+            .single_tenant(config.single_tenant_mode)
+            .tenant_id(config.tenant_id)
+    }
+
+    /// Deserialize a [`serde_json::Value`] into a [`RuntimeConfig`] and apply it.
+    ///
+    /// This is the entry point for kit-config integration: callers receive a
+    /// `serde_json::Value` from `kit_config::ConfigLoader` and pass it here —
+    /// no direct dependency on kit-config is needed in this crate.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value).map(|c| Self::default().with_config(c))
+    }
+
     /// Inject a custom snapshot store.  If not set, an [`InMemorySnapshotStore`] is used.
     pub fn with_snapshot_store(
         mut self,

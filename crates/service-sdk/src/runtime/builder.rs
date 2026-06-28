@@ -11,6 +11,13 @@ use crate::runtime::runtime_builder::RuntimeInner;
 pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
 
 /// Builder for constructing a [`Runtime`] with optional security providers.
+///
+/// `RuntimeBuilder` has no configurable scalar fields of its own — all
+/// runtime tunables (mailbox capacity, concurrency budget, passivation
+/// timeout, tenant mode) belong to the entity-level runtime and are
+/// configured via [`persistent_entity::EntityRuntimeBuilder::from_value`].
+/// Pass a `serde_json::Value` obtained from `kit_config::ConfigLoader` to
+/// that builder, not to this one.
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
     interceptor_chain: Arc<InterceptorChain>,

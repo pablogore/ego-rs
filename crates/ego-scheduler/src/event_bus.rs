@@ -143,6 +143,17 @@ impl Default for EventBusConfig {
     }
 }
 
+impl EventBusConfig {
+    /// Deserialize a [`serde_json::Value`] into an [`EventBusConfig`].
+    ///
+    /// Entry point for kit-config integration — callers pass the `Value`
+    /// obtained from `kit_config::ConfigLoader` without any direct dependency
+    /// on kit-config in this crate.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+}
+
 /// Multi-producer sender for the event bus (I6: Clone for distribution to CORE-006).
 #[derive(Clone)]
 pub struct SchedulerEventSender {
