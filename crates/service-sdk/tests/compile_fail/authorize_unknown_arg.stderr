@@ -1,0 +1,5 @@
+error: #[authorize] unknown argument 'perm'; expected 'context' and 'permission'
+  --> tests/compile_fail/authorize_unknown_arg.rs:34:32
+   |
+34 |     #[authorize(context = ctx, perm = "orders:read")]
+   |                                ^^^^

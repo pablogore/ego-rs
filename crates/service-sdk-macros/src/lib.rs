@@ -186,7 +186,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     if arg_names.is_empty() {
                         // Parameterless methods: ctx_param is a phantom token. Any method here
                         // without #[authorize] will get a compile error on enforce_tenant(&ctx) —
-                        // that is intentional: all @operation methods must have a context parameter.
+                        // that is intentional: all #[operation] methods must have a context parameter.
                         (quote! { ctx }, vec![])
                     } else {
                         // When #[authorize] is present, derive ctx_param from context_ident so
@@ -244,6 +244,13 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                                 assert_from::<#err_ty>();
                             };
 
+                            // #[authorize] requires authentication. A missing SecurityContext
+                            // is a request-level failure, not a disabled-security bypass.
+                            let __sec_ctx = #ctx_ident.security().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                    ego_service_sdk::security::SecurityError::MissingContext
+                                )
+                            })?;
                             let __rt = self.runtime.upgrade().ok_or_else(|| {
                                 <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
                                     ego_service_sdk::security::SecurityError::ProviderError(
@@ -257,7 +264,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                                 )
                             })?;
                             ego_service_sdk::security::authorize_in_context(
-                                #ctx_ident.security(),
+                                Some(__sec_ctx),
                                 ego_service_sdk::security::Resource {
                                     kind: std::borrow::Cow::Borrowed(#resource_str),
                                     id: None,
@@ -281,15 +288,14 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
-                // When #[authorize] is present, __rt is already bound by the guard; reuse it.
-                // When there is no guard, we must upgrade from the Weak.
-                let enforce_tenant_block = if maybe_authorize.is_some() {
-                    quote! { __rt.enforce_tenant(&#ctx_param); }
-                } else {
-                    quote! {
-                        if let Some(rt) = self.runtime.upgrade() {
-                            rt.enforce_tenant(&#ctx_param);
-                        }
+                // enforce_tenant is always a best-effort no-op; upgrade from Weak each time.
+                // The authorization guard may have already checked the runtime (and failed fast on
+                // Err), so by the time we reach this point the upgrade will succeed or the guard
+                // already returned. Either way, a fresh upgrade here is correct and avoids
+                // lifetime conflicts with the scoped `__rt` inside the `if` block above.
+                let enforce_tenant_block = quote! {
+                    if let Some(rt) = self.runtime.upgrade() {
+                        rt.enforce_tenant(&#ctx_param);
                     }
                 };
 
