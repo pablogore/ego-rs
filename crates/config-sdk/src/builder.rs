@@ -143,7 +143,7 @@ impl ConfigurationBuilder {
                     (key, (value, attr))
                 })
                 .collect();
-            Ok(Configuration::new(entries))
+            Ok(Configuration::new(entries, all_names))
         } else {
             Err(errors)
         }
