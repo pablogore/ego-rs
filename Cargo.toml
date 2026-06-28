@@ -14,7 +14,6 @@ members = [
     "crates/service-sdk-macros",
     "crates/security-sdk",
     "crates/security-jwt",
-    "crates/config-sdk",
 ]
 resolver = "2"
 
