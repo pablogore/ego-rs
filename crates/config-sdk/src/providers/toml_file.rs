@@ -51,7 +51,7 @@ impl ConfigurationProvider for TomlFileProvider {
     fn load(&self) -> Result<ConfigurationSource, ConfigurationError> {
         let value = KitSource::load(&self.source).map_err(|e| ConfigurationError::ProviderLoad {
             provider_name: self.name.clone(),
-            cause: e.to_string(),
+            cause: Box::new(e),
         })?;
         let map = value_to_config_map(value);
         ConfigurationSource::new(map, self.name.clone())

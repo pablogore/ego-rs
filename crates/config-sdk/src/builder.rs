@@ -184,7 +184,7 @@ mod tests {
         fn load(&self) -> Result<ConfigurationSource, ConfigurationError> {
             Err(ConfigurationError::ProviderLoad {
                 provider_name: self.name.clone(),
-                cause: "always fails".to_string(),
+                cause: Box::new(std::io::Error::new(std::io::ErrorKind::Other, "always fails")),
             })
         }
     }
