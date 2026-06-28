@@ -186,7 +186,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     if arg_names.is_empty() {
                         // Parameterless methods: ctx_param is a phantom token. Any method here
                         // without #[authorize] will get a compile error on enforce_tenant(&ctx) —
-                        // that is intentional: all @operation methods must have a context parameter.
+                        // that is intentional: all #[operation] methods must have a context parameter.
                         (quote! { ctx }, vec![])
                     } else {
                         // When #[authorize] is present, derive ctx_param from context_ident so
@@ -244,34 +244,36 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                                 assert_from::<#err_ty>();
                             };
 
-                            // Guard executes only when a SecurityContext is present (AC-5.1 / AD-9).
-                            // When ctx.security() is None, security is disabled and the call proceeds
-                            // without any authorization check.
-                            if #ctx_ident.security().is_some() {
-                                let __rt = self.runtime.upgrade().ok_or_else(|| {
-                                    <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
-                                        ego_service_sdk::security::SecurityError::ProviderError(
-                                            "authorization provider unavailable: runtime dropped".into()
-                                        )
-                                    )
-                                })?;
-                                let __provider = __rt.authorization_provider().ok_or_else(|| {
-                                    <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
-                                        ego_service_sdk::security::SecurityError::CapabilityNotEnabled
-                                    )
-                                })?;
-                                ego_service_sdk::security::authorize_in_context(
-                                    #ctx_ident.security(),
-                                    ego_service_sdk::security::Resource {
-                                        kind: std::borrow::Cow::Borrowed(#resource_str),
-                                        id: None,
-                                    },
-                                    ego_service_sdk::security::Action(std::borrow::Cow::Borrowed(#action_str)),
-                                    __provider.as_ref(),
+                            // #[authorize] requires authentication. A missing SecurityContext
+                            // is a request-level failure, not a disabled-security bypass.
+                            let __sec_ctx = #ctx_ident.security().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                    ego_service_sdk::security::SecurityError::MissingContext
                                 )
-                                .await
-                                .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
-                            }
+                            })?;
+                            let __rt = self.runtime.upgrade().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                    ego_service_sdk::security::SecurityError::ProviderError(
+                                        "authorization provider unavailable: runtime dropped".into()
+                                    )
+                                )
+                            })?;
+                            let __provider = __rt.authorization_provider().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                    ego_service_sdk::security::SecurityError::CapabilityNotEnabled
+                                )
+                            })?;
+                            ego_service_sdk::security::authorize_in_context(
+                                Some(__sec_ctx),
+                                ego_service_sdk::security::Resource {
+                                    kind: std::borrow::Cow::Borrowed(#resource_str),
+                                    id: None,
+                                },
+                                ego_service_sdk::security::Action(std::borrow::Cow::Borrowed(#action_str)),
+                                __provider.as_ref(),
+                            )
+                            .await
+                            .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
                         }
                     } else {
                         let err = syn::Error::new(

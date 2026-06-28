@@ -4,7 +4,7 @@
 //   T-18: Allow path — provider allows; body executes (AC-5.5)
 //   T-19: Deny path — provider denies; body does not execute (AC-4.1, AC-5.4)
 //   T-20: Exactly one authorize_in_context call per annotated invocation (AC-4.2)
-//   T-21: Security disabled — ctx.security() is None; body executes without guard (AC-5.1)
+//   T-21: Missing SecurityContext — ctx.security() is None; returns Err(MissingContext), body does NOT execute (AC-5.1)
 //   T-22: Runtime dropped — Weak::upgrade() returns None; Err(ProviderError) (AC-5.2)
 //   T-23: CapabilityNotEnabled path — authz resolves to CapabilityNotEnabled (AC-5.3)
 //   T-24: Multiple annotated methods — guards are independent per method
@@ -269,29 +269,28 @@ async fn t20_exactly_one_authorize_call_per_invocation() {
 }
 
 // ---------------------------------------------------------------------------
-// T-21: Security disabled — ctx.security() is None; body executes without guard
+// T-21: Missing SecurityContext — ctx.security() is None; returns Err(MissingContext), body does NOT execute
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn t21_security_disabled_body_executes_without_guard() {
-    // Runtime has security providers configured, but ctx has no SecurityContext.
+async fn t21_missing_security_context_fails_closed() {
+    // ctx has no SecurityContext — #[authorize] must fail closed with MissingContext.
     let provider = Arc::new(CountingAllowProvider::new());
     let (_rt, weak) = make_runtime(provider.clone());
     let body_ran = Arc::new(AtomicUsize::new(0));
     let proxy = make_proxy(body_ran.clone(), weak);
 
-    // No with_security() call — ctx.security() is None.
-    let ctx = ServiceContext::new();
+    let ctx = ServiceContext::new(); // no with_security()
 
     let result = proxy.get_order(ctx, "order-1".to_string()).await;
 
-    assert!(result.is_ok(), "expected Ok when security is disabled, got: {:?}", result);
-    assert_eq!(body_ran.load(Ordering::Relaxed), 1, "body must execute when security is disabled");
-    assert_eq!(
-        provider.call_count(),
-        0,
-        "provider must NOT be called when ctx.security() is None"
+    assert!(result.is_err(), "expected Err when SecurityContext is absent");
+    assert!(
+        result.unwrap_err().0.contains("missing security context"),
+        "expected MissingContext error"
     );
+    assert_eq!(body_ran.load(Ordering::Relaxed), 0, "body must NOT execute when SecurityContext is absent");
+    assert_eq!(provider.call_count(), 0, "provider must NOT be called when SecurityContext is absent");
 }
 
 // ---------------------------------------------------------------------------
