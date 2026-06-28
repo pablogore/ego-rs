@@ -222,6 +222,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "config-core"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kit-config.git?branch=master#82a21b0b6d03f7df836dadab6950afa12f67d1f2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "config-loaders"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kit-config.git?branch=master#82a21b0b6d03f7df836dadab6950afa12f67d1f2"
+dependencies = [
+ "config-core",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "config-models"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kit-config.git?branch=master#82a21b0b6d03f7df836dadab6950afa12f67d1f2"
+dependencies = [
+ "config-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "console"
 version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,12 +435,12 @@ dependencies = [
 name = "ego-config-sdk"
 version = "0.1.0"
 dependencies = [
+ "kit-config",
  "serde",
  "serde_json",
- "serde_yml",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -1143,6 +1175,16 @@ dependencies = [
  "serde",
  "serde_json",
  "simple_asn1",
+]
+
+[[package]]
+name = "kit-config"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kit-config.git?branch=master#82a21b0b6d03f7df836dadab6950afa12f67d1f2"
+dependencies = [
+ "config-core",
+ "config-loaders",
+ "config-models",
 ]
 
 [[package]]
