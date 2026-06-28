@@ -474,6 +474,8 @@ name = "ego-scheduler"
 version = "0.1.0"
 dependencies = [
  "ego-domain",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
