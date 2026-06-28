@@ -1,0 +1,50 @@
+warning: unused imports: `authorize` and `operation`
+ --> tests/compile_fail/authorize_missing_from.rs:6:30
+  |
+6 | use ego_service_sdk_macros::{authorize, operation, service};
+  |                              ^^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `NoFromError: From<SecurityError>` is not satisfied
+  --> tests/compile_fail/authorize_missing_from.rs:28:82
+   |
+28 |     async fn get_order(&self, ctx: ServiceContext, id: String) -> Result<String, NoFromError>;
+   |                                                                                  ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<SecurityError>` is not implemented for `NoFromError`
+  --> tests/compile_fail/authorize_missing_from.rs:10:1
+   |
+10 | pub struct NoFromError(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `NoFromError: From<SecurityError>` is not satisfied
+  --> tests/compile_fail/authorize_missing_from.rs:24:1
+   |
+24 | #[service(version = "1.0.0")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<SecurityError>` is not implemented for `NoFromError`
+  --> tests/compile_fail/authorize_missing_from.rs:10:1
+   |
+10 | pub struct NoFromError(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `NoFromError: From<SecurityError>` is not satisfied
+  --> tests/compile_fail/authorize_missing_from.rs:28:82
+   |
+28 |     async fn get_order(&self, ctx: ServiceContext, id: String) -> Result<String, NoFromError>;
+   |                                                                                  ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<SecurityError>` is not implemented for `NoFromError`
+  --> tests/compile_fail/authorize_missing_from.rs:10:1
+   |
+10 | pub struct NoFromError(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `assert_from`
+  --> tests/compile_fail/authorize_missing_from.rs:24:1
+   |
+24 | #[service(version = "1.0.0")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_from`
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

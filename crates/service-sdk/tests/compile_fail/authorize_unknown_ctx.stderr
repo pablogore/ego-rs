@@ -1,0 +1,19 @@
+error: #[authorize] context parameter 'wrong' not found in method signature
+  --> tests/compile_fail/authorize_unknown_ctx.rs:34:27
+   |
+34 |     #[authorize(context = wrong, permission = "orders:read")]
+   |                           ^^^^^
+
+warning: unused import: `ego_service_sdk::context::ServiceContext`
+ --> tests/compile_fail/authorize_unknown_ctx.rs:4:5
+  |
+4 | use ego_service_sdk::context::ServiceContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `authorize` and `operation`
+ --> tests/compile_fail/authorize_unknown_ctx.rs:7:30
+  |
+7 | use ego_service_sdk_macros::{authorize, operation, service};
+  |                              ^^^^^^^^^  ^^^^^^^^^
