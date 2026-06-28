@@ -1,19 +1,5 @@
 error: #[authorize] permission "ordersread" must have the form "resource:action"
-  --> tests/compile_fail/authorize_bad_format.rs:33:45
+  --> tests/compile_fail/authorize_bad_format.rs:34:45
    |
-33 |     #[authorize(context = ctx, permission = "ordersread")]
+34 |     #[authorize(context = ctx, permission = "ordersread")]
    |                                             ^^^^^^^^^^^^
-
-warning: unused import: `ego_service_sdk::context::ServiceContext`
- --> tests/compile_fail/authorize_bad_format.rs:4:5
-  |
-4 | use ego_service_sdk::context::ServiceContext;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused imports: `authorize` and `operation`
- --> tests/compile_fail/authorize_bad_format.rs:7:30
-  |
-7 | use ego_service_sdk_macros::{authorize, operation, service};
-  |                              ^^^^^^^^^  ^^^^^^^^^

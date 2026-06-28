@@ -1,5 +1,6 @@
 // Fixture: E6 — context = wrong does not match any parameter name in the signature.
 // Linked requirement: FR-1, AC-1.2.
+#![allow(unused_imports)]
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;

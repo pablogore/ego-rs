@@ -1,5 +1,6 @@
 // Fixture: AD-4 non-literal — permission value is not a string literal.
 // Linked requirement: FR-3, AC-3.5.
+#![allow(unused_imports)]
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;

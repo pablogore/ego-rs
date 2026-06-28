@@ -1,19 +1,5 @@
 error: #[authorize] permission must be a string literal known at compile time
-  --> tests/compile_fail/authorize_non_literal.rs:35:45
+  --> tests/compile_fail/authorize_non_literal.rs:36:45
    |
-35 |     #[authorize(context = ctx, permission = PERM_CONST)]
+36 |     #[authorize(context = ctx, permission = PERM_CONST)]
    |                                             ^^^^^^^^^^
-
-warning: unused import: `ego_service_sdk::context::ServiceContext`
- --> tests/compile_fail/authorize_non_literal.rs:4:5
-  |
-4 | use ego_service_sdk::context::ServiceContext;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused imports: `authorize` and `operation`
- --> tests/compile_fail/authorize_non_literal.rs:7:30
-  |
-7 | use ego_service_sdk_macros::{authorize, operation, service};
-  |                              ^^^^^^^^^  ^^^^^^^^^

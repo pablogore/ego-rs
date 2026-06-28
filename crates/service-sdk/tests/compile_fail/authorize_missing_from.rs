@@ -1,5 +1,6 @@
 // Fixture: E_from — error type does not implement From<SecurityError>.
 // Linked requirement: FR-6, AC-6.1.
+#![allow(unused_imports)]
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::ServiceErrorTrait;

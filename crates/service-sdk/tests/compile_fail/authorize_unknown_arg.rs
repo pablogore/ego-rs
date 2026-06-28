@@ -1,5 +1,6 @@
 // Fixture: E4 — unknown named argument key 'perm' (expected 'permission').
 // Linked requirement: FR-2, AC-2.2.
+#![allow(unused_imports)]
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;

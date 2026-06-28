@@ -1,5 +1,6 @@
 // Fixture: E3 — empty action (permission = "orders:").
 // Linked requirement: FR-3, AC-3.4.
+#![allow(unused_imports)]
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;

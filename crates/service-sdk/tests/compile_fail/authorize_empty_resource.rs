@@ -1,5 +1,6 @@
 // Fixture: E2 — empty resource (permission = ":read").
 // Linked requirement: FR-3, AC-3.3.
+#![allow(unused_imports)]
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;
