@@ -52,9 +52,9 @@ impl ConfigurationSource {
 
 /// Returns `true` if `key` is a valid dotted-path identifier.
 ///
-/// Each dot-separated segment must start with an alphanumeric character or `_`,
-/// followed by alphanumeric characters, `_`, or `-`. Empty segments (leading/trailing
-/// dots or consecutive dots) are rejected.
+/// Each dot-separated segment must start with an ASCII alphanumeric character (`[a-zA-Z0-9]`)
+/// or `_`, followed by ASCII alphanumeric characters, `_`, or `-`. Unicode characters are
+/// rejected. Empty segments (leading/trailing dots or consecutive dots) are also rejected.
 fn is_valid_key(key: &str) -> bool {
     if key.is_empty() {
         return false;
@@ -65,10 +65,10 @@ fn is_valid_key(key: &str) -> bool {
         }
         let mut chars = segment.chars();
         match chars.next() {
-            Some(c) if c.is_alphanumeric() || c == '_' => {}
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {}
             _ => return false,
         }
-        if !chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return false;
         }
     }
@@ -190,5 +190,29 @@ mod tests {
         data.insert("a-b_c.d".to_string(), ConfigValue::Bool(true));
         ConfigurationSource::new(data, "stub".to_string())
             .expect("valid dotted paths must succeed");
+    }
+
+    #[test]
+    fn unicode_first_char_returns_invalid_key_error() {
+        // 'é', 'π', CJK, Arabic-Indic digits — all rejected. Keys must be ASCII.
+        for key in &["é.port", "π.ratio", "café.timeout", "١server.port"] {
+            let mut data = HashMap::new();
+            data.insert(key.to_string(), ConfigValue::Bool(true));
+            let err = ConfigurationSource::new(data, "stub".to_string())
+                .expect_err(&format!("unicode key '{key}' must be rejected"));
+            assert!(
+                matches!(err, ConfigurationError::InvalidKey { .. }),
+                "expected InvalidKey for '{key}', got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_non_first_char_returns_invalid_key_error() {
+        let mut data = HashMap::new();
+        data.insert("server.héro".to_string(), ConfigValue::Bool(true));
+        let err = ConfigurationSource::new(data, "stub".to_string())
+            .expect_err("unicode in non-first position must be rejected");
+        assert!(matches!(err, ConfigurationError::InvalidKey { .. }));
     }
 }

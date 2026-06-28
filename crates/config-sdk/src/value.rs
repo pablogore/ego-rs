@@ -1,6 +1,13 @@
 //! Configuration value types.
 
 /// A typed configuration value produced by a provider.
+///
+/// # Note on `Float` equality
+///
+/// `ConfigValue` derives `PartialEq` but not `Eq` because `f64` does not satisfy `Eq`.
+/// `ConfigValue::Float(f64::NAN) != ConfigValue::Float(f64::NAN)` — NaN values from
+/// configuration files should be treated as a parse error by callers.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigValue {
     /// A UTF-8 string value.
@@ -11,11 +18,15 @@ pub enum ConfigValue {
     Float(f64),
     /// A boolean value.
     Bool(bool),
-    /// A list of values. Reserved for OQ-04; no provider populates this in v1.
+    /// A list of scalar values.
+    ///
+    /// Reserved for OQ-04. No built-in provider populates this in v1.
+    #[doc(hidden)]
     List(Vec<ConfigValue>),
 }
 
 /// Identifies which provider loaded a specific configuration key.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceAttribution {
     /// The name of the provider that supplied this value.
@@ -72,6 +83,15 @@ mod tests {
             ConfigValue::Float(f) => assert!((f - 3.14).abs() < f64::EPSILON),
             _ => panic!("expected Float variant"),
         }
+    }
+
+    #[test]
+    fn float_nan_is_not_equal_to_itself() {
+        // Documents IEEE 754 NaN behavior: NaN != NaN. Callers must not rely on
+        // equality for Float values that may be NaN.
+        let a = ConfigValue::Float(f64::NAN);
+        let b = ConfigValue::Float(f64::NAN);
+        assert_ne!(a, b, "NaN != NaN per IEEE 754 — callers must handle this");
     }
 
     #[test]

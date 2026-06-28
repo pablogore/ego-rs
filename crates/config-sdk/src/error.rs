@@ -3,15 +3,19 @@
 use thiserror::Error;
 
 /// Errors that can occur during configuration loading and access.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ConfigurationError {
     /// A provider failed to load its configuration.
+    ///
+    /// The original error is preserved as the `source()` for error-chain traversal.
     #[error("provider '{provider_name}' failed to load: {cause}")]
     ProviderLoad {
         /// Provider identifier.
         provider_name: String,
-        /// Human-readable cause.
-        cause: String,
+        /// Underlying error from the source (e.g. a kit-config `ConfigError`).
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
     /// A key produced by a provider is not a valid dotted-path identifier.
@@ -53,8 +57,20 @@ pub enum ConfigurationError {
     },
 
     /// Multiple errors collected during a single build operation.
-    #[error("{} configuration error(s) occurred", .0.len())]
+    ///
+    /// Iterate `.0` to access individual errors:
+    /// ```ignore
+    /// if let ConfigurationError::Multiple(errors) = err {
+    ///     for e in &errors { eprintln!("  - {e}"); }
+    /// }
+    /// ```
+    #[error("{}", format_multiple(.0))]
     Multiple(Vec<ConfigurationError>),
+}
+
+fn format_multiple(errors: &[ConfigurationError]) -> String {
+    let lines: Vec<String> = errors.iter().map(|e| format!("  - {e}")).collect();
+    format!("{} configuration error(s):\n{}", errors.len(), lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -72,11 +88,24 @@ mod tests {
     fn provider_load_display_contains_provider_name() {
         let e = ConfigurationError::ProviderLoad {
             provider_name: "env:APP_".to_string(),
-            cause: "permission denied".to_string(),
+            cause: Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            )),
         };
         let s = e.to_string();
         assert!(s.contains("env:APP_"), "display: {s}");
         assert!(s.contains("permission denied"), "display: {s}");
+    }
+
+    #[test]
+    fn provider_load_source_chain_is_preserved() {
+        let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let e = ConfigurationError::ProviderLoad {
+            provider_name: "toml:/app.toml".to_string(),
+            cause: Box::new(inner),
+        };
+        assert!(std::error::Error::source(&e).is_some(), "source chain must be set");
     }
 
     #[test]
@@ -138,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_variant_wraps_errors() {
+    fn multiple_display_includes_inner_error_messages() {
         let e = ConfigurationError::Multiple(vec![
             ConfigurationError::Missing {
                 key: "a".to_string(),
@@ -151,5 +180,22 @@ mod tests {
         ]);
         let s = e.to_string();
         assert!(s.contains("2"), "display should contain error count: {s}");
+        assert!(s.contains("'a'"), "display should contain inner error key 'a': {s}");
+        assert!(s.contains("'b'"), "display should contain inner error key 'b': {s}");
+    }
+
+    #[test]
+    fn multiple_inner_errors_are_accessible() {
+        let inner = vec![
+            ConfigurationError::Missing { key: "x".to_string(), searched_providers: vec![] },
+            ConfigurationError::Missing { key: "y".to_string(), searched_providers: vec![] },
+        ];
+        let e = ConfigurationError::Multiple(inner);
+        if let ConfigurationError::Multiple(errors) = &e {
+            assert_eq!(errors.len(), 2);
+            assert!(errors[0].to_string().contains("'x'"));
+        } else {
+            panic!("expected Multiple");
+        }
     }
 }
