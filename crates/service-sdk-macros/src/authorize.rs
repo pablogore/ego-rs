@@ -11,8 +11,6 @@ pub(crate) struct AuthorizeArgs {
     pub(crate) resource: String,
     /// The action portion of the permission literal (e.g., `"read"`).
     pub(crate) action: String,
-    /// The span of the full permission literal — used for spanned errors.
-    pub(crate) permission_span: proc_macro2::Span,
 }
 
 /// Parses and validates `#[authorize(context = <ident>, permission = "<resource>:<action>")]`.
@@ -34,7 +32,13 @@ pub(crate) fn parse_authorize_args(
         if meta.path.is_ident("context") {
             // context = <ident>
             let value = meta.value()?;
-            // Peek for a string literal first — that's an AD-4 non-ident error.
+            if context_ident.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &meta.path,
+                    "#[authorize] duplicate 'context' argument",
+                ));
+            }
+            // Peek for a string literal — that's an AD-4 non-ident error.
             if value.peek(syn::LitStr) {
                 let lit: syn::LitStr = value.parse()?;
                 return Err(syn::Error::new_spanned(
@@ -51,10 +55,14 @@ pub(crate) fn parse_authorize_args(
         } else if meta.path.is_ident("permission") {
             // permission = "<resource>:<action>"
             let value = meta.value()?;
-            // Non-literal is an AD-4 error — try parsing as LitStr; if that fails,
-            // the value is not a string literal.
+            if permission_lit.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &meta.path,
+                    "#[authorize] duplicate 'permission' argument",
+                ));
+            }
+            // Non-literal is an AD-4 error — consume before returning so the buffer is drained.
             if !value.peek(syn::LitStr) {
-                // Consume the remaining tokens so syn doesn't complain about unconsumed input.
                 let span = value.cursor().token_stream();
                 let _: proc_macro2::TokenStream = value.parse()?;
                 return Err(syn::Error::new_spanned(
@@ -79,30 +87,27 @@ pub(crate) fn parse_authorize_args(
     // After the full parse, check that both required args are present.
     match (context_ident, permission_lit) {
         (Some(ctx_ident), Some(perm_lit)) => {
-            // Validate the permission format: exactly one ':', non-empty resource and action.
+            // Single split_once is sufficient: captures both halves and enforces the single-colon invariant atomically.
             let perm_value = perm_lit.value();
-            let perm_span = perm_lit.span();
-            let colon_count = perm_value.chars().filter(|&c| c == ':').count();
-
-            if colon_count == 0 {
-                return Err(syn::Error::new_spanned(
-                    &perm_lit,
-                    format!(
-                        "#[authorize] permission \"{perm_value}\" must have the form \"resource:action\""
-                    ),
-                ));
-            }
-            if colon_count > 1 {
-                return Err(syn::Error::new_spanned(
-                    &perm_lit,
-                    format!(
-                        "#[authorize] permission \"{perm_value}\" must have exactly one ':' (form \"resource:action\")"
-                    ),
-                ));
-            }
-
-            // Exactly one colon — split and validate non-empty resource and action.
-            let (resource, action) = perm_value.split_once(':').unwrap();
+            let (resource, action) = match perm_value.split_once(':') {
+                None => {
+                    return Err(syn::Error::new_spanned(
+                        &perm_lit,
+                        format!(
+                            "#[authorize] permission \"{perm_value}\" must have the form \"resource:action\""
+                        ),
+                    ));
+                }
+                Some((_, action)) if action.contains(':') => {
+                    return Err(syn::Error::new_spanned(
+                        &perm_lit,
+                        format!(
+                            "#[authorize] permission \"{perm_value}\" must have exactly one ':' (form \"resource:action\")"
+                        ),
+                    ));
+                }
+                Some((resource, action)) => (resource, action),
+            };
             if resource.is_empty() {
                 return Err(syn::Error::new_spanned(
                     &perm_lit,
@@ -119,12 +124,20 @@ pub(crate) fn parse_authorize_args(
                     ),
                 ));
             }
+            if resource == "*" || action == "*" {
+                return Err(syn::Error::new_spanned(
+                    &perm_lit,
+                    format!(
+                        "#[authorize] permission \"{perm_value}\" must not use wildcards; \
+                         wildcards belong on the grant side, not the access-request side"
+                    ),
+                ));
+            }
 
             Ok(AuthorizeArgs {
                 context_ident: ctx_ident,
                 resource: resource.to_string(),
                 action: action.to_string(),
-                permission_span: perm_span,
             })
         }
         _ => Err(syn::Error::new(
@@ -136,18 +149,22 @@ pub(crate) fn parse_authorize_args(
 
 /// Validates that `ident` names a typed parameter present in `sig`.
 ///
-/// Returns `Ok(())` when found; otherwise emits error E6 spanned at `ident`.
+/// Returns `Ok(usize)` — the 0-based index among typed parameters —
+/// so the call site can locate the parameter without a second O(N) scan.
+/// Returns `Err` (E6) spanned at `ident` when not found.
 pub(crate) fn validate_context_ident_in_signature(
     ident: &syn::Ident,
     sig: &syn::Signature,
-) -> syn::Result<()> {
+) -> syn::Result<usize> {
+    let mut typed_idx: usize = 0;
     for fn_arg in &sig.inputs {
         if let syn::FnArg::Typed(pat_type) = fn_arg {
             if let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
                 if pat_ident.ident == *ident {
-                    return Ok(());
+                    return Ok(typed_idx);
                 }
             }
+            typed_idx += 1;
         }
     }
     Err(syn::Error::new_spanned(
@@ -160,7 +177,7 @@ pub(crate) fn validate_context_ident_in_signature(
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests (RED — parse_authorize_args always errors until implemented)
+// Unit tests for parse_authorize_args and validate_context_ident_in_signature.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -305,6 +322,34 @@ pub(crate) mod authorize_args_tests {
         );
     }
 
+    // ── S3: duplicate keys ────────────────────────────────────────────────
+
+    #[test]
+    fn e_duplicate_context() {
+        let tokens: proc_macro2::TokenStream =
+            syn::parse_str("context = ctx, context = other, permission = \"orders:read\"")
+                .expect("token parse");
+        let err = parse_authorize_args(tokens).expect_err("expected Err for duplicate context");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'context' argument"),
+            "duplicate context message mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn e_duplicate_permission() {
+        let tokens: proc_macro2::TokenStream =
+            syn::parse_str("context = ctx, permission = \"orders:read\", permission = \"orders:write\"")
+                .expect("token parse");
+        let err = parse_authorize_args(tokens).expect_err("expected Err for duplicate permission");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'permission' argument"),
+            "duplicate permission message mismatch: {msg}"
+        );
+    }
+
     // ── AC-3.6: valid 'resource:action' does NOT trigger E2 ──────────────
 
     #[test]
@@ -323,7 +368,10 @@ pub(crate) mod authorize_args_tests {
             syn::parse_str("async fn foo(&self, ctx: ServiceContext) -> Result<(), E>")
                 .expect("sig parse");
         let ident: syn::Ident = syn::parse_str("ctx").expect("ident parse");
-        assert!(validate_context_ident_in_signature(&ident, &sig).is_ok());
+        // Returns the 0-based typed-param index so callers avoid re-scanning the input list.
+        let idx = validate_context_ident_in_signature(&ident, &sig)
+            .expect("ctx is the first typed param");
+        assert_eq!(idx, 0, "ctx is typed-param index 0 (self is skipped)");
     }
 
     #[test]

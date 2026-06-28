@@ -10,13 +10,15 @@
 //! `AccessRequest::from_permission` rejects any descriptor that contains `"*"`
 //! in either the resource or action segment.
 
+use std::borrow::Cow;
+
 use crate::error::SecurityError;
 
 /// A resource kind with an optional instance identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resource {
     /// Resource kind (e.g. `"orders"`, `"invoices"`).
-    pub kind: String,
+    pub kind: Cow<'static, str>,
     /// Optional instance identifier (e.g. `"order-42"`).
     pub id: Option<String>,
 }
@@ -27,7 +29,7 @@ pub struct Resource {
 /// they are valid only in [`crate::policy::Permission::action`] on the grant
 /// side of an authorization policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Action(pub String);
+pub struct Action(pub Cow<'static, str>);
 
 /// Describes what a principal wants to do: perform `action` on `resource`.
 #[derive(Debug, Clone)]
@@ -44,7 +46,44 @@ impl AccessRequest {
         Self { resource, action }
     }
 
-    /// Parses a `"resource:action"` descriptor string.
+    /// Parses a `"resource:action"` descriptor from a `&'static str`, borrowing
+    /// the resource and action slices with `Cow::Borrowed` — zero allocation at runtime.
+    ///
+    /// Use this constructor for compile-time known permission strings (e.g., string
+    /// literals in proc-macro generated code). For runtime-constructed strings, use
+    /// [`from_permission`](Self::from_permission), which produces `Cow::Owned` slices.
+    ///
+    /// # Errors
+    /// Returns a `&'static str` description if the descriptor does not have the form
+    /// `"resource:action"` with non-empty parts and exactly one `':'`.
+    pub fn from_static(permission: &'static str) -> Result<Self, &'static str> {
+        match permission.split_once(':') {
+            Some((resource, action))
+                if !resource.is_empty()
+                    && !action.is_empty()
+                    && !action.contains(':')
+                    && resource != "*"
+                    && action != "*" =>
+            {
+                Ok(Self {
+                    resource: Resource {
+                        kind: Cow::Borrowed(resource),
+                        id: None,
+                    },
+                    action: Action(Cow::Borrowed(action)),
+                })
+            }
+            Some(("*", _)) | Some((_, "*")) => {
+                Err("wildcard not valid in access request; wildcards belong on the grant side")
+            }
+            _ => Err("permission must be \"resource:action\" with non-empty parts"),
+        }
+    }
+
+    /// Parses a `"resource:action"` descriptor string from a runtime `&str`.
+    ///
+    /// Produces `Cow::Owned` slices. For compile-time known strings prefer
+    /// [`from_static`](Self::from_static) which borrows without allocating.
     ///
     /// # Errors
     /// Returns [`SecurityError::InvalidAccessRequest`] if:
@@ -82,12 +121,17 @@ impl AccessRequest {
                     .into(),
             ));
         }
+        if action.contains(':') {
+            return Err(SecurityError::InvalidAccessRequest(
+                "permission must have exactly one ':' (form \"resource:action\")".into(),
+            ));
+        }
         Ok(Self::new(
             Resource {
-                kind: resource.into(),
+                kind: Cow::Owned(resource.to_owned()),
                 id: None,
             },
-            Action(action.into()),
+            Action(Cow::Owned(action.to_owned())),
         ))
     }
 }
@@ -169,10 +213,62 @@ mod tests {
     }
 
     #[test]
+    fn from_permission_rejects_multiple_colons() {
+        assert!(matches!(
+            AccessRequest::from_permission("a:b:c"),
+            Err(SecurityError::InvalidAccessRequest(_))
+        ));
+    }
+
+    #[test]
     fn from_permission_rejects_double_wildcard() {
         assert!(matches!(
             AccessRequest::from_permission("*:*"),
             Err(SecurityError::InvalidAccessRequest(_))
         ));
+    }
+
+    // ── from_static ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_static_parses_valid_descriptor() {
+        let req = AccessRequest::from_static("orders:read").unwrap();
+        assert!(matches!(req.resource.kind, std::borrow::Cow::Borrowed("orders")));
+        assert!(matches!(req.action.0, std::borrow::Cow::Borrowed("read")));
+    }
+
+    #[test]
+    fn from_static_rejects_missing_colon() {
+        assert!(AccessRequest::from_static("ordersread").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_empty_resource() {
+        assert!(AccessRequest::from_static(":read").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_empty_action() {
+        assert!(AccessRequest::from_static("orders:").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_multiple_colons() {
+        assert!(AccessRequest::from_static("a:b:c").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_wildcard_action() {
+        assert!(AccessRequest::from_static("orders:*").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_wildcard_resource() {
+        assert!(AccessRequest::from_static("*:read").is_err());
+    }
+
+    #[test]
+    fn from_static_rejects_double_wildcard() {
+        assert!(AccessRequest::from_static("*:*").is_err());
     }
 }

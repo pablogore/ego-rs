@@ -5,6 +5,9 @@ edition = "2021"
 
 [features]
 dev-providers = []
+# test-helpers is an alias for dev-providers — enables AlwaysAllow / AllowAllAuthorizationProvider
+# for use in unit and integration tests without enabling all dev-providers.
+test-helpers = ["dev-providers"]
 
 [dependencies]
 async-trait = "0.1"
