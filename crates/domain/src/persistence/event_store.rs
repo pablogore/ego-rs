@@ -32,4 +32,18 @@ pub trait EventStore<E: DomainEvent> {
 
     /// List all aggregate IDs known to this store, optionally scoped to a tenant.
     fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError>;
+
+    /// Returns the logical position of the first event that `load` would return.
+    ///
+    /// Stores that hold all events from the beginning return `0`.
+    /// Stores that have a pre-seeded version offset (e.g. for test setup) override
+    /// this to return the number of events that precede the physical stream.
+    ///
+    /// This is used by [`PersistenceFacade`] to correctly filter post-snapshot events
+    /// when recovering entity state.
+    ///
+    /// [`PersistenceFacade`]: persistent_entity::persistence::PersistenceFacade
+    fn stream_version_offset(&self, _aggregate_id: &str, _tenant_id: Option<&str>) -> u64 {
+        0
+    }
 }

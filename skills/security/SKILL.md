@@ -1,0 +1,88 @@
+---
+name: ego-rs-security
+description: "Trigger: security review, audit, SQL, query, user input, auth, JWT, permissions, tenant. Enforce security rules before writing or reviewing code that touches queries, auth, or external input."
+license: Apache-2.0
+metadata:
+  author: "pablogore"
+  version: "1.0"
+---
+
+## Activation Contract
+
+Load this skill when:
+- Writing or reviewing any code that constructs a database query
+- Writing or reviewing auth, JWT validation, or permission checks
+- Handling user-supplied input at any system boundary
+- Reviewing persistence, transport, or service-sdk crates
+
+## Hard Rules
+
+### Rule 1 — No SQL Injection (ABSOLUTE — no exceptions)
+
+Never construct SQL by concatenating or interpolating user input, variables, or external data.
+This rule holds under ALL contexts: tests, migrations, admin tools, internal services, CLIs.
+
+**Forbidden patterns:**
+```rust
+// String format — NEVER
+format!("SELECT * FROM users WHERE id = '{}'", user_id)
+sqlx::query(&format!("SELECT ... WHERE name = '{}'", name))
+
+// Manual concatenation — NEVER
+"SELECT * FROM events WHERE aggregate_id = '".to_string() + id + "'"
+```
+
+**Required pattern — always use bound parameters:**
+```rust
+// sqlx — always bind, never interpolate
+sqlx::query("SELECT * FROM events WHERE aggregate_id = $1 AND tenant_id = $2")
+    .bind(aggregate_id)
+    .bind(tenant_id)
+    .fetch_all(&pool)
+    .await
+```
+
+If a query cannot be expressed with bound parameters (e.g., dynamic column names), it requires an explicit security review comment AND must use a strict allowlist — never a user-supplied string.
+
+### Rule 2 — Tenant Isolation
+
+Every query that touches tenant-scoped data MUST include `tenant_id` as a bound parameter.
+Never derive tenant from a mutable or user-controlled field without validation.
+
+### Rule 3 — JWT / Auth Boundaries
+
+- Never trust a JWT claim without signature verification first.
+- Scope checks (tenant, role) MUST happen after signature verification, not before or in parallel.
+- Do not log raw token values or private claims.
+
+### Rule 4 — No Privilege Escalation via Self-Referential Calls
+
+Do not allow a service to issue requests on behalf of another tenant using its own credentials.
+Cross-tenant operations require an explicit `CrossTenantPermit` (see `crates/service-sdk`).
+
+## Decision Gates
+
+| Situation | Action |
+|-----------|--------|
+| Query uses user-supplied string in SQL text | Block — rewrite with `bind()` |
+| Dynamic table/column name from user input | Block — use allowlist only |
+| Tenant field missing from query | Block — add tenant scope |
+| JWT claim used before `verify()` | Block — verify first |
+| Cross-tenant call without permit | Block — add `CrossTenantPermit` |
+| All params bound, tenant scoped | Pass |
+
+## Execution Steps
+
+1. Scan every `sqlx::query` / `sqlx::query_as` / `sqlx::query_scalar` call in the diff.
+2. Confirm no string interpolation or concatenation reaches the SQL text.
+3. Confirm every tenant-scoped table has `tenant_id` as a bound `$N` parameter.
+4. If auth code is touched: verify the signature-first ordering is intact.
+5. If cross-tenant code is touched: verify `CrossTenantPermit` is present and validated.
+6. Report findings as BLOCK (must fix before merge) or WARN (should fix, explain risk).
+
+## Output Contract
+
+Return:
+- PASS — no violations found
+- BLOCK — list each violation with file:line, the forbidden pattern, and the required fix
+- WARN — list advisory issues with rationale

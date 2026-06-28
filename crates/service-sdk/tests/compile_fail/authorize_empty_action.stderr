@@ -1,0 +1,5 @@
+error: #[authorize] action in "orders:" must not be empty
+  --> tests/compile_fail/authorize_empty_action.rs:34:45
+   |
+34 |     #[authorize(context = ctx, permission = "orders:")]
+   |                                             ^^^^^^^^^

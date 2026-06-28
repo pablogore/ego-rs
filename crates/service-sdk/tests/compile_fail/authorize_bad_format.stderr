@@ -1,0 +1,5 @@
+error: #[authorize] permission "ordersread" must have the form "resource:action"
+  --> tests/compile_fail/authorize_bad_format.rs:34:45
+   |
+34 |     #[authorize(context = ctx, permission = "ordersread")]
+   |                                             ^^^^^^^^^^^^

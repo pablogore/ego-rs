@@ -6,7 +6,10 @@ pub mod decision;
 pub use access_request::{AccessRequest, Action, Resource};
 pub use decision::AuthorizationDecision;
 
+use std::panic::AssertUnwindSafe;
+
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 
 use crate::{context::SecurityContext, error::SecurityError, principal::Principal};
 
@@ -40,10 +43,19 @@ pub trait AuthorizationProvider: Send + Sync {
 /// targets. The caller passes the already-resolved `Option<&SecurityContext>`
 /// (extracted from `ctx.security`) so this function remains ego-dep-free.
 ///
+/// # Test pattern
+///
+/// In unit and integration tests that need a no-op authorization layer, enable
+/// the `test-helpers` (or `dev-providers`) Cargo feature and use
+/// [`crate::AllowAllAuthorizationProvider`].  If fine-grained call inspection
+/// is needed, use `mockall::automock` — the `AuthorizationProvider` trait is
+/// already annotated with `#[cfg_attr(test, mockall::automock)]`.
+///
 /// # Errors
 /// - [`SecurityError::CapabilityNotEnabled`] if security is not enabled in the runtime.
 /// - [`SecurityError::AuthorizationDenied`] if the decision is `Deny`.
-/// - Propagates any provider error.
+/// - [`SecurityError::ProviderError`] if the provider returns an error or panics.
+///   A panicking provider maps to `ProviderError` — the system always fails closed.
 pub async fn authorize_in_context(
     security: Option<&SecurityContext>,
     resource: Resource,
@@ -53,7 +65,15 @@ pub async fn authorize_in_context(
     let sec = security.ok_or(SecurityError::CapabilityNotEnabled)?;
     let principal = sec.principal();
     let request = AccessRequest::new(resource, action);
-    match provider.authorize(principal, &request, sec).await? {
+    let decision = AssertUnwindSafe(provider.authorize(principal, &request, sec))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| {
+            Err(SecurityError::ProviderError(
+                "authorization provider panicked".into(),
+            ))
+        })?;
+    match decision {
         AuthorizationDecision::Allow => Ok(()),
         AuthorizationDecision::Deny { reason } => {
             Err(SecurityError::AuthorizationDenied { reason })
@@ -74,12 +94,14 @@ mod tests {
         principal::{Principal, PrincipalKind, SubjectId},
     };
 
-    // ── AuthorizationProvider object-safety tests (TASK-017) ──────────────────
+    // ── AuthorizationProvider object-safety tests ─────────────────────────────
 
-    struct AlwaysAllow;
+    /// Inline test stub — always grants access. NOT a public type; see
+    /// `providers::allow_all::AllowAllAuthorizationProvider` for the public variant.
+    struct InlineAllow;
 
     #[async_trait]
-    impl AuthorizationProvider for AlwaysAllow {
+    impl AuthorizationProvider for InlineAllow {
         async fn authorize(
             &self,
             _: &Principal,
@@ -87,22 +109,6 @@ mod tests {
             _: &SecurityContext,
         ) -> Result<AuthorizationDecision, SecurityError> {
             Ok(AuthorizationDecision::Allow)
-        }
-    }
-
-    struct AlwaysDeny;
-
-    #[async_trait]
-    impl AuthorizationProvider for AlwaysDeny {
-        async fn authorize(
-            &self,
-            _: &Principal,
-            _: &AccessRequest,
-            _: &SecurityContext,
-        ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Deny {
-                reason: "denied".into(),
-            })
         }
     }
 
@@ -114,7 +120,7 @@ mod tests {
 
     #[test]
     fn provider_is_object_safe() {
-        let _: Arc<dyn AuthorizationProvider> = Arc::new(AlwaysAllow);
+        let _: Arc<dyn AuthorizationProvider> = Arc::new(InlineAllow);
     }
 
     #[test]
@@ -134,20 +140,36 @@ mod tests {
             Action("act".into()),
         );
 
-        let allow_result = AlwaysAllow
+        let allow_result = InlineAllow
             .authorize(ctx.principal(), &req, &ctx)
             .await
             .unwrap();
         assert!(matches!(allow_result, AuthorizationDecision::Allow));
 
-        let deny_result = AlwaysDeny
+        struct InlineDeny;
+
+        #[async_trait]
+        impl AuthorizationProvider for InlineDeny {
+            async fn authorize(
+                &self,
+                _: &Principal,
+                _: &AccessRequest,
+                _: &SecurityContext,
+            ) -> Result<AuthorizationDecision, SecurityError> {
+                Ok(AuthorizationDecision::Deny {
+                    reason: "denied".into(),
+                })
+            }
+        }
+
+        let deny_result = InlineDeny
             .authorize(ctx.principal(), &req, &ctx)
             .await
             .unwrap();
         assert!(matches!(deny_result, AuthorizationDecision::Deny { .. }));
     }
 
-    // ── authorize_in_context tests (TASK-025) ─────────────────────────────────
+    // ── authorize_in_context tests ────────────────────────────────────────────
 
     #[tokio::test]
     async fn allow_returns_ok_unit() {
@@ -159,7 +181,7 @@ mod tests {
                 id: None,
             },
             Action("read".into()),
-            &AlwaysAllow,
+            &InlineAllow,
         )
         .await;
         assert!(result.is_ok());
@@ -209,10 +231,43 @@ mod tests {
                 id: None,
             },
             Action("read".into()),
-            &AlwaysAllow,
+            &InlineAllow,
         )
         .await;
         assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn panicking_provider_returns_provider_error() {
+        struct PanicProvider;
+
+        #[async_trait]
+        impl AuthorizationProvider for PanicProvider {
+            async fn authorize(
+                &self,
+                _: &Principal,
+                _: &AccessRequest,
+                _: &SecurityContext,
+            ) -> Result<AuthorizationDecision, SecurityError> {
+                panic!("provider bug")
+            }
+        }
+
+        let ctx = make_ctx();
+        let result = authorize_in_context(
+            Some(&ctx),
+            Resource {
+                kind: "orders".into(),
+                id: None,
+            },
+            Action("read".into()),
+            &PanicProvider,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SecurityError::ProviderError(_))),
+            "expected ProviderError on panic, got: {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -30,7 +30,10 @@ pub use ego_domain::auth::{AuthenticationError, Claims, StandardClaims};
 pub use error::SecurityError;
 pub use policy::{InMemoryRoleStore, Permission, RoleStore};
 pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
+#[cfg(feature = "dev-providers")]
+pub use providers::allow_all::AllowAllAuthorizationProvider;
 pub use providers::{
     basic::{BasicAuthenticationProvider, CredentialVerifier},
+    deny_all::DenyAllAuthorizationProvider,
     rbac::RbacProvider,
 };

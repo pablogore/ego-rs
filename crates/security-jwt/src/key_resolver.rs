@@ -49,6 +49,9 @@ pub enum VerificationKey {
     /// RSA public key in PEM format (RS256). The string begins with
     /// `-----BEGIN PUBLIC KEY-----` or `-----BEGIN RSA PUBLIC KEY-----`.
     RsaPem(String),
+    /// EC public key in PEM format (ES256). The string begins with
+    /// `-----BEGIN PUBLIC KEY-----` (PKIX/SubjectPublicKeyInfo form).
+    EcPem(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,27 @@ impl KeyResolver for LocalKeyResolver {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Fixture pinning (compile-only check that EC fixture files are present)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fixture_pin_tests {
+    // These include_str! calls fail to compile if any fixture is missing from disk.
+    const _EC_PRIVATE: &str = include_str!("../tests/fixtures/test_ec_private.pem");
+    const _EC_PUBLIC: &str = include_str!("../tests/fixtures/test_ec_public.pem");
+    const _EC_OTHER_PRIVATE: &str = include_str!("../tests/fixtures/test_ec_other_private.pem");
+    const _EC_OTHER_PUBLIC: &str = include_str!("../tests/fixtures/test_ec_other_public.pem");
+
+    #[test]
+    fn ec_fixtures_are_non_empty() {
+        assert!(!_EC_PRIVATE.is_empty());
+        assert!(!_EC_PUBLIC.is_empty());
+        assert!(!_EC_OTHER_PRIVATE.is_empty());
+        assert!(!_EC_OTHER_PUBLIC.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod key_resolver_error_tests {
     use super::*;
@@ -159,6 +183,16 @@ mod key_resolver_error_tests {
 #[cfg(test)]
 mod verification_key_tests {
     use super::*;
+
+    #[test]
+    fn ec_pem_variant_stores_string() {
+        let pem = "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----".to_string();
+        let key = VerificationKey::EcPem(pem.clone());
+        match key {
+            VerificationKey::EcPem(stored) => assert_eq!(stored, pem),
+            _ => panic!("expected EcPem"),
+        }
+    }
 
     #[test]
     fn hmac_variant_stores_bytes() {

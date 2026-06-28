@@ -1,0 +1,5 @@
+error: #[authorize] permission must be a string literal known at compile time
+  --> tests/compile_fail/authorize_non_literal.rs:36:45
+   |
+36 |     #[authorize(context = ctx, permission = PERM_CONST)]
+   |                                             ^^^^^^^^^^

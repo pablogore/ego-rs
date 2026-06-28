@@ -6,6 +6,8 @@ use ego_security_sdk::context::SecurityContext;
 use ego_security_sdk::error::SecurityError;
 use tokio_util::sync::CancellationToken;
 
+use crate::runtime::CrossTenantPermit;
+
 /// A service context that propagates across service calls for tracing, tenant isolation,
 /// and other cross-cutting concerns.
 ///
@@ -28,6 +30,10 @@ use tokio_util::sync::CancellationToken;
 /// `ServiceContext::clone()` performs a shallow clone of `security` (Arc increment) and a
 /// deep clone of string fields and the additional-context map. For typical request contexts
 /// (3-5 string fields, empty or small map), this is a few heap allocations.
+///
+/// The `allow_cross_tenant` flag is preserved on clone — a cloned context retains the same
+/// cross-tenant permission as the original. This is intentional: the permit authorizes the
+/// context value, not a single use.
 ///
 /// For hot paths that clone context frequently, prefer keeping `additional_context` empty
 /// and relying on the typed fields. Avoid storing large payloads in `additional_context`.
@@ -52,7 +58,7 @@ pub struct ServiceContext {
     /// The additional context.
     pub additional_context: HashMap<String, String>,
     /// Whether cross-tenant access is allowed.
-    pub allow_cross_tenant: bool,
+    allow_cross_tenant: bool,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
@@ -150,11 +156,16 @@ impl ServiceContext {
         self
     }
 
-    /// Allows cross-tenant access.
+    /// Marks the context as permitted for cross-tenant access.
     ///
-    /// # Returns
-    /// A new `ServiceContext` with cross-tenant access enabled
-    pub fn allow_cross_tenant(mut self) -> Self {
+    /// Requires a [`CrossTenantPermit`] issued by [`RuntimeInner::issue_cross_tenant_permit`].
+    /// Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
+    /// fallback exists. The permit is a zero-size witness of authorization; it is borrowed
+    /// (not consumed) so one issued permit can authorize multiple context grants.
+    ///
+    /// Compile-time gate only. TASK-014 adds the runtime authorization check inside
+    /// `RuntimeInner::issue_cross_tenant_permit`.
+    pub fn with_cross_tenant_access(mut self, _permit: &CrossTenantPermit) -> Self {
         self.allow_cross_tenant = true;
         self
     }
@@ -303,6 +314,25 @@ mod tests {
         let subject = SubjectId::new("user:test").unwrap();
         let principal = Principal::new(PrincipalKind::User, subject);
         SecurityContext::empty(principal)
+    }
+
+    #[test]
+    fn with_cross_tenant_access_sets_flag() {
+        use crate::runtime::RuntimeInner;
+        let inner = RuntimeInner::default();
+        let permit = inner.issue_cross_tenant_permit();
+        let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
+        assert!(ctx.is_cross_tenant_allowed());
+    }
+
+    #[test]
+    fn clone_preserves_cross_tenant_flag() {
+        use crate::runtime::RuntimeInner;
+        let rt = RuntimeInner::default();
+        let permit = rt.issue_cross_tenant_permit();
+        let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
+        let cloned = ctx.clone();
+        assert!(cloned.is_cross_tenant_allowed());
     }
 
     #[test]

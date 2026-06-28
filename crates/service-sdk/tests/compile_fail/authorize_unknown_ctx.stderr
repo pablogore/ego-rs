@@ -1,0 +1,5 @@
+error: #[authorize] context parameter 'wrong' not found in method signature
+  --> tests/compile_fail/authorize_unknown_ctx.rs:35:27
+   |
+35 |     #[authorize(context = wrong, permission = "orders:read")]
+   |                           ^^^^^

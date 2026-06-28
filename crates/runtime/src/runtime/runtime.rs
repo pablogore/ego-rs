@@ -80,6 +80,10 @@ struct TokioRuntimeInner {
     handle: tokio::runtime::Handle,
     /// Registry of all active executions, keyed by `ExecutionId`.
     units: Mutex<HashMap<ExecutionId, ExecutionUnit>>,
+    /// Owned runtime — present only when created via `with_new_runtime`.
+    /// Kept alive until the last `TokioRuntime` clone is dropped; dropped last
+    /// so the handle above is still valid during `units` cleanup.
+    _runtime: Option<tokio::runtime::Runtime>,
 }
 
 /// Tokio-backed runtime implementation.
@@ -102,11 +106,16 @@ impl TokioRuntime {
             inner: Arc::new(TokioRuntimeInner {
                 handle,
                 units: Mutex::new(HashMap::new()),
+                _runtime: None,
             }),
         }
     }
 
-    /// Create a new `TokioRuntime` with a new multi-threaded runtime.
+    /// Create a new `TokioRuntime` that owns its Tokio runtime.
+    ///
+    /// The runtime is kept alive for as long as any clone of the returned
+    /// `TokioRuntime` exists; it is dropped cleanly when the last clone is
+    /// released.
     pub fn with_new_runtime() -> Result<Self, SpawnError> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -116,11 +125,14 @@ impl TokioRuntime {
             })?;
 
         let handle = rt.handle().clone();
-        let runtime = Self::new(handle);
 
-        std::mem::forget(rt);
-
-        Ok(runtime)
+        Ok(Self {
+            inner: Arc::new(TokioRuntimeInner {
+                handle,
+                units: Mutex::new(HashMap::new()),
+                _runtime: Some(rt),
+            }),
+        })
     }
 
     /// Internal: spawns an execution by creating an `ExecutionUnit`, building

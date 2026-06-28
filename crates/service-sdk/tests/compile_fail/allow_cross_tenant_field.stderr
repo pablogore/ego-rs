@@ -1,0 +1,5 @@
+error[E0616]: field `allow_cross_tenant` of struct `ServiceContext` is private
+ --> tests/compile_fail/allow_cross_tenant_field.rs:5:9
+  |
+5 |     ctx.allow_cross_tenant = true;
+  |         ^^^^^^^^^^^^^^^^^^ private field

@@ -21,6 +21,9 @@ Thumbs.db
 # AI / Coding assistants
 .aider*
 .gga
+.atl/
+.serena/
+.arena/
 
 # Environment
 .env
@@ -51,3 +54,7 @@ graphify-out/
 .specs-fire/
 .specsmd/
 .specify/
+
+# Compiled test/scratch binaries
+test_const_closure_good
+test_const_closure_bad

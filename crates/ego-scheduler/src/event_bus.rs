@@ -111,17 +111,24 @@ pub struct BusItem {
 }
 
 /// Policy for handling buffer overflow at enqueue time (I5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum DropPolicy {
     /// Sender blocks until space available.
     Block,
     /// Incoming event silently dropped.
     DropNewest,
     /// Oldest buffered event evicted.
+    ///
+    /// NOTE: True eviction requires access to the receiver side, which the
+    /// sender does not hold. Current behaviour falls back to DropNewest —
+    /// the incoming event is silently accepted (Ok) rather than returning an
+    /// error.
+    /// TODO #79: implement true DropOldest via shared receiver.
     DropOldest,
 }
 
 /// Configuration for the event bus.
+#[derive(serde::Deserialize)]
 pub struct EventBusConfig {
     pub capacity: usize,
     pub drop_policy: DropPolicy,
@@ -133,6 +140,17 @@ impl Default for EventBusConfig {
             capacity: 4096,
             drop_policy: DropPolicy::Block,
         }
+    }
+}
+
+impl EventBusConfig {
+    /// Deserialize a [`serde_json::Value`] into an [`EventBusConfig`].
+    ///
+    /// Entry point for kit-config integration — callers pass the `Value`
+    /// obtained from `kit_config::ConfigLoader` without any direct dependency
+    /// on kit-config in this crate.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value)
     }
 }
 
@@ -156,7 +174,10 @@ impl SchedulerEventSender {
             Err(mpsc::error::TrySendError::Full(_)) => match self.drop_policy {
                 DropPolicy::Block => Err(SchedulerError::BusFull),
                 DropPolicy::DropNewest => Ok(()),
-                DropPolicy::DropOldest => Err(SchedulerError::BusFull),
+                // TODO #79: implement true DropOldest (requires shared rx).
+                // Falls back to DropNewest: silently discard the incoming
+                // event rather than returning an error.
+                DropPolicy::DropOldest => Ok(()),
             },
             Err(mpsc::error::TrySendError::Closed(_)) => Err(SchedulerError::ChannelClosed),
         }

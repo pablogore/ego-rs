@@ -38,10 +38,10 @@ fn handler(
 }
 
 // ============================================================================
-// User Story 1 — Activation Ordering (T007–T011)
+// User Story 1 — Activation Ordering
 // ============================================================================
 
-/// T007 / T008: Activation lookup — send to new entity creates it, passivation removes sender.
+/// Activation lookup — send to new entity creates it, passivation removes sender.
 #[tokio::test]
 async fn test_activation_lookup_active_and_passivated() {
     let runtime = build_runtime();
@@ -62,7 +62,7 @@ async fn test_activation_lookup_active_and_passivated() {
     assert!(result.is_ok(), "second send should use active sender");
 }
 
-/// T009: FIFO ordering — commands processed in send order.
+/// FIFO ordering — commands processed in send order.
 #[tokio::test]
 async fn test_activation_fifo_ordering() {
     let runtime = build_runtime();
@@ -91,7 +91,7 @@ async fn test_activation_fifo_ordering() {
     assert_eq!(expected, 55);
 }
 
-/// T010: No partial state — command always sees fully recovered state.
+/// No partial state — command always sees fully recovered state.
 #[tokio::test]
 async fn test_no_partial_state_observable() {
     let runtime = build_runtime();
@@ -120,7 +120,7 @@ async fn test_no_partial_state_observable() {
     }
 }
 
-/// T011: Activation redirect — concurrent callers find active entity without duplicate spawn.
+/// Activation redirect — concurrent callers find active entity without duplicate spawn.
 #[tokio::test]
 async fn test_activation_redirect() {
     let runtime = build_runtime();
@@ -151,10 +151,10 @@ async fn test_activation_redirect() {
 }
 
 // ============================================================================
-// User Story 2 — No Double Actor Spawn (T012–T015)
+// User Story 2 — No Double Actor Spawn
 // ============================================================================
 
-/// T012: No double spawn — concurrent tasks to passivated entity all go to one actor.
+/// No double spawn — concurrent tasks to passivated entity all go to one actor.
 #[tokio::test]
 async fn test_no_double_spawn_concurrent() {
     let runtime = build_fast_passivation_runtime();
@@ -184,7 +184,7 @@ async fn test_no_double_spawn_concurrent() {
     );
 
     // At most 1 active entity should exist
-    let active_count = runtime.active_count().await;
+    let active_count = runtime.active_count();
     assert!(
         active_count <= 2,
         "should have at most 2 active (one draining, one new): {}",
@@ -192,7 +192,7 @@ async fn test_no_double_spawn_concurrent() {
     );
 }
 
-/// T013 / T014: Mutex-based single-flight — concurrent activations serialize.
+/// Mutex-based single-flight — concurrent activations serialize.
 #[tokio::test]
 async fn test_activation_mutex_serializes() {
     let runtime = build_fast_passivation_runtime();
@@ -234,11 +234,11 @@ async fn test_activation_mutex_serializes() {
         assert!(result.is_ok(), "concurrent command should succeed");
     }
 
-    let active = runtime.active_count().await;
+    let active = runtime.active_count();
     assert!(active <= 2, "at most 2 active entities: {}", active);
 }
 
-/// T015: No double spawn across multiple entities — each gets exactly one actor.
+/// No double spawn across multiple entities — each gets exactly one actor.
 #[tokio::test]
 async fn test_no_double_spawn_multiple_entities() {
     let runtime = build_fast_passivation_runtime();
@@ -269,15 +269,15 @@ async fn test_no_double_spawn_multiple_entities() {
     }
 
     // All 10 should have active actors (or some may have passivated already)
-    let active = runtime.active_count().await;
+    let active = runtime.active_count();
     assert!(active > 0, "at least some entities should be active");
 }
 
 // ============================================================================
-// User Story 3 — Deterministic Recovery (T016–T020)
+// User Story 3 — Deterministic Recovery
 // ============================================================================
 
-/// T016: Recovery barrier — pre-loaded events are reflected after activation.
+/// Recovery barrier — pre-loaded events are reflected after activation.
 #[tokio::test]
 async fn test_recovery_barrier() {
     // Build runtime, increment many times to build history
@@ -316,7 +316,7 @@ async fn test_recovery_barrier() {
     }
 }
 
-/// T017: Deterministic replay — same event stream produces identical state.
+/// Deterministic replay — same event stream produces identical state.
 #[tokio::test]
 async fn test_recovery_deterministic_replay() {
     let runtime = build_runtime();
@@ -360,7 +360,7 @@ async fn test_recovery_deterministic_replay() {
     }
 }
 
-/// T018: Recovery failure transition — simulated via handler error.
+/// Recovery failure transition — simulated via handler error.
 #[tokio::test]
 async fn test_recovery_failure_transitions_to_failed() {
     let runtime = build_runtime();
@@ -395,7 +395,7 @@ async fn test_recovery_failure_transitions_to_failed() {
     );
 }
 
-/// T019: Recovery retry — after failure, next command triggers fresh activation.
+/// Recovery retry — after failure, next command triggers fresh activation.
 #[tokio::test]
 async fn test_recovery_retry_after_failure() {
     let runtime = build_runtime();
@@ -415,7 +415,7 @@ async fn test_recovery_retry_after_failure() {
     assert!(result.is_ok());
 }
 
-/// T025: Zero-event query — GetState produces NoEvents, doesn't advance version.
+/// Zero-event query — GetState produces NoEvents, doesn't advance version.
 #[tokio::test]
 async fn test_zero_event_query() {
     let runtime = build_runtime();
@@ -442,7 +442,7 @@ async fn test_zero_event_query() {
     }
 }
 
-/// T025-2: Multiple entity isolation — same entity type, different IDs.
+/// Multiple entity isolation — same entity type, different IDs.
 #[tokio::test]
 async fn test_multiple_entity_isolation() {
     let runtime = build_runtime();

@@ -1,22 +1,37 @@
-//! Tokio-based implementations of the [`ExecutionBackend`] trait.
+//! Tokio-based execution backend (deprecated — retained for compatibility only).
 //!
-//! Provides [`TokioExecutionBackend`] for real execution and [`SyncTestBackend`]
-//! for test environments.
-
-use futures::executor::block_on;
-use serde::de::DeserializeOwned;
+//! The `block_on` path has been removed. Command execution now happens
+//! directly inside the spawned actor task via `.await`. This module is kept
+//! only in case external consumers still reference [`TokioExecutionBackend`].
+//!
+//! # Deprecation notice
+//!
+//! [`TokioExecutionBackend`] and [`SyncTestBackend`] are deprecated. The actor
+//! loop in [`crate::actor`] awaits handler methods directly; no
+//! [`ExecutionBackend`] implementation is used on the hot path. These types
+//! will be removed in a future change.
 
 use crate::command_context::CommandContext;
 use crate::error::EntityError;
+#[allow(deprecated)]
 use crate::execution_backend::ExecutionBackend;
 use crate::persistent_entity::PersistentEntity;
+use serde::de::DeserializeOwned;
 
-/// An [`ExecutionBackend`] that runs handler logic via `tokio::task::block_on`.
+/// Deprecated Tokio-based [`ExecutionBackend`].
 ///
-/// Suitable for use within Tokio runtimes where blocking is acceptable.
+/// Previously used `futures::executor::block_on` to drive async handlers
+/// synchronously. That pattern panics inside a `current_thread` Tokio
+/// runtime. The actor now awaits handlers directly; this type is a stub
+/// retained for API compatibility.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use EntityActor directly; block_on has been removed"
+)]
 #[derive(Debug, Default, Clone)]
 pub struct TokioExecutionBackend;
 
+#[allow(deprecated)]
 impl TokioExecutionBackend {
     /// Creates a new [`TokioExecutionBackend`].
     pub fn new() -> Self {
@@ -24,39 +39,38 @@ impl TokioExecutionBackend {
     }
 }
 
+#[allow(deprecated)]
 impl ExecutionBackend for TokioExecutionBackend {
     fn execute<C, E, S>(
         &self,
-        entity: &dyn PersistentEntity<Command = C, Event = E, State = S>,
-        state: &S,
-        command: &C,
-        context: &CommandContext,
+        _entity: &dyn PersistentEntity<Command = C, Event = E, State = S>,
+        _state: &S,
+        _command: &C,
+        _context: &CommandContext,
     ) -> Result<(Vec<E>, S), EntityError>
     where
         C: Send + Sync + serde::Serialize + 'static,
         E: Send + Sync + Clone + serde::Serialize + 'static,
         S: Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     {
-        let events = block_on(entity.handle_command(command, state, context))
-            .map_err(|e| EntityError::Internal(e.to_string()))?;
-
-        let new_state = if events.is_empty() {
-            state.clone()
-        } else {
-            block_on(entity.apply_events(state, &events))
-                .map_err(|e| EntityError::Internal(e.to_string()))?
-        };
-
-        Ok((events, new_state))
+        Err(EntityError::Internal(
+            "TokioExecutionBackend is deprecated; use EntityActor directly".to_string(),
+        ))
     }
 }
 
-/// A test-only [`ExecutionBackend`] that delegates to [`TokioExecutionBackend`].
+/// Deprecated test [`ExecutionBackend`].
 ///
-/// Provides the same behavior for synchronous test contexts.
+/// Delegates to [`TokioExecutionBackend`], which is itself deprecated.
+/// Kept for API compatibility only.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use EntityActor with InMemory stores directly; block_on has been removed"
+)]
 #[derive(Debug, Default, Clone)]
 pub struct SyncTestBackend;
 
+#[allow(deprecated)]
 impl ExecutionBackend for SyncTestBackend {
     fn execute<C, E, S>(
         &self,
@@ -70,6 +84,7 @@ impl ExecutionBackend for SyncTestBackend {
         E: Send + Sync + Clone + serde::Serialize + 'static,
         S: Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     {
+        #[allow(deprecated)]
         TokioExecutionBackend.execute(entity, state, command, context)
     }
 }

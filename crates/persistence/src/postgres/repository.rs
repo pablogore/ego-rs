@@ -37,7 +37,6 @@ impl<A, F> fmt::Debug for PostgreSQLRepository<A, F> {
 }
 
 impl<A, F> PostgreSQLRepository<A, F> {
-    /// Constructor and helper methods for `PostgreSQLRepository`.
     /// Create a new PostgreSQL repository with the given connection pool and deserializer.
     pub fn new(pool: PgPool, deserialize: F) -> Self {
         Self {
@@ -48,7 +47,7 @@ impl<A, F> PostgreSQLRepository<A, F> {
     }
 
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        Handle::current().block_on(future)
+        tokio::task::block_in_place(|| Handle::current().block_on(future))
     }
 }
 
@@ -69,67 +68,63 @@ where
             Some(t) => Some(t.to_string()),
             None => None,
         };
-
         let payload = serde_json::to_value(&aggregate).map_err(|e| {
             PersistenceError::Internal(format!("failed to serialize aggregate: {}", e))
         })?;
+        let pool = self.pool.clone();
+        let aggregate_id = aggregate_id.to_string();
 
-        let is_new: bool = self.block_on(async {
-            sqlx::query_scalar(
-                r#"SELECT NOT EXISTS(SELECT 1 FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2)"#,
+        self.block_on(async move {
+            let mut tx = pool.begin().await.map_err(|e| {
+                PersistenceError::Internal(format!("failed to begin transaction: {}", e))
+            })?;
+
+            // Lock the row for update to prevent concurrent version bypasses.
+            let current_version: Option<i64> = sqlx::query_scalar(
+                r#"SELECT version FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2 FOR UPDATE"#,
             )
-            .bind(aggregate_id)
+            .bind(&aggregate_id)
             .bind(&tenant)
-            .fetch_one(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to check existence: {}", e)))?;
+            .map_err(|e| {
+                PersistenceError::Internal(format!("failed to query current version: {}", e))
+            })?;
 
-        if !is_new {
-            let current_version: Option<i64> = self
-                .block_on(async {
-                    sqlx::query_scalar(
-                    r#"SELECT version FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#,
-                )
-                .bind(aggregate_id)
-                .bind(&tenant)
-                .fetch_optional(&self.pool)
-                .await
-                })
-                .map_err(|e| {
-                    PersistenceError::Internal(format!("failed to query current version: {}", e))
-                })?;
+            let new_version = match current_version {
+                None => 1,
+                Some(current) => {
+                    if current != expected_version {
+                        return Err(PersistenceError::Conflict {
+                            aggregate_id: aggregate_id.clone(),
+                            expected: expected_version,
+                            actual: current,
+                        });
+                    }
+                    expected_version + 1
+                }
+            };
 
-            let current = current_version.unwrap_or(0);
-            if current != expected_version {
-                return Err(PersistenceError::Conflict {
-                    aggregate_id: aggregate_id.to_string(),
-                    expected: expected_version,
-                    actual: current,
-                });
-            }
-        }
-
-        let new_version = if is_new { 1 } else { expected_version + 1 };
-
-        self.block_on(async {
             sqlx::query(
                 r#"INSERT INTO aggregates (aggregate_id, tenant_id, version, payload, updated_at)
                    VALUES ($1, $2, $3, $4, NOW())
                    ON CONFLICT (aggregate_id, tenant_id) DO UPDATE
-                   SET version = $3, payload = $4, updated_at = NOW()
-                   WHERE aggregates.aggregate_id = $1 AND aggregates.tenant_id = $2"#,
+                   SET version = $3, payload = $4, updated_at = NOW()"#,
             )
-            .bind(aggregate_id)
+            .bind(&aggregate_id)
             .bind(&tenant)
             .bind(new_version)
-            .bind(payload)
-            .execute(&self.pool)
+            .bind(&payload)
+            .execute(&mut *tx)
             .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to save aggregate: {}", e)))?;
+            .map_err(|e| PersistenceError::Internal(format!("failed to save aggregate: {}", e)))?;
 
-        Ok(new_version)
+            tx.commit().await.map_err(|e| {
+                PersistenceError::Internal(format!("failed to commit transaction: {}", e))
+            })?;
+
+            Ok(new_version)
+        })
     }
 
     fn load(&self, aggregate_id: &str, tenant_id: Option<&str>) -> Result<A, PersistenceError> {

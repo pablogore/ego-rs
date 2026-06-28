@@ -1,0 +1,7 @@
+error: #[authorize] can only be used on methods inside a #[service] trait
+ --> tests/compile_fail/authorize_outside_service.rs:5:1
+  |
+5 | #[authorize(context = ctx, permission = "orders:read")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `authorize` (in Nightly builds, run with -Z macro-backtrace for more info)
