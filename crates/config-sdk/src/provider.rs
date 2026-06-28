@@ -16,8 +16,7 @@ pub trait ConfigurationProvider: Send + Sync {
 
     /// Loads all key-value pairs from this provider into an immutable snapshot.
     ///
-    /// Called exactly once during
-    /// [`ConfigurationBuilder::build`](crate::builder::ConfigurationBuilder::build).
+    /// Called exactly once during `ConfigurationBuilder::build`.
     /// Must not have side effects beyond reading the configuration source.
     fn load(&self) -> Result<ConfigurationSource, ConfigurationError>;
 }
