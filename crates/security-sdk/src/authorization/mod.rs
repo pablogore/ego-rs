@@ -43,6 +43,14 @@ pub trait AuthorizationProvider: Send + Sync {
 /// targets. The caller passes the already-resolved `Option<&SecurityContext>`
 /// (extracted from `ctx.security`) so this function remains ego-dep-free.
 ///
+/// # Test pattern
+///
+/// In unit and integration tests that need a no-op authorization layer, enable
+/// the `test-helpers` (or `dev-providers`) Cargo feature and use
+/// [`crate::AllowAllAuthorizationProvider`].  If fine-grained call inspection
+/// is needed, use `mockall::automock` — the `AuthorizationProvider` trait is
+/// already annotated with `#[cfg_attr(test, mockall::automock)]`.
+///
 /// # Errors
 /// - [`SecurityError::CapabilityNotEnabled`] if security is not enabled in the runtime.
 /// - [`SecurityError::AuthorizationDenied`] if the decision is `Deny`.

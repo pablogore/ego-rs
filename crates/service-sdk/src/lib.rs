@@ -1,14 +1,4 @@
-//! Service SDK crate for defining and resolving application services.
-//!
-//! This crate provides the core functionality for declaring service contracts,
-//! resolving services through a registry, and managing service dependencies.
-//!
-//! # Core Concepts
-//!
-//! - **Service Contracts**: Declared via `#[service]` attribute on traits
-//! - **Service Registry**: Central registry for service implementations
-//! - **Dependency Injection**: Field-declared dependencies resolved at runtime
-//! - **Service Context**: Propagated across service calls for tracing and tenant isolation
+//! Service SDK — contracts, runtime, DI, and interceptors for ego-rs services.
 
 pub mod context;
 pub mod contract;
@@ -31,3 +21,7 @@ pub use runtime::*;
 // Re-export async_trait so generated code can reference it via ego_service_sdk::async_trait.
 #[doc(hidden)]
 pub use async_trait;
+
+// Re-export for #[service] codegen — avoids requiring service crates to list ego-security-sdk directly.
+#[doc(hidden)]
+pub use ego_security_sdk as security;
