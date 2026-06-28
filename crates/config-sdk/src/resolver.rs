@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use crate::error::ConfigurationError;
-use crate::provider::ConfigurationProvider;
 use crate::source::ConfigurationSource;
 use crate::value::ConfigValue;
 
@@ -15,20 +14,9 @@ pub(crate) enum ConflictPolicy {
     Strict,
 }
 
-/// A provider registered with its priority tier.
-pub(crate) struct RegisteredSource {
-    /// The provider implementation.
-    pub(crate) provider: Box<dyn ConfigurationProvider>,
-    /// Priority tier (higher = more precedent). CLI=30, ENV=20, files=10, defaults=0.
-    pub(crate) priority: u32,
-    /// Cached provider name (avoids calling `provider.name()` after move).
-    pub(crate) name: String,
-}
-
 /// Resolves a set of post-load [`ConfigurationSource`] snapshots according to a conflict policy.
 ///
 /// Operates on immutable snapshots; all resolution is done at construction time.
-/// [`RegisteredSource`] entries are loaded by the builder before being passed here.
 pub(crate) struct ConfigurationResolver {
     /// Snapshots sorted **descending** by priority (highest priority first).
     sources: Vec<(u32, ConfigurationSource)>,
@@ -44,7 +32,7 @@ impl ConfigurationResolver {
         policy: ConflictPolicy,
     ) -> Self {
         // Stable sort descending so equal-priority sources retain insertion order.
-        sources.sort_by(|a, b| b.0.cmp(&a.0));
+        sources.sort_by_key(|(p, _)| std::cmp::Reverse(*p));
         Self { sources, policy }
     }
 
@@ -224,6 +212,13 @@ mod tests {
         let resolver = ConfigurationResolver::new(vec![a, b], ConflictPolicy::Strict);
         let errs = resolver.resolve().expect_err("both x and y conflict");
         assert_eq!(errs.len(), 2, "both conflicts must be collected; got: {errs:?}");
+    }
+
+    // ponytail: List → "" is the documented ceiling until OQ-04; this test pins the behavior.
+    #[test]
+    fn list_value_to_string_returns_empty() {
+        let list = ConfigValue::List(vec![ConfigValue::Str("a".into())]);
+        assert_eq!(value_to_string(&list), "");
     }
 
     // Priority-sort invariant: insertion order must not affect resolution
