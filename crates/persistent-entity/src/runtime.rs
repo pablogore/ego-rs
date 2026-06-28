@@ -22,17 +22,25 @@ use crate::snapshot::SnapshotStrategy;
 ///
 /// Controls mailbox capacity, concurrency budget, passivation timeout,
 /// and tenant isolation settings.
+#[derive(serde::Deserialize)]
 pub struct RuntimeConfig {
     /// Maximum number of commands queued per mailbox.
     pub mailbox_capacity: usize,
     /// Maximum number of concurrently active actors.
     pub concurrency_budget: usize,
-    /// Duration of inactivity before entity passivation.
-    pub passivation_timeout: std::time::Duration,
+    /// Seconds of inactivity before entity passivation.
+    pub passivation_timeout_secs: u64,
     /// When true, all entities share the default tenant scope.
     pub single_tenant_mode: bool,
     /// Tenant identifier used when single_tenant_mode is false.
     pub tenant_id: String,
+}
+
+impl RuntimeConfig {
+    /// Returns the passivation timeout as a [`std::time::Duration`].
+    pub fn passivation_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.passivation_timeout_secs)
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -40,7 +48,7 @@ impl Default for RuntimeConfig {
         RuntimeConfig {
             mailbox_capacity: 1000,
             concurrency_budget: 10000,
-            passivation_timeout: std::time::Duration::from_secs(300),
+            passivation_timeout_secs: 300,
             single_tenant_mode: true,
             tenant_id: String::new(),
         }
@@ -127,7 +135,7 @@ where
             entity_handler,
             self.event_sender.clone(),
             self.config.mailbox_capacity,
-            self.config.passivation_timeout,
+            self.config.passivation_timeout(),
         )
     }
 
