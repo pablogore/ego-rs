@@ -10,7 +10,7 @@ test-helpers = []
 thiserror = "1.0"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-kit-config = { path = "../../../kit-config/crates/kit-config", features = ["config-loaders"] }
+kit-config = { git = "https://github.com/pablogore/kit-config.git", branch = "master", features = ["config-loaders"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
