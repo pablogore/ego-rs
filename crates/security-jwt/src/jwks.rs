@@ -456,10 +456,16 @@ impl KeyResolver for JwksKeyResolver {
 
         // Cache miss — debounce: skip force_refresh if one ran within the last 30 s.
         // Prevents N concurrent JWKS fetches when an attacker floods with novel kid values.
-        // NOTE: last_force_refresh is updated ONLY on successful refresh (inside force_refresh).
+        // The check and the claim are done under the same lock hold (check-and-set) so that
+        // concurrent threads cannot both observe should_refresh=true and both call force_refresh.
         let should_refresh = {
-            let last = self.last_force_refresh.lock().expect("debounce mutex poisoned");
-            last.elapsed() >= Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS)
+            let mut last = self.last_force_refresh.lock().expect("debounce mutex poisoned");
+            if last.elapsed() >= Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS) {
+                *last = Instant::now(); // claim the slot — subsequent threads see elapsed < 30s
+                true
+            } else {
+                false
+            }
         };
         if !should_refresh {
             return Err(KeyResolverError::KeyNotFound { kid: key });
