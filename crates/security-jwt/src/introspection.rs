@@ -251,13 +251,19 @@ impl IntrospectionAuthenticationProvider {
 
         let credentials = ClientCredentials { client_id, client_secret };
 
-        let cache = config.introspection_cache_ttl_seconds.map(|ttl| {
-            (
+        const MAX_CACHE_TTL: u64 = 300;
+        let cache = config.introspection_cache_ttl_seconds.map(|ttl| -> Result<_, AuthenticationError> {
+            if ttl == 0 || ttl > MAX_CACHE_TTL {
+                return Err(AuthenticationError::ProviderUnavailable(format!(
+                    "introspection_cache_ttl_seconds must be 1..={MAX_CACHE_TTL}"
+                )));
+            }
+            Ok((
                 ttl,
                 Arc::new(RwLock::new(HashMap::new())),
                 Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-            )
-        });
+            ))
+        }).transpose()?;
 
         Ok(Self { provider, endpoint, credentials, mapper, cache, clock })
     }
@@ -350,12 +356,14 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
                 }
             }
 
-            // Always push a new queue entry (key + current timestamp).
-            // On re-insertion after TTL expiry the OLD queue entry becomes a ghost
-            // (its queued_at won't match the new inserted_at) and is safely skipped
-            // during eviction without prematurely removing the live re-inserted entry.
-            cache_guard.insert(key, (now_ts, ctx.clone()));
-            queue.push_back((key, now_ts));
+            // Only insert if at or below the limit after eviction.
+            // If the loop exhausted all queue entries without finding a live entry to evict
+            // (e.g., every entry was a ghost from a mass TTL-expiry + re-auth cycle), we
+            // skip the insert rather than growing the cache beyond MAX_INTROSPECTION_CACHE_ENTRIES.
+            if cache_guard.len() < MAX_INTROSPECTION_CACHE_ENTRIES {
+                cache_guard.insert(key, (now_ts, ctx.clone()));
+                queue.push_back((key, now_ts));
+            }
         }
 
         Ok(ctx)
@@ -623,7 +631,7 @@ mod tests {
 
         let (fake, count) = CountingFake::active("user");
         let provider = IntrospectionAuthenticationProvider::with_provider(
-            make_config(Some(3600)),
+            make_config(Some(300)),
             clock,
             default_mapper(),
             Arc::new(fake),
@@ -837,7 +845,7 @@ mod tests {
 
         let (fake, _count) = CountingFake::active("user");
         let provider = IntrospectionAuthenticationProvider::with_provider(
-            make_config(Some(3600)),
+            make_config(Some(300)),
             clock,
             default_mapper(),
             Arc::new(fake),
@@ -861,7 +869,7 @@ mod tests {
         // tok-new was just inserted; it must be cached.
         let (fake2, count2) = CountingFake::active("user");
         let provider2 = IntrospectionAuthenticationProvider::with_provider(
-            make_config(Some(3600)),
+            make_config(Some(300)),
             Arc::new(ControllableClock(Arc::new(StdRwLock::new(1_000_000_i64)))),
             default_mapper(),
             Arc::new(fake2),
