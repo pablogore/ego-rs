@@ -7,6 +7,10 @@
 
 use std::collections::BTreeMap;
 
+/// Standard JWT registered claim names that are consumed as typed fields.
+/// These are stripped from the custom-claims map after extraction.
+const STANDARD_JWT_CLAIM_KEYS: &[&str] = &["exp", "nbf", "iat", "jti", "iss", "aud"];
+
 use ego_domain::auth::{ClaimSet, ClaimValue, StandardClaims};
 use ego_security_sdk::{Principal, PrincipalKind,     PrincipalMapper, Role, SubjectId};
 use ego_domain::auth::AuthenticationError;
@@ -137,7 +141,7 @@ impl PrincipalMapper for DefaultPrincipalMapper {
 
         // Always remove: sub (principal), standard JWT claims
         custom.remove("sub");
-        for key in &["exp", "nbf", "iat", "jti", "iss", "aud"] {
+        for key in STANDARD_JWT_CLAIM_KEYS {
             custom.remove(*key);
         }
 

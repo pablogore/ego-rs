@@ -219,7 +219,7 @@ impl DiscoveryProvider for FakeDiscovery {
 
 /// Configurable fake introspection provider for unit tests.
 ///
-/// Pre-configure per-token responses with `set_response` and `set_active_response`.
+/// Pre-configure per-token responses with `set_inactive_response` and `set_active_response`.
 /// Unknown tokens return `active: false`.
 #[cfg(feature = "test-kit")]
 pub struct FakeIntrospection {
@@ -233,13 +233,9 @@ impl FakeIntrospection {
         Self { responses: Mutex::new(HashMap::new()) }
     }
 
-    /// Set a simple active/inactive response for a token.
-    ///
-    /// `active: false` → `IntrospectionResult { active: false, claims: None }`.
-    /// `active: true` → `IntrospectionResult { active: true, claims: None }` (protocol error!
-    /// use `set_active_response` to provide claims).
-    pub fn set_response(&mut self, token: &str, active: bool) {
-        let result = IntrospectionResult { active, claims: None };
+    /// Mark a token as inactive (rejected by introspection).
+    pub fn set_inactive_response(&mut self, token: &str) {
+        let result = IntrospectionResult { active: false, claims: None };
         self.responses.lock().unwrap().insert(token.to_string(), result);
     }
 
@@ -309,6 +305,7 @@ mod tests {
         let mut map = BTreeMap::new();
         map.insert("sub".to_string(), ClaimValue::String(sub.into()));
         map.insert("exp".to_string(), ClaimValue::Integer(exp));
+        map.insert("iss".to_string(), ClaimValue::String("https://fake-issuer.test".into()));
         map
     }
 
@@ -326,6 +323,7 @@ mod tests {
         let resolver = Arc::new(issuer.jwks_resolver());
         let config = OidcProviderConfig {
             jwks_uri: Some(issuer.jwks_uri.clone()),
+            expected_iss: Some("https://fake-issuer.test".into()),
             ..Default::default()
         };
         let mapper = Arc::new(DefaultPrincipalMapper);
@@ -346,6 +344,7 @@ mod tests {
         let resolver = Arc::new(issuer.jwks_resolver());
         let config = OidcProviderConfig {
             jwks_uri: Some(issuer.jwks_uri.clone()),
+            expected_iss: Some("https://fake-issuer.test".into()),
             ..Default::default()
         };
         let mapper = Arc::new(DefaultPrincipalMapper);
@@ -366,6 +365,7 @@ mod tests {
         let resolver = Arc::new(issuer.jwks_resolver());
         let config = OidcProviderConfig {
             jwks_uri: Some(issuer.jwks_uri.clone()),
+            expected_iss: Some("https://fake-issuer.test".into()),
             ..Default::default()
         };
         let mapper = Arc::new(DefaultPrincipalMapper);
@@ -381,9 +381,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn fake_introspection_set_response_inactive_returns_invalid_token() {
+    fn fake_introspection_set_inactive_response_returns_invalid_token() {
         let mut fake = FakeIntrospection::new();
-        fake.set_response("tok", false);
+        fake.set_inactive_response("tok");
 
         let config = OidcProviderConfig {
             jwks_uri: Some(url::Url::parse("https://fake.test/jwks").unwrap()),

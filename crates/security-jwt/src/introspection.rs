@@ -4,6 +4,9 @@
 //!         `IntrospectionAuthenticationProvider`, `ClientCredentials`, `IntrospectionResult`.
 //! Internal: `IntrospectionResponse` (pub(crate) serde type).
 
+// LOCK ORDER: when both locks are needed, acquire `cache` (write) before `eviction_queue`.
+// Reversing this order will deadlock.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
@@ -189,7 +192,9 @@ fn cache_key(token: &str) -> [u8; 32] {
 
 type CacheEntry = (i64, SecurityContext); // (inserted_at_timestamp, context)
 type IntrospectionCache = Arc<RwLock<HashMap<[u8; 32], CacheEntry>>>;
-type EvictionQueue = Arc<std::sync::Mutex<std::collections::VecDeque<[u8; 32]>>>;
+// Each entry stores (key_hash, inserted_at) so ghost entries (re-insertions after TTL expiry)
+// can be detected by comparing the queued timestamp against the live cache entry's timestamp.
+type EvictionQueue = Arc<std::sync::Mutex<std::collections::VecDeque<([u8; 32], i64)>>>;
 
 /// Validates opaque tokens via RFC 7662 introspection.
 ///
@@ -325,29 +330,32 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
         // Store in cache if enabled
         if let Some((_, cache, eviction_queue)) = &self.cache {
             let key = cache_key(token);
-            // Acquire write lock BEFORE eviction_queue lock to avoid deadlock.
+            // Acquire write lock BEFORE eviction_queue lock to avoid deadlock (see LOCK ORDER).
             let mut cache_guard = cache.write().expect("introspection cache poisoned");
             let mut queue = eviction_queue.lock().expect("eviction queue lock poisoned");
 
-            // FIFO eviction (O(1)): if at capacity, remove the oldest inserted entry.
+            // FIFO eviction (O(1)): if at capacity, drain ghost entries and remove one live entry.
             if cache_guard.len() >= MAX_INTROSPECTION_CACHE_ENTRIES {
-                while let Some(oldest) = queue.pop_front() {
-                    if cache_guard.remove(&oldest).is_some() {
-                        break; // evicted one entry; stop
+                while let Some((evict_key, queued_at)) = queue.pop_front() {
+                    if let Some((cached_inserted_at, _)) = cache_guard.get(&evict_key) {
+                        if *cached_inserted_at == queued_at {
+                            // Live entry with matching timestamp — evict it.
+                            cache_guard.remove(&evict_key);
+                            break;
+                        }
+                        // Timestamp mismatch: this is a ghost entry for a key that was
+                        // re-inserted after TTL expiry (new timestamp). Skip without evicting.
                     }
-                    // Key was already removed (e.g. TTL expiry check path) — try next.
+                    // Key not in cache: already evicted or never inserted — skip.
                 }
             }
 
-            // B-2: only push to the queue if this key is truly new.
-            // Re-inserting an expired entry must not create a duplicate queue entry,
-            // which would cause the live entry to be evicted prematurely when the
-            // stale queue entry is later popped during an eviction sweep.
-            let already_existed = cache_guard.contains_key(&key);
+            // Always push a new queue entry (key + current timestamp).
+            // On re-insertion after TTL expiry the OLD queue entry becomes a ghost
+            // (its queued_at won't match the new inserted_at) and is safely skipped
+            // during eviction without prematurely removing the live re-inserted entry.
             cache_guard.insert(key, (now_ts, ctx.clone()));
-            if !already_existed {
-                queue.push_back(key);
-            }
+            queue.push_back((key, now_ts));
         }
 
         Ok(ctx)
@@ -652,10 +660,12 @@ mod tests {
         );
     }
 
-    // B-2: re-authenticating a TTL-expired token must not create a phantom queue entry.
-    // After expiry + re-auth, the queue length must equal the cache size — no duplicates.
-    // A subsequent capacity-triggered eviction must remove the second-oldest, not the
-    // live re-inserted entry via a stale duplicate queue pointer.
+    // Re-authenticating a TTL-expired token pushes a new queue entry (key + new timestamp).
+    // The old queue entry becomes a ghost: its queued_at timestamp no longer matches the
+    // live cache entry's inserted_at, so it is skipped during eviction without prematurely
+    // removing the re-inserted live entry.
+    // A subsequent capacity-triggered eviction must remove the oldest *live* entry (tok-1),
+    // not tok-0 which was re-inserted most recently.
     #[test]
     fn cache_reinsert_after_ttl_expiry_does_not_create_phantom_queue_entry() {
         use std::sync::RwLock as StdRwLock;
@@ -690,17 +700,16 @@ mod tests {
         *ts.write().unwrap() = 1_000_000 + 61;
 
         // Re-authenticate tok-0 — cache miss (expired), calls provider, re-inserts.
-        // Without the B-2 fix this would push a second queue entry for tok-0's key hash.
+        // A new queue entry (tok-0-key, T+61) is pushed; the old entry (tok-0-key, T+0)
+        // remains in the queue but is now a ghost (its queued_at != new inserted_at).
         provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 5, "tok-0 re-auth must call provider (expired)");
 
         // Cache now has 5 entries (tok-0 re-inserted, tok-1..tok-3 still live, 1 slot was free).
-        // Insert tok-new → triggers FIFO eviction of the oldest queue entry.
-        // With the B-2 fix, the oldest queue entry is still tok-1's key (tok-0 was re-inserted
-        // without duplicating its queue position, so its original queue entry has already been
-        // popped by the contains_key guard OR the queue now only has one entry per key).
-        // The key invariant: after eviction the cache must contain exactly MAX entries
-        // and tok-0 (re-inserted most recently) must still be present.
+        // Insert tok-new → triggers FIFO eviction. The queue front is the ghost for tok-0
+        // (queued_at=T+0 != live inserted_at=T+61), so it is skipped. The next entry is tok-1
+        // (live, queued_at matches) — tok-1 is evicted.
+        // The key invariant: tok-0 (re-inserted most recently) must still be present.
         *ts.write().unwrap() = 1_000_000 + 62;
         provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 6, "tok-new must be a cache miss");
@@ -715,6 +724,65 @@ mod tests {
         // tok-0 must also still be cached (re-auth was the most recent insertion).
         provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
         assert_eq!(count.load(Ordering::SeqCst), before, "tok-0 must still be cached after re-auth");
+    }
+
+    // After TTL expiry and re-insertion, tok-0's ghost queue entry is skipped during eviction.
+    // The eviction order must reflect re-insertion time, not original insertion time.
+    // tok-1 (the oldest *live* entry after tok-0's re-insertion) must be evicted, not tok-0.
+    #[test]
+    fn cache_reinsert_after_ttl_expiry_is_evicted_in_insertion_order_not_original_order() {
+        use std::sync::RwLock as StdRwLock;
+
+        struct ControllableClock(Arc<StdRwLock<i64>>);
+        impl Clock for ControllableClock {
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                chrono::DateTime::from_timestamp(*self.0.read().unwrap(), 0).unwrap()
+            }
+        }
+
+        // MAX_INTROSPECTION_CACHE_ENTRIES == 5 in test mode; TTL = 60 s.
+        let ts = Arc::new(StdRwLock::new(1_000_000_i64));
+        let clock: Arc<dyn Clock> = Arc::new(ControllableClock(Arc::clone(&ts)));
+        let (fake, count) = CountingFake::active("user");
+        let provider = IntrospectionAuthenticationProvider::with_provider(
+            make_config(Some(60)),
+            clock,
+            default_mapper(),
+            Arc::new(fake),
+        )
+        .unwrap();
+
+        // Fill cache to capacity (5 entries): tok-0..tok-4
+        for i in 0..MAX_INTROSPECTION_CACHE_ENTRIES {
+            *ts.write().unwrap() = 1_000_000 + i as i64;
+            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+        }
+        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES);
+
+        // Advance past TTL so tok-0 expires (inserted at T+0, TTL=60, now=T+61).
+        *ts.write().unwrap() = 1_000_000 + 61;
+
+        // Re-authenticate tok-0 — cache miss (expired), re-inserts with new timestamp T+61.
+        // tok-0's ghost queue entry (queued_at=T+0) remains but will be skipped during eviction
+        // because its timestamp no longer matches the live entry's inserted_at (T+61).
+        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES + 1);
+
+        // Insert tok-new → triggers eviction.
+        // Queue front: ghost for tok-0 (queued_at=T+0 != live inserted_at=T+61) — skip.
+        // Next: tok-1 (queued_at=T+1, live inserted_at=T+1 — match) — evict tok-1.
+        *ts.write().unwrap() = 1_000_000 + 62;
+        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES + 2);
+
+        // tok-0 must still be cached (re-inserted most recently among existing tokens).
+        let before = count.load(Ordering::SeqCst);
+        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), before, "tok-0 must still be cached — it was re-inserted after tok-1..tok-4");
+
+        // tok-new must still be cached.
+        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), before, "tok-new must still be cached");
     }
 
     #[test]

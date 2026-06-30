@@ -44,7 +44,7 @@ fn looks_like_jwt(token: &str) -> bool {
         !part.is_empty()
             && part
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'=')
     })
 }
 
@@ -495,7 +495,8 @@ mod tests {
         OidcProviderConfig {
             issuer_url: None,
             jwks_uri: Some(url::Url::parse("https://idp.example.com/jwks").unwrap()),
-            expected_iss: None,
+            // R1-B1: expected_iss is required when jwks_uri is set without issuer_url.
+            expected_iss: Some("https://idp.example.com".into()),
             expected_aud: None,
             clock_skew_seconds: None,
             jwks_refresh_ttl_seconds: None,
@@ -595,7 +596,7 @@ mod tests {
 
     #[test]
     fn valid_rs256_jwt_returns_security_context() {
-        let claims = json!({ "sub": "rs256-user", "exp": future_ts(3600) });
+        let claims = json!({ "sub": "rs256-user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_rs256_token(&claims);
         let resolver = rsa_resolver(rs256_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
@@ -608,7 +609,7 @@ mod tests {
 
     #[test]
     fn valid_es256_jwt_returns_security_context() {
-        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600) });
+        let claims = json!({ "sub": "es256-user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_ec_token(&claims);
         let resolver = ec_resolver(ec_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
@@ -757,7 +758,7 @@ mod tests {
         )
         .unwrap();
 
-        let claims = json!({ "sub": "user", "exp": future_ts(3600) });
+        let claims = json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_rs256_token(&claims);
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "user");
@@ -795,7 +796,7 @@ mod tests {
 
     #[test]
     fn token_format_auto_with_jwt_uses_jwt_path() {
-        let claims = json!({ "sub": "user", "exp": future_ts(3600) });
+        let claims = json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_rs256_token(&claims); // 3-part JWT
         let resolver = rsa_resolver(rs256_public_pem());
         let config = OidcProviderConfig {

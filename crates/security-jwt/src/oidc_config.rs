@@ -119,8 +119,15 @@ impl OidcProviderConfig {
         }
 
         // H-3: cap cache TTL to prevent long-lived tokens defeating revocation.
+        // Also reject ttl=0 — a zero TTL disables caching by timing out instantly;
+        // callers who want no cache should use None, not 0.
         const MAX_INTROSPECTION_CACHE_TTL_SECS: u64 = 300;
         if let Some(ttl) = self.introspection_cache_ttl_seconds {
+            if ttl == 0 {
+                return Err(AuthenticationError::ProviderUnavailable(
+                    "introspection_cache_ttl_seconds must be >= 1 (use None to disable cache)".into(),
+                ));
+            }
             if ttl > MAX_INTROSPECTION_CACHE_TTL_SECS {
                 return Err(AuthenticationError::ProviderUnavailable(format!(
                     "introspection_cache_ttl_seconds must be <= {MAX_INTROSPECTION_CACHE_TTL_SECS} \
@@ -138,6 +145,15 @@ impl OidcProviderConfig {
             }
         }
 
+        // R1-B1: when jwks_uri is configured without issuer_url and expected_iss is not set,
+        // tokens from ANY issuer are accepted. Require expected_iss to prevent issuer confusion.
+        if self.jwks_uri.is_some() && self.issuer_url.is_none() && self.expected_iss.is_none() {
+            return Err(AuthenticationError::ProviderUnavailable(
+                "expected_iss is required when jwks_uri is configured without issuer_url — \
+                 without it, tokens from any issuer are accepted".into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -150,6 +166,7 @@ pub(crate) fn validate_url_requires_https(url: &url::Url, field: &str) -> Result
         "https" => Ok(()),
         "http" => {
             let host = url.host_str().unwrap_or("");
+            // url::Url::host_str() returns "[::1]" WITH brackets for IPv6 literals (WHATWG URL spec).
             if host == "localhost" || host == "127.0.0.1" || host == "[::1]" {
                 Ok(())
             } else {
@@ -190,7 +207,8 @@ mod tests {
         OidcProviderConfig {
             issuer_url: None,
             jwks_uri: Some(url("https://example.com/.well-known/jwks.json")),
-            expected_iss: None,
+            // R1-B1: expected_iss required when jwks_uri set without issuer_url.
+            expected_iss: Some("https://example.com".into()),
             expected_aud: None,
             clock_skew_seconds: None,
             jwks_refresh_ttl_seconds: None,

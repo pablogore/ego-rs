@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD}, Engine as _};
 use ego_domain::auth::AuthenticationError;
 use ego_security_sdk::{AuthenticationProvider, Credential, SecurityContext};
 
@@ -27,8 +27,11 @@ pub(crate) fn unverified_iss(token: &str) -> Option<String> {
     if parts.len() != 3 {
         return None;
     }
-    // Payload is parts[1] — base64url (URL_SAFE_NO_PAD, RFC 4648 §5)
-    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+    // Payload is parts[1] — base64url (URL_SAFE_NO_PAD, RFC 4648 §5).
+    // Some IdPs emit padded base64url (with '='). Try unpadded first; fall back to padded.
+    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1])
+        .or_else(|_| URL_SAFE.decode(parts[1]))
+        .ok()?;
     let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
     payload.get("iss").and_then(|v| v.as_str()).map(str::to_owned)
 }
@@ -234,6 +237,27 @@ mod tests {
         let payload_b64 = URL_SAFE_NO_PAD.encode(&payload_bytes);
         let fake_token = format!("header.{payload_b64}.signature");
         assert!(unverified_iss(&fake_token).is_none());
+    }
+
+    #[test]
+    fn unverified_iss_handles_padded_base64url_payload() {
+        // Some IdPs emit base64url WITH padding ('='). Craft a payload whose base64url
+        // encoding requires '=' padding characters and verify unverified_iss still works.
+        // JSON bytes length is chosen so that base64 encoding is not a multiple of 3,
+        // forcing '=' padding. We build it with URL_SAFE (padded) engine.
+        let payload = json!({ "iss": "https://padded-issuer.example.com", "sub": "u" });
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        // Encode WITH padding using URL_SAFE engine.
+        let padded_b64 = URL_SAFE.encode(&payload_bytes);
+        // Confirm that the encoded string actually contains padding (otherwise the test
+        // would not exercise the fallback path).
+        assert!(
+            padded_b64.contains('='),
+            "test setup: padded_b64 must contain '=' to exercise the fallback"
+        );
+        let fake_token = format!("header.{padded_b64}.signature");
+        let iss = unverified_iss(&fake_token).expect("unverified_iss must succeed for padded payload");
+        assert_eq!(iss, "https://padded-issuer.example.com");
     }
 
     // -----------------------------------------------------------------------

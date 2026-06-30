@@ -853,4 +853,55 @@ mod tests {
         .unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "u1");
     }
+
+    #[test]
+    fn nbf_equal_to_now_plus_leeway_boundary_is_accepted() {
+        // nbf = now + leeway → now + leeway >= now + leeway → accepted (inclusive boundary)
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let leeway_secs: i64 = 5;
+        let nbf_secs = (now + chrono::Duration::seconds(leeway_secs)).timestamp();
+        let exp_secs = (now + chrono::Duration::hours(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs, "nbf": nbf_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            clock_skew_seconds: Some(leeway_secs as u64),
+        };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.principal.subject_id.as_str(),
+            "u1",
+            "nbf == now + leeway is the inclusive boundary and must be accepted"
+        );
+    }
+
+    #[test]
+    fn exp_equal_to_now_no_skew_is_rejected() {
+        // exp == now with no clock skew → expired
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let exp_secs = now.timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs });
+        let token = make_hs256_token(&claims);
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            AuthenticationError::ExpiredToken,
+            "exp == now with no skew must be rejected"
+        );
+    }
 }

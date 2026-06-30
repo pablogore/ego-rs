@@ -80,7 +80,7 @@ fn resolve_key_sync(
         let _ = tx.send(resolver.resolve(kid.as_deref(), algorithm).await);
     });
     rx.recv()
-        .map_err(|_| AuthenticationError::InvalidToken("key resolver did not complete (pool exhausted or task dropped)".into()))?
+        .map_err(|_| AuthenticationError::ProviderUnavailable("key resolver did not complete (pool exhausted or task dropped)".into()))?
         .map_err(map_resolver_error)
 }
 

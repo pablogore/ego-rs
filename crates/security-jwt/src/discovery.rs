@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use ego_domain::auth::AuthenticationError;
 use tracing::warn;
 
+use crate::oidc_config::validate_url_requires_https;
+
 // ---------------------------------------------------------------------------
 // OidcEndpoints — public (callers inspect the discovery result)
 // ---------------------------------------------------------------------------
@@ -122,6 +124,14 @@ impl DiscoveryProvider for HttpDiscoveryProvider {
                 "discovery document missing required jwks_uri".into(),
             )
         })?;
+
+        // Validate that URLs from the discovery document also satisfy the HTTPS requirement.
+        // A compromised IdP could advertise http:// endpoints — reject them the same way
+        // statically configured URLs are rejected (INV-11).
+        validate_url_requires_https(&jwks_uri, "jwks_uri (from discovery)")?;
+        if let Some(ref ep) = config.introspection_endpoint {
+            validate_url_requires_https(ep, "introspection_endpoint (from discovery)")?;
+        }
 
         Ok(OidcEndpoints { jwks_uri, introspection_endpoint: config.introspection_endpoint })
     }

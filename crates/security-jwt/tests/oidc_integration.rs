@@ -52,6 +52,7 @@ fn make_claims(sub: &str, exp: i64) -> BTreeMap<String, ClaimValue> {
     let mut m = BTreeMap::new();
     m.insert("sub".into(), ClaimValue::String(sub.into()));
     m.insert("exp".into(), ClaimValue::Integer(exp));
+    m.insert("iss".into(), ClaimValue::String("https://fake-issuer.test".into()));
     m
 }
 
@@ -59,6 +60,7 @@ fn oidc_provider_with_issuer(issuer: &FakeIssuer) -> OidcAuthenticationProvider 
     let resolver = Arc::new(issuer.jwks_resolver());
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     OidcAuthenticationProvider::with_resolver(
@@ -123,9 +125,11 @@ fn us001_nbf_in_future_returns_invalid_token() {
     claims.insert("sub".to_string(), ClaimValue::String("user-1".to_string()));
     claims.insert("exp".to_string(), ClaimValue::Integer(9_999_999_999));
     claims.insert("nbf".to_string(), ClaimValue::Integer(1100)); // T + 100
+    claims.insert("iss".to_string(), ClaimValue::String("https://fake-issuer.test".to_string()));
     let token = issuer.issue_token(claims);
     let config = OidcProviderConfig {
         jwks_uri: Some(url::Url::parse("https://fake.example.com/jwks").unwrap()),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
@@ -136,6 +140,7 @@ fn us001_nbf_in_future_returns_invalid_token() {
     )
     .unwrap();
     let credential = Credential::Bearer(token);
+    // note: claims also need iss for the validator; but nbf rejection fires before iss check
     let result = provider.authenticate(&credential);
     assert!(
         matches!(result, Err(AuthenticationError::InvalidToken(_))),
@@ -157,6 +162,7 @@ fn us002_jwks_uri_config_no_discovery_called() {
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
         issuer_url: None, // explicit: no discovery
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider =
@@ -257,6 +263,7 @@ fn us003b_auto_jwt_uses_jwt_path() {
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
         token_format: Some(TokenFormat::Auto),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
@@ -276,6 +283,7 @@ fn us003b_auto_no_dots_uses_opaque_path_or_invalid_token() {
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
         token_format: Some(TokenFormat::Auto),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
@@ -301,6 +309,7 @@ fn us003b_opaque_format_with_dotted_token_uses_introspection() {
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
         token_format: Some(TokenFormat::Opaque),
+        expected_iss: Some("https://fake-issuer.test".into()),
         introspection_endpoint: Some(
             url::Url::parse("https://fake.test/introspect").unwrap(),
         ),
@@ -357,7 +366,7 @@ fn us004_active_true_introspection_returns_ok() {
 #[test]
 fn us004_active_false_introspection_returns_invalid_token() {
     let mut fake = FakeIntrospection::new();
-    fake.set_response("tok", false);
+    fake.set_inactive_response("tok");
 
     let provider = IntrospectionAuthenticationProvider::with_provider(
         make_introspection_config(None),
@@ -374,7 +383,7 @@ fn us004_active_false_introspection_returns_invalid_token() {
 #[test]
 fn us004_token_over_8kib_rejected_before_io() {
     let mut fake = FakeIntrospection::new();
-    fake.set_response("whatever", true);
+    fake.set_inactive_response("whatever");
     let provider = IntrospectionAuthenticationProvider::with_provider(
         make_introspection_config(None),
         fixed_clock(pinned_now()),
@@ -498,6 +507,7 @@ fn us006_custom_mapper_preferred_username_as_subject_id() {
     let resolver = Arc::new(issuer.jwks_resolver());
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
@@ -518,6 +528,7 @@ fn us006_missing_sub_returns_missing_claim() {
     let issuer = FakeIssuer::new(Arc::clone(&clock));
     let mut claims = BTreeMap::new();
     claims.insert("exp".into(), ClaimValue::Integer(future_ts(3600)));
+    claims.insert("iss".into(), ClaimValue::String("https://fake-issuer.test".into()));
     // no sub
     let token = issuer.issue_token(claims);
     let err = oidc_provider_with_issuer(&issuer)
@@ -556,6 +567,7 @@ fn us006_mapper_called_exactly_once_per_authenticate() {
     let resolver = Arc::new(issuer.jwks_resolver());
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
+        expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(

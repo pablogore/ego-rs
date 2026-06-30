@@ -180,7 +180,7 @@ fn ec_components_to_pem(x_b64: &str, y_b64: &str) -> Result<String, Authenticati
         .decode(y_b64)
         .map_err(|e| AuthenticationError::ProviderUnavailable(format!("bad EC y: {e}")))?;
 
-    if x.is_empty() || y.is_empty() || x.len() > 32 || y.len() > 32 {
+    if x.is_empty() || y.is_empty() || x.len() > P256_COORD_BYTES || y.len() > P256_COORD_BYTES {
         return Err(AuthenticationError::ProviderUnavailable(
             "EC P-256 coordinate must be 1–32 bytes — malformed JWK".to_string(),
         ));
@@ -188,11 +188,11 @@ fn ec_components_to_pem(x_b64: &str, y_b64: &str) -> Result<String, Authenticati
 
     // Uncompressed EC point: 0x04 || x || y
     let mut point = vec![0x04u8];
-    // Pad to 32 bytes each for P-256
-    let pad_x = 32usize.saturating_sub(x.len());
+    // Pad to P256_COORD_BYTES each for P-256
+    let pad_x = P256_COORD_BYTES.saturating_sub(x.len());
     let mut xp = vec![0u8; pad_x];
     xp.extend_from_slice(&x);
-    let pad_y = 32usize.saturating_sub(y.len());
+    let pad_y = P256_COORD_BYTES.saturating_sub(y.len());
     let mut yp = vec![0u8; pad_y];
     yp.extend_from_slice(&y);
     point.extend_from_slice(&xp);
@@ -279,6 +279,13 @@ fn der_integer(bytes: &[u8]) -> Vec<u8> {
 /// A second miss within this window is rejected immediately to prevent
 /// attacker-triggered JWKS fetch floods with novel kid values.
 const FORCE_REFRESH_DEBOUNCE_SECS: u64 = 30;
+
+/// Initial age of the debounce guard, set past the debounce window so the
+/// first forced refresh always fires immediately.
+const FORCE_REFRESH_INITIAL_AGE_SECS: u64 = FORCE_REFRESH_DEBOUNCE_SECS + 1;
+
+/// P-256 (secp256r1) field element size in bytes (256 bits / 8).
+const P256_COORD_BYTES: usize = 32;
 
 // ---------------------------------------------------------------------------
 // JwksKeyResolver helpers
@@ -391,9 +398,9 @@ impl JwksKeyResolver {
             });
         }
 
-        // Subtract DEBOUNCE+1s so the first cache miss always triggers a refresh.
+        // Subtract FORCE_REFRESH_INITIAL_AGE_SECS so the first cache miss always triggers a refresh.
         let last_force_refresh =
-            Mutex::new(Instant::now() - Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS + 1));
+            Mutex::new(Instant::now() - Duration::from_secs(FORCE_REFRESH_INITIAL_AGE_SECS));
 
         Self { cache, jwks_uri, provider, last_force_refresh }
     }
