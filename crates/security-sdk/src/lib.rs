@@ -14,12 +14,18 @@ pub mod authentication;
 pub mod authorization;
 pub mod context;
 pub mod credential;
+pub mod credential_extractor;
 pub mod error;
+pub mod interceptor;
 pub mod policy;
 pub mod principal;
+pub mod principal_mapper;
 pub mod providers;
 
-pub use authentication::AuthenticationProvider;
+pub use authentication::{AuthenticationInterceptor, AuthenticationProvider};
+pub use interceptor::Interceptor;
+pub use credential_extractor::{ApiKeyExtractor, BasicExtractor, BearerExtractor, CredentialExtractor, RequestContext};
+pub use principal_mapper::PrincipalMapper;
 pub use authorization::{
     authorize_in_context, AccessRequest, Action, AuthorizationDecision, AuthorizationProvider,
     Resource,

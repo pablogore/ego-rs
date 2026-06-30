@@ -19,7 +19,9 @@ pub mod error;
 pub mod credential;
 pub mod clock;
 pub mod claims;
+pub mod claim_set;
 
+pub use claim_set::{ClaimSet, ClaimValue};
 pub use claims::{Claims, StandardClaims};
 pub use clock::{Clock, SystemClock};
 pub use credential::Credential;

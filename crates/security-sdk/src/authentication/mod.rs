@@ -1,5 +1,8 @@
 //! Authentication provider contract — synchronous, returns [`SecurityContext`].
 
+pub mod interceptor;
+pub use interceptor::AuthenticationInterceptor;
+
 use crate::{context::SecurityContext, credential::Credential};
 use ego_domain::auth::AuthenticationError;
 

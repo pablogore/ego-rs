@@ -1,5 +1,17 @@
 stages:
+  - test
   - governance
+
+
+test:
+  stage: test
+  image: rust:latest
+  script:
+    - cargo test --workspace
+    - cargo test -p security-jwt --features test-kit
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
 
 governance:
   stage: governance

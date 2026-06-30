@@ -3,6 +3,18 @@ name = "security-jwt"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Gate all TestKit types behind this feature — never enabled in production.
+#
+# CI guard (T-16): verify no FakeIssuer/FakeDiscovery/FakeJwks/FakeIntrospection symbols
+# appear in the release artifact:
+#
+#   cargo build --release --no-default-features -p security-jwt
+#   nm -g target/release/libsecurity_jwt.rlib 2>/dev/null \
+#     | grep -E "FakeIssuer|FakeDiscovery|FakeJwks|FakeIntrospection" \
+#     && exit 1 || exit 0
+test-kit = []
+
 [dependencies]
 ego-domain = { path = "../domain" }
 ego-security-sdk = { path = "../security-sdk" }
@@ -14,5 +26,10 @@ thiserror = "2"
 tracing = "0.1"
 async-trait = { workspace = true }
 futures-executor = { version = "0.3", features = ["thread-pool"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+url = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
