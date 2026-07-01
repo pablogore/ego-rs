@@ -3,6 +3,7 @@
 # Generated code is never hand-edited. Any changes must go through the contract or generation configuration.
 test:
 	cargo test --workspace
+	cargo test -p security-jwt --features test-kit
 	cargo test --test contract_tests
 
 test-cov:

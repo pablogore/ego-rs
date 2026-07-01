@@ -3,13 +3,17 @@
 //! This module is `pub(crate)` only. It MUST NOT be re-exported from `lib.rs`.
 //! See AD-019.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use ego_domain::auth::{AuthenticationError, Claims, Clock, StandardClaims};
-use ego_security_sdk::{Principal, PrincipalKind, Role, SecurityContext, SubjectId};
+use ego_domain::auth::{AuthenticationError, Clock};
+use ego_security_sdk::{PrincipalMapper, SecurityContext};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 use tracing::warn;
+
+use crate::principal_mapper::claims_map_to_claim_set;
+#[cfg(test)]
+use crate::principal_mapper::DefaultPrincipalMapper;
 
 // ---------------------------------------------------------------------------
 // ValidationParams
@@ -21,6 +25,12 @@ pub(crate) struct ValidationParams<'a> {
     pub expected_iss: Option<&'a str>,
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
     pub expected_aud: Option<&'a [String]>,
+    /// Leeway in seconds applied to `exp` and `nbf` checks.
+    ///
+    /// Tokens expired by fewer than this many seconds are still accepted (effective validity
+    /// window extends past `exp` by this amount). Use small values (≤ 30s) to avoid weakening
+    /// revocation. This is NOT symmetric clock-skew tolerance — only `exp` and `nbf` are affected.
+    pub leeway_seconds: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -44,15 +54,29 @@ pub(crate) struct JwtValidationEngine;
 impl JwtValidationEngine {
     /// Validate `token` and return a [`SecurityContext`] on success.
     ///
-    /// `key` and `alg` are already resolved by the calling provider.
-    /// `params` carries optional iss/aud expectations.
-    /// `clock` is injected for deterministic exp/nbf checks (NFR-013-04).
+    /// Uses `DefaultPrincipalMapper`. Existing callers are unchanged.
+    #[cfg(test)]
     pub(crate) fn validate(
         token: &str,
         key: &DecodingKey,
         alg: Algorithm,
         params: ValidationParams<'_>,
         clock: &dyn Clock,
+    ) -> Result<SecurityContext, AuthenticationError> {
+        Self::validate_with_mapper(token, key, alg, params, clock, &DefaultPrincipalMapper)
+    }
+
+    /// Validate `token` with an injected `PrincipalMapper`.
+    ///
+    /// The engine owns: signature verification, `exp`/`nbf`/`iss`/`aud` checks,
+    /// and `ClaimSet` assembly. The `(Principal, Claims)` pair comes from `mapper`.
+    pub(crate) fn validate_with_mapper(
+        token: &str,
+        key: &DecodingKey,
+        alg: Algorithm,
+        params: ValidationParams<'_>,
+        clock: &dyn Clock,
+        mapper: &dyn PrincipalMapper,
     ) -> Result<SecurityContext, AuthenticationError> {
         // Disable jsonwebtoken's built-in exp/nbf/aud/iss so we do it ourselves
         // (we need clock injection for time checks and custom aud matching).
@@ -89,9 +113,12 @@ impl JwtValidationEngine {
             warn!(error = "invalid_token", "JWT validation failed");
             AuthenticationError::InvalidToken("missing required claim: exp".to_string())
         })?;
+        let leeway = chrono::Duration::seconds(
+            i64::try_from(params.leeway_seconds.unwrap_or(0)).unwrap_or(0),
+        );
         match parse_timestamp(exp_val) {
             Some(exp_dt) => {
-                if now >= exp_dt {
+                if now >= exp_dt + leeway {
                     warn!(error = "expired_token", "JWT validation failed");
                     return Err(AuthenticationError::ExpiredToken);
                 }
@@ -104,11 +131,11 @@ impl JwtValidationEngine {
             }
         }
 
-        // nbf check — reject if nbf > now
+        // nbf check — reject if nbf > now + leeway (same tolerance as exp)
         if let Some(nbf_val) = all_claims.get("nbf") {
             match parse_timestamp(nbf_val) {
                 Some(nbf_dt) => {
-                    if now < nbf_dt {
+                    if now + leeway < nbf_dt {
                         warn!(error = "invalid_token", "JWT validation failed");
                         return Err(AuthenticationError::InvalidToken(
                             "token not yet valid".into(),
@@ -141,6 +168,9 @@ impl JwtValidationEngine {
                     ));
                 }
             }
+        } else if all_claims.contains_key("iss") {
+            // B-1: expected_iss not configured — iss claim present but not validated
+            warn!("expected_iss not configured — iss claim is not validated for this provider");
         }
 
         // aud check — at least one expected aud must be present
@@ -166,36 +196,17 @@ impl JwtValidationEngine {
                     "aud mismatch".into(),
                 ));
             }
+        } else if all_claims.contains_key("aud") {
+            // B-2: expected_aud not configured — aud claim present but not validated
+            warn!("expected_aud not configured — aud claim is not validated for this provider");
         }
 
-        // Build StandardClaims
-        let standard = build_standard_claims(&all_claims);
-
-        let (subject, all_claims) = extract_subject(all_claims).map_err(|e| {
-            warn!(error = "invalid_token", "JWT validation failed");
+        // Convert raw claims to ClaimSet and delegate to mapper (INV-3).
+        let claim_set = claims_map_to_claim_set(all_claims);
+        let (principal, claims) = mapper.map(&claim_set).map_err(|e| {
+            warn!(error = "principal_mapping_failed", "JWT validation failed");
             e
         })?;
-        let (tenant_id, all_claims) = extract_tenant_id(all_claims);
-        let (roles, all_claims) = extract_roles(all_claims);
-
-        // Remove standard claim keys from custom
-        let custom = remove_standard_keys(all_claims);
-
-        let mut principal = Principal::new(
-            PrincipalKind::User,
-            SubjectId::new(subject).map_err(|_| {
-                warn!(error = "invalid_token", "JWT validation failed");
-                AuthenticationError::InvalidToken("invalid subject id".into())
-            })?,
-        );
-        for role in roles {
-            principal = principal.with_role(Role(role));
-        }
-        if let Some(tid) = tenant_id {
-            principal = principal.with_tenant_id(tid);
-        }
-
-        let claims = Claims { standard, custom };
 
         Ok(SecurityContext::new(principal, claims))
     }
@@ -228,99 +239,6 @@ struct RawClaims {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (moved verbatim from authenticator.rs)
-// ---------------------------------------------------------------------------
-
-/// Build [`StandardClaims`] from the raw claims map.
-fn build_standard_claims(map: &BTreeMap<String, Value>) -> StandardClaims {
-    let exp = map.get("exp").and_then(parse_timestamp);
-    let nbf = map.get("nbf").and_then(parse_timestamp);
-    let iat = map.get("iat").and_then(parse_timestamp);
-    let jti = map.get("jti").and_then(|v| v.as_str().map(str::to_owned));
-    let iss = map.get("iss").and_then(|v| v.as_str().map(str::to_owned));
-    let aud = map.get("aud").and_then(|v| match v {
-        Value::String(s) => Some(vec![s.clone()]),
-        Value::Array(arr) => Some(
-            arr.iter()
-                .filter_map(|x| x.as_str().map(str::to_owned))
-                .collect(),
-        ),
-        _ => None,
-    });
-
-    StandardClaims { exp, nbf, iat, jti, iss, aud }
-}
-
-/// Extract `sub`. Absent → `MissingClaim("sub")`; non-string or empty → `InvalidToken`.
-fn extract_subject(
-    mut map: BTreeMap<String, Value>,
-) -> Result<(String, BTreeMap<String, Value>), AuthenticationError> {
-    match map.remove("sub") {
-        Some(Value::String(s)) if s.is_empty() => Err(AuthenticationError::InvalidToken(
-            "sub claim is empty".into(),
-        )),
-        Some(Value::String(s)) => Ok((s, map)),
-        Some(_) => Err(AuthenticationError::InvalidToken(
-            "sub claim is not a string".into(),
-        )),
-        None => Err(AuthenticationError::MissingClaim("sub".into())),
-    }
-}
-
-/// Extract `tenant_id` or `tid`. CLAR-005: wrong type → None, raw preserved.
-fn extract_tenant_id(
-    mut map: BTreeMap<String, Value>,
-) -> (Option<String>, BTreeMap<String, Value>) {
-    let (orig_key, val) = if let Some(v) = map.remove("tenant_id") {
-        ("tenant_id", Some(v))
-    } else {
-        ("tid", map.remove("tid"))
-    };
-    match val {
-        Some(Value::String(s)) => (Some(s), map),
-        Some(other) => {
-            map.insert(orig_key.into(), other);
-            (None, map)
-        }
-        None => (None, map),
-    }
-}
-
-/// Extract `roles`. CLAR-005: wrong type or mixed array → empty, raw preserved.
-fn extract_roles(
-    mut map: BTreeMap<String, Value>,
-) -> (BTreeSet<String>, BTreeMap<String, Value>) {
-    match map.remove("roles") {
-        Some(Value::Array(arr)) => {
-            let all_strings = arr.iter().all(|v| v.is_string());
-            if all_strings {
-                let roles = arr
-                    .into_iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect();
-                (roles, map)
-            } else {
-                map.insert("roles".into(), Value::Array(arr));
-                (BTreeSet::new(), map)
-            }
-        }
-        Some(other) => {
-            map.insert("roles".into(), other);
-            (BTreeSet::new(), map)
-        }
-        None => (BTreeSet::new(), map),
-    }
-}
-
-/// Remove well-known standard claim keys from the custom map.
-fn remove_standard_keys(mut map: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
-    for key in &["exp", "nbf", "iat", "jti", "iss", "aud"] {
-        map.remove(*key);
-    }
-    map
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -337,7 +255,7 @@ mod tests {
     }
 
     fn no_params<'a>() -> ValidationParams<'a> {
-        ValidationParams { expected_iss: None, expected_aud: None }
+        ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None }
     }
 
     // -----------------------------------------------------------------------
@@ -591,7 +509,7 @@ mod tests {
     fn iss_mismatch_returns_invalid_token() {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "wrong" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None };
+        let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -608,7 +526,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let params =
-            ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None };
+            ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -630,7 +548,7 @@ mod tests {
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
         let params =
-            ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
+            ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -675,7 +593,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "my-api" });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -696,7 +614,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": 42 });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud) };
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -736,6 +654,162 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // B-1: expected_iss None — token with iss accepted (permissive, observable)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expected_iss_none_does_not_validate_iss() {
+        // Token carries a random issuer; expected_iss is None.
+        // The token MUST be accepted — the warn! path is exercised, not rejection.
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "https://random.issuer.example" });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            now_clock().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    // -----------------------------------------------------------------------
+    // B-2: expected_aud None — token with aud accepted (permissive, observable)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expected_aud_none_does_not_validate_aud() {
+        // Token carries an audience; expected_aud is None.
+        // The token MUST be accepted — the warn! path is exercised, not rejection.
+        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "some-unvalidated-service" });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            now_clock().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    // -----------------------------------------------------------------------
+    // leeway_seconds: boundary — expired by exactly leeway → rejected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expired_by_exact_leeway_is_rejected() {
+        // exp = now - leeway → exp_dt + leeway == now → now >= exp_dt + leeway → true → ExpiredToken
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let leeway_secs: i64 = 5;
+        let exp_secs = (now - chrono::Duration::seconds(leeway_secs)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(leeway_secs as u64),
+        };
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            AuthenticationError::ExpiredToken,
+            "token expired by exactly leeway seconds must be rejected"
+        );
+    }
+
+    #[test]
+    fn expired_by_leeway_minus_one_is_accepted() {
+        // exp = now - (leeway - 1) → exp_dt + leeway == now + 1 > now → accepted
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let leeway_secs: i64 = 5;
+        let exp_secs = (now - chrono::Duration::seconds(leeway_secs - 1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(leeway_secs as u64),
+        };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.principal.subject_id.as_str(),
+            "u1",
+            "token expired by leeway-1 seconds must be accepted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // B-3: nbf leeway — leeway_seconds applies to nbf as well
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_not_yet_valid_by_less_than_leeway_is_accepted() {
+        // nbf = now + 3s, leeway = 5s → now + 5 >= now + 3 → accepted
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let nbf_secs = (now + chrono::Duration::seconds(3)).timestamp();
+        let exp_secs = (now + chrono::Duration::hours(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs, "nbf": nbf_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(5),
+        };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    #[test]
+    fn token_not_yet_valid_by_more_than_leeway_is_rejected() {
+        // nbf = now + 10s, leeway = 5s → now + 5 < now + 10 → rejected
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let nbf_secs = (now + chrono::Duration::seconds(10)).timestamp();
+        let exp_secs = (now + chrono::Duration::hours(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs, "nbf": nbf_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(5),
+        };
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, AuthenticationError::InvalidToken(msg) if msg.contains("token not yet valid")));
+    }
+
+    // -----------------------------------------------------------------------
     // Invalid signature
     // -----------------------------------------------------------------------
 
@@ -753,5 +827,84 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
+    }
+
+    // -----------------------------------------------------------------------
+    // leeway_seconds: token expired by 1s accepted with 5s leeway
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expired_by_one_second_accepted_within_clock_skew() {
+        // exp is exactly 1 second before "now" — without leeway this would be rejected.
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let exp_secs = (now - chrono::Duration::seconds(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs });
+        let token = make_hs256_token(&claims);
+        // 5 seconds of leeway: exp+5 > now, so token is still valid
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(5),
+        };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(ctx.principal.subject_id.as_str(), "u1");
+    }
+
+    #[test]
+    fn nbf_equal_to_now_plus_leeway_boundary_is_accepted() {
+        // nbf = now + leeway → now + leeway >= now + leeway → accepted (inclusive boundary)
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let leeway_secs: i64 = 5;
+        let nbf_secs = (now + chrono::Duration::seconds(leeway_secs)).timestamp();
+        let exp_secs = (now + chrono::Duration::hours(1)).timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs, "nbf": nbf_secs });
+        let token = make_hs256_token(&claims);
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: Some(leeway_secs as u64),
+        };
+        let ctx = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            params,
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.principal.subject_id.as_str(),
+            "u1",
+            "nbf == now + leeway is the inclusive boundary and must be accepted"
+        );
+    }
+
+    #[test]
+    fn exp_equal_to_now_no_skew_is_rejected() {
+        // exp == now with no clock skew → expired
+        let now = chrono::Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap();
+        let exp_secs = now.timestamp();
+        let claims = json!({ "sub": "u1", "exp": exp_secs });
+        let token = make_hs256_token(&claims);
+        let err = JwtValidationEngine::validate(
+            &token,
+            &hs256_key(),
+            jsonwebtoken::Algorithm::HS256,
+            no_params(),
+            fixed_clock(now).as_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            AuthenticationError::ExpiredToken,
+            "exp == now with no skew must be rejected"
+        );
     }
 }

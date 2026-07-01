@@ -4,7 +4,7 @@
 ///
 /// This is a pure marker enum — key material has been moved to
 /// [`crate::VerificationKey`] inside a [`crate::KeyResolver`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
 pub enum JwtAlgorithm {
     /// HMAC-SHA256.
     Hs256,
@@ -21,18 +21,18 @@ pub enum JwtAlgorithm {
 /// Holds optional issuer and audience constraints. Key material lives in the
 /// injected [`crate::KeyResolver`] — not here. The algorithm is encoded at
 /// the type level by each provider, so no `algorithm` field is needed.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, Default)]
 pub struct JwtProviderConfig {
     /// If `Some`, the token's `iss` claim MUST equal this value.
     pub expected_iss: Option<String>,
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
     pub expected_aud: Option<Vec<String>>,
-}
-
-impl Default for JwtProviderConfig {
-    fn default() -> Self {
-        Self { expected_iss: None, expected_aud: None }
-    }
+    /// Leeway in seconds applied to `exp` and `nbf` checks.
+    ///
+    /// Tokens expired by fewer than this many seconds are still accepted (effective validity
+    /// window extends past `exp` by this amount). Use small values (≤ 30s) to avoid weakening
+    /// revocation. This is NOT symmetric clock-skew tolerance — only `exp` and `nbf` are affected.
+    pub leeway_seconds: Option<u64>,
 }
 
 /// Type alias for clarity at call sites using [`crate::Hs256AuthenticationProvider`].
@@ -46,12 +46,3 @@ pub type Es256Config = JwtProviderConfig;
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn es256_variant_equality() {
-        assert_eq!(JwtAlgorithm::Es256, JwtAlgorithm::Es256);
-    }
-}

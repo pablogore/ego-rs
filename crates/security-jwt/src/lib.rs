@@ -35,6 +35,7 @@
 //! let config = JwtProviderConfig {
 //!     expected_iss: Some("my-service".into()),
 //!     expected_aud: None,
+//!     leeway_seconds: None,
 //! };
 //! let auth = Hs256AuthenticationProvider::new(config, resolver, Arc::new(SystemClock));
 //! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;
@@ -50,8 +51,33 @@
 /// JWT configuration — algorithm selection and validation parameters.
 pub mod config;
 
+/// OIDC provider configuration.
+pub mod oidc_config;
+
+/// JWKS key resolution.
+pub mod jwks;
+
+/// OIDC discovery.
+pub(crate) mod discovery;
+
+/// DefaultPrincipalMapper + serde_json → ClaimValue conversion.
+pub mod principal_mapper;
+
+/// Opaque token introspection.
+pub mod introspection;
+
 /// JWT authenticator — the [`ego_security_sdk::AuthenticationProvider`] implementation.
 pub mod authenticator;
+
+/// OIDC composite resource server provider.
+pub mod oidc_provider;
+
+/// Multi-issuer routing.
+pub mod multi_issuer;
+
+/// In-process test fakes (gated behind `feature = "test-kit"`).
+#[cfg(feature = "test-kit")]
+pub mod test_kit;
 
 mod key_resolver;
 mod validation;
@@ -59,5 +85,15 @@ mod validation;
 mod test_helpers;
 
 pub use authenticator::{Es256AuthenticationProvider, Hs256AuthenticationProvider, Rs256AuthenticationProvider};
+pub use oidc_provider::OidcAuthenticationProvider;
+pub use multi_issuer::{IssuerResolver, MultiIssuerAuthenticationProvider, StaticIssuerResolver};
 pub use config::{Es256Config, Hs256Config, JwtAlgorithm, JwtProviderConfig, Rs256Config};
 pub use key_resolver::{KeyResolver, KeyResolverError, LocalKeyResolver, VerificationKey};
+pub use oidc_config::{MultiIssuerConfig, OidcProviderConfig, TokenFormat};
+pub use jwks::{HttpJwksProvider, JwksKeyResolver, JwksProvider};
+pub use discovery::OidcEndpoints;
+pub use principal_mapper::DefaultPrincipalMapper;
+pub use introspection::{
+    ClientCredentials, HttpIntrospectionProvider, IntrospectionAuthenticationProvider,
+    IntrospectionProvider, IntrospectionResult,
+};

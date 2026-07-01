@@ -80,5 +80,6 @@ pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
 pub use auth::{
-    AuthenticationError, Claims, Clock, Credential, StandardClaims, SystemClock,
+    AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
+    SystemClock,
 };

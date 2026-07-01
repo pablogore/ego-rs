@@ -18,7 +18,9 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 
 use crate::config::{JwtAlgorithm, JwtProviderConfig};
 use crate::key_resolver::{KeyResolver, KeyResolverError, VerificationKey};
+use crate::principal_mapper::DefaultPrincipalMapper;
 use crate::validation::{JwtValidationEngine, ValidationParams};
+use ego_security_sdk::PrincipalMapper;
 
 // ---------------------------------------------------------------------------
 // Single-algorithm providers — shared helpers, macro, and three impl types
@@ -36,12 +38,26 @@ fn map_resolver_error(e: KeyResolverError) -> AuthenticationError {
     }
 }
 
+/// Maximum allowed token size in bytes. Enforced before any cryptographic work.
+pub(crate) const MAX_TOKEN_BYTES: usize = 8192;
+
 static RESOLVER_POOL: OnceLock<ThreadPool> = OnceLock::new();
 
-fn resolver_pool() -> &'static ThreadPool {
+/// Number of worker threads in the shared resolver pool (H-4).
+pub(crate) const RESOLVER_POOL_SIZE: usize = 4;
+
+/// Returns the shared async resolver thread pool.
+///
+/// Pool size is [`RESOLVER_POOL_SIZE`]. Each call to `resolve_key_sync` or `call_introspect` spawns one
+/// future and blocks the calling thread on an mpsc channel until it completes.
+/// Under ≤4 concurrent authentications, every caller gets a worker immediately.
+/// Under >4 concurrent authentications, callers beyond the 4th wait until a worker
+/// is free — the pool never deadlocks because pool workers do not themselves spawn
+/// back onto the pool (HIGH-3).
+pub(crate) fn resolver_pool() -> &'static ThreadPool {
     RESOLVER_POOL.get_or_init(|| {
         ThreadPool::builder()
-            .pool_size(4)
+            .pool_size(RESOLVER_POOL_SIZE)
             .create()
             .expect("failed to create JWT key resolver thread pool")
     })
@@ -64,17 +80,23 @@ fn resolve_key_sync(
         let _ = tx.send(resolver.resolve(kid.as_deref(), algorithm).await);
     });
     rx.recv()
-        .map_err(|_| AuthenticationError::InvalidToken("key resolver panicked".into()))?
+        .map_err(|_| AuthenticationError::ProviderUnavailable("key resolver did not complete (pool exhausted or task dropped)".into()))?
         .map_err(map_resolver_error)
 }
 
 /// Extract a bearer token string from a [`Credential`], or return
 /// [`AuthenticationError::InvalidToken`] for any other credential type.
+///
+/// Also enforces the 8 KiB token size limit before any cryptographic work.
 fn bearer_token(credential: &Credential) -> Result<&str, AuthenticationError> {
-    match credential {
-        Credential::Bearer(t) => Ok(t.as_str()),
-        _ => Err(AuthenticationError::InvalidToken("unsupported credential type".into())),
+    let raw = match credential {
+        Credential::Bearer(t) => t.as_str(),
+        _ => return Err(AuthenticationError::InvalidToken("expected Bearer credential".to_string())),
+    };
+    if raw.len() > MAX_TOKEN_BYTES {
+        return Err(AuthenticationError::InvalidToken("token exceeds maximum allowed size".to_string()));
     }
+    Ok(raw)
 }
 
 fn rsa_decoding_key(pem: &str) -> Result<DecodingKey, AuthenticationError> {
@@ -87,20 +109,14 @@ fn ec_decoding_key(pem: &str) -> Result<DecodingKey, AuthenticationError> {
         .map_err(|e| AuthenticationError::InvalidToken(format!("bad EC public key: {e}")))
 }
 
-/// Core authenticate logic shared by all three providers.
-///
-/// Parses the JWT header, enforces `expected_alg`, resolves the key via the
-/// injected resolver, then calls `build_decoding_key` — a caller-supplied
-/// closure that converts the resolved [`VerificationKey`] to a
-/// [`DecodingKey`] in an algorithm-specific way. Full claim validation is
-/// delegated to [`JwtValidationEngine`].
-fn authenticate_inner(
+pub(crate) fn authenticate_inner(
     token: &str,
     config: &JwtProviderConfig,
     resolver: &Arc<dyn KeyResolver>,
     clock: &Arc<dyn Clock>,
     expected_alg: Algorithm,
     jwt_alg: JwtAlgorithm,
+    mapper: &dyn PrincipalMapper,
     build_decoding_key: impl FnOnce(&VerificationKey) -> Result<DecodingKey, AuthenticationError>,
 ) -> Result<SecurityContext, AuthenticationError> {
     let header = jsonwebtoken::decode_header(token)
@@ -116,11 +132,12 @@ fn authenticate_inner(
     let params = ValidationParams {
         expected_iss: config.expected_iss.as_deref(),
         expected_aud: config.expected_aud.as_deref(),
+        leeway_seconds: config.leeway_seconds,
     };
-    JwtValidationEngine::validate(token, &decoding_key, expected_alg, params, clock.as_ref())
+    JwtValidationEngine::validate_with_mapper(token, &decoding_key, expected_alg, params, clock.as_ref(), mapper)
 }
 
-/// Defines a JWT authentication provider struct and its `new()` constructor.
+/// Defines a JWT authentication provider struct and its `new()` / `with_mapper()` constructors.
 /// Each type stays distinct for algorithm enforcement at the type level.
 macro_rules! define_provider {
     ($name:ident) => {
@@ -137,6 +154,7 @@ macro_rules! define_provider {
             config: JwtProviderConfig,
             resolver: Arc<dyn KeyResolver>,
             clock: Arc<dyn Clock>,
+            mapper: Arc<dyn PrincipalMapper>,
         }
 
         impl $name {
@@ -146,7 +164,18 @@ macro_rules! define_provider {
                 resolver: Arc<dyn KeyResolver>,
                 clock: Arc<dyn Clock>,
             ) -> Self {
-                Self { config, resolver, clock }
+                Self {
+                    config,
+                    resolver,
+                    clock,
+                    mapper: Arc::new(DefaultPrincipalMapper),
+                }
+            }
+
+            /// Replace the default [`DefaultPrincipalMapper`] with a custom one.
+            pub fn with_mapper(mut self, mapper: Arc<dyn PrincipalMapper>) -> Self {
+                self.mapper = mapper;
+                self
             }
         }
     };
@@ -176,8 +205,17 @@ impl AuthenticationProvider for Hs256AuthenticationProvider {
             &self.clock,
             Algorithm::HS256,
             JwtAlgorithm::Hs256,
+            self.mapper.as_ref(),
             |key| match key {
-                VerificationKey::Hmac(bytes) => Ok(DecodingKey::from_secret(bytes)),
+                VerificationKey::Hmac(bytes) => {
+                    // H-2: NIST SP 800-107 minimum HMAC secret length.
+                    if bytes.len() < 32 {
+                        return Err(AuthenticationError::ProviderUnavailable(
+                            "HMAC secret must be at least 32 bytes (NIST SP 800-107)".into(),
+                        ));
+                    }
+                    Ok(DecodingKey::from_secret(bytes))
+                }
                 _ => Err(AuthenticationError::InvalidToken("expected HMAC key".into())),
             },
         )
@@ -208,6 +246,7 @@ impl AuthenticationProvider for Rs256AuthenticationProvider {
             &self.clock,
             Algorithm::RS256,
             JwtAlgorithm::Rs256,
+            self.mapper.as_ref(),
             |key| match key {
                 VerificationKey::RsaPem(pem) => rsa_decoding_key(pem),
                 _ => Err(AuthenticationError::InvalidToken("expected RSA PEM key".into())),
@@ -240,6 +279,7 @@ impl AuthenticationProvider for Es256AuthenticationProvider {
             &self.clock,
             Algorithm::ES256,
             JwtAlgorithm::Es256,
+            self.mapper.as_ref(),
             |key| match key {
                 VerificationKey::EcPem(pem) => ec_decoding_key(pem),
                 _ => Err(AuthenticationError::InvalidToken("expected EC PEM key".into())),
@@ -470,9 +510,10 @@ mod tests {
     fn hs256_provider_wrong_secret_returns_invalid_signature() {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
+        // Must be >= 32 bytes so the H-2 length check passes and we reach signature verification.
         let wrong_resolver = Arc::new(LocalKeyResolver::new(
             JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(b"wrong-secret".to_vec()),
+            VerificationKey::Hmac(b"wrong-secret-that-is-32-bytes!!!".to_vec()),
         ));
         let provider = Hs256AuthenticationProvider::new(default_config(), wrong_resolver, pinned_clock());
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
@@ -877,5 +918,70 @@ mod tests {
         assert_send_sync::<Hs256AuthenticationProvider>();
         assert_send_sync::<Rs256AuthenticationProvider>();
         assert_send_sync::<Es256AuthenticationProvider>();
+    }
+
+    // H-2: HMAC key shorter than 32 bytes must be rejected before JWT decoding.
+    #[test]
+    fn hmac_key_shorter_than_32_bytes_returns_provider_unavailable() {
+        let short_key = b"short-key".to_vec(); // 9 bytes < 32
+        let resolver = Arc::new(LocalKeyResolver::new(
+            JwtAlgorithm::Hs256,
+            VerificationKey::Hmac(short_key.clone()),
+        ));
+        let claims = serde_json::json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
+        // Build a token signed with the short key (jsonwebtoken accepts it; we reject on verify)
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(&short_key),
+        )
+        .unwrap();
+        let provider = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
+        let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+        assert!(
+            matches!(err, AuthenticationError::ProviderUnavailable(_)),
+            "HMAC key < 32 bytes must return ProviderUnavailable, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T-11: custom PrincipalMapper injected via with_mapper is called exactly
+    // once per authenticate call (tracking mapper).
+    // -----------------------------------------------------------------------
+
+    struct TrackingMapper {
+        call_count: Arc<Mutex<usize>>,
+        inner: DefaultPrincipalMapper,
+    }
+
+    impl ego_security_sdk::PrincipalMapper for TrackingMapper {
+        fn map(
+            &self,
+            claims: &ego_domain::auth::ClaimSet,
+        ) -> Result<(ego_security_sdk::Principal, ego_domain::auth::Claims), ego_domain::auth::AuthenticationError> {
+            let mut guard = self.call_count.lock().unwrap();
+            *guard += 1;
+            drop(guard);
+            self.inner.map(claims)
+        }
+    }
+
+    #[test]
+    fn rs256_with_mapper_is_called_exactly_once_per_authenticate() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let mapper = Arc::new(TrackingMapper {
+            call_count: Arc::clone(&call_count),
+            inner: DefaultPrincipalMapper,
+        });
+
+        let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
+        let token = make_rs256_token(&claims);
+
+        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock())
+            .with_mapper(mapper);
+
+        provider.authenticate(&Credential::Bearer(token)).unwrap();
+
+        assert_eq!(*call_count.lock().unwrap(), 1, "mapper must be called exactly once per authenticate");
     }
 }
