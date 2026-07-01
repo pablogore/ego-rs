@@ -468,6 +468,21 @@ mod tests {
         assert!(cfg.validate().is_ok(), "TTL == 300 must be accepted");
     }
 
+    // H-3: TTL=0 is rejected (use None to disable cache, not zero).
+    #[test]
+    fn validate_rejects_introspection_cache_ttl_zero() {
+        let mut cfg = cfg_with_jwks_uri();
+        cfg.introspection_endpoint = Some(url("https://idp.example.com/introspect"));
+        cfg.introspection_client_id = Some("cid".into());
+        cfg.introspection_client_secret = Some("csec".into());
+        cfg.introspection_cache_ttl_seconds = Some(0);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, AuthenticationError::ProviderUnavailable(_)),
+            "TTL == 0 must be ProviderUnavailable"
+        );
+    }
+
     // H-5: empty allowed_algorithms must be rejected.
     #[test]
     fn validate_rejects_empty_allowed_algorithms() {
