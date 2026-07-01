@@ -171,6 +171,26 @@ impl OidcAuthenticationProvider {
         mapper: Arc<dyn PrincipalMapper>,
         discovery: Arc<dyn DiscoveryProvider>,
     ) -> Result<Self, AuthenticationError> {
+        Self::with_discovery_and_jwks_provider(
+            config,
+            clock,
+            mapper,
+            discovery,
+            Arc::new(crate::jwks::HttpJwksProvider::new()),
+        )
+    }
+
+    /// Internal: construct with explicit `DiscoveryProvider` and `JwksProvider`.
+    ///
+    /// This is the canonical constructor that all other constructors funnel into.
+    /// Both providers are injectable, enabling full in-process testing without HTTP (C2).
+    pub(crate) fn with_discovery_and_jwks_provider(
+        config: OidcProviderConfig,
+        clock: Arc<dyn Clock>,
+        mapper: Arc<dyn PrincipalMapper>,
+        discovery: Arc<dyn DiscoveryProvider>,
+        jwks_provider: Arc<dyn crate::jwks::JwksProvider>,
+    ) -> Result<Self, AuthenticationError> {
         config.validate()?;
 
         // Resolve JWKS URI: direct config wins over discovery (OQ-5).
@@ -186,14 +206,13 @@ impl OidcAuthenticationProvider {
         let jwks_resolver = Arc::new(JwksKeyResolver::with_provider(
             jwks_uri,
             ttl,
-            // ponytail: no HttpJwksProvider here — tests inject via with_provider
-            Arc::new(crate::jwks::HttpJwksProvider::new()),
+            jwks_provider,
         ));
 
         let jwt_config = JwtProviderConfig {
             expected_iss: config.expected_iss.clone(),
             expected_aud: config.expected_aud.clone(),
-            clock_skew_seconds: config.clock_skew_seconds,
+            leeway_seconds: config.leeway_seconds,
         };
 
         let introspection = Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
@@ -231,11 +250,38 @@ impl OidcAuthenticationProvider {
         let jwt_config = JwtProviderConfig {
             expected_iss: config.expected_iss.clone(),
             expected_aud: config.expected_aud.clone(),
-            clock_skew_seconds: config.clock_skew_seconds,
+            leeway_seconds: config.leeway_seconds,
         };
 
         let token_format = config.token_format.clone().unwrap_or(TokenFormat::Auto);
         let introspection = Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
+        let allowed_algorithms = config.allowed_algorithms.clone()
+            .unwrap_or_else(|| vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]);
+
+        Ok(Self { jwks_resolver, jwt_config, introspection, token_format, clock, mapper, allowed_algorithms })
+    }
+
+    /// Construct with explicit resolver and introspection provider (test-kit only).
+    ///
+    /// Like `with_resolver` but allows injecting a custom `IntrospectionAuthenticationProvider`
+    /// so tests can use `FakeIntrospection` without HTTP (W4).
+    #[cfg(any(test, feature = "test-kit"))]
+    pub fn with_resolver_and_introspection(
+        jwks_resolver: Arc<JwksKeyResolver>,
+        introspection: Option<Arc<IntrospectionAuthenticationProvider>>,
+        config: OidcProviderConfig,
+        clock: Arc<dyn Clock>,
+        mapper: Arc<dyn PrincipalMapper>,
+    ) -> Result<Self, AuthenticationError> {
+        config.validate()?;
+
+        let jwt_config = JwtProviderConfig {
+            expected_iss: config.expected_iss.clone(),
+            expected_aud: config.expected_aud.clone(),
+            leeway_seconds: config.leeway_seconds,
+        };
+
+        let token_format = config.token_format.clone().unwrap_or(TokenFormat::Auto);
         let allowed_algorithms = config.allowed_algorithms.clone()
             .unwrap_or_else(|| vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]);
 
@@ -498,7 +544,7 @@ mod tests {
             // R1-B1: expected_iss is required when jwks_uri is set without issuer_url.
             expected_iss: Some("https://idp.example.com".into()),
             expected_aud: None,
-            clock_skew_seconds: None,
+            leeway_seconds: None,
             jwks_refresh_ttl_seconds: None,
             token_format: None,
             introspection_endpoint: None,
@@ -668,18 +714,22 @@ mod tests {
         let jwks_uri = url::Url::parse("https://fake-idp.test/jwks").unwrap();
         let issuer = url::Url::parse("https://fake-idp.test").unwrap();
         let (fake_discovery, discovery_count, received_url) = FakeDiscovery::new(jwks_uri.clone());
+        let (fake_jwks, jwks_fetch_count) = FakeJwks::rsa(rs256_public_pem());
 
         let config = OidcProviderConfig {
             issuer_url: Some(issuer.clone()),
             jwks_uri: None, // force discover_sync
+            expected_iss: Some(issuer.to_string()),
             ..Default::default()
         };
 
-        let result = OidcAuthenticationProvider::with_discovery(
+        // Use with_discovery_and_jwks_provider so no real HTTP calls are made.
+        let result = OidcAuthenticationProvider::with_discovery_and_jwks_provider(
             config,
             pinned_clock(),
             default_mapper(),
             Arc::new(fake_discovery),
+            Arc::new(fake_jwks),
         );
 
         assert!(result.is_ok(), "with_discovery must succeed when FakeDiscovery returns a valid jwks_uri");
@@ -688,29 +738,22 @@ mod tests {
             1,
             "discover_sync must be called exactly once at construction"
         );
-        // Verify the correct issuer URL was forwarded to the discovery provider.
         assert_eq!(
             received_url.lock().unwrap().as_ref(),
             Some(&issuer),
             "discover_sync must forward the issuer_url to the DiscoveryProvider"
         );
-        // Auth will fail (no real JWKS server) — but construction succeeded and the
-        // discover_sync bridge is exercised.
+
+        // Auth must succeed — FakeJwks holds the matching key.
         let provider = result.unwrap();
-        let claims = json!({ "sub": "user", "exp": future_ts(3600) });
+        let claims = json!({ "sub": "user", "iss": issuer.as_str(), "exp": future_ts(3600) });
         let token = make_rs256_token(&claims);
-        // Auth must fail — either JWKS fetch error (ProviderUnavailable) or
-        // key mismatch (InvalidSignature). Either proves the real JWKS path was taken.
-        // Using a narrow match instead of is_err() prevents an Ok(...) from silently
-        // passing (which would mean the test never actually exercised the JWKS path).
-        let auth_err = provider.authenticate(&Credential::Bearer(token))
-            .expect_err("auth must fail when no real JWKS server backs the discovered URI");
+        let ctx = provider.authenticate(&Credential::Bearer(token))
+            .expect("auth must succeed with FakeJwks holding the matching RS256 key");
+        assert_eq!(ctx.principal.subject_id.as_str(), "user");
         assert!(
-            matches!(
-                auth_err,
-                AuthenticationError::ProviderUnavailable(_) | AuthenticationError::InvalidSignature
-            ),
-            "expected ProviderUnavailable or InvalidSignature, got: {auth_err:?}"
+            jwks_fetch_count.load(Ordering::SeqCst) >= 1,
+            "FakeJwks must have been fetched at least once (warm-up)"
         );
     }
 

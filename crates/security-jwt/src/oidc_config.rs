@@ -34,8 +34,11 @@ pub struct OidcProviderConfig {
     pub expected_iss: Option<String>,
     /// Expected `aud` claim values (at least one must match).
     pub expected_aud: Option<Vec<String>>,
-    /// Clock-skew tolerance in seconds. Default 0.
-    pub clock_skew_seconds: Option<u64>,
+    /// Leeway in seconds applied to `exp` and `nbf` checks. Default 0.
+    ///
+    /// Tokens expired by fewer than this many seconds are still accepted.
+    /// Use small values (≤ 30s). This is NOT symmetric clock-skew — only `exp`/`nbf` are affected.
+    pub leeway_seconds: Option<u64>,
     /// JWKS background refresh interval in seconds. Default 300.
     pub jwks_refresh_ttl_seconds: Option<u64>,
     /// Token format detection mode. Default `Auto`.
@@ -60,7 +63,7 @@ impl std::fmt::Debug for OidcProviderConfig {
             .field("jwks_uri", &self.jwks_uri)
             .field("expected_iss", &self.expected_iss)
             .field("expected_aud", &self.expected_aud)
-            .field("clock_skew_seconds", &self.clock_skew_seconds)
+            .field("leeway_seconds", &self.leeway_seconds)
             .field("jwks_refresh_ttl_seconds", &self.jwks_refresh_ttl_seconds)
             .field("token_format", &self.token_format)
             .field("introspection_endpoint", &self.introspection_endpoint)
@@ -145,13 +148,24 @@ impl OidcProviderConfig {
             }
         }
 
-        // R1-B1: when jwks_uri is configured without issuer_url and expected_iss is not set,
-        // tokens from ANY issuer are accepted. Require expected_iss to prevent issuer confusion.
-        if self.jwks_uri.is_some() && self.issuer_url.is_none() && self.expected_iss.is_none() {
+        // R1-B1: when jwks_uri is configured, expected_iss is always required regardless of
+        // whether issuer_url is also present. Without expected_iss the iss claim is not validated
+        // and tokens from any issuer are accepted (W3: closes the bypass where both urls are set).
+        if self.jwks_uri.is_some() && self.expected_iss.is_none() {
             return Err(AuthenticationError::ProviderUnavailable(
-                "expected_iss is required when jwks_uri is configured without issuer_url — \
+                "expected_iss is required when jwks_uri is configured — \
                  without it, tokens from any issuer are accepted".into(),
             ));
+        }
+
+        // R2-W2: discovery-only path (issuer_url set, jwks_uri absent, expected_iss absent).
+        // Not a hard error — operators may set up OIDC discovery before they know the issuer
+        // string. Advisory warning only; the iss claim will not be validated at runtime.
+        if self.issuer_url.is_some() && self.jwks_uri.is_none() && self.expected_iss.is_none() {
+            tracing::warn!(
+                "OidcProviderConfig: expected_iss not set — iss claim in JWT will not be \
+                 validated. Set expected_iss to prevent issuer confusion attacks."
+            );
         }
 
         Ok(())
@@ -210,7 +224,7 @@ mod tests {
             // R1-B1: expected_iss required when jwks_uri set without issuer_url.
             expected_iss: Some("https://example.com".into()),
             expected_aud: None,
-            clock_skew_seconds: None,
+            leeway_seconds: None,
             jwks_refresh_ttl_seconds: None,
             token_format: None,
             introspection_endpoint: None,
@@ -238,9 +252,29 @@ mod tests {
 
     #[test]
     fn validate_returns_ok_when_issuer_url_is_set() {
-        let mut cfg = cfg_with_neither();
-        cfg.issuer_url = Some(url("https://example.com"));
+        // Base from Default::default() so expected_iss is None — tests discovery-only path.
+        let cfg = OidcProviderConfig {
+            issuer_url: Some(url("https://example.com")),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
+    }
+
+    // R2-W2: discovery-only path with expected_iss = None must return Ok (not a hard error).
+    // A warn! is emitted at runtime but validate() must not reject this config — operators may
+    // legitimately use OIDC discovery before they know the exact issuer string.
+    #[test]
+    fn validate_returns_ok_when_issuer_url_set_without_expected_iss() {
+        let cfg = OidcProviderConfig {
+            issuer_url: Some(url("https://example.com")),
+            jwks_uri: None,
+            expected_iss: None, // explicit: discovery path with no issuer validation
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "discovery-only path without expected_iss must be Ok (advisory warn, not hard error)"
+        );
     }
 
     #[test]
@@ -317,8 +351,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_orphaned_introspection_client_id() {
+        // expected_iss is required by R1-B1; set it so the orphaned-credential guard is reached.
         let config = OidcProviderConfig {
             jwks_uri: Some(url("https://example.com/.well-known/jwks.json")),
+            expected_iss: Some("https://example.com".into()),
             introspection_client_id: Some("orphaned-id".to_string()),
             ..Default::default()
         };
@@ -327,8 +363,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_orphaned_introspection_client_secret() {
+        // expected_iss is required by R1-B1; set it so the orphaned-credential guard is reached.
         let config = OidcProviderConfig {
             jwks_uri: Some(url("https://example.com/.well-known/jwks.json")),
+            expected_iss: Some("https://example.com".into()),
             introspection_client_secret: Some("orphaned-secret".to_string()),
             ..Default::default()
         };
@@ -338,8 +376,10 @@ mod tests {
     // HIGH-1: both client_id AND client_secret without endpoint — common operator mistake
     #[test]
     fn validate_rejects_both_orphaned_credentials_without_endpoint() {
+        // expected_iss is required by R1-B1; set it so the orphaned-credential guard is reached.
         let config = OidcProviderConfig {
             jwks_uri: Some(url("https://example.com/.well-known/jwks.json")),
+            expected_iss: Some("https://example.com".into()),
             introspection_client_id: Some("cid".to_string()),
             introspection_client_secret: Some("csecret".to_string()),
             ..Default::default()

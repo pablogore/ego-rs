@@ -132,7 +132,7 @@ pub(crate) fn authenticate_inner(
     let params = ValidationParams {
         expected_iss: config.expected_iss.as_deref(),
         expected_aud: config.expected_aud.as_deref(),
-        clock_skew_seconds: config.clock_skew_seconds,
+        leeway_seconds: config.leeway_seconds,
     };
     JwtValidationEngine::validate_with_mapper(token, &decoding_key, expected_alg, params, clock.as_ref(), mapper)
 }

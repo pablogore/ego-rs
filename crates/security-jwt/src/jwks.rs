@@ -2,10 +2,11 @@
 //!
 //! `JwksKeyResolver` wraps a provider with an in-memory `RwLock<HashMap>` cache.
 //! Hot path: read lock → cache hit → return clone (INV-7).
-//! Cache miss: ONE forced refresh via RESOLVER_POOL, then re-read.
+//! Cache miss: ONE forced refresh on a dedicated OS thread, then re-read.
 //! Background: `tokio::spawn` + interval task refreshes the cache on TTL.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,6 @@ use ego_domain::auth::AuthenticationError;
 use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, JwkSet};
 use tracing::warn;
 
-use crate::authenticator::resolver_pool;
 use crate::config::JwtAlgorithm;
 use crate::key_resolver::{KeyResolver, KeyResolverError, VerificationKey};
 
@@ -329,8 +329,11 @@ pub struct JwksKeyResolver {
     cache: Cache,
     jwks_uri: url::Url,
     provider: Arc<dyn JwksProvider>,
-    // ponytail: std::sync::Mutex — debounce guard, never held across await, no async needed.
+    // ponytail: std::sync::Mutex — debounce timer, updated only on successful refresh.
     last_force_refresh: Mutex<Instant>,
+    // ponytail: AtomicBool — in-flight guard prevents concurrent force_refresh calls
+    // without burning the debounce window on failure (C1/C3 fix).
+    refresh_in_flight: AtomicBool,
 }
 
 impl JwksKeyResolver {
@@ -353,21 +356,27 @@ impl JwksKeyResolver {
         let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
 
         // Warm-up: synchronously populate the cache at construction time.
+        // Uses std::thread::spawn + a per-call single-threaded Tokio runtime so that
+        // reqwest's I/O reactor is always available (R2-C1: futures_executor::block_on
+        // has no Tokio reactor and panics in production with HttpJwksProvider).
         let provider_ref = Arc::clone(&provider);
         let uri_ref = jwks_uri.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        resolver_pool().spawn_ok(async move {
-            let result = provider_ref.fetch_jwks(&uri_ref).await;
-            let _ = tx.send(result);
-        });
-        match rx.recv() {
+        let warmup_result = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build single-thread Tokio runtime for JWKS warm-up")
+                .block_on(provider_ref.fetch_jwks(&uri_ref))
+        })
+        .join();
+        match warmup_result {
             Ok(Ok(keys)) if !keys.is_empty() => {
                 let mut guard = cache.write().expect("jwks cache poisoned");
                 *guard = keys.into_iter().collect();
             }
             Ok(Ok(_)) => warn!("JWKS warm-up returned 0 keys — cache starts empty"),
             Ok(Err(e)) => warn!("JWKS warm-up failed: {e} — cache starts empty, will retry on first auth"),
-            Err(_) => warn!("JWKS warm-up: pool dropped sender — cache starts empty, will retry on first auth"),
+            Err(_) => warn!("JWKS warm-up: thread panicked — cache starts empty, will retry on first auth"),
         }
 
         // Background refresh task — only when a Tokio runtime is available.
@@ -402,34 +411,41 @@ impl JwksKeyResolver {
         let last_force_refresh =
             Mutex::new(Instant::now() - Duration::from_secs(FORCE_REFRESH_INITIAL_AGE_SECS));
 
-        Self { cache, jwks_uri, provider, last_force_refresh }
+        Self { cache, jwks_uri, provider, last_force_refresh, refresh_in_flight: AtomicBool::new(false) }
     }
 
-    /// Force a synchronous cache refresh via `RESOLVER_POOL`.
+    /// Force a synchronous cache refresh on a dedicated OS thread.
+    ///
+    /// Uses `std::thread::spawn` + a per-call single-threaded Tokio runtime so that
+    /// reqwest's I/O reactor is always available (R2-C1: futures_executor::block_on
+    /// has no Tokio reactor and panics in production with HttpJwksProvider).
     ///
     /// Updates `last_force_refresh` ONLY on a successful fetch that produces keys,
-    /// so a failed refresh does not block retries for 30 s.
+    /// so a failed refresh does not block retries for 30 s (C3).
     fn force_refresh(&self) {
         let provider_ref = Arc::clone(&self.provider);
         let uri_ref = self.jwks_uri.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        resolver_pool().spawn_ok(async move {
-            let result = provider_ref.fetch_jwks(&uri_ref).await;
-            let _ = tx.send(result);
-        });
-        match rx.recv() {
+        let result = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build single-thread Tokio runtime for JWKS force_refresh")
+                .block_on(provider_ref.fetch_jwks(&uri_ref))
+        })
+        .join();
+        match result {
             Ok(Ok(keys)) if !keys.is_empty() => {
                 // Write lock only during cache replacement (INV-7)
                 if let Ok(mut guard) = self.cache.write() {
                     *guard = keys.into_iter().collect();
                 }
                 // Update debounce timer only on success — failed fetches must not
-                // block retries for the full 30 s window.
+                // block retries for the full 30 s window (C3).
                 *self.last_force_refresh.lock().expect("debounce mutex poisoned") = Instant::now();
             }
             Ok(Ok(_)) => warn!("JWKS force_refresh returned 0 keys — retaining stale cache"),
             Ok(Err(e)) => warn!("JWKS forced refresh failed: {e} — retaining stale cache"),
-            Err(_) => warn!("JWKS forced refresh: pool dropped sender — retaining stale cache"),
+            Err(_) => warn!("JWKS forced refresh: thread panicked — retaining stale cache"),
         }
     }
 }
@@ -454,22 +470,34 @@ impl KeyResolver for JwksKeyResolver {
             }
         }
 
-        // Cache miss — debounce: skip force_refresh if one ran within the last 30 s.
-        // Prevents N concurrent JWKS fetches when an attacker floods with novel kid values.
-        // The check and the claim are done under the same lock hold (check-and-set) so that
-        // concurrent threads cannot both observe should_refresh=true and both call force_refresh.
+        // Cache miss — debounce: skip force_refresh if one ran within the last 30 s (success-only),
+        // or if one is already in-flight. Prevents N concurrent JWKS fetches when an attacker
+        // floods with novel kid values.
+        //
+        // C3: `last_force_refresh` is updated ONLY inside `force_refresh` on success, so a failed
+        // fetch does not burn the 30 s window. `refresh_in_flight` prevents concurrent calls.
         let should_refresh = {
-            let mut last = self.last_force_refresh.lock().expect("debounce mutex poisoned");
-            if last.elapsed() >= Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS) {
-                *last = Instant::now(); // claim the slot — subsequent threads see elapsed < 30s
-                true
-            } else {
+            let last = self.last_force_refresh.lock().expect("debounce mutex poisoned");
+            if last.elapsed() < Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS) {
                 false
+            } else {
+                // Try to claim in-flight slot; if already claimed by another thread, skip.
+                self.refresh_in_flight
+                    .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+                    .is_ok()
             }
         };
         if !should_refresh {
             return Err(KeyResolverError::KeyNotFound { kid: key });
         }
+        // R2-W1: RAII guard ensures refresh_in_flight is reset even if force_refresh panics.
+        struct ResetOnDrop<'a>(&'a AtomicBool);
+        impl Drop for ResetOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, AtomicOrdering::SeqCst);
+            }
+        }
+        let _guard = ResetOnDrop(&self.refresh_in_flight);
         self.force_refresh();
 
         {

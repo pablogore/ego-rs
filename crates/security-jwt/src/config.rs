@@ -27,9 +27,12 @@ pub struct JwtProviderConfig {
     pub expected_iss: Option<String>,
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
     pub expected_aud: Option<Vec<String>>,
-    /// Clock-skew tolerance applied to `exp` and `nbf` checks, in seconds.
-    /// A token expired by fewer than this many seconds is still accepted.
-    pub clock_skew_seconds: Option<u64>,
+    /// Leeway in seconds applied to `exp` and `nbf` checks.
+    ///
+    /// Tokens expired by fewer than this many seconds are still accepted (effective validity
+    /// window extends past `exp` by this amount). Use small values (≤ 30s) to avoid weakening
+    /// revocation. This is NOT symmetric clock-skew tolerance — only `exp` and `nbf` are affected.
+    pub leeway_seconds: Option<u64>,
 }
 
 /// Type alias for clarity at call sites using [`crate::Hs256AuthenticationProvider`].

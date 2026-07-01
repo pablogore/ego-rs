@@ -25,9 +25,12 @@ pub(crate) struct ValidationParams<'a> {
     pub expected_iss: Option<&'a str>,
     /// If `Some`, the token's `aud` claim MUST contain at least one of these values.
     pub expected_aud: Option<&'a [String]>,
-    /// Clock-skew tolerance in seconds. A token expired by fewer than this many
-    /// seconds is still accepted.
-    pub clock_skew_seconds: Option<u64>,
+    /// Leeway in seconds applied to `exp` and `nbf` checks.
+    ///
+    /// Tokens expired by fewer than this many seconds are still accepted (effective validity
+    /// window extends past `exp` by this amount). Use small values (≤ 30s) to avoid weakening
+    /// revocation. This is NOT symmetric clock-skew tolerance — only `exp` and `nbf` are affected.
+    pub leeway_seconds: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +114,7 @@ impl JwtValidationEngine {
             AuthenticationError::InvalidToken("missing required claim: exp".to_string())
         })?;
         let leeway = chrono::Duration::seconds(
-            i64::try_from(params.clock_skew_seconds.unwrap_or(0)).unwrap_or(0),
+            i64::try_from(params.leeway_seconds.unwrap_or(0)).unwrap_or(0),
         );
         match parse_timestamp(exp_val) {
             Some(exp_dt) => {
@@ -252,7 +255,7 @@ mod tests {
     }
 
     fn no_params<'a>() -> ValidationParams<'a> {
-        ValidationParams { expected_iss: None, expected_aud: None, clock_skew_seconds: None }
+        ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None }
     }
 
     // -----------------------------------------------------------------------
@@ -506,7 +509,7 @@ mod tests {
     fn iss_mismatch_returns_invalid_token() {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "wrong" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, clock_skew_seconds: None };
+        let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -523,7 +526,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
         let params =
-            ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, clock_skew_seconds: None };
+            ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -545,7 +548,7 @@ mod tests {
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
         let params =
-            ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), clock_skew_seconds: None };
+            ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -590,7 +593,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "my-api" });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), clock_skew_seconds: None };
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -611,7 +614,7 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": 42 });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), clock_skew_seconds: None };
+        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -660,7 +663,7 @@ mod tests {
         // The token MUST be accepted — the warn! path is exercised, not rejection.
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "https://random.issuer.example" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: None, expected_aud: None, clock_skew_seconds: None };
+        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -682,7 +685,7 @@ mod tests {
         // The token MUST be accepted — the warn! path is exercised, not rejection.
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "some-unvalidated-service" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: None, expected_aud: None, clock_skew_seconds: None };
+        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -695,7 +698,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // clock_skew_seconds: boundary — expired by exactly leeway → rejected
+    // leeway_seconds: boundary — expired by exactly leeway → rejected
     // -----------------------------------------------------------------------
 
     #[test]
@@ -709,7 +712,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(leeway_secs as u64),
+            leeway_seconds: Some(leeway_secs as u64),
         };
         let err = JwtValidationEngine::validate(
             &token,
@@ -737,7 +740,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(leeway_secs as u64),
+            leeway_seconds: Some(leeway_secs as u64),
         };
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -755,7 +758,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // B-3: nbf leeway — clock_skew_seconds applies to nbf as well
+    // B-3: nbf leeway — leeway_seconds applies to nbf as well
     // -----------------------------------------------------------------------
 
     #[test]
@@ -769,7 +772,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(5),
+            leeway_seconds: Some(5),
         };
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -793,7 +796,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(5),
+            leeway_seconds: Some(5),
         };
         let err = JwtValidationEngine::validate(
             &token,
@@ -827,7 +830,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // clock_skew_seconds: token expired by 1s accepted with 5s leeway
+    // leeway_seconds: token expired by 1s accepted with 5s leeway
     // -----------------------------------------------------------------------
 
     #[test]
@@ -841,7 +844,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(5),
+            leeway_seconds: Some(5),
         };
         let ctx = JwtValidationEngine::validate(
             &token,
@@ -866,7 +869,7 @@ mod tests {
         let params = ValidationParams {
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: Some(leeway_secs as u64),
+            leeway_seconds: Some(leeway_secs as u64),
         };
         let ctx = JwtValidationEngine::validate(
             &token,

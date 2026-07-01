@@ -35,7 +35,7 @@
 //! let config = JwtProviderConfig {
 //!     expected_iss: Some("my-service".into()),
 //!     expected_aud: None,
-//!     clock_skew_seconds: None,
+//!     leeway_seconds: None,
 //! };
 //! let auth = Hs256AuthenticationProvider::new(config, resolver, Arc::new(SystemClock));
 //! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;

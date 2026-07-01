@@ -334,11 +334,22 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
         let ctx = SecurityContext::new(principal, claims);
 
         // Store in cache if enabled
-        if let Some((_, cache, eviction_queue)) = &self.cache {
+        if let Some((cache_ttl, cache, eviction_queue)) = &self.cache {
             let key = cache_key(token);
             // Acquire write lock BEFORE eviction_queue lock to avoid deadlock (see LOCK ORDER).
             let mut cache_guard = cache.write().expect("introspection cache poisoned");
             let mut queue = eviction_queue.lock().expect("eviction queue lock poisoned");
+
+            // W1: Double-checked locking — a concurrent thread may have inserted the same key
+            // between our read-lock miss and this write-lock acquisition. Skip insert + queue
+            // push only if the key is already present AND fresh (within TTL), to prevent
+            // duplicate queue entries. Expired entries must still be overwritten.
+            if let Some((inserted_at, existing_ctx)) = cache_guard.get(&key) {
+                let age_u64 = u64::try_from(now_ts.saturating_sub(*inserted_at)).unwrap_or(u64::MAX);
+                if age_u64 < *cache_ttl {
+                    return Ok(existing_ctx.clone());
+                }
+            }
 
             // FIFO eviction (O(1)): if at capacity, drain ghost entries and remove one live entry.
             if cache_guard.len() >= MAX_INTROSPECTION_CACHE_ENTRIES {
@@ -389,7 +400,7 @@ mod tests {
             jwks_uri: None,
             expected_iss: None,
             expected_aud: None,
-            clock_skew_seconds: None,
+            leeway_seconds: None,
             jwks_refresh_ttl_seconds: None,
             token_format: None,
             introspection_endpoint: Some(

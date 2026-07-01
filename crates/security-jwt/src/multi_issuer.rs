@@ -188,7 +188,7 @@ mod tests {
         let config = JwtProviderConfig {
             expected_iss: Some(iss.to_string()),
             expected_aud: None,
-            clock_skew_seconds: None,
+            leeway_seconds: None,
         };
         Arc::new(Rs256AuthenticationProvider::new(config, resolver, fixed_clock(pinned_now())))
     }
@@ -315,7 +315,7 @@ mod tests {
             let config = JwtProviderConfig {
                 expected_iss: Some("https://issuer-a.example.com".to_string()),
                 expected_aud: None,
-                clock_skew_seconds: None,
+                leeway_seconds: None,
             };
             Arc::new(Rs256AuthenticationProvider::new(
                 config,

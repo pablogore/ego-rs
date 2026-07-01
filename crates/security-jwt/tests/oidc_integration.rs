@@ -300,30 +300,62 @@ fn us003b_auto_no_dots_uses_opaque_path_or_invalid_token() {
 
 #[test]
 fn us003b_opaque_format_with_dotted_token_uses_introspection() {
-    // Introspection configured; TokenFormat::Opaque; token looks like JWT → goes to introspection
+    // Introspection configured; TokenFormat::Opaque; token looks like JWT → goes to introspection.
+    // Uses FakeIntrospection so the test is deterministic and requires no network (W4).
+    use std::collections::BTreeMap;
+    use ego_domain::auth::{ClaimSet, ClaimValue};
+    use security_jwt::IntrospectionAuthenticationProvider;
+
     let clock = fixed_clock(pinned_now());
     let issuer = FakeIssuer::new(Arc::clone(&clock));
-    let token = issuer.issue_token(make_claims("user", future_ts(3600)));
-    // token is a valid JWT but with Opaque mode it should go to introspection
+    let token = issuer.issue_token(make_claims("user-opaque", future_ts(3600)));
+
+    // Build a FakeIntrospection that returns active:true for our token.
+    let mut fake_intro = FakeIntrospection::new();
+    let mut raw = BTreeMap::new();
+    raw.insert("sub".into(), ClaimValue::String("user-opaque".into()));
+    raw.insert("exp".into(), ClaimValue::Integer(future_ts(3600)));
+    fake_intro.set_active_response(&token, ClaimSet::new(raw));
+
+    let intro_config = OidcProviderConfig {
+        issuer_url: Some(url::Url::parse("https://fake.test").unwrap()),
+        jwks_uri: None,
+        introspection_endpoint: Some(url::Url::parse("https://fake.test/introspect").unwrap()),
+        introspection_client_id: Some("cid".into()),
+        introspection_client_secret: Some("csec".into()),
+        ..Default::default()
+    };
+    let intro_provider = Arc::new(
+        IntrospectionAuthenticationProvider::with_provider(
+            intro_config,
+            fixed_clock(pinned_now()),
+            default_mapper(),
+            Arc::new(fake_intro),
+        )
+        .unwrap(),
+    );
+
     let resolver = Arc::new(issuer.jwks_resolver());
     let config = OidcProviderConfig {
         jwks_uri: Some(issuer.jwks_uri.clone()),
         token_format: Some(TokenFormat::Opaque),
         expected_iss: Some("https://fake-issuer.test".into()),
-        introspection_endpoint: Some(
-            url::Url::parse("https://fake.test/introspect").unwrap(),
-        ),
-        introspection_client_id: Some("cid".into()),
-        introspection_client_secret: Some("csec".into()),
         ..Default::default()
     };
-    let provider = OidcAuthenticationProvider::with_resolver(
-        resolver, config, fixed_clock(pinned_now()), default_mapper(),
+    // with_resolver_and_introspection injects FakeIntrospection — no HTTP needed.
+    let provider = OidcAuthenticationProvider::with_resolver_and_introspection(
+        resolver,
+        Some(intro_provider),
+        config,
+        fixed_clock(pinned_now()),
+        default_mapper(),
     )
     .unwrap();
-    // HttpIntrospectionProvider will fail (no server); this proves introspection path was taken
-    let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
-    assert!(matches!(err, AuthenticationError::ProviderUnavailable(_)));
+
+    // Opaque mode: the JWT-looking token must be routed to introspection, not the JWT path.
+    // FakeIntrospection returns active:true, so we get Ok with the expected subject.
+    let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
+    assert_eq!(ctx.principal.subject_id.as_str(), "user-opaque");
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +363,10 @@ fn us003b_opaque_format_with_dotted_token_uses_introspection() {
 // ---------------------------------------------------------------------------
 
 fn make_introspection_config(ttl: Option<u64>) -> OidcProviderConfig {
+    // Introspection-only config: jwks_uri intentionally absent.
+    // Adding jwks_uri would require expected_iss (R1-B1 guard) but these tests only
+    // exercise IntrospectionAuthenticationProvider which does not call config.validate().
     OidcProviderConfig {
-        jwks_uri: Some(url::Url::parse("https://fake.test/jwks").unwrap()),
         introspection_endpoint: Some(
             url::Url::parse("https://fake.test/introspect").unwrap(),
         ),
