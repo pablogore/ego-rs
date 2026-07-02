@@ -1971,6 +1971,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "security-apikey"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ego-domain",
+ "ego-security-sdk",
+ "mockall 0.14.0",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.18",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "security-jwt"
 version = "0.1.0"
 dependencies = [
@@ -3518,6 +3534,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

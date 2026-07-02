@@ -1,0 +1,93 @@
+change_id: CORE-021
+title: API Key Authentication
+status: verified
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  spec:
+    status: complete
+    artifact: spec.md, specs/security-apikey/spec.md
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: complete
+  verify:
+    status: passed
+    artifact: verify-report.md
+  archive:
+    status: pending
+    artifact: archive.md
+
+# Test and verification results (current — reflects post-archive re-verification)
+verification:
+  test_status: passed
+  test_count: 41
+  critical_findings: 0
+  warnings: 0
+  suggestions: 0
+  clippy_status: clean
+  fmt_status: clean
+  last_verified_at: 2026-07-02
+  re_verified: true
+  re_verification_note: >
+    Post-archive review found and fixed a timing side-channel, an expiry
+    tie-break bug, and a deleted determinism test; ApiKeyHash constructors
+    were promoted to pub. Re-verified PASS. Full detail in engram topic
+    sdd/CORE-021-api-key-auth/verify-report. archive.md retains the original
+    38/1/1 counts as a historical snapshot per documentation policy.
+
+# Final release verification (2026-07-02) — accepted on scoped (crate-level) merits
+release_verification:
+  decision: accepted_scoped
+  scoped_checks:
+    cargo_test_workspace: pass
+    cargo_test_security_apikey: pass (41/41)
+    cargo_clippy_security_apikey_deny_warnings: pass
+    cargo_fmt_security_apikey: pass
+  workspace_wide_checks:
+    cargo_fmt_check: fail (pre-existing formatting drift in unrelated crates, out of CORE-021 scope)
+    cargo_clippy_workspace_deny_warnings: fail (pre-existing lint failures in unrelated crates, out of CORE-021 scope)
+  note: >
+    CORE-021 (security-apikey) passes every check in isolation. Workspace-wide
+    fmt/clippy gates fail only due to pre-existing debt in ego-service-sdk-macros,
+    persistent-entity, and security-jwt — none introduced by or in scope of
+    CORE-021. Per explicit decision, CORE-021 is accepted on its own merits;
+    the workspace-wide debt is tracked separately as
+    openspec/changes/CORE-023-workspace-hygiene (not started).
+
+# Change scope
+artifacts:
+  crates_created:
+    - crates/security-apikey
+  files_created:
+    - crates/security-apikey/Cargo.toml
+    - crates/security-apikey/src/lib.rs
+    - crates/security-apikey/src/key_id.rs
+    - crates/security-apikey/src/key_hash.rs
+    - crates/security-apikey/src/secret.rs
+    - crates/security-apikey/src/parser.rs
+    - crates/security-apikey/src/resolver.rs
+    - crates/security-apikey/src/authenticator.rs
+  files_modified:
+    - Cargo.toml
+
+# Rollback is trivial
+rollback_plan: |
+  Remove "crates/security-apikey" from workspace members in root Cargo.toml,
+  then delete crates/security-apikey/ directory. No existing code was modified.
+
+notes: |
+  CORE-021 is fully additive with no breaking changes.
+  Implementation and independent verification complete (41/41 tests, clean
+  clippy/fmt/doc for security-apikey). NOT yet committed to git — no PR
+  exists for this change. The previous "Verified merged in PR #111" claim
+  was false: PR #111 in actual git history is the unrelated oauth2-oidc
+  merge. Do not treat this change as archived or shipped until it is
+  actually committed and merged.
