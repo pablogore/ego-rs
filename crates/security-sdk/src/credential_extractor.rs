@@ -151,7 +151,7 @@ impl CredentialExtractor for ApiKeyExtractor {
     fn extract(&self, request: &dyn RequestContext) -> Result<Option<Credential>, AuthenticationError> {
         match request.header(&self.header_name) {
             None => Ok(None),
-            Some(val) if val.is_empty() => Err(AuthenticationError::InvalidToken(
+            Some("") => Err(AuthenticationError::InvalidToken(
                 "API key header present but value is empty".into(),
             )),
             Some(val) => Ok(Some(Credential::Bearer(val.to_string()))),

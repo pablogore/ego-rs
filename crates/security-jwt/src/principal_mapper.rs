@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn float_converts() {
-        let v = serde_json::json!(3.14f64);
+        let v = serde_json::json!(2.5f64);
         assert!(matches!(value_to_claim_value(v), ClaimValue::Float(_)));
     }
 
