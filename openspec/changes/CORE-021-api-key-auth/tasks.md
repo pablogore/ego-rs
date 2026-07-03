@@ -58,7 +58,7 @@ Chain strategy: size-exception
   - `ApiKeyRecord { principal, scopes, expires_at, metadata, key_hash }` (derive `Clone`)
   - `trait ApiKeyResolver: Send + Sync` with `#[cfg_attr(test, mockall::automock)]`
   - `InMemoryApiKeyResolver` (HashMap-backed, `pub fn insert(key_id, record)`)
-  - `pub type LocalApiKeyResolver = InMemoryApiKeyResolver`
+  - `pub trait LocalApiKeyResolver: ApiKeyResolver {}` (empty marker; `impl LocalApiKeyResolver for InMemoryApiKeyResolver {}`) — see design.md AD-8
   - Tests pass.
 
 ---

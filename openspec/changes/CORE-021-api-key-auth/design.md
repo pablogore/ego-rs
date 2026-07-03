@@ -99,6 +99,27 @@ a JSON string array (`serde_json::Value::Array`). Rationale: scopes are
 request-scoped auth assertions (Claims are exactly that, AD-002), not
 principal-identity metadata (`Principal.attributes`). No SDK change needed.
 
+### AD-8: Provider requires `LocalApiKeyResolver`, a marker supertrait, not bare `ApiKeyResolver`
+
+| Option | Tradeoff | Decision |
+|--------|----------|----------|
+| `Arc<dyn ApiKeyResolver>` in the provider (original shape) | Any implementation compiles, including I/O-backed ones that reopen the timing side-channel `authenticate()` closes via dummy-hash verification | rejected |
+| Rename/split into a separate remote SPI entirely | Bigger surface change; no remote resolver exists yet to design against (YAGNI) | rejected for this change |
+| `LocalApiKeyResolver: ApiKeyResolver {}` empty marker trait; provider requires `Arc<dyn LocalApiKeyResolver>` | Rust cannot verify "no I/O" at compile time, but this forces an explicit, visible opt-in from any resolver author, rather than silently satisfying an unconstrained trait | **chosen** |
+
+Rationale: `ApiKeyResolver`'s "cache-first, no I/O" contract (AD-004) is
+unenforceable by the type system alone. A marker supertrait doesn't fix
+that, but it converts an implicit assumption into an explicit assertion,
+`impl LocalApiKeyResolver for MyResolver {}` is a deliberate, auditable
+statement, not something that happens by accident of satisfying `lookup`'s
+signature. This also gives `LocalApiKeyResolver` real semantics, replacing
+the no-op `type LocalApiKeyResolver = InMemoryApiKeyResolver` alias from the
+original design (which added a name but no abstraction). A future remote
+resolver SPI (e.g. `RemoteApiKeySource`) would deliberately NOT implement
+`LocalApiKeyResolver`, and so could never be passed to
+`ApiKeyAuthenticationProvider::new` without the author incorrectly opting
+in.
+
 ## Data Flow
 
 ```
@@ -180,13 +201,20 @@ pub trait ApiKeyResolver: Send + Sync {   // object-safe, Arc<dyn>
     fn lookup(&self, key_id: &ApiKeyId) -> Result<Option<Arc<ApiKeyRecord>>, ApiKeyResolverError>;
 }
 pub struct InMemoryApiKeyResolver { /* HashMap<ApiKeyId, Arc<ApiKeyRecord>> */ }
-pub type LocalApiKeyResolver = InMemoryApiKeyResolver;
+
+// Opt-in, empty marker trait, NOT compiler-verified: implementing it is an
+// author's promise that `lookup` performs no I/O on any path. The provider
+// requires this, not bare `ApiKeyResolver`, so a hypothetical remote/DB/HTTP
+// resolver cannot be wired in without explicitly (and incorrectly) asserting
+// it. See AD-004 and resolver.rs's doc comment for the full rationale.
+pub trait LocalApiKeyResolver: ApiKeyResolver {}
+impl LocalApiKeyResolver for InMemoryApiKeyResolver {}
 
 pub struct ApiKeyAuthenticationProvider {          // impl AuthenticationProvider (sync)
-    // resolver: Arc<dyn ApiKeyResolver>, parser: Arc<dyn ApiKeyParser>, clock: Arc<dyn Clock>
+    // resolver: Arc<dyn LocalApiKeyResolver>, parser: Arc<dyn ApiKeyParser>, clock: Arc<dyn Clock>
 }
 impl ApiKeyAuthenticationProvider {
-    pub fn new(resolver: Arc<dyn ApiKeyResolver>, clock: Arc<dyn Clock>) -> Self; // DefaultApiKeyParser
+    pub fn new(resolver: Arc<dyn LocalApiKeyResolver>, clock: Arc<dyn Clock>) -> Self; // DefaultApiKeyParser
     pub fn with_parser(self, parser: Arc<dyn ApiKeyParser>) -> Self;
 }
 ```

@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::key_hash::ApiKeyHash;
 use crate::parser::{ApiKeyParser, DefaultApiKeyParser};
-use crate::resolver::ApiKeyResolver;
+use crate::resolver::LocalApiKeyResolver;
 
 /// Uniform failure for every rejection path — the message is intentionally
 /// identical everywhere so a future edit to one branch can't accidentally
@@ -33,14 +33,21 @@ pub const MAX_KEY_BYTES: usize = 1024;
 /// oracle attacks; callers MUST NOT forward the inner error message to external
 /// consumers.
 pub struct ApiKeyAuthenticationProvider {
-    resolver: Arc<dyn ApiKeyResolver>,
+    resolver: Arc<dyn LocalApiKeyResolver>,
     parser: Arc<dyn ApiKeyParser>,
     clock: Arc<dyn Clock>,
 }
 
 impl ApiKeyAuthenticationProvider {
     /// Creates a provider using the [`DefaultApiKeyParser`].
-    pub fn new(resolver: Arc<dyn ApiKeyResolver>, clock: Arc<dyn Clock>) -> Self {
+    ///
+    /// Takes `Arc<dyn LocalApiKeyResolver>`, not `Arc<dyn ApiKeyResolver>`,
+    /// deliberately: `LocalApiKeyResolver` is an opt-in marker asserting the
+    /// resolver performs no I/O (see its doc comment). This is not
+    /// compiler-verified, but it forces a resolver author to explicitly
+    /// declare local-only-ness rather than silently satisfying an
+    /// unconstrained trait.
+    pub fn new(resolver: Arc<dyn LocalApiKeyResolver>, clock: Arc<dyn Clock>) -> Self {
         Self {
             resolver,
             parser: Arc::new(DefaultApiKeyParser),
@@ -175,7 +182,7 @@ mod tests {
         secret: &[u8],
         expires_at: Option<SystemTime>,
         scopes: Vec<String>,
-    ) -> Arc<dyn ApiKeyResolver> {
+    ) -> Arc<dyn LocalApiKeyResolver> {
         let mut resolver = InMemoryApiKeyResolver::new();
         let id = ApiKeyId::new(key_id).unwrap();
         let record = ApiKeyRecord {
@@ -389,11 +396,19 @@ mod tests {
 
     #[test]
     fn provider_is_object_safe_behind_arc() {
-        let resolver: Arc<dyn ApiKeyResolver> = Arc::new(InMemoryApiKeyResolver::new());
+        let resolver: Arc<dyn LocalApiKeyResolver> = Arc::new(InMemoryApiKeyResolver::new());
         let provider: Arc<dyn AuthenticationProvider> = Arc::new(
             ApiKeyAuthenticationProvider::new(resolver, fixed_clock(pinned_now())),
         );
         // Just constructing this confirms object safety at compile time.
         let _ = provider;
+    }
+
+    #[test]
+    fn local_api_key_resolver_is_object_safe_behind_arc() {
+        // Confirms the marker trait itself (not just ApiKeyResolver) is
+        // object-safe, since the provider stores Arc<dyn LocalApiKeyResolver>.
+        let resolver: Arc<dyn LocalApiKeyResolver> = Arc::new(InMemoryApiKeyResolver::new());
+        let _ = resolver;
     }
 }

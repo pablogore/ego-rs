@@ -29,6 +29,10 @@ pub struct ApiKeyRecord {
     /// Arbitrary provider metadata (ignored by the provider). `Arc`-wrapped
     /// so resolvers sharing metadata across records (e.g. tenant/plan/owner
     /// fields common to many keys) pay one allocation, not one per record.
+    /// Because it's shared, it is effectively immutable after construction:
+    /// there is no exclusive-ownership path to mutate it in place once an
+    /// `ApiKeyRecord` exists. Build a fresh map (and a fresh `Arc`) if a
+    /// given record needs metadata distinct from its siblings.
     pub metadata: Arc<HashMap<String, String>>,
     /// Stored hash used for constant-time verification.
     pub key_hash: ApiKeyHash,
@@ -99,8 +103,22 @@ impl ApiKeyResolver for InMemoryApiKeyResolver {
     }
 }
 
-/// Type alias for `InMemoryApiKeyResolver` — the local (non-I/O) variant.
-pub type LocalApiKeyResolver = InMemoryApiKeyResolver;
+/// Opt-in assertion that an [`ApiKeyResolver`] satisfies the local/no-I/O
+/// contract documented on that trait.
+///
+/// This is NOT a compiler-verified guarantee — Rust cannot check that
+/// `lookup` performs no I/O. Implementing this (empty) trait is a promise
+/// from the author: `lookup` returns from already-resident local state on
+/// every path, with no meaningfully-variable latency between a hit and a
+/// miss. [`crate::authenticator::ApiKeyAuthenticationProvider`] requires
+/// `Arc<dyn LocalApiKeyResolver>`, not `Arc<dyn ApiKeyResolver>`, precisely
+/// so a database-backed, HTTP-backed, or otherwise I/O-performing resolver
+/// cannot be wired into the provider without its author explicitly (and, in
+/// that case, incorrectly) asserting this trait. A hypothetical remote
+/// resolver SPI belongs behind a different, non-`LocalApiKeyResolver` type.
+pub trait LocalApiKeyResolver: ApiKeyResolver {}
+
+impl LocalApiKeyResolver for InMemoryApiKeyResolver {}
 
 #[cfg(test)]
 mod tests {

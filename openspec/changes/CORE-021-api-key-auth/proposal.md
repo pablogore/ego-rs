@@ -22,7 +22,9 @@ established `security-jwt` pattern (resolver SPI + thin authenticator).
   - Constant-time comparison enforced inside the provider (not delegated to
     the resolver)
   - `InMemoryApiKeyResolver` reference implementation for tests and local dev
-  - `LocalApiKeyResolver` alias or re-export of the in-memory impl
+  - `LocalApiKeyResolver`: empty marker supertrait of `ApiKeyResolver` that the
+    provider requires, an explicit, author-asserted promise that `lookup`
+    performs no I/O (see design.md AD-8)
 - Wire `Credential::Bearer` as the carrier for the raw key value (consistent
   with how `ApiKeyExtractor` today maps header values to `Credential::Bearer`)
 - Propagate resolved scopes into `SecurityContext.claims.custom["scopes"]` as a

@@ -154,7 +154,7 @@ this contract. A malformed raw string MUST produce
 ### Requirement: ApiKeyResolver Cache-First Contract (AD-004)
 
 `ApiKeyResolver: Send + Sync`. `lookup(&self, key_id: &ApiKeyId) ->
-Result<Option<ApiKeyRecord>, ApiKeyResolverError>` MUST return from locally
+Result<Option<Arc<ApiKeyRecord>>, ApiKeyResolverError>` MUST return from locally
 available state without performing I/O on the calling thread inside
 `authenticate`, on any path, including the not-found path.
 `InMemoryApiKeyResolver` is the canonical reference implementation
@@ -189,6 +189,33 @@ local caches only, never a pass-through to a remote store).
 - GIVEN a resolver implementing `ApiKeyResolver`
 - WHEN it is stored as `Arc<dyn ApiKeyResolver>`
 - THEN it compiles without error
+
+---
+
+### Requirement: LocalApiKeyResolver Opt-In Marker (AD-8)
+
+`ApiKeyAuthenticationProvider::new` MUST accept `Arc<dyn LocalApiKeyResolver>`,
+not `Arc<dyn ApiKeyResolver>`. `LocalApiKeyResolver: ApiKeyResolver` is an
+empty marker trait; it adds no methods and is not compiler-verified. Its
+purpose is to require an explicit, visible opt-in from a resolver author
+before that resolver can be wired into the provider, since the "no I/O"
+contract on `ApiKeyResolver` (AD-004) cannot itself be enforced by the type
+system. `InMemoryApiKeyResolver` implements `LocalApiKeyResolver`. Any
+future remote-backed resolver (database, HTTP, or otherwise I/O-performing)
+MUST NOT implement `LocalApiKeyResolver`, and therefore cannot be passed to
+the provider without its author incorrectly asserting the marker.
+
+#### Scenario: Reference resolver satisfies the marker
+
+- GIVEN `InMemoryApiKeyResolver`
+- WHEN it is passed to `ApiKeyAuthenticationProvider::new`
+- THEN the call compiles, because `InMemoryApiKeyResolver` implements `LocalApiKeyResolver`
+
+#### Scenario: A bare `ApiKeyResolver` does not satisfy the provider
+
+- GIVEN a type that implements `ApiKeyResolver` but not `LocalApiKeyResolver`
+- WHEN it is passed to `ApiKeyAuthenticationProvider::new`
+- THEN the call does NOT compile
 
 ---
 
