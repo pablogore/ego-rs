@@ -182,7 +182,7 @@ mod tests {
             principal: make_principal("user:test"),
             scopes,
             expires_at,
-            metadata: HashMap::new(),
+            metadata: Arc::new(HashMap::new()),
             key_hash: ApiKeyHash::of(secret),
         };
         resolver.insert(id, record);

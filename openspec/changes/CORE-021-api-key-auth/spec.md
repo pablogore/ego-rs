@@ -84,7 +84,7 @@ encapsulated inside `ApiKeyHash` (the provider MUST NOT access it directly).
 ### Requirement: ApiKeyRecord Structure
 
 `ApiKeyRecord` MUST contain: `principal: Principal`, `scopes: Vec<String>`,
-`expires_at: Option<SystemTime>`, `metadata: HashMap<String, String>`,
+`expires_at: Option<SystemTime>`, `metadata: Arc<HashMap<String, String>>`,
 `key_hash: ApiKeyHash`. Resolver implementations MUST ignore unknown `metadata`
 entries. Consumers MUST NOT depend on provider-specific metadata keys unless
 explicitly documented by the resolver.
@@ -156,8 +156,21 @@ this contract. A malformed raw string MUST produce
 `ApiKeyResolver: Send + Sync`. `lookup(&self, key_id: &ApiKeyId) ->
 Result<Option<ApiKeyRecord>, ApiKeyResolverError>` MUST return from locally
 available state without performing I/O on the calling thread inside
-`authenticate`. `InMemoryApiKeyResolver` is the canonical reference
-implementation (HashMap-backed, no I/O, no persistence, no distributed sync).
+`authenticate`, on any path, including the not-found path.
+`InMemoryApiKeyResolver` is the canonical reference implementation
+(HashMap-backed, no I/O, no persistence, no distributed sync).
+
+This is a hard requirement, not a performance preference: the Provider
+Validation Flow requirement below deliberately performs equal work (a
+hash-verify with a dummy digest) whether `lookup` returns `Some` or `None`,
+specifically so an unknown key id and a known key id with the wrong secret
+are indistinguishable by response time. If `lookup` itself has different
+latency for a hit vs. a miss (a database round-trip, an HTTP call, lock
+contention), that timing difference reopens the same side-channel the
+dummy-hash step exists to close, regardless of how `key_hash.verify`
+behaves. Rust's type system cannot enforce this at compile time;
+implementors MUST satisfy it by construction (in-memory maps or warmed
+local caches only, never a pass-through to a remote store).
 
 #### Scenario: Known key returned
 

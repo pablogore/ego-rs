@@ -26,13 +26,33 @@ pub struct ApiKeyRecord {
     pub scopes: Vec<String>,
     /// Optional expiry; `None` means the key never expires.
     pub expires_at: Option<SystemTime>,
-    /// Arbitrary provider metadata (ignored by the provider).
-    pub metadata: HashMap<String, String>,
+    /// Arbitrary provider metadata (ignored by the provider). `Arc`-wrapped
+    /// so resolvers sharing metadata across records (e.g. tenant/plan/owner
+    /// fields common to many keys) pay one allocation, not one per record.
+    pub metadata: Arc<HashMap<String, String>>,
     /// Stored hash used for constant-time verification.
     pub key_hash: ApiKeyHash,
 }
 
-/// Synchronous cache-first resolver — returns from local state without I/O.
+/// Synchronous cache-first resolver.
+///
+/// # Contract (MUST, not just convention)
+///
+/// `lookup` MUST return from already-resident local state and MUST NOT
+/// perform network or file I/O, database queries, or artificial delay of
+/// any kind, on ANY path — including the not-found path. This is a hard
+/// requirement for the type, not just cache friendliness: the caller,
+/// [`crate::authenticator::ApiKeyAuthenticationProvider`], deliberately does
+/// equal work (a hash-verify with a dummy digest) whether `lookup` returns
+/// `Some` or `None`, specifically to prevent an attacker from distinguishing
+/// "unknown key_id" from "known key_id, wrong secret" via response timing.
+/// If `lookup` itself takes meaningfully different time for a hit vs. a
+/// miss (e.g. a database round-trip, an HTTP call, a lock with contention),
+/// that timing difference reopens the exact side-channel the provider was
+/// built to close, regardless of how `key_hash.verify` behaves. The Rust
+/// type system cannot enforce this — implementors MUST enforce it by
+/// construction (in-memory maps, warmed local caches only; never a
+/// pass-through to a remote store).
 ///
 /// Object-safe and storable as `Arc<dyn ApiKeyResolver>`.
 #[cfg_attr(test, mockall::automock)]
@@ -41,6 +61,8 @@ pub trait ApiKeyResolver: Send + Sync {
     ///
     /// Returns `Ok(Some(record))` when found, `Ok(None)` when not found,
     /// and `Err(ApiKeyResolverError::Backend(_))` for backend failures.
+    ///
+    /// See the trait-level contract above — this MUST NOT perform I/O.
     fn lookup(&self, key_id: &ApiKeyId) -> Result<Option<Arc<ApiKeyRecord>>, ApiKeyResolverError>;
 }
 
@@ -97,7 +119,7 @@ mod tests {
             principal: make_principal(subject),
             scopes: vec![],
             expires_at: None,
-            metadata: HashMap::new(),
+            metadata: Arc::new(HashMap::new()),
             key_hash: crate::key_hash::ApiKeyHash::of(secret),
         }
     }

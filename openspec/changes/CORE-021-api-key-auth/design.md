@@ -171,7 +171,7 @@ pub struct ApiKeyRecord {
     pub principal: Principal,
     pub scopes: Vec<String>,
     pub expires_at: Option<SystemTime>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: Arc<HashMap<String, String>>,
     pub key_hash: ApiKeyHash,
 }
 
