@@ -186,11 +186,11 @@ New crate: `crates/security-apikey/` (`Cargo.toml`, `lib.rs`, `key_id.rs`, `key_
 
 ## Artifacts & Traceability
 
-- **Proposal**: `openspec/changes/CORE-021-api-key-auth/proposal.md`
-- **Specification**: `openspec/changes/CORE-021-api-key-auth/spec.md` (+ delta spec at `specs/security-apikey/spec.md`)
-- **Design**: `openspec/changes/CORE-021-api-key-auth/design.md`
-- **Tasks**: `openspec/changes/CORE-021-api-key-auth/tasks.md`
-- **Archive Report**: `openspec/changes/CORE-021-api-key-auth/archive.md` (this file)
+- **Proposal**: `openspec/changes/archive/2026-07-03-CORE-021-api-key-auth/proposal.md`
+- **Specification**: `openspec/changes/archive/2026-07-03-CORE-021-api-key-auth/spec.md` (+ delta spec at `specs/security-apikey/spec.md`)
+- **Design**: `openspec/changes/archive/2026-07-03-CORE-021-api-key-auth/design.md`
+- **Tasks**: `openspec/changes/archive/2026-07-03-CORE-021-api-key-auth/tasks.md`
+- **Archive Report**: `openspec/changes/archive/2026-07-03-CORE-021-api-key-auth/archive-report.md` (this file)
 - **Implementation**: `crates/security-apikey/` (entire crate)
 - **Pull Request**: [pablogore/ego-rs#112](https://github.com/pablogore/ego-rs/pull/112)
 - **Follow-up (filed, not started)**: `openspec/changes/CORE-023-workspace-hygiene` (pre-existing workspace-wide fmt/clippy debt, unrelated to this change)
