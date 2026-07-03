@@ -1,6 +1,9 @@
 change_id: CORE-021
 title: API Key Authentication
-status: verified
+status: archived
+archived_at: 2026-07-03
+merged_pr: 112
+merged_branch: develop
 
 # Phase progression
 phases:
@@ -22,33 +25,35 @@ phases:
     status: passed
     artifact: verify-report.md
   archive:
-    status: pending
-    artifact: archive.md
+    status: complete
+    artifact: archive-report.md
 
-# Test and verification results (current — reflects post-archive re-verification)
+# Test and verification results (final, at archive time)
 verification:
   test_status: passed
-  test_count: 41
+  test_count: 42
   critical_findings: 0
   warnings: 0
   suggestions: 0
   clippy_status: clean
   fmt_status: clean
-  last_verified_at: 2026-07-02
+  last_verified_at: 2026-07-03
   re_verified: true
   re_verification_note: >
-    Post-archive review found and fixed a timing side-channel, an expiry
-    tie-break bug, and a deleted determinism test; ApiKeyHash constructors
-    were promoted to pub. Re-verified PASS. Full detail in engram topic
-    sdd/CORE-021-api-key-auth/verify-report. archive.md retains the original
-    38/1/1 counts as a historical snapshot per documentation policy.
+    Two rounds of external PR review found and fixed a timing side-channel
+    (closed via unconditional hash-verify + the LocalApiKeyResolver opt-in
+    marker, AD-8), an expiry tie-break bug, and a deleted determinism test.
+    All fixed and re-verified before merge. archive.md was rewritten at
+    archive time (2026-07-03) to reflect the final shipped state, since it
+    had never been committed before and so carried no historical record to
+    preserve.
 
 # Final release verification (2026-07-02) — accepted on scoped (crate-level) merits
 release_verification:
   decision: accepted_scoped
   scoped_checks:
     cargo_test_workspace: pass
-    cargo_test_security_apikey: pass (41/41)
+    cargo_test_security_apikey: pass (42/42)
     cargo_clippy_security_apikey_deny_warnings: pass
     cargo_fmt_security_apikey: pass
   workspace_wide_checks:
@@ -85,9 +90,9 @@ rollback_plan: |
 
 notes: |
   CORE-021 is fully additive with no breaking changes.
-  Implementation and independent verification complete (41/41 tests, clean
-  clippy/fmt/doc for security-apikey). NOT yet committed to git — no PR
-  exists for this change. The previous "Verified merged in PR #111" claim
-  was false: PR #111 in actual git history is the unrelated oauth2-oidc
-  merge. Do not treat this change as archived or shipped until it is
-  actually committed and merged.
+  Committed and merged: PR #112 (https://github.com/pablogore/ego-rs/pull/112)
+  into develop, merged 2026-07-03. 42/42 tests, clean clippy/fmt/doc for
+  security-apikey. An earlier draft of this file incorrectly claimed
+  "Verified merged in PR #111" before any commit existed — PR #111 in
+  actual git history is the unrelated oauth2-oidc merge. That claim was
+  corrected before this change was ever committed; the real PR is #112.
