@@ -15,6 +15,7 @@ members = [
     "crates/security-sdk",
     "crates/security-jwt",
     "crates/security-apikey",
+    "examples/reference-app",
 ]
 resolver = "2"
 
