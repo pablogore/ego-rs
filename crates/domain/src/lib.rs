@@ -28,6 +28,7 @@
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
 //! | `auth`          | `Claims`, `Credential`, `Clock`, `AuthenticationError` |
+//! | `config`        | `Validate`, `ConfigError` (CORE-016) |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -66,6 +67,9 @@ pub mod read_side;
 /// Authentication domain contracts — Claims, Credential, Clock, AuthenticationError.
 pub mod auth;
 
+/// Configuration validation contract — Validate, ConfigError (CORE-016).
+pub mod config;
+
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use context::{
@@ -83,3 +87,4 @@ pub use auth::{
     AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
     SystemClock,
 };
+pub use config::{ConfigError, Validate};

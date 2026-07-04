@@ -1,0 +1,16 @@
+[package]
+name = "reference-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+ego-domain = { path = "../../crates/domain" }
+persistent-entity = { path = "../../crates/persistent-entity" }
+security-jwt = { path = "../../crates/security-jwt" }
+ego-security-sdk = { path = "../../crates/security-sdk" }
+ego-scheduler = { path = "../../crates/ego-scheduler" }
+ego-persistence = { path = "../../crates/persistence" }
+ego-service-sdk = { path = "../../crates/service-sdk" }
+ego-transport = { path = "../../crates/transport" }

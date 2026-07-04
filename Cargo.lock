@@ -1798,6 +1798,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reference-app"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ego-domain",
+ "ego-persistence",
+ "ego-scheduler",
+ "ego-security-sdk",
+ "ego-service-sdk",
+ "ego-transport",
+ "persistent-entity",
+ "security-jwt",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
