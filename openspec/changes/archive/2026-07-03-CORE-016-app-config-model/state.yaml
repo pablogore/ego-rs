@@ -1,0 +1,173 @@
+---
+# Archive State — CORE-016 Application Configuration Model
+# Date Archived: 2026-07-03
+
+change_name: CORE-016-app-config-model
+archive_date: '2026-07-03'
+artifact_store_mode: openspec
+status: archived_closed
+
+# SDD Cycle Completion
+sdd_phases:
+  proposal:
+    status: complete
+    file: proposal.md
+  spec:
+    status: complete
+    file: spec.md
+    main_spec_location: openspec/specs/domain/config.md
+    merge_action: copied_as_new_canonical_spec
+  design:
+    status: complete
+    file: design.md
+  tasks:
+    status: complete
+    file: tasks.md
+    tasks_total: 20
+    tasks_complete: 20
+  apply:
+    status: complete
+    file: apply-progress.md
+    batches: 4
+    phases_completed: 5
+  verify:
+    status: complete
+    file: verify-report.md
+    verdict: PASS_WITH_WARNINGS
+    critical_issues: 0
+    warnings: 5
+    suggestions: 2
+  archive:
+    status: complete
+    file: archive-report.md
+
+# Verification Results
+verification:
+  build: PASSED
+  tests: PASSED
+  test_count: 777
+  test_failures: 0
+  new_unit_tests: 22
+  new_integration_tests: 3
+  service_sdk_diff: zero
+  clippy_new_warnings: 0
+  spec_compliance:
+    total_requirements: 12
+    fully_compliant: 11
+    partial: 1
+    non_blocking: true
+
+# Implementation Scope
+files_created: 8
+files_modified: 7
+files_untouched:
+  - crates/service-sdk
+  - crates/service-sdk/src/runtime/builder.rs
+
+# Key Metrics
+tdd_mode: strict
+tdd_compliance_checks_passed: 5
+tdd_compliance_checks_total: 6
+assertion_quality: all_verify_real_behavior
+pre_existing_debt_confirmed: true
+
+# Deliverables
+deliverables:
+  - name: Validate trait + ConfigError
+    location: crates/domain/src/config.rs
+    status: implemented
+  - name: impl Validate for RuntimeConfig
+    location: crates/persistent-entity/src/runtime.rs
+    status: implemented
+  - name: impl Validate for JwtProviderConfig
+    location: crates/security-jwt/src/config.rs
+    status: implemented
+  - name: impl Validate for EventBusConfig
+    location: crates/ego-scheduler/src/event_bus.rs
+    status: implemented
+  - name: DatabaseConfig (new domain)
+    location: crates/persistence/src/config.rs
+    status: implemented
+  - name: GrpcServerConfig (new domain)
+    location: crates/transport/src/config.rs
+    status: implemented
+  - name: Reference example application
+    location: examples/reference-app/
+    status: implemented
+  - name: Integration test suite
+    location: examples/reference-app/tests/pipeline.rs
+    status: implemented
+
+# Constraints Satisfied
+constraints:
+  - name: RuntimeBuilder unchanged
+    satisfied: true
+    verification: git_status_zero_diff
+  - name: No kit-config dependency introduced
+    satisfied: true
+    verification: rg_grep_no_match
+  - name: All tasks complete
+    satisfied: true
+    verification: all_20_marked_complete
+  - name: Zero CRITICAL issues
+    satisfied: true
+    verification: verify_report_verdict
+
+# Non-Critical Issues
+warnings:
+  - id: 1
+    description: Phase 1 TDD evidence reported narratively, not as formal table
+    severity: low
+    impact: documentation_gap_only
+    code_correctness: unaffected
+  - id: 2
+    description: Design pseudocode constructors not literally implemented
+    severity: low
+    impact: reference_example_scope
+    blocked: false
+  - id: 3
+    description: GrpcServerConfig excluded from reference example AppConfig
+    severity: low
+    impact: reference_scope_only
+    spec_compliant: true
+  - id: 4
+    description: Unrelated working-tree change in openspec/specs/domain/auth.md
+    severity: low
+    impact: staging_discipline_required
+    code_blocked: false
+  - id: 5
+    description: Pre-existing repo-wide clippy debt
+    severity: low
+    impact: pre_existing_confirmed
+    code_blocked: false
+
+suggestions:
+  - id: 1
+    description: Add note to tasks.md explaining intentional GrpcServerConfig exclusion
+    priority: low
+  - id: 2
+    description: Consider follow-up ticket for real service constructors
+    priority: low
+    blocked_by: none
+
+# Related Artifacts
+canonical_specs:
+  - path: openspec/specs/domain/config.md
+    status: new_main_spec
+    source: CORE-016 delta spec
+
+# Closure Confirmation
+closure:
+  sdd_cycle_complete: true
+  all_artifacts_archived: true
+  main_spec_synced: true
+  change_folder_moved: true
+  ready_for_next_change: true
+
+# Notes
+notes:
+  - All 20 CORE-016 tasks implemented and verified
+  - Judgment Day Round 1 approved after 3 fixes; findings incorporated
+  - Complete TDD evidence trail preserved in apply-progress.md
+  - Design constraint (RuntimeBuilder unchanged) confirmed via zero diff
+  - No breaking changes; library API purely additive
