@@ -143,6 +143,15 @@ impl Default for EventBusConfig {
     }
 }
 
+impl ego_domain::Validate for EventBusConfig {
+    fn validate(&self) -> Result<(), ego_domain::ConfigError> {
+        if self.capacity == 0 {
+            return Err(ego_domain::ConfigError::non_zero("capacity"));
+        }
+        Ok(())
+    }
+}
+
 impl EventBusConfig {
     /// Deserialize a [`serde_json::Value`] into an [`EventBusConfig`].
     ///
@@ -221,4 +230,30 @@ pub fn event_bus_channel_with_config(
 /// Creates a BTreeSet of pending entities from an iterator.
 pub fn pending_from_iter<I: IntoIterator<Item = EntityTriple>>(iter: I) -> BTreeSet<EntityTriple> {
     iter.into_iter().collect()
+}
+
+#[cfg(test)]
+mod event_bus_config_validate_tests {
+    use super::*;
+    use ego_domain::{ConfigError, Validate};
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(EventBusConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn zero_capacity_is_invalid() {
+        let config = EventBusConfig {
+            capacity: 0,
+            ..EventBusConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::Invalid {
+                field: "capacity".to_string(),
+                reason: "must be non-zero".to_string(),
+            })
+        );
+    }
 }
