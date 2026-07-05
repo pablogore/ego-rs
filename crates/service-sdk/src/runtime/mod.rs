@@ -1,9 +1,118 @@
 mod builder;
+mod config_provider;
+mod error;
+mod logger;
 mod permit;
 mod resolvable;
 mod runtime_builder;
 
 pub use builder::{Runtime, RuntimeBuilder};
+pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
+pub use error::RuntimeInfraError;
+pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{Resolvable, ResolvableContainer};
 pub use runtime_builder::{RuntimeError, RuntimeInner};
+
+/// CORE-017 Phase 5 integration tests (TASK-021/TASK-022).
+///
+/// Per the testing skill's Decision Gates table, these exercise only
+/// in-memory state (kitlogger's capture-buffer exporter, `serde_json::json!`
+/// values) — no real DB/broker/HTTP — so they live as ordinary
+/// `#[cfg(test)]` modules here rather than in `crates/integration-tests/`.
+#[cfg(test)]
+mod integration_tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use console_exporter::ConsoleExporterImpl;
+    use kitlogger::KITLogger;
+    use kitlogger_formatter::LogFormat;
+    use kitlogger_log_domain::Severity;
+    use serde_json::json;
+
+    use super::{build_logger, ConfigurationProvider, RuntimeBuilder};
+    use crate::context::ServiceContext;
+
+    #[derive(Clone, Default)]
+    struct CaptureBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// TASK-021: bootstrap path only.
+    ///
+    /// `ConfigurationProvider::from_value(..)` -> `.logging()` -> `build_logger(..)`
+    /// -> `RuntimeBuilder::new().with_logger(logger).build()` ->
+    /// `ServiceContext::new().with_logger(rt.logger().unwrap().clone())`.
+    ///
+    /// Uses the public `Runtime::logger()` facade, not the hidden
+    /// `RuntimeInner::logger()` — this test demonstrates the same path
+    /// application code should follow (see `examples/logging_bootstrap.rs`).
+    ///
+    /// Manual `ServiceContext::new().with_logger(..)` construction is
+    /// intentional here — there is no generated-dispatcher path that
+    /// assembles `ServiceContext` today; `examples/reference-app` constructs
+    /// `.with_security(..)` the same manual way.
+    #[test]
+    fn bootstrap_path_wires_logger_from_config_to_service_context() {
+        let provider = ConfigurationProvider::from_value(json!({
+            "logging": { "enabled": true, "format": "json" }
+        }));
+        let settings = provider.logging().expect("valid logging config");
+        let logger = build_logger(&settings)
+            .expect("logger constructs")
+            .expect("enabled settings yield a logger");
+
+        let rt = RuntimeBuilder::new().with_logger(logger).build();
+        let rt_logger = rt.logger().expect("runtime holds the logger").clone();
+
+        let ctx = ServiceContext::new().with_logger(rt_logger.clone());
+
+        assert!(ctx.logger().is_some());
+        assert!(Arc::ptr_eq(
+            ctx.logger.as_ref().expect("ctx holds the logger"),
+            &rt_logger
+        ));
+    }
+
+    /// TASK-022: shutdown path only, isolated from TASK-021 so a failure
+    /// points at one component instead of six.
+    ///
+    /// Builds a `Runtime` with `.with_logger(..)` wired to a capture-buffer
+    /// exporter, calls `rt.shutdown()`, and asserts the buffer received every
+    /// record logged before shutdown (no lost records). Per
+    /// `ConsoleExporterImpl::export`, each `log()` call writes to the router
+    /// synchronously — `shutdown()`'s flush is a documented no-op stub — so
+    /// "no lost records" here means shutdown does not corrupt or drop what
+    /// was already written, and the pipeline is still fully drained/closed.
+    #[test]
+    fn shutdown_path_flushes_capture_buffer_with_no_lost_records() {
+        let exporter = Arc::new(ConsoleExporterImpl::new());
+        let stdout = CaptureBuffer::default();
+        exporter.set_writers(Box::new(stdout.clone()), Box::new(CaptureBuffer::default()));
+        exporter.init().expect("capture exporter initializes");
+
+        let logger = Arc::new(KITLogger::with_exporter_and_format(exporter, LogFormat::Json));
+        logger.log(Severity::Info, "record-1").expect("record 1 logs");
+        logger.log(Severity::Info, "record-2").expect("record 2 logs");
+        logger.log(Severity::Info, "record-3").expect("record 3 logs");
+
+        let rt = RuntimeBuilder::new().with_logger(logger).build();
+
+        assert!(rt.shutdown().is_ok());
+
+        let captured = stdout.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&captured);
+        assert!(text.contains("record-1"), "record-1 must not be lost");
+        assert!(text.contains("record-2"), "record-2 must not be lost");
+        assert!(text.contains("record-3"), "record-3 must not be lost");
+    }
+}

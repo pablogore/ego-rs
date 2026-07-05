@@ -9,14 +9,21 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7" }
 semver = "1"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 ego-security-sdk = { path = "../security-sdk" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
-serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 mockall = "0.12"
 insta = { version = "1", features = ["filters"] }
 trybuild = "1"
+# Test-only: capture-buffer exporter construction for TASK-008/TASK-022
+# (KITLogger::with_exporter_and_format takes Arc<console_exporter::ConsoleExporterImpl>;
+# kitlogger's crate root re-exports neither type it needs, per design.md's grounding finding).
+console-exporter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }

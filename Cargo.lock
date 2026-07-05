@@ -507,13 +507,17 @@ name = "ego-service-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "console-exporter",
  "ego-security-sdk",
  "ego-service-sdk-macros",
  "insta",
  "kitlogger",
+ "kitlogger-formatter",
+ "kitlogger-log-domain",
  "mockall 0.12.1",
  "semver",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

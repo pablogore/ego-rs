@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use ego_security_sdk::context::SecurityContext;
 use ego_security_sdk::error::SecurityError;
+use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::CrossTenantPermit;
@@ -43,7 +44,7 @@ use crate::runtime::CrossTenantPermit;
 /// Each component that requires a `ServiceContext` MUST declare that dependency in its
 /// public signature. The context is passed forward — not looked up. Use `.clone()` when
 /// passing to both an interceptor chain and an inner handler in the same call.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceContext {
     /// The tenant ID.
     pub tenant_id: Option<String>,
@@ -63,6 +64,8 @@ pub struct ServiceContext {
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
     pub security: Option<Arc<SecurityContext>>,
+    /// Attached logger, propagated from `Runtime` via `Runtime::logger()`, if any.
+    pub logger: Option<Arc<KITLogger>>,
 }
 
 impl ServiceContext {
@@ -81,6 +84,7 @@ impl ServiceContext {
             allow_cross_tenant: false,
             cancellation_token: None,
             security: None,
+            logger: None,
         }
     }
 
@@ -199,6 +203,23 @@ impl ServiceContext {
         self.security.as_deref()
     }
 
+    /// Attaches a logger, propagated from `Runtime` via `Runtime::logger()`.
+    ///
+    /// # Arguments
+    /// * `logger` - The `KITLogger` to associate with this service context
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the logger set
+    pub fn with_logger(mut self, logger: Arc<KITLogger>) -> Self {
+        self.logger = Some(logger);
+        self
+    }
+
+    /// Returns the attached logger, if any.
+    pub fn logger(&self) -> Option<&KITLogger> {
+        self.logger.as_deref()
+    }
+
     /// Returns `true` if the associated `CancellationToken` has been cancelled.
     ///
     /// Returns `false` if no token is attached.
@@ -282,6 +303,26 @@ impl Default for ServiceContext {
     }
 }
 
+// `KITLogger` does not implement `Debug`, so `ServiceContext` cannot derive it.
+// This mirrors `RuntimeInner`'s hand-rolled `Debug` impl (`runtime/runtime_builder.rs`),
+// which faces the same constraint.
+impl std::fmt::Debug for ServiceContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceContext")
+            .field("tenant_id", &self.tenant_id)
+            .field("correlation_id", &self.correlation_id)
+            .field("trace_id", &self.trace_id)
+            .field("deadline", &self.deadline)
+            .field("timeout", &self.timeout)
+            .field("additional_context", &self.additional_context)
+            .field("allow_cross_tenant", &self.allow_cross_tenant)
+            .field("cancellation_token", &self.cancellation_token)
+            .field("security", &self.security)
+            .field("logger", &self.logger.is_some())
+            .finish()
+    }
+}
+
 /// A context key for storing and retrieving typed values from a service context.
 ///
 /// This trait allows for strongly-typed access to context values, providing
@@ -352,5 +393,20 @@ mod tests {
             result.unwrap().principal().subject_id.as_str(),
             "user:test"
         );
+    }
+
+    // -- CORE-017: logger access (TASK-018/TASK-019) ------------------------
+
+    #[test]
+    fn logger_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert!(ctx.logger().is_none());
+    }
+
+    #[test]
+    fn with_logger_sets_logger() {
+        use kitlogger::KITLogger;
+        let ctx = ServiceContext::new().with_logger(Arc::new(KITLogger::default()));
+        assert!(ctx.logger().is_some());
     }
 }

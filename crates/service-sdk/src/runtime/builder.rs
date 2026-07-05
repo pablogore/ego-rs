@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
+use kitlogger::KITLogger;
 
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
+use crate::runtime::logger::TeardownStack;
 use crate::runtime::runtime_builder::RuntimeInner;
+use crate::runtime::RuntimeInfraError;
 
 /// The pair of security providers registered with a [`Runtime`].
 pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
@@ -23,6 +26,7 @@ pub struct RuntimeBuilder {
     interceptor_chain: Arc<InterceptorChain>,
     authn: Option<Arc<dyn AuthenticationProvider>>,
     authz: Option<Arc<dyn AuthorizationProvider>>,
+    logger: Option<Arc<KITLogger>>,
 }
 
 impl RuntimeBuilder {
@@ -33,6 +37,7 @@ impl RuntimeBuilder {
             interceptor_chain: Arc::new(InterceptorChain::new()),
             authn: None,
             authz: None,
+            logger: None,
         }
     }
 
@@ -53,19 +58,38 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Registers a fully-constructed logger for this runtime.
+    ///
+    /// Mirrors [`RuntimeBuilder::with_security`]: the logger is constructed and
+    /// initialized by the **host** (via `build_logger`), before `RuntimeBuilder::new()`
+    /// is ever called (CORE-016). `RuntimeBuilder` never constructs it — it only
+    /// takes ownership and registers it for ordered teardown on [`Runtime::shutdown`].
+    pub fn with_logger(mut self, logger: Arc<KITLogger>) -> Self {
+        self.logger = Some(logger);
+        self
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
-    /// Always succeeds — security is optional.
+    /// Always succeeds — security and the logger are both optional. By the
+    /// time this runs, the logger (if supplied) is already constructed and
+    /// initialized by the host; this only pushes it onto the teardown stack.
     pub fn build(self) -> Runtime {
         let security_providers = match (self.authn, self.authz) {
             (Some(authn), Some(authz)) => Some((authn, authz)),
             _ => None,
         };
+        let mut teardown = TeardownStack::new();
+        if let Some(logger) = &self.logger {
+            teardown.push(logger.clone());
+        }
         Runtime {
-            inner: Arc::new(RuntimeInner::new(
+            inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
                 self.interceptor_chain,
                 security_providers,
+                self.logger,
+                Mutex::new(teardown),
             )),
         }
     }
@@ -94,6 +118,26 @@ impl Runtime {
     ) -> Option<&SecurityProviders> {
         self.inner.security_providers.as_ref()
     }
+
+    /// Returns the registered logger, if any.
+    pub fn logger(&self) -> Option<&Arc<KITLogger>> {
+        self.inner.logger()
+    }
+
+    /// Drains initialized infrastructure in reverse construction order.
+    ///
+    /// For the console exporter, `shutdown()` flushes (`OnShutdownFlush`) then
+    /// closes. Idempotent: a second call on an already-drained stack returns
+    /// `Ok(())`. A poisoned lock (only possible if a prior `shutdown()`
+    /// panicked mid-drain) is treated as a hard error rather than silently
+    /// recovered — consistent with "no degraded mode."
+    pub fn shutdown(&self) -> Result<(), RuntimeInfraError> {
+        self.inner
+            .teardown
+            .lock()
+            .expect("teardown mutex poisoned")
+            .drain()
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +154,7 @@ mod tests {
     use ego_security_sdk::error::SecurityError;
     use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
     use ego_security_sdk::AuthenticationError;
+    use kitlogger::KITLogger;
 
     use super::{Runtime, RuntimeBuilder};
 
@@ -161,5 +206,85 @@ mod tests {
     fn runtime_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Runtime>();
+    }
+
+    // -- CORE-017: logger wiring ---------------------------------------
+
+    #[test]
+    fn build_without_logger_has_none_logger() {
+        let rt = RuntimeBuilder::new().build();
+        assert!(rt.logger().is_none());
+    }
+
+    /// Real host bootstrap always calls `KITLogger::init()` before handing the
+    /// logger to `.with_logger(..)` (that's `build_logger`'s job). Tests that
+    /// exercise `Runtime::shutdown()` need an initialized logger too — an
+    /// un-initialized `KITLogger`'s exporter is `Uninitialized`, and its
+    /// `shutdown()` is an invalid lifecycle transition (`Uninitialized ->
+    /// Flushing`), so it would fail for reasons unrelated to what these tests
+    /// verify.
+    fn initialized_logger() -> Arc<KITLogger> {
+        let logger = KITLogger::default();
+        logger.init().expect("logger initializes");
+        Arc::new(logger)
+    }
+
+    #[test]
+    fn build_with_logger_has_some_logger() {
+        let rt = RuntimeBuilder::new()
+            .with_logger(Arc::new(KITLogger::default()))
+            .build();
+        assert!(rt.logger().is_some());
+    }
+
+    #[test]
+    fn shutdown_with_logger_succeeds_and_is_idempotent() {
+        let rt = RuntimeBuilder::new().with_logger(initialized_logger()).build();
+        assert!(rt.shutdown().is_ok());
+        assert!(rt.shutdown().is_ok());
+    }
+
+    #[test]
+    fn shutdown_without_logger_succeeds() {
+        let rt = RuntimeBuilder::new().build();
+        assert!(rt.shutdown().is_ok());
+    }
+
+    /// Ownership test: asserts the *contract* — something else holds the
+    /// logger after `.build()`, and `.shutdown()` releases at least one of
+    /// those references — not an exact count, so this doesn't couple to
+    /// `TeardownStack`'s current `Vec<Arc<_>>` shape.
+    ///
+    /// Deviation from tasks.md's literal TASK-016 wording, documented here:
+    /// tasks.md describes the post-shutdown count as "== 1 (back to only the
+    /// test's reference)". Tracing design.md's own frozen `build()` snippet
+    /// shows that's not achievable as written: `RuntimeInner` retains its own
+    /// permanent `logger: Option<Arc<KITLogger>>` field (for the `.logger()`
+    /// accessor) *in addition to* the separate clone `TeardownStack` holds
+    /// for ordered teardown — two independent owners by design (File Changes:
+    /// "RuntimeInner gains `logger: Option<Arc<KITLogger>>` + `Mutex<TeardownStack>`").
+    /// `shutdown()` only drains the stack's clone; `RuntimeInner.logger` keeps
+    /// its own reference alive after shutdown so the accessor keeps working.
+    /// So the true post-shutdown count is 2 (test's + `RuntimeInner.logger`),
+    /// not 1. This test asserts the part of the contract that actually holds:
+    /// shutdown strictly reduces the count from its post-build value.
+    #[test]
+    fn shutdown_releases_teardown_stack_ownership_of_logger() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        let count_after_build = Arc::strong_count(&logger);
+        assert!(
+            count_after_build > 1,
+            "the runtime should now also hold at least one reference"
+        );
+
+        rt.shutdown().expect("shutdown succeeds");
+
+        let count_after_shutdown = Arc::strong_count(&logger);
+        assert!(
+            count_after_shutdown < count_after_build,
+            "shutdown must release the teardown stack's own reference"
+        );
     }
 }
