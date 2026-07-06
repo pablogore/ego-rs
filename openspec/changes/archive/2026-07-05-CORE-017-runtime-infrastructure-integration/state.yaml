@@ -1,0 +1,135 @@
+---
+# Archive State — CORE-017 Runtime Infrastructure Integration
+# Date Archived: 2026-07-05
+
+change_name: CORE-017-runtime-infrastructure-integration
+archive_date: '2026-07-05'
+artifact_store_mode: openspec
+status: archived_closed
+
+# SDD Cycle Completion
+sdd_phases:
+  proposal:
+    status: complete
+    file: proposal.md
+  design:
+    status: complete
+    file: design.md
+  tasks:
+    status: complete
+    file: tasks.md
+    tasks_total: 24
+    tasks_complete: 24
+  apply:
+    status: complete
+    file: apply-progress.md
+    batches: 2
+    phases_completed: 5
+  verify:
+    status: complete
+    file: verify-report.md
+    verdict: PASS
+    critical_issues: 0
+    warnings: 0
+    suggestions: 0
+  archive:
+    status: complete
+    file: archive-report.md
+
+# Verification Results
+verification:
+  build: PASSED
+  tests: PASSED
+  test_count: 57
+  test_failures: 0
+  new_unit_tests: 4
+  new_integration_tests: 2
+
+# Implementation Scope
+files_created: 2
+files_modified: 5
+files_untouched:
+  - crates/service-sdk (as a whole; only runtime module touched)
+  - examples/reference-app (no changes needed)
+
+# Key Metrics
+tdd_mode: standard
+assertion_quality: real_behavior_verified
+pre_existing_debt_confirmed: false
+
+# Deliverables
+deliverables:
+  - name: ConfigurationProvider (thin boundary adapter)
+    location: crates/service-sdk/src/runtime/config_provider.rs
+    status: implemented
+  - name: build_logger (canonical construction entry point)
+    location: crates/service-sdk/src/runtime/logger.rs
+    status: implemented
+  - name: RuntimeBuilder logger integration
+    location: crates/service-sdk/src/runtime/builder.rs
+    status: implemented
+  - name: RuntimeInner logger lifecycle ownership
+    location: crates/service-sdk/src/runtime/runtime_builder.rs
+    status: implemented
+  - name: ServiceContext logger access
+    location: crates/service-sdk/src/context/mod.rs
+    status: implemented
+  - name: RuntimeInfraError (infrastructure failures)
+    location: crates/service-sdk/src/runtime/error.rs
+    status: implemented
+
+# Constraints Satisfied
+constraints:
+  - name: RuntimeBuilder receives pre-built logger
+    satisfied: true
+    verification: code_review_with_logger_signature
+  - name: build() stays infallible
+    satisfied: true
+    verification: verified_no_result_return
+  - name: No kit-config dependency in service-sdk
+    satisfied: true
+    verification: grep_cargo_toml
+  - name: No kitlogger redesign
+    satisfied: true
+    verification: external_dep_untouched
+  - name: All 24 tasks complete
+    satisfied: true
+    verification: all_marked_complete
+  - name: Zero CRITICAL issues
+    satisfied: true
+    verification: verify_report_verdict
+  - name: No lost log records on shutdown
+    satisfied: true
+    verification: integration_test_passed
+
+# Non-Critical Issues
+findings:
+  - resolved_suggestion: RuntimeInfraError extracted to dedicated error.rs module post-verify
+    status: resolved
+    impact: code_organization_only
+
+# Related Artifacts
+no_delta_specs: true
+reason: CORE-017 is runtime integration only; no new domain specs created
+
+# GitHub Integration
+github_issue: '#116'
+github_pr: '#117'
+pr_status: merged
+pr_merged_at: '2026-07-05'
+merge_commit: '7cf9fb0'
+
+# Closure Confirmation
+closure:
+  sdd_cycle_complete: true
+  all_artifacts_archived: true
+  change_folder_moved: true
+  ready_for_next_change: true
+
+# Notes
+notes:
+  - All 24 CORE-017 tasks implemented and verified
+  - No delta specs to merge (runtime integration, not domain spec change)
+  - Only crates/service-sdk touched; no cross-crate changes
+  - Post-verify fix: RuntimeInfraError moved to dedicated error.rs module
+  - Full traceability: proposal, design, tasks, apply-progress, verify-report preserved

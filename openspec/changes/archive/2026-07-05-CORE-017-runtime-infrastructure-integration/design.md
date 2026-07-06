@@ -403,6 +403,7 @@ something existing `RuntimeBuilder` callers are forced to adopt.
   specified. No further verification needed. If a richer message is wanted
   later, add `telemetry-adapter-contracts` and match on variants — not needed
   for v1.
+
 ## Future Considerations
 
 Not open questions — no decision is pending on either of these; they're
