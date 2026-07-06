@@ -138,7 +138,7 @@ full set immediately before implementation; known sites at proposal time:
 
 - Do not add `.with_adapter()` / `.with_config()` to `RuntimeBuilder`
   (issue #120).
-- Do not touch kit-config wiring or host examples (issue #119).
+- Do not touch kit-config wiring or host examples (issue #119 is independent).
 - Do not add new authorization or tenant-enforcement logic.
 - No behavioral change to correctly-built runtimes — visibility restriction
   and call-site migration only.

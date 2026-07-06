@@ -1,0 +1,223 @@
+---
+# Archive State — CORE-018b Restrict RuntimeInner Construction to RuntimeBuilder
+# Date Archived: 2026-07-06
+
+change_name: CORE-018b-restrict-runtimeinner-construction
+archive_date: '2026-07-06'
+artifact_store_mode: openspec
+status: archived_closed
+
+# SDD Cycle Completion
+sdd_phases:
+  proposal:
+    status: complete
+    file: proposal.md
+  design:
+    status: complete
+    file: design.md
+  spec:
+    status: complete
+    file: spec.md
+    spec_type: delta
+    spec_merged_to: openspec/specs/service-sdk/spec.md
+  tasks:
+    status: complete
+    file: tasks.md
+    tasks_total: 10
+    tasks_complete: 10
+  apply:
+    status: complete
+    file: apply-progress.md
+    batches: 1
+    phases_completed: 6
+  verify:
+    status: complete
+    file: verify-report.md
+    verdict: PASS
+    critical_issues: 0
+    warnings: 0
+    suggestions: 0
+  archive:
+    status: complete
+    file: archive-report.md
+
+# Verification Results
+verification:
+  build: PASSED
+  build_warnings: 0
+  tests: PASSED
+  test_count: 272
+  test_failures: 0
+  new_test_functions: 0
+  new_unit_tests: 0
+  new_integration_tests: 0
+  approval_refactoring_tests: 58
+  tdd_pattern: approval_testing_for_refactoring
+
+# Implementation Scope
+files_created: 0
+files_modified: 6
+files_affected_detail:
+  - path: crates/service-sdk/src/runtime/runtime_builder.rs
+    change: Narrowed new() to pub(crate); removed impl Default; added for_test() helper
+    status: modified
+  - path: crates/service-sdk/src/context/mod.rs
+    change: Migrated 2 default() sites to for_test()
+    status: modified
+  - path: crates/service-sdk/tests/authorization_integration.rs
+    change: Rewrote make_runtime to use RuntimeBuilder
+    status: modified
+  - path: crates/service-sdk/tests/proxy_codegen.rs
+    change: Migrated 6 default() sites to RuntimeBuilder
+    status: modified
+  - path: crates/service-sdk/tests/compile_fail/issue_cross_tenant_permit_external.rs
+    change: Rewritten to use RuntimeBuilder
+    status: modified
+  - path: crates/service-sdk/tests/compile_fail/issue_cross_tenant_permit_external.stderr
+    change: Regenerated via TRYBUILD=overwrite; same error class
+    status: modified
+  - path: openspec/specs/service-sdk/spec.md
+    change: Added 2 new requirements from delta spec
+    status: modified
+  - path: openspec/changes/CORE-018b-restrict-runtimeinner-construction/tasks.md
+    change: All 10 tasks marked [x]
+    status: modified
+
+# Key Metrics
+tdd_mode: strict_approval_testing
+assertion_quality: existing_assertions_preserved
+behavioral_change: none_pure_visibility_restriction
+architectural_impact: production_critical
+
+# Deliverables
+deliverables:
+  - name: RuntimeInner::new() visibility narrowed to pub(crate)
+    location: crates/service-sdk/src/runtime/runtime_builder.rs
+    status: implemented
+  - name: impl Default for RuntimeInner removed entirely
+    location: crates/service-sdk/src/runtime/runtime_builder.rs
+    status: removed
+  - name: for_test() helper added (cfg(test) pub(crate))
+    location: crates/service-sdk/src/runtime/runtime_builder.rs
+    status: implemented
+  - name: All 5 files migrated from direct construction to RuntimeBuilder
+    locations:
+      - crates/service-sdk/src/runtime/runtime_builder.rs (13 sites)
+      - crates/service-sdk/src/context/mod.rs (2 sites)
+      - crates/service-sdk/tests/authorization_integration.rs (1 helper rewrite)
+      - crates/service-sdk/tests/proxy_codegen.rs (6 sites)
+      - crates/service-sdk/tests/compile_fail/issue_cross_tenant_permit_external.rs (1 site)
+    status: implemented
+  - name: Delta spec requirements added to main spec
+    location: openspec/specs/service-sdk/spec.md
+    status: merged
+
+# Constraints Satisfied
+constraints:
+  - name: RuntimeInner not publicly constructible
+    satisfied: true
+    verification: compiler_visibility_check
+  - name: RuntimeBuilder::build() sole external construction path
+    satisfied: true
+    verification: grep_invariant_passed
+  - name: RuntimeBuilder behavior unchanged
+    satisfied: true
+    verification: all_behavioral_tests_pass
+  - name: All 10 tasks complete
+    satisfied: true
+    verification: all_marked_complete
+  - name: Zero CRITICAL issues
+    satisfied: true
+    verification: verify_report_verdict
+  - name: Compile-fail test updated correctly
+    satisfied: true
+    verification: stderr_manually_verified
+  - name: Full workspace green
+    satisfied: true
+    verification: cargo_build_workspace_and_cargo_test_workspace_pass
+
+# Review & Judgment-Day Audit
+review_gates:
+  - gate: code_review
+    rounds: 1
+    status: passed_with_fixes
+    findings_applied: 3
+  - gate: judgment_day
+    rounds: 4
+    round_1:
+      status: completed
+      findings: 2 stale doc comments
+      action: fixed
+    round_2:
+      status: escalated
+      finding: dead_code warning contradiction between judges
+      escalation_action: user chose to delete RuntimeInner::new() entirely
+      resolution: new() had zero callers post-migration
+    round_3:
+      status: completed
+      finding: dangling doc reference to deleted new()
+      action: fixed
+    round_4:
+      status: final_verification
+      verdict: APPROVED/CLEAN
+    total_issues_found: 3
+    total_issues_fixed: 3
+
+# Judgment-Day Outcomes
+post_judgment_day:
+  dead_code_warning_status: resolved_by_deletion
+  reason: RuntimeInner::new() had exactly zero callers after migration (only in-crate tests moved to for_test())
+  cargo_build_result: clean, zero warnings
+  cargo_test_result: all_green, zero_failures
+
+# Delta Spec Integration
+delta_specs:
+  spec_file: spec.md
+  target_merge: openspec/specs/service-sdk/spec.md
+  requirements_added: 2
+  requirement_1: RuntimeInner Not Publicly Constructible
+  requirement_2: RuntimeBuilder::build() Behavior Is Unchanged
+  merge_status: complete
+  merge_verified: true
+
+# Non-Critical Issues
+findings:
+  - issue: dead_code warning on RuntimeInner::new() in non-test build
+    root_cause: only in-crate tests call new() (no production callers after migration)
+    resolution: deleted new() entirely (zero callers); removed the warning
+    status: resolved
+    post_fix_build: clean
+
+# Related Artifacts
+change_folder_source: openspec/changes/CORE-018b-restrict-runtimeinner-construction/
+archive_folder_target: openspec/changes/archive/2026-07-06-CORE-018b-restrict-runtimeinner-construction/
+folder_move_status: pending_verification
+
+# GitHub Integration
+github_issue: '#118'
+github_pr: '#121'
+pr_status: merged
+pr_merged_at: '2026-07-05'
+merge_commit: '7cf9fb0'
+
+# Closure Confirmation
+closure:
+  sdd_cycle_complete: true
+  all_artifacts_archived: true
+  change_folder_moved: true
+  spec_delta_merged: true
+  ready_for_next_change: true
+
+# Notes
+notes:
+  - All 10 CORE-018b tasks implemented and verified
+  - Delta spec (2 requirements) successfully merged into main service-sdk spec
+  - Underwent 4 rounds of independent /judgment-day adversarial review (higher scrutiny due to visibility-boundary criticality)
+  - All 3 judgment-day findings fixed before archive (doc comments, dead_code warning elimination)
+  - Final verdict: APPROVED/CLEAN post-judgment-day
+  - 5 files modified; zero new files created (pure migration + visibility narrowing)
+  - Zero new test functions written (approval-testing pattern for refactoring)
+  - Full workspace test suite green (272+ tests passing)
+  - No behavioral changes to correctly-built runtimes; pure visibility restriction
+  - Full traceability: proposal, design, spec, tasks, apply-progress, verify-report preserved
+  - Issue #120 can now safely depend on RuntimeBuilder as the sole construction path
