@@ -9,11 +9,16 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::runtime::{RuntimeError, RuntimeInner};
+use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
 use std::sync::Arc;
+
+/// Shared fixture: an empty `Runtime` for tests that only need proxy/DI wiring.
+fn test_runtime() -> ego_service_sdk::runtime::Runtime {
+    RuntimeBuilder::new().build()
+}
 
 // ---------------------------------------------------------------------------
 // Tag + Ref generation
@@ -69,8 +74,8 @@ fn service_on_trait_generates_tag_and_ref() {
 
     let inner: Arc<dyn OrderService> = Arc::new(NoopOrderService);
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
-    let runtime_weak = Arc::downgrade(&runtime_inner);
+    let rt = test_runtime();
+    let runtime_weak = Arc::downgrade(rt.inner());
 
     // Must compile: OrderServiceRef::new(inner, chain, runtime_weak)
     let _ref_obj = OrderServiceRef::new(inner, chain, runtime_weak);
@@ -135,8 +140,8 @@ async fn interceptors_fire_in_order_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
-    let runtime_weak = Arc::downgrade(&runtime_inner);
+    let rt = test_runtime();
+    let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
     let ctx = ServiceContext::new();
@@ -160,8 +165,8 @@ async fn interceptors_fire_on_success_via_generated_ref() {
     chain.add_interceptor(spy.clone());
 
     let inner: Arc<dyn PaymentService> = Arc::new(FailingPaymentService);
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
-    let runtime_weak = Arc::downgrade(&runtime_inner);
+    let rt = test_runtime();
+    let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = PaymentServiceRef::new(inner, Arc::new(chain), runtime_weak);
 
     let ctx = ServiceContext::new();
@@ -200,8 +205,8 @@ async fn context_propagates_via_explicit_param() {
     });
     let inner: Arc<dyn PaymentService> = capturing.clone();
     let chain = Arc::new(InterceptorChain::new());
-    let runtime_inner = Arc::new(ego_service_sdk::runtime::RuntimeInner::default());
-    let runtime_weak = Arc::downgrade(&runtime_inner);
+    let rt = test_runtime();
+    let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = PaymentServiceRef::new(inner, chain, runtime_weak);
 
     let ctx = ServiceContext::new().with_tenant_id("tenant-abc");
@@ -261,8 +266,8 @@ fn injectable_build_returns_dependency_not_found_for_di_fields() {
     // InjectableServiceImpl has DI fields (ProjectionRef, AdapterRef).
     // build() calls rt.resolve_projection / rt.resolve_adapter which return
     // DependencyNotFound when no instance is registered.
-    let rt = RuntimeInner::default();
-    let result = InjectableServiceImpl::build(&rt);
+    let rt = test_runtime();
+    let result = InjectableServiceImpl::build(rt.inner());
     assert!(
         matches!(result, Err(RuntimeError::DependencyNotFound)),
         "build() must return DependencyNotFound when resolvers are missing"
@@ -279,8 +284,8 @@ struct PlainServiceImpl {
 
 #[test]
 fn injectable_build_succeeds_for_plain_fields() {
-    let rt = RuntimeInner::default();
-    let result = PlainServiceImpl::build(&rt);
+    let rt = test_runtime();
+    let result = PlainServiceImpl::build(rt.inner());
     assert!(
         result.is_ok(),
         "build() must succeed when all fields use Default"

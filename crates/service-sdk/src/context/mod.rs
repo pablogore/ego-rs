@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn with_cross_tenant_access_sets_flag() {
         use crate::runtime::RuntimeInner;
-        let inner = RuntimeInner::default();
+        let inner = RuntimeInner::for_test();
         let permit = inner.issue_cross_tenant_permit();
         let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
         assert!(ctx.is_cross_tenant_allowed());
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn clone_preserves_cross_tenant_flag() {
         use crate::runtime::RuntimeInner;
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         let permit = rt.issue_cross_tenant_permit();
         let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
         let cloned = ctx.clone();

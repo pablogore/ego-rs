@@ -86,6 +86,14 @@ None — all 10 tasks complete.
 
 Re-ran `cargo build --workspace` and `cargo test --workspace` after applying: zero failures, same one pre-existing benign `dead_code` warning on `RuntimeInner::new()` (unchanged from before these fixes — `new()` still has exactly one in-crate test caller at the `Some(...)` providers test).
 
+## Judgment Day Round 2 — Escalated Finding Resolved
+
+Round 2 re-judge (post above fixes) had judges contradict on the `dead_code` warning: Judge A re-classified it as `WARNING (real)` (reproducible on any local `cargo build`); Judge B declined to re-raise it (already documented/accepted). Escalated per protocol; user chose to fix rather than keep accepting it.
+
+**Fix**: migrated the last remaining `RuntimeInner::new(...)` caller (`authorization_provider_returns_arc_when_providers_set`, the `Some(...)` security-providers test) to call `new_with_logger(..., None, Mutex::new(TeardownStack::new()))` instead — identical resulting state, but now routes through the same constructor path `RuntimeBuilder::build()` uses (same rationale as `for_test()`). With that, `new()` had zero callers in any build configuration, so it was **deleted entirely** rather than suppressed with `#[allow(dead_code)]`. The TASK-014 doc note moved from `new()` to `new_with_logger()`, now the sole constructor.
+
+Re-verified: `cargo build --workspace` is now warning-free (previously 1 warning). `cargo test --workspace` still 0 failures. A separate, pre-existing `unused imports: authorize and operation` warning appears in the full workspace test run — confirmed via `git stash` to reproduce identically on `develop` before this change; it originates from `tests/compile_pass/authorize_ok.rs` and `tests/compile_fail/authorize_*.rs` trybuild fixtures, none of which this change touches. Unrelated, out of scope.
+
 ## Status
 
 10/10 tasks complete, verified, post-verify review fixes applied. Ready to commit.

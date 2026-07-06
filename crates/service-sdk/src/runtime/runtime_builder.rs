@@ -126,38 +126,20 @@ impl std::fmt::Debug for RuntimeInner {
 }
 
 impl RuntimeInner {
-    /// Creates a new `RuntimeInner`.
-    ///
-    /// # TASK-014 note
-    ///
-    /// Once the runtime authorization check is active inside
-    /// `issue_cross_tenant_permit`, consider restricting `RuntimeInner`
-    /// construction to `pub(crate)` or forcing it through `RuntimeBuilder`
-    /// to prevent rogue instances with custom `security_providers` from
-    /// bypassing the authorization check.
-    pub fn new(
-        registry: ServiceRegistry,
-        interceptor_chain: Arc<InterceptorChain>,
-        security_providers: Option<
-            (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>),
-        >,
-    ) -> Self {
-        Self {
-            registry,
-            interceptor_chain,
-            security_providers,
-            resolved: DependencyTable::new(),
-            logger: None,
-            teardown: Mutex::new(TeardownStack::new()),
-        }
-    }
-
     /// Creates a new `RuntimeInner` with a logger and its teardown stack.
     ///
     /// Called by `RuntimeBuilder::build()`. The logger (if any) is already
     /// constructed and initialized by the host before this runs (CORE-016);
     /// this constructor only takes ownership and wires it into the teardown
     /// stack for `Runtime::shutdown()`.
+    ///
+    /// # TASK-014 note
+    ///
+    /// This is the sole constructor (`pub(super)`, CORE-018b) — closing the
+    /// external bypass that would have let rogue instances with custom
+    /// `security_providers` skip the authorization check. TASK-014 itself —
+    /// making `issue_cross_tenant_permit` run a real `AuthorizationProvider`
+    /// check — is still pending.
     pub(super) fn new_with_logger(
         registry: ServiceRegistry,
         interceptor_chain: Arc<InterceptorChain>,
@@ -246,21 +228,29 @@ impl RuntimeInner {
     pub(crate) fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
         CrossTenantPermit::new()
     }
-}
 
-impl Default for RuntimeInner {
-    // TASK-014: see the note on RuntimeInner::new() — once the authorization
-    // check is active, Default may also need to be restricted or removed to
-    // prevent rogue instances with no security_providers.
-    fn default() -> Self {
-        Self {
-            registry: ServiceRegistry::new(),
-            interceptor_chain: Arc::new(InterceptorChain::new()),
-            security_providers: None,
-            resolved: DependencyTable::new(),
-            logger: None,
-            teardown: Mutex::new(TeardownStack::new()),
-        }
+    /// Test-only fixture equivalent to the removed `Default` impl.
+    ///
+    /// Inherent methods CAN be `pub(crate)` (unlike a trait impl, whose
+    /// visibility follows the public `Default` trait), so this closes the
+    /// external `::default()` bypass while keeping in-crate tests terse.
+    ///
+    /// Routes through [`Self::new_with_logger`] — the same constructor
+    /// `RuntimeBuilder::build()` uses — so tests built on this fixture
+    /// exercise the same construction path production code does. Always
+    /// yields `security_providers: None`; a test that needs
+    /// `Some((authn, authz))` calls `Self::new_with_logger` directly with
+    /// explicit providers (see `authorization_provider_returns_arc_when_providers_set`
+    /// below).
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new_with_logger(
+            ServiceRegistry::new(),
+            Arc::new(InterceptorChain::new()),
+            None,
+            None,
+            Mutex::new(TeardownStack::new()),
+        )
     }
 }
 
@@ -299,7 +289,7 @@ mod tests {
 
     #[test]
     fn runtime_inner_default_creates_empty() {
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         assert!(matches!(
             rt.resolve_projection::<()>(),
             Err(RuntimeError::DependencyNotFound)
@@ -308,21 +298,21 @@ mod tests {
 
     #[test]
     fn resolve_projection_returns_not_found_for_unregistered() {
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         let result: Result<ProjectionRef<()>, RuntimeError> = rt.resolve_projection();
         assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
     }
 
     #[test]
     fn resolve_adapter_returns_not_found_for_unregistered() {
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         let result: Result<AdapterRef<()>, RuntimeError> = rt.resolve_adapter();
         assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
     }
 
     #[test]
     fn resolve_config_returns_not_found_for_unregistered() {
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         let result: Result<ConfigValue<()>, RuntimeError> = rt.resolve_config();
         assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
     }
@@ -335,7 +325,7 @@ mod tests {
 
     #[test]
     fn resolve_projection_succeeds_for_registered_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(MyProjection(42)) as Arc<dyn Any + Send + Sync>;
         rt.resolved
             .projections
@@ -348,7 +338,7 @@ mod tests {
 
     #[test]
     fn resolve_adapter_succeeds_for_registered_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(MyProjection(99)) as Arc<dyn Any + Send + Sync>;
         rt.resolved
             .adapters
@@ -361,7 +351,7 @@ mod tests {
 
     #[test]
     fn resolve_config_succeeds_for_registered_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(String::from("config-value")) as Arc<dyn Any + Send + Sync>;
         rt.resolved.configs.insert(TypeId::of::<String>(), instance);
 
@@ -374,7 +364,7 @@ mod tests {
 
     #[test]
     fn resolve_projection_returns_not_found_for_wrong_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         // Register as String, request as MyProjection.
         let instance = Arc::new(String::from("not-a-projection")) as Arc<dyn Any + Send + Sync>;
         rt.resolved
@@ -387,7 +377,7 @@ mod tests {
 
     #[test]
     fn resolve_adapter_returns_not_found_for_wrong_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(String::from("not-an-adapter")) as Arc<dyn Any + Send + Sync>;
         rt.resolved
             .adapters
@@ -399,7 +389,7 @@ mod tests {
 
     #[test]
     fn resolve_config_returns_not_found_for_wrong_type() {
-        let mut rt = RuntimeInner::default();
+        let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(MyProjection(7)) as Arc<dyn Any + Send + Sync>;
         rt.resolved
             .configs
@@ -413,7 +403,7 @@ mod tests {
 
     #[test]
     fn concurrent_resolution_succeeds() {
-        let rt = Arc::new(RuntimeInner::default());
+        let rt = Arc::new(RuntimeInner::for_test());
 
         let mut handles = Vec::new();
         for _ in 0..10 {
@@ -458,7 +448,7 @@ mod tests {
 
     #[test]
     fn runtime_inner_issues_cross_tenant_permit() {
-        let inner = RuntimeInner::default();
+        let inner = RuntimeInner::for_test();
         let _permit = inner.issue_cross_tenant_permit();
     }
 
@@ -466,7 +456,7 @@ mod tests {
 
     #[test]
     fn authorization_provider_returns_none_when_no_providers() {
-        let rt = RuntimeInner::default();
+        let rt = RuntimeInner::for_test();
         assert!(
             rt.authorization_provider().is_none(),
             "Expected None when security_providers is None"
@@ -510,10 +500,12 @@ mod tests {
         let authz: Arc<dyn AuthorizationProvider> = Arc::new(StubAuthz);
         let authz_ptr = Arc::as_ptr(&authz);
 
-        let rt = RuntimeInner::new(
+        let rt = RuntimeInner::new_with_logger(
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((authn, authz)),
+            None,
+            Mutex::new(TeardownStack::new()),
         );
 
         let result = rt.authorization_provider();
