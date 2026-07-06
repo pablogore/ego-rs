@@ -356,6 +356,44 @@ Restricting `RuntimeInner`'s constructors MUST NOT alter the observable behavior
 - THEN a valid `Runtime` is returned with `security_providers == None`, identical to pre-change behavior
 
 ---
+
+### Requirement: Reference Host Example Materializes Configuration Through kit-config
+
+The reference host example (`examples/reference-app`) MUST materialize
+application configuration through `kit-config` at its composition root,
+before any `RuntimeBuilder` construction begins. It MUST hand `RuntimeBuilder`
+only materialized configuration, delivered through `ConfigurationProvider` —
+never a raw configuration source (unparsed file, raw environment map, or
+config-loading intermediate).
+
+This confirms, with a real example, the frozen constraint already established
+in `openspec/changes/archive/2026-07-03-CORE-016-app-config-model/spec.md:148`.
+It does not redefine that constraint.
+
+#### Scenario: build_runtime wires real kit-config output
+
+- GIVEN `examples/reference-app` depends on `kit-config` as a git dependency
+- WHEN `build_runtime()` executes
+- THEN configuration is materialized via `kit-config`, delivered to
+  `RuntimeBuilder` through `ConfigurationProvider`, and a logger derived from
+  it is installed via `.with_logger(...)`
+
+#### Scenario: No raw configuration source reaches RuntimeBuilder
+
+- GIVEN the reference-app composition root after this change
+- WHEN every value passed into `RuntimeBuilder`'s builder methods is reviewed
+- THEN none of them is an unparsed config source — only materialized
+  configuration delivered via `ConfigurationProvider` reaches it
+
+#### Scenario: Existing framework contract remains untouched
+
+- GIVEN `crates/service-sdk`'s `ConfigurationProvider`, `build_logger`, and
+  `RuntimeBuilder` implementations
+- WHEN this change is applied
+- THEN `crates/service-sdk` and `crates/service-sdk/examples/logging_bootstrap.rs`
+  show zero diff
+
+---
 ## Non-Functional Requirements
 
 ### NFR-001: No Behavioral Regression
