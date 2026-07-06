@@ -7,10 +7,15 @@
 //!
 //! Host -> AppConfig::validate() -> typed service construction -> RuntimeBuilder
 //!
-//! `kit-config` (materialization + secrets) is intentionally out of scope —
-//! this example constructs `AppConfig` directly in-process to keep the
-//! pipeline runnable without an external dependency that does not exist in
-//! this workspace.
+//! `build_runtime` also proves the CORE-016 frozen constraint
+//! ("RuntimeBuilder MUST NOT receive raw configuration values") with a real
+//! config source: the logging subtree is materialized through the real
+//! `kit_config::ConfigLoader` (see `config.toml`), converted to a
+//! `ConfigurationProvider`, and turned into a logger via `build_logger`
+//! before `RuntimeBuilder` ever sees it. `AppConfig` itself is still
+//! constructed directly in-process — the two config models are scoped to
+//! different subtrees (`AppConfig`: security/runtime/scheduler/database;
+//! kit-config: logging only), not a redundancy.
 
 use std::sync::Arc;
 
@@ -20,8 +25,9 @@ use ego_scheduler::event_bus::EventBusConfig;
 use ego_security_sdk::{
     AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Principal, SecurityContext, SecurityError,
 };
-use ego_service_sdk::{Runtime, RuntimeBuilder};
+use ego_service_sdk::{build_logger, ConfigurationProvider, Runtime, RuntimeBuilder};
 use ego_transport::GrpcServerConfig;
+use kit_config::ConfigLoader;
 use persistent_entity::runtime::RuntimeConfig;
 use security_jwt::{Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, KeyResolver, LocalKeyResolver, VerificationKey};
 
@@ -103,8 +109,9 @@ impl AuthorizationProvider for ReferenceAllowAllAuthorization {
 /// Mirrors design.md's Data Flow: validation runs before any service is
 /// constructed, then each subtree's typed config goes only to the service
 /// that owns it. `RuntimeBuilder` never receives raw configuration — it
-/// only ever receives already-constructed security providers.
-pub fn build_runtime(config: &AppConfig) -> Result<Runtime, ConfigError> {
+/// only ever receives already-constructed security providers and, when
+/// present, an already-constructed logger materialized through kit-config.
+pub fn build_runtime(config: &AppConfig) -> Result<Runtime, Box<dyn std::error::Error>> {
     config.validate()?;
 
     let resolver: Arc<dyn KeyResolver> = Arc::new(LocalKeyResolver::new(
@@ -119,5 +126,30 @@ pub fn build_runtime(config: &AppConfig) -> Result<Runtime, ConfigError> {
     let _scheduler = SchedulerService(&config.scheduler);
     let _database = DatabaseService(&config.database);
 
-    Ok(RuntimeBuilder::new().with_security(authn, authz).build())
+    // Materialize configuration through the real kit-config loader before any
+    // RuntimeBuilder construction begins. Only the resulting materialized
+    // `LoggingSettings` (via `ConfigurationProvider`) reaches `RuntimeBuilder`
+    // — never the loader or its raw sources (CORE-016 frozen constraint).
+    let map = ConfigLoader::builder()
+        .add_defaults()
+        // ponytail: file sources (TomlFileSource, priority 200) outrank
+        // environment sources (EnvironmentSource, priority 50) in kit-config
+        // today, and `add_environment()` only ever produces flat top-level
+        // `Value::String` keys — it can never populate or override the
+        // nested `logging` object below. This is observed kit-config
+        // behavior, not an ego-rs guarantee; kept here to demonstrate it,
+        // not to be relied upon for precedence.
+        .add_environment()
+        .add_toml(concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml"))
+        .build()?
+        .load()?;
+    let settings = ConfigurationProvider::from_value(serde_json::to_value(map)?).logging()?;
+    let logger = build_logger(&settings)?;
+
+    let mut builder = RuntimeBuilder::new().with_security(authn, authz);
+    if let Some(logger) = logger {
+        builder = builder.with_logger(logger);
+    }
+
+    Ok(builder.build())
 }

@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+kit-config = { git = "https://github.com/pablogore/kit-config.git", branch = "master" }
+serde_json = "1"
 ego-domain = { path = "../../crates/domain" }
 persistent-entity = { path = "../../crates/persistent-entity" }
 security-jwt = { path = "../../crates/security-jwt" }

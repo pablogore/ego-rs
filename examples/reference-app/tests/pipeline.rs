@@ -40,6 +40,18 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
 }
 
 #[test]
+fn build_runtime_wires_real_kit_config_output() {
+    let config = AppConfig::default();
+
+    let runtime = build_runtime(&config);
+    assert!(
+        runtime.is_ok(),
+        "build_runtime should materialize configuration through the real kit-config \
+         loader (ConfigLoader -> ConfigurationProvider -> build_logger -> with_logger)"
+    );
+}
+
+#[test]
 fn invalid_cross_domain_rule_fails_validate() {
     let mut config = AppConfig::default();
     // Each subtree is individually valid, but the cross-domain rule (see
