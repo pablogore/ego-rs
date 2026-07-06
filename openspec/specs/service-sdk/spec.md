@@ -298,6 +298,64 @@ pub fn with_security(
 - THEN zero matches related to security or provider state are returned
 
 ---
+
+### Requirement: RuntimeInner Not Publicly Constructible
+
+`RuntimeInner::new()` MUST be `pub(crate)`. Any `Default` implementation for `RuntimeInner` MUST be either removed or `pub(crate)` — it MUST NOT be `pub`. No public constructor for `RuntimeInner` may exist outside the `service-sdk` crate.
+
+The only construction path reachable from outside `crates/service-sdk` is `RuntimeBuilder::build()` (via `RuntimeInner::new_with_logger`, already `pub(super)`).
+
+#### Scenario: External crate cannot construct RuntimeInner directly
+
+- GIVEN a crate outside `service-sdk` (e.g. an application or integration test crate depending on `service-sdk` as a library)
+- WHEN that crate attempts to call `RuntimeInner::new(...)` or `RuntimeInner::default()`
+- THEN compilation fails with a visibility error
+
+#### Scenario: RuntimeBuilder::build() remains the sole construction path
+
+- GIVEN the `service-sdk` crate after this change
+- WHEN `rg "RuntimeInner\s*\{|RuntimeInner::new\(|RuntimeInner::default\(\)" crates/` is run
+- THEN every match resolves to `RuntimeBuilder::build()`'s internal call chain (`new_with_logger`) or a `#[cfg(test)]` / `pub(crate)` test helper inside `service-sdk`
+- AND no match originates from a crate other than `service-sdk`
+
+#### Scenario: In-crate test helper stays crate-private
+
+- GIVEN a test inside `crates/service-sdk` needs a `RuntimeInner` state not reachable through `RuntimeBuilder::build()`
+- WHEN such a helper is added
+- THEN it is gated `#[cfg(test)]` and/or `pub(crate)`
+- AND it is never re-exposed as `pub`
+
+---
+
+### Requirement: RuntimeBuilder::build() Behavior Is Unchanged
+
+Restricting `RuntimeInner`'s constructors MUST NOT alter the observable behavior of `RuntimeBuilder::build()` for correctly-built runtimes: logger wiring, ordered teardown registration, and security-provider installation behave identically before and after this change.
+
+#### Scenario: Logger wiring unchanged
+
+- GIVEN a `RuntimeBuilder` configured with `.with_logger(logger)`
+- WHEN `.build()` is called
+- THEN the resulting `Runtime`'s `RuntimeInner::logger()` returns the same logger instance as before this change
+
+#### Scenario: Teardown ordering unchanged
+
+- GIVEN a `RuntimeBuilder` with infrastructure registered that pushes teardown entries
+- WHEN `.build()` is called and the runtime is later shut down
+- THEN teardown entries drain in the same reverse-construction order as before this change
+
+#### Scenario: Security provider installation unchanged
+
+- GIVEN a `RuntimeBuilder` configured with `.with_security(authn, authz)`
+- WHEN `.build()` is called
+- THEN `RuntimeInner::authorization_provider()` returns the same provider as before this change
+
+#### Scenario: Build without security still succeeds
+
+- GIVEN a `RuntimeBuilder` with no `.with_security(...)` call
+- WHEN `.build()` is called
+- THEN a valid `Runtime` is returned with `security_providers == None`, identical to pre-change behavior
+
+---
 ## Non-Functional Requirements
 
 ### NFR-001: No Behavioral Regression
