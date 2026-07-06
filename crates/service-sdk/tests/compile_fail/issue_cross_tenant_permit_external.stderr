@@ -1,8 +1,8 @@
 error[E0624]: method `issue_cross_tenant_permit` is private
- --> tests/compile_fail/issue_cross_tenant_permit_external.rs:8:25
+ --> tests/compile_fail/issue_cross_tenant_permit_external.rs:8:30
   |
-8 |     let _permit = inner.issue_cross_tenant_permit();
-  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+8 |     let _permit = rt.inner().issue_cross_tenant_permit();
+  |                              ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
   |
  ::: src/runtime/runtime_builder.rs
   |

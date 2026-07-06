@@ -26,8 +26,7 @@ use ego_service_sdk::{
     error::category::ErrorCategory,
     error::ServiceErrorTrait,
     interceptor::InterceptorChain,
-    registry::ServiceRegistry,
-    runtime::RuntimeInner,
+    runtime::{Runtime, RuntimeBuilder, RuntimeInner},
 };
 #[allow(unused_imports)]
 use ego_service_sdk_macros::{authorize, operation, service};
@@ -173,17 +172,16 @@ fn make_security_ctx() -> SecurityContext {
     SecurityContext::empty(principal)
 }
 
-/// Build a live RuntimeInner with the given authorization provider and return
-/// both the Arc (for the Weak) and a Weak reference.
+/// Build a live `Runtime` with the given authorization provider and return
+/// both the `Runtime` (keeps the inner Arc alive) and a Weak reference to its
+/// `RuntimeInner`.
 fn make_runtime(
     authz: Arc<dyn AuthorizationProvider>,
-) -> (Arc<RuntimeInner>, std::sync::Weak<RuntimeInner>) {
-    let rt = Arc::new(RuntimeInner::new(
-        ServiceRegistry::new(),
-        Arc::new(InterceptorChain::new()),
-        Some((Arc::new(StubAuthnProvider), authz)),
-    ));
-    let weak = Arc::downgrade(&rt);
+) -> (Runtime, std::sync::Weak<RuntimeInner>) {
+    let rt = RuntimeBuilder::new()
+        .with_security(Arc::new(StubAuthnProvider), authz)
+        .build();
+    let weak = Arc::downgrade(rt.inner());
     (rt, weak)
 }
 
