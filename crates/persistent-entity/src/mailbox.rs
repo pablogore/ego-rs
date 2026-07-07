@@ -3,10 +3,11 @@
 //! This module implements a bounded FIFO mailbox for queuing commands to entities.
 
 use crate::error::EntityError;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 /// Type alias for erased command results.
 ///
@@ -72,6 +73,23 @@ impl<T> BoundedMailbox<T> {
         self.not_full.notify_waiters();
     }
 
+    /// Synchronously close the mailbox and drain every currently-queued
+    /// command, handing them back to the caller.
+    ///
+    /// Unlike [`close`](Self::close), this also empties the queue in the same
+    /// call — callable from a synchronous `Drop` (e.g. the Phase 3 teardown
+    /// guard), which cannot `.await` a lock. The `parking_lot::Mutex` backing
+    /// the queue never poisons, so this is safe to call during panic unwind.
+    /// The caller is responsible for terminally answering each returned
+    /// item's reply channel — this method only closes and drains.
+    pub fn close_and_drain(&self) -> VecDeque<T> {
+        self.closed.store(true, Ordering::Release);
+        let drained = std::mem::take(&mut *self.queue.lock());
+        self.not_empty.notify_waiters();
+        self.not_full.notify_waiters();
+        drained
+    }
+
     /// Send a command to the mailbox.
     ///
     /// Returns `Err(EntityError::MailboxClosed)` immediately if the mailbox
@@ -83,7 +101,7 @@ impl<T> BoundedMailbox<T> {
             // release and the .await below.
             let notified = self.not_full.notified();
             {
-                let mut queue = self.queue.lock().await;
+                let mut queue = self.queue.lock();
                 if self.closed.load(Ordering::Acquire) {
                     return Err(EntityError::MailboxClosed);
                 }
@@ -108,7 +126,7 @@ impl<T> BoundedMailbox<T> {
             // .await below would otherwise be a lost wakeup.
             let notified = self.not_empty.notified();
             {
-                let mut queue = self.queue.lock().await;
+                let mut queue = self.queue.lock();
                 if let Some(command) = queue.pop_front() {
                     self.not_full.notify_waiters();
                     return Ok(command);
@@ -123,16 +141,72 @@ impl<T> BoundedMailbox<T> {
 
     /// Check if the mailbox is empty.
     pub async fn is_empty(&self) -> bool {
-        self.queue.lock().await.is_empty()
+        self.queue.lock().is_empty()
     }
 
     /// Check if the mailbox is full.
     pub async fn is_full(&self) -> bool {
-        self.queue.lock().await.len() >= self.capacity
+        self.queue.lock().len() >= self.capacity
     }
 
     /// Get the current size of the mailbox.
     pub async fn len(&self) -> usize {
-        self.queue.lock().await.len()
+        self.queue.lock().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    /// Minimal stand-in for `ActorEnvelope<C>` — just enough to prove
+    /// `close_and_drain()` hands back every queued item so a caller (the
+    /// Phase 3 teardown guard) can reply on each one.
+    struct TestEnvelope {
+        reply: oneshot::Sender<Result<(), EntityError>>,
+    }
+
+    #[tokio::test]
+    async fn close_and_drain_returns_every_queued_envelope_for_replying() {
+        let mailbox: BoundedMailbox<TestEnvelope> = BoundedMailbox::new(4);
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+        mailbox
+            .send(TestEnvelope { reply: tx1 })
+            .await
+            .expect("send 1");
+        mailbox
+            .send(TestEnvelope { reply: tx2 })
+            .await
+            .expect("send 2");
+
+        let drained = mailbox.close_and_drain();
+        assert_eq!(drained.len(), 2, "both queued envelopes must be drained");
+
+        for envelope in drained {
+            envelope
+                .reply
+                .send(Err(EntityError::EntityNotActive))
+                .expect("receiver still open");
+        }
+
+        assert!(matches!(
+            rx1.await.unwrap(),
+            Err(EntityError::EntityNotActive)
+        ));
+        assert!(matches!(
+            rx2.await.unwrap(),
+            Err(EntityError::EntityNotActive)
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_and_drain_on_empty_mailbox_returns_empty_queue() {
+        let mailbox: BoundedMailbox<TestEnvelope> = BoundedMailbox::new(4);
+
+        let drained = mailbox.close_and_drain();
+
+        assert!(drained.is_empty(), "nothing was queued, nothing to drain");
     }
 }

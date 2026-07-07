@@ -1605,6 +1605,7 @@ dependencies = [
  "ego-domain",
  "erased-serde",
  "futures",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
