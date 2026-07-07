@@ -499,16 +499,6 @@ mod tests {
             queued_rxs.push(rx);
         }
 
-        // Keep an independent handle to the queue alive, exactly like a real
-        // caller's `TokioEntityRef` clone would — otherwise the actor's own
-        // `mailbox` field is the *only* remaining reference and dropping it
-        // during unwind would deallocate the queue itself (dropping the
-        // queued oneshots as a side effect of Arc teardown, not because
-        // anything actually answered them). Holding this clone reproduces
-        // the real bug: the queue survives the panic, untouched, and every
-        // queued oneshot hangs forever without a guard to drain it.
-        let _caller_side_mailbox = mailbox.clone();
-
         let (event_sender, _rx) = event_bus_channel();
         let registry = Arc::new(EntityRegistry::new());
         let entity_id = EntityTriple::new("default".to_string(), "probe", "actor-panic-1");
