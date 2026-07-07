@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
@@ -9,6 +10,8 @@ use persistent_entity::test_entity::TestEntity;
 use persistent_entity::testing::{create_test_context, TestCommand, TestEvent, TestState};
 
 mod common;
+
+use common::CountingEventStore;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,6 +31,22 @@ fn build_fast_passivation_runtime() -> Arc<persistent_entity::runtime::EntityRun
         persistent_entity::builder::EntityRuntimeBuilder::new()
             .passivation_timeout(std::time::Duration::from_millis(50))
             .snapshot_strategy(Arc::new(NoSnapshot))
+            .build(),
+    )
+}
+
+/// Same as [`build_fast_passivation_runtime`], but wired with a
+/// [`CountingEventStore`] so callers can assert on the number of genuine
+/// activation (recovery) attempts — actor-level instrumentation (NFR-002).
+fn build_fast_passivation_runtime_with_counter(
+    load_calls: Arc<AtomicUsize>,
+) -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
+    let event_store = Arc::new(Mutex::new(CountingEventStore::new(load_calls)));
+    Arc::new(
+        persistent_entity::builder::EntityRuntimeBuilder::new()
+            .passivation_timeout(std::time::Duration::from_millis(50))
+            .snapshot_strategy(Arc::new(NoSnapshot))
+            .with_event_store(event_store)
             .build(),
     )
 }
@@ -159,9 +178,18 @@ async fn test_activation_redirect() {
 // ============================================================================
 
 /// No double spawn — concurrent tasks to passivated entity all go to one actor.
+///
+/// NFR-002: "no duplicate actor" is asserted at the actor-task level via a
+/// `CountingEventStore`'s `load()` call counter (one call per genuine
+/// recovery/activation attempt), in addition to the existing
+/// `active_count()` bound — `active_count()` alone cannot distinguish "one
+/// actor activated once" from "one actor survived N racing activation
+/// attempts that each got as far as recovery before losing the single-flight
+/// race," since only ONE of those attempts would ever reach `Active`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_concurrent() {
-    let runtime = build_fast_passivation_runtime();
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
     let entity_ref =
@@ -176,6 +204,8 @@ async fn test_no_double_spawn_concurrent() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
     // Concurrent sends should coalesce into single activation
     let results =
@@ -197,12 +227,28 @@ async fn test_no_double_spawn_concurrent() {
         "single-flight guarantees exactly one active entity, got {}",
         active_count
     );
+
+    // NFR-002: the 20-caller burst against the passivated entity must have
+    // triggered exactly one genuine reactivation attempt (recovery `load()`
+    // call), not merely produced one surviving `active_count()` entry.
+    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
+    assert_eq!(
+        reactivation_load_calls, 1,
+        "single-flight must coalesce the 20-caller burst into exactly one reactivation attempt, got {}",
+        reactivation_load_calls
+    );
 }
 
 /// Mutex-based single-flight — concurrent activations serialize.
+///
+/// NFR-002: same rigor as `test_no_double_spawn_concurrent` — the
+/// serialization claim is asserted at the actor-task level via a
+/// `CountingEventStore`'s `load()` call counter, not only via
+/// `active_count()`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_activation_mutex_serializes() {
-    let runtime = build_fast_passivation_runtime();
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
     let entity_ref =
@@ -217,6 +263,8 @@ async fn test_activation_mutex_serializes() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
     // Spawn 10 concurrent tasks — all should succeed with no duplicate spawns
     let n = 10;
@@ -247,6 +295,15 @@ async fn test_activation_mutex_serializes() {
         active, 1,
         "single-flight guarantees exactly one active entity, got {}",
         active
+    );
+
+    // NFR-002: the 10-caller burst against the passivated entity must have
+    // triggered exactly one genuine reactivation attempt.
+    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
+    assert_eq!(
+        reactivation_load_calls, 1,
+        "single-flight must serialize the 10-caller burst into exactly one reactivation attempt, got {}",
+        reactivation_load_calls
     );
 }
 
