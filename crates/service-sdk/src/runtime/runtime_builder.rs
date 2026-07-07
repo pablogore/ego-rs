@@ -34,19 +34,30 @@ use super::permit::CrossTenantPermit;
 /// Kept as a private field of `RuntimeInner` so the three maps are
 /// packaged together rather than scattered across the parent struct.
 #[derive(Debug)]
-struct DependencyTable {
+pub(super) struct DependencyTable {
     projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl DependencyTable {
+    #[cfg(test)]
     fn new() -> Self {
         Self {
             projections: HashMap::new(),
             adapters: HashMap::new(),
             configs: HashMap::new(),
         }
+    }
+
+    /// Builds a table from host-registered adapters/configs (`RuntimeBuilder`),
+    /// with no registered projections. Takes both maps as named parameters so
+    /// they can't be silently transposed at the call site.
+    pub(super) fn with_registrations(
+        adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+        configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    ) -> Self {
+        Self { projections: HashMap::new(), adapters, configs }
     }
 
     fn resolve_projection<T: 'static + Send + Sync>(
@@ -146,6 +157,7 @@ impl RuntimeInner {
         security_providers: Option<
             (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>),
         >,
+        resolved: DependencyTable,
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
     ) -> Self {
@@ -153,7 +165,7 @@ impl RuntimeInner {
             registry,
             interceptor_chain,
             security_providers,
-            resolved: DependencyTable::new(),
+            resolved,
             logger,
             teardown,
         }
@@ -248,6 +260,7 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             None,
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
         )
@@ -504,6 +517,7 @@ mod tests {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((authn, authz)),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
         );
