@@ -26,7 +26,9 @@
 //! hand-built actor.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -64,6 +66,16 @@ fn handler(
 /// `EntityActor::recover_state()`, before the actor ever publishes `Active`.
 struct PanicOnLoadEventStore {
     load_calls: Arc<AtomicUsize>,
+    /// Optional gate: if present, `load()` blocks on it before panicking.
+    /// `None` for single-caller tests (no race to guard against). `Some` for
+    /// multi-caller tests, so the test can guarantee every concurrent caller
+    /// has already enqueued into the original mailbox before the panic (and
+    /// the teardown it triggers) can happen — otherwise a straggler racing
+    /// past the teardown window could legitimately spawn its own second
+    /// activation attempt (FR-010 permits this; it just isn't what these
+    /// tests want to isolate), which would also panic here and inflate
+    /// `load_calls` past 1.
+    release_panic: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl EventStore<TestEvent> for PanicOnLoadEventStore {
@@ -83,6 +95,9 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(release) = &self.release_panic {
+            let _ = release.recv();
+        }
         panic!("guaranteed_completion_tests: intentional panic during recovery load()");
     }
 
@@ -102,6 +117,7 @@ async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
     let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
         PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
+            release_panic: None,
         },
     ));
 
@@ -468,9 +484,11 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_once() {
     let load_calls = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
         PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
+            release_panic: Some(release_rx),
         },
     ));
 
@@ -483,11 +501,14 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
     );
 
     const N: usize = 20;
+    let started = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(N);
     for i in 0..N {
         let rt = runtime.clone();
         let h = handler();
+        let started = started.clone();
         handles.push(tokio::spawn(async move {
+            started.fetch_add(1, Ordering::SeqCst);
             let entity_ref = rt
                 .entity_ref::<TestCommand, TestState>("probe", "recovery-panic-20", h)
                 .unwrap();
@@ -499,6 +520,27 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
             .expect("FR-009: every one of the 20 callers must eventually resolve, not hang")
         }));
     }
+
+    // Gate the panic until every caller has enqueued (see
+    // `PanicOnLoadEventStore`'s doc comment) — otherwise a straggler racing
+    // past the teardown window could legitimately trigger its own second
+    // activation attempt, inflating `load_calls` past 1 without any actual
+    // bug (this is a test-determinism concern, not a production one).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if started.load(Ordering::SeqCst) == N {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "all 20 caller tasks must have started within the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    let _ = release_tx.send(());
 
     let mut results: Vec<Result<CommandResult<TestEvent, TestState>, EntityError>> =
         Vec::with_capacity(N);
@@ -765,4 +807,203 @@ async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6 — capstone: 100-caller probe, recovery panic, then a clean retry
+// activates exactly once more (FR-001, FR-005, FR-009, FR-010, NFR-002)
+// ---------------------------------------------------------------------------
+
+/// `EventStore` whose `load()` blocks on a gate before its first call, panics
+/// exactly once, then behaves like a normal empty store on every subsequent
+/// call. Models "the triple's first activation attempt hits a real recovery
+/// panic; a later, independent activation attempt for the same triple
+/// recovers cleanly" — but the gate matters for a subtler reason: with 100
+/// *genuinely* concurrent (`multi_thread`) callers, nothing stops a straggler
+/// from calling `entity_ref()` *after* the panicking actor's `TeardownGuard`
+/// has already removed the dead entry — that straggler would legitimately
+/// find no live entry and spawn its own second, independently-successful
+/// activation (FR-010 explicitly permits this; it just isn't the scenario
+/// this test wants to isolate from the explicit retry below). The gate
+/// blocks the panic itself until the test confirms all 100 callers have
+/// already enqueued into the *original* mailbox, so none of them can race
+/// past the teardown window on their own.
+struct GatedPanicOnceEventStore {
+    load_calls: Arc<AtomicUsize>,
+    release_panic: std::sync::mpsc::Receiver<()>,
+}
+
+impl EventStore<TestEvent> for GatedPanicOnceEventStore {
+    fn append(
+        &mut self,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _expected_version: i64,
+        _events: Vec<StoredEvent<TestEvent>>,
+    ) -> Result<i64, PersistenceError> {
+        Ok(0)
+    }
+
+    fn load(
+        &self,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+    ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
+        let call_number = self.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call_number == 1 {
+            // Synchronous, explicit wait for the test's release signal — not
+            // a sleep. Blocks this one Tokio worker thread; the other 7
+            // (`worker_threads = 8`) keep servicing the 100 caller tasks.
+            let _ = self.release_panic.recv();
+            panic!("guaranteed_completion_tests: intentional panic on the FIRST recovery attempt only");
+        }
+        Ok(Vec::new())
+    }
+
+    fn list_aggregate_ids(&self, _tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+        Ok(Vec::new())
+    }
+}
+
+/// FR-001 + FR-005 + FR-009 + FR-010 + NFR-002 — Scenario: the capstone case
+/// that exercises every mechanism in this change against one triple, in one
+/// scenario, in this order:
+///
+/// 1. **Concurrent lookup** — 100 callers race `entity_ref()` + `send_command()`
+///    against a triple whose recovery panics.
+/// 2. **Single activation attempt** — the single-flight lock (ADR-001)
+///    coalesces all 100 into exactly one `load()` call (NFR-002: asserted via
+///    actor-level instrumentation, not `active_count()`).
+/// 3. **Guaranteed completion** — every one of the 100 callers resolves to a
+///    terminal `Err` (FR-009); none hangs.
+/// 4. **Teardown + epoch + registry cleanup** — the `TeardownGuard` backstop
+///    removes the dead entry; the registry ends empty for this triple before
+///    the retry begins.
+/// 5. **Explicit caller retry** — per ADR-008/FR-010, nothing in this crate
+///    retries automatically; this test's own second `entity_ref()` call is
+///    the retry. It reaches a brand-new epoch's actor, which recovers
+///    cleanly this time (the event store only panics once) and answers with
+///    a real, successful result — proving the triple is usable again, not
+///    permanently wedged by the earlier panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() {
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
+        GatedPanicOnceEventStore {
+            load_calls: load_calls.clone(),
+            release_panic: release_rx,
+        },
+    ));
+
+    let runtime = Arc::new(
+        EntityRuntimeBuilder::<TestEvent>::new()
+            .passivation_timeout(Duration::from_secs(3600))
+            .snapshot_strategy(Arc::new(NoSnapshot))
+            .with_event_store(event_store)
+            .build(),
+    );
+
+    let triple = EntityTriple::new("default".to_string(), "probe", "hundred-caller-retry-1");
+    let aggregate_id = triple.aggregate_id();
+
+    const N: usize = 100;
+    let started = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let rt = runtime.clone();
+        let h = handler();
+        let started = started.clone();
+        handles.push(tokio::spawn(async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            let entity_ref = rt
+                .entity_ref::<TestCommand, TestState>("probe", "hundred-caller-retry-1", h)
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                entity_ref.send_command(TestCommand::Increment((i + 1) as u64), create_test_context()),
+            )
+            .await
+            .expect("FR-009: every one of the 100 callers must eventually resolve, not hang")
+        }));
+    }
+
+    // Wait until every one of the 100 caller tasks has begun executing —
+    // bounded poll, not a blind sleep. `entity_ref()` and the `mailbox.send()`
+    // half of `send_command()` are both non-yielding while the mailbox has
+    // room (default capacity is 1000, N=100), so a task that has started at
+    // all completes that whole enqueue prefix within its first poll, before
+    // it ever reaches the `.await` on the reply — the `yield_now()` loop
+    // below gives the scheduler a few turns to actually finish delivering
+    // that first poll to every task before the gate opens.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if started.load(Ordering::SeqCst) == N {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "all 100 caller tasks must have started within the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+
+    let _ = release_tx.send(());
+
+    let mut results: Vec<Result<CommandResult<TestEvent, TestState>, EntityError>> =
+        Vec::with_capacity(N);
+    for handle in handles {
+        results.push(handle.await.expect("caller task must not itself panic"));
+    }
+
+    assert!(
+        results.iter().all(|r| r.is_err()),
+        "every one of the 100 callers must observe a terminal Err after the recovery-time panic"
+    );
+    assert_eq!(
+        load_calls.load(Ordering::SeqCst),
+        1,
+        "NFR-002: the 100-caller burst must coalesce into exactly one activation attempt"
+    );
+
+    // Registry cleanup: the triple must end with no live entry before the
+    // retry begins — the guard's backstop, not the (never-reached, since the
+    // panic preempts it) in-body drain.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if runtime.registry.lookup(&aggregate_id).is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dead triple must not remain a zombie registry entry before the retry"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Explicit retry (ADR-008/FR-010: the caller retries; nothing in this
+    // crate retries automatically). This reaches a fresh epoch's actor.
+    let retry_ref = runtime
+        .entity_ref::<TestCommand, TestState>("probe", "hundred-caller-retry-1", handler())
+        .unwrap();
+    let retry_result: CommandResult<TestEvent, TestState> = tokio::time::timeout(
+        Duration::from_secs(5),
+        retry_ref.send_command(TestCommand::Increment(1), create_test_context()),
+    )
+    .await
+    .expect("the retry must not hang")
+    .expect("the retry must reach a newly-activated, healthy actor and succeed");
+
+    match retry_result {
+        CommandResult::Events { new_state, .. } => assert_eq!(new_state.value, 1),
+        other => panic!("expected Events, got {other:?}"),
+    }
+    assert_eq!(
+        load_calls.load(Ordering::SeqCst),
+        2,
+        "the explicit retry must trigger exactly one NEW activation attempt — no more, no fewer"
+    );
 }
