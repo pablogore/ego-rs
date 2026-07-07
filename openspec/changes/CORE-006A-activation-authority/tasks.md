@@ -44,12 +44,12 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 3: Teardown guard + actor wiring (ADR-005, ADR-008)
 
-- [ ] TASK-008 RED: failing test — actor panics mid-processing with N commands already queued; all N callers eventually resolve to a terminal `Err`, none hangs (FR-009).
-- [ ] TASK-009 RED: failing test — `MailboxClosed` observed in the close→remove teardown window is retried via a fresh `entity_ref()` call and reaches the next healthy actor (FR-010, ADR-008).
-- [ ] TASK-010 GREEN: `entity_ref()` becomes lookup-or-spawn: lock map → clone existing erased mailbox, or create mailbox + `watch::channel(Recovering)` + `epoch = next_epoch()` + insert → release lock → `tokio::spawn` the actor with a `TeardownGuard { epoch, tx }` moved in, strictly *after* release (Round-3 self-deadlock fix — do not move spawn back under the lock).
-- [ ] TASK-011 GREEN: implement `TeardownGuard::drop()` → sync `deactivate()`: `mailbox.close()` → `close_and_drain()` replying `Err(EntityNotActive)` to every queued envelope → `deactivate_if_mine(epoch)` (remove entry + `tx.send(terminal)`). Delete `SpawnGuard` (`entity_ref_tokio.rs:30-39`).
-- [ ] TASK-012 GREEN: `actor.rs` — move the `watch::Sender` into the actor; publish `EntityState` on every `lifecycle.transition_to(_)`; remove direct `registry.remove_active` calls in `drain_mailbox_with_error`/`passivate` (`:320,328`) — teardown now flows only through the guard.
-- [ ] TASK-013 GREEN: `runtime.rs` — `entity_ref()` signature changes to `Result<impl EntityRef<Command = C>, EntityError>`.
+- [x] TASK-008 RED: failing test — actor panics mid-processing with N commands already queued; all N callers eventually resolve to a terminal `Err`, none hangs (FR-009).
+- [x] TASK-009 RED: failing test — `MailboxClosed` observed in the close→remove teardown window is retried via a fresh `entity_ref()` call and reaches the next healthy actor (FR-010, ADR-008).
+- [x] TASK-010 GREEN: `entity_ref()` becomes lookup-or-spawn: lock map → clone existing erased mailbox, or create mailbox + `watch::channel(Recovering)` + `epoch = next_epoch()` + insert → release lock → `tokio::spawn` the actor with a `TeardownGuard { epoch, tx }` moved in, strictly *after* release (Round-3 self-deadlock fix — do not move spawn back under the lock).
+- [x] TASK-011 GREEN: implement `TeardownGuard::drop()` → sync `deactivate()`: `mailbox.close()` → `close_and_drain()` replying `Err(EntityNotActive)` to every queued envelope → `deactivate_if_mine(epoch)` (remove entry + `tx.send(terminal)`). Delete `SpawnGuard` (`entity_ref_tokio.rs:30-39`).
+- [x] TASK-012 GREEN: `actor.rs` — move the `watch::Sender` into the actor; publish `EntityState` on every `lifecycle.transition_to(_)`; remove direct `registry.remove_active` calls in `drain_mailbox_with_error`/`passivate` (`:320,328`) — teardown now flows only through the guard.
+- [x] TASK-013 GREEN: `runtime.rs` — `entity_ref()` signature changes to `Result<impl EntityRef<Command = C>, EntityError>`.
 
 ## Phase 4: Remove dead activation/supervisor code (ADR-006)
 
