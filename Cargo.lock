@@ -568,6 +568,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ego-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "console-exporter",
+ "ego-domain",
+ "ego-security-sdk",
+ "ego-service-sdk",
+ "ego-service-sdk-macros",
+ "kitlogger",
+ "kitlogger-formatter",
+ "kitlogger-log-domain",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ego-transport"
 version = "0.1.0"
 dependencies = [

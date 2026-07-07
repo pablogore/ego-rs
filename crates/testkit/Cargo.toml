@@ -1,0 +1,26 @@
+[package]
+name = "ego-testkit"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Opt-in ONLY: re-exports ego-security-sdk's AllowAllAuthorizationProvider.
+# Off by default so the dev-providers feature is never silently unified across
+# the workspace (see design.md AD-3). ScriptedAuthorizationProvider::allow_all()
+# is the default allow path and needs no feature.
+dev-providers = ["ego-security-sdk/test-helpers"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ego-domain = { path = "../domain" }
+ego-security-sdk = { path = "../security-sdk" }
+ego-service-sdk = { path = "../service-sdk" }
+kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+console-exporter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+
+[dev-dependencies]
+ego-service-sdk-macros = { path = "../service-sdk-macros" }
