@@ -64,11 +64,17 @@ impl<T> BoundedMailbox<T> {
         }
     }
 
+    /// Mark the mailbox closed without notifying anyone. Shared by `close()`
+    /// and `close_and_drain()`, which each need different notify timing.
+    fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
     /// Close the mailbox. Any `recv()` calls waiting on an empty queue will
     /// return `Err(EntityError::MailboxClosed)` after the queue drains. Senders
     /// blocked on a full queue are also woken so they can observe the closed flag.
     pub fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.mark_closed();
         self.not_empty.notify_waiters();
         self.not_full.notify_waiters();
     }
@@ -82,9 +88,16 @@ impl<T> BoundedMailbox<T> {
     /// the queue never poisons, so this is safe to call during panic unwind.
     /// The caller is responsible for terminally answering each returned
     /// item's reply channel — this method only closes and drains.
+    ///
+    /// Drains before notifying waiters: a woken `send()`/`recv()` re-checks
+    /// the queue under its own lock acquisition, so notifying first would
+    /// open an avoidable contention window against this method's own drain.
     pub fn close_and_drain(&self) -> VecDeque<T> {
-        self.close();
-        std::mem::take(&mut *self.queue.lock())
+        self.mark_closed();
+        let drained = std::mem::take(&mut *self.queue.lock());
+        self.not_empty.notify_waiters();
+        self.not_full.notify_waiters();
+        drained
     }
 
     /// Send a command to the mailbox.
@@ -214,10 +227,15 @@ mod tests {
     /// the drained output. Every one of `N` concurrent `send()` attempts
     /// must end up EITHER drained by `close_and_drain()` OR rejected with
     /// `MailboxClosed` — never silently lost.
+    ///
+    /// Capacity is deliberately half of `N` so roughly half the sends fill
+    /// the queue while the other half block on `not_full.notified()`,
+    /// exercising the backpressure/lost-wakeup-guard path (PC-R7) as well as
+    /// plain capacity exhaustion — not just the always-fits case.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn close_and_drain_races_concurrent_sends_without_losing_envelopes() {
         const N: usize = 64;
-        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(N);
+        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(N / 2);
 
         let handles: Vec<_> = (0..N)
             .map(|id| {
@@ -226,9 +244,15 @@ mod tests {
             })
             .collect();
 
-        // Race close_and_drain() against the still-running send() tasks above.
+        // Race close_and_drain() against both the queue-filling sends and the
+        // blocked-on-not_full sends above.
         let drained = mailbox.close_and_drain();
-        let drained_ids: std::collections::HashSet<usize> = drained.into_iter().collect();
+        let drained_ids: std::collections::HashSet<usize> = drained.iter().copied().collect();
+        assert_eq!(
+            drained.len(),
+            drained_ids.len(),
+            "close_and_drain() must not return the same envelope twice"
+        );
 
         let mut accepted = 0usize;
         let mut rejected = 0usize;
