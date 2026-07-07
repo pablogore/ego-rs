@@ -402,4 +402,46 @@ mod tests {
         let result = rt.inner().resolve_config::<StubConfig>();
         assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
     }
+
+    // -- CORE-120: identity preservation (no clone-on-resolve) ---------------
+
+    #[test]
+    fn with_adapter_preserves_arc_identity() {
+        let original = Arc::new(StubAdapter(7));
+        let rt = RuntimeBuilder::new().with_adapter(original.clone()).build();
+
+        let resolved = rt.inner().resolve_adapter::<StubAdapter>().unwrap();
+        assert!(
+            std::ptr::eq(&*original, &*resolved),
+            "resolve_adapter must return the exact registered instance, not a clone"
+        );
+    }
+
+    #[test]
+    fn with_config_preserves_arc_identity() {
+        let original = Arc::new(StubConfig("hello".to_string()));
+        let rt = RuntimeBuilder::new().with_config(original.clone()).build();
+
+        let resolved = rt.inner().resolve_config::<StubConfig>().unwrap();
+        assert!(
+            std::ptr::eq(&*original, &*resolved),
+            "resolve_config must return the exact registered instance, not a clone"
+        );
+    }
+
+    // -- CORE-120: adapter/config namespace isolation ------------------------
+
+    #[derive(Debug, PartialEq)]
+    struct SharedType(u32);
+
+    #[test]
+    fn adapter_and_config_of_same_concrete_type_do_not_collide() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(SharedType(1)))
+            .with_config(Arc::new(SharedType(2)))
+            .build();
+
+        assert_eq!(*rt.inner().resolve_adapter::<SharedType>().unwrap(), SharedType(1));
+        assert_eq!(*rt.inner().resolve_config::<SharedType>().unwrap(), SharedType(2));
+    }
 }
