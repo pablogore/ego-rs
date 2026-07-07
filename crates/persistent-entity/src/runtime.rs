@@ -144,6 +144,10 @@ where
 
         let triple = EntityTriple::new(tenant_id, entity_type, entity_id);
 
+        // Phase 2 shim: TokioEntityRef::new is now fallible (ADR-002's downcast-mismatch
+        // error), but entity_ref()'s public signature only becomes Result in Phase 3
+        // (TASK-013). The only failure this can currently produce is the never-in-practice
+        // routing type mismatch, so unwrapping here is a temporary, explicitly-scoped gap.
         TokioEntityRef::new(
             triple,
             self.registry.clone(),
@@ -155,6 +159,7 @@ where
             self.config.mailbox_capacity,
             self.config.passivation_timeout(),
         )
+        .expect("entity_ref: routing type mismatch (Phase 3 propagates this as Result)")
     }
 
     /// Returns the number of currently active entities.

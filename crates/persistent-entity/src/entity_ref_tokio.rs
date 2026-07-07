@@ -1,5 +1,6 @@
 //! Production [`EntityRef`] backed by a real [`EntityActor`] spawned via `tokio::spawn`.
 
+use std::any::Any;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -12,29 +13,34 @@ use crate::command_context::CommandContext;
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
 use crate::entity_ref::EntityRef;
 use crate::error::EntityError;
-use crate::lifecycle::LifecycleStateMachine;
+use crate::lifecycle::{EntityState, LifecycleStateMachine};
 use crate::mailbox::BoundedMailbox;
 use crate::passivation_signal::TokioPassivationSignal;
 use crate::persistence::PersistenceFacade;
 use crate::persistent_entity::PersistentEntity;
 use crate::publisher::EventPublisher;
-use crate::registry::EntityRegistry;
+use crate::registry::{EntityRegistry, RouteOutcome};
 use crate::scheduler::EntityTriple;
 use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use ego_domain::event::DomainEvent;
 
-/// Calls `remove_active` on drop — guards against a leaked active entry when the spawned future
-/// is dropped before it ever polls (e.g. runtime teardown before task starts). `remove_active`
-/// is idempotent: calling it after normal passivation (which already removed the entry) is safe.
+/// Calls `deactivate_if_mine` on drop — guards against a leaked routing entry when the spawned
+/// future is dropped before it ever polls (e.g. runtime teardown before task starts).
+/// `deactivate_if_mine` is idempotent and epoch-scoped: calling it after normal passivation
+/// (which already removed the entry) or against a superseded epoch is a safe no-op.
+///
+/// Phase 3's `TeardownGuard` (design.md ADR-005) supersedes this with the full
+/// close-mailbox+drain+remove contract; this guard only covers the pre-poll-drop case for now.
 struct SpawnGuard {
     aggregate_id: String,
     registry: Arc<EntityRegistry>,
+    epoch: u64,
 }
 
 impl Drop for SpawnGuard {
     fn drop(&mut self) {
-        self.registry.remove_active(&self.aggregate_id);
+        self.registry.deactivate_if_mine(&self.aggregate_id, self.epoch);
     }
 }
 
@@ -72,7 +78,14 @@ where
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
 {
-    /// Marks the entity active, spawns the actor, and returns the mailbox write-side.
+    /// Looks up an existing live actor for `triple`, or spawns a new one
+    /// (ADR-001's lookup-or-spawn), and returns the mailbox write-side.
+    ///
+    /// Returns `Err(EntityError::Internal(..))` if a live entry exists but its
+    /// erased mailbox does not downcast to `BoundedMailbox<ActorEnvelope<C>>`
+    /// (ADR-002) — a programming error (mismatched `entity_type`/command
+    /// type). This is never treated as "no live entry" and never falls
+    /// through to a competing spawn.
     pub fn new(
         triple: EntityTriple,
         registry: Arc<EntityRegistry>,
@@ -83,59 +96,95 @@ where
         event_sender: SchedulerEventSender,
         mailbox_capacity: usize,
         passivation_timeout: std::time::Duration,
-    ) -> Self {
-        let mailbox: BoundedMailbox<ActorEnvelope<C>> = BoundedMailbox::new(mailbox_capacity);
-        let mailbox_for_actor = mailbox.clone();
-
-        let entity_id = triple.clone();
-        let registry_for_actor = registry.clone();
-
+    ) -> Result<Self, EntityError> {
         let aggregate_id = triple.aggregate_id();
 
-        let mut actor = EntityActor {
-            entity_id: triple,
-            mailbox: mailbox_for_actor,
-            state: None,
-            version: 0,
-            lifecycle: LifecycleStateMachine::new(),
-            registry: registry_for_actor,
-            persistence,
-            publisher,
-            snapshot_strategy,
-            entity_handler,
-            event_sender,
-            signal: TokioPassivationSignal::new(passivation_timeout),
-            _phantom: PhantomData,
-        };
-
-        // Mark the entity as active before spawning so that callers who inspect
-        // registry.active_count() immediately after entity_ref() observe the correct count.
-        // Registry ops use std::sync::Mutex (no await), so this is safe from a sync fn.
-        //
-        // Known window: active_count() is inflated by one between this line and the actor's
-        // first poll. Moving mark_active inside run() would hide the entity until the first
-        // Tokio context switch, which is worse. SpawnGuard handles the case where the spawned
-        // future is dropped before it ever polls (runtime teardown).
-        registry.mark_active(&aggregate_id);
-
-        // Guard calls remove_active on drop. If the runtime drops the spawned future before it
-        // ever polls (e.g. shutdown), the active entry is cleaned up. In the normal path,
-        // actor.run() already removes the entry; Drop is a safe no-op because remove_active
-        // is idempotent.
-        let _guard = SpawnGuard {
-            aggregate_id: aggregate_id.clone(),
-            registry: registry.clone(),
-        };
-
-        tokio::spawn(async move {
-            actor.run().await;
-            drop(_guard);
+        // Single-flight critical section (ADR-001): lazily builds the mailbox only
+        // if no live entry exists yet, under one lock acquisition.
+        let outcome = registry.lookup_or_insert(&aggregate_id, || {
+            let mailbox: BoundedMailbox<ActorEnvelope<C>> = BoundedMailbox::new(mailbox_capacity);
+            Arc::new(mailbox) as Arc<dyn Any + Send + Sync>
         });
 
-        TokioEntityRef {
-            entity_id,
-            mailbox,
-            _phantom: PhantomData,
+        let downcast = |erased: Arc<dyn Any + Send + Sync>| {
+            erased
+                .downcast::<BoundedMailbox<ActorEnvelope<C>>>()
+                .map_err(|_| {
+                    debug_assert!(
+                        false,
+                        "routing type mismatch for triple {aggregate_id}: erased mailbox is not \
+                         BoundedMailbox<ActorEnvelope<C>> for this entity_type"
+                    );
+                    EntityError::Internal(format!("routing type mismatch for triple {aggregate_id}"))
+                })
+        };
+
+        match outcome {
+            RouteOutcome::Existing { mailbox: erased } => {
+                // Downcast happens after the lock is released (ADR-001/ADR-002).
+                let mailbox = downcast(erased)?;
+                Ok(TokioEntityRef {
+                    entity_id: triple,
+                    mailbox: (*mailbox).clone(),
+                    _phantom: PhantomData,
+                })
+            }
+            RouteOutcome::Inserted { mailbox: erased, epoch, tx } => {
+                // Freshly inserted under this call's own type parameters, so the
+                // downcast is infallible in practice — kept uniform with the
+                // Existing branch rather than special-cased.
+                let mailbox = downcast(erased)
+                    .expect("freshly-inserted mailbox always matches its own type");
+                let mailbox_for_actor = (*mailbox).clone();
+
+                // Phase 2 parity shim: publish Active synchronously here, mirroring
+                // today's eager mark_active-before-spawn timing bug-for-bug, so
+                // active_count() keeps its current observable semantics. Phase 3
+                // (design.md ADR-003) moves this into the actor's own lifecycle
+                // transitions, publishing through `tx` only once recovery completes.
+                let _ = tx.send(EntityState::Active);
+
+                let entity_id = triple.clone();
+                let registry_for_actor = registry.clone();
+
+                let mut actor = EntityActor {
+                    entity_id: triple,
+                    mailbox: mailbox_for_actor,
+                    state: None,
+                    version: 0,
+                    lifecycle: LifecycleStateMachine::new(),
+                    registry: registry_for_actor,
+                    epoch,
+                    persistence,
+                    publisher,
+                    snapshot_strategy,
+                    entity_handler,
+                    event_sender,
+                    signal: TokioPassivationSignal::new(passivation_timeout),
+                    _phantom: PhantomData,
+                };
+
+                // Guard calls deactivate_if_mine on drop. If the runtime drops the
+                // spawned future before it ever polls (e.g. shutdown), the routing
+                // entry is cleaned up. In the normal path, actor.run() already
+                // removes the entry; Drop is then a safe, epoch-scoped no-op.
+                let _guard = SpawnGuard {
+                    aggregate_id: aggregate_id.clone(),
+                    registry: registry.clone(),
+                    epoch,
+                };
+
+                tokio::spawn(async move {
+                    actor.run().await;
+                    drop(_guard);
+                });
+
+                Ok(TokioEntityRef {
+                    entity_id,
+                    mailbox: (*mailbox).clone(),
+                    _phantom: PhantomData,
+                })
+            }
         }
     }
 }

@@ -35,6 +35,10 @@ pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     pub(crate) lifecycle: LifecycleStateMachine,
     /// Shared entity registry.
     pub(crate) registry: Arc<EntityRegistry>,
+    /// This actor's teardown identity — the epoch its routing entry was inserted
+    /// under (ADR-005). Only a removal call presenting this exact epoch may
+    /// remove the entry.
+    pub(crate) epoch: u64,
     /// Persistence facade for loading and storing events/snapshots.
     pub(crate) persistence: Arc<PersistenceFacade<E>>,
     /// Event publisher for notifying downstream consumers.
@@ -317,7 +321,8 @@ where
         while let Ok(envelope) = self.mailbox.recv().await {
             let _ = envelope.reply.send(Err(err.clone()));
         }
-        self.registry.remove_active(&self.entity_id.aggregate_id());
+        self.registry
+            .deactivate_if_mine(&self.entity_id.aggregate_id(), self.epoch);
     }
 
     /// Drains the mailbox, snapshots state, and marks the entity passivated in the registry.
@@ -325,7 +330,8 @@ where
         // Close the mailbox first so recv() returns MailboxClosed once empty,
         // rather than blocking forever waiting for the next command.
         self.mailbox.close();
-        self.registry.remove_active(&self.entity_id.aggregate_id());
+        self.registry
+            .deactivate_if_mine(&self.entity_id.aggregate_id(), self.epoch);
 
         while let Ok(actor_envelope) = self.mailbox.recv().await {
             self.execute_command(actor_envelope).await;
