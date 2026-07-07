@@ -250,6 +250,64 @@ mod tests {
         );
     }
 
+    /// NFR-003 (FR-004): the identical claim as
+    /// `active_count_excludes_recovering_counts_active`, proven for the
+    /// reactivation-from-`Passivated` path instead of the cold path. After a
+    /// triple's first incarnation reaches `Active` and is torn down
+    /// (`deactivate_if_mine`), a second `lookup_or_insert` for the same
+    /// `entity_id` is a reactivation: it starts a fresh entry under a new
+    /// epoch, seeded `Recovering` exactly like a cold insert. That entry
+    /// must be excluded from `active_count()` until its own state reaches
+    /// `Active` — the visibility contract must not differ by origin
+    /// (FR-004 mirrors FR-003).
+    #[test]
+    fn reactivation_active_count_excludes_recovering_counts_active() {
+        let registry = EntityRegistry::new();
+
+        // Cold activation, then teardown (Active -> removed), simulating a
+        // passivation cycle from the registry's point of view.
+        let (epoch1, tx1) = match registry.lookup_or_insert("triple-5", || erased_probe(0usize)) {
+            RouteOutcome::Inserted { epoch, tx, .. } => (epoch, tx),
+            RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
+        };
+        tx1.send(EntityState::Active)
+            .expect("receiver still held by the registry entry");
+        assert_eq!(
+            registry.active_count(),
+            1,
+            "cold activation must be counted once Active"
+        );
+        registry.mark_passivated("triple-5".to_string(), 1);
+        registry.deactivate_if_mine("triple-5", epoch1);
+        assert_eq!(
+            registry.active_count(),
+            0,
+            "the torn-down entry must no longer be counted"
+        );
+
+        // Reactivation: a fresh lookup_or_insert for the same entity_id
+        // starts a new Recovering entry under a new epoch.
+        let tx2 = match registry.lookup_or_insert("triple-5", || erased_probe(0usize)) {
+            RouteOutcome::Inserted { tx, .. } => tx,
+            RouteOutcome::Existing { .. } => panic!("expected a fresh insert on reactivation"),
+        };
+
+        assert_eq!(
+            registry.active_count(),
+            0,
+            "reactivation's freshly-inserted entry is Recovering, not counted (FR-004)"
+        );
+
+        tx2.send(EntityState::Active)
+            .expect("receiver still held by the registry entry");
+
+        assert_eq!(
+            registry.active_count(),
+            1,
+            "the reactivated entry must be counted once its published state is Active (FR-004)"
+        );
+    }
+
     /// TASK-006 (ADR-002, Judgment Day CRITICAL 1 / FR-001's type-mismatch
     /// scenario): a downcast mismatch against a live entry must never be
     /// treated as "no live entry" — the entry is left exactly as-is and no
