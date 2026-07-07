@@ -224,38 +224,57 @@ mod tests {
     /// `closed` flag inside the same `queue` lock critical section as the
     /// `push_back`, so there is no window in which `close_and_drain()` can
     /// take the queue after a message was accepted but before it lands in
-    /// the drained output. Every one of `N` concurrent `send()` attempts
-    /// must end up EITHER drained by `close_and_drain()` OR rejected with
+    /// the drained output. Every one of `N` total send attempts must end up
+    /// EITHER drained by `close_and_drain()` OR rejected with
     /// `MailboxClosed` — never silently lost.
     ///
-    /// Capacity is deliberately half of `N` so roughly half the sends fill
-    /// the queue while the other half block on `not_full.notified()`,
-    /// exercising the backpressure/lost-wakeup-guard path (PC-R7) as well as
-    /// plain capacity exhaustion — not just the always-fits case.
+    /// Constructed deterministically rather than relying on scheduling:
+    /// first, `capacity` sends are awaited synchronously — nothing is racing
+    /// yet, so they are guaranteed to land in the queue. Only then are the
+    /// remaining `N - capacity` sends spawned concurrently; since the queue
+    /// is already full, each of those is guaranteed to block on
+    /// `not_full.notified()` when it runs. `close_and_drain()` is called
+    /// last, draining the `capacity` queued items and waking the blocked
+    /// senders so they observe `closed` and reject. This reliably exercises
+    /// capacity exhaustion and backpressure activation (PC-R7) on every run,
+    /// rather than only probabilistically depending on task scheduling.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn close_and_drain_races_concurrent_sends_without_losing_envelopes() {
         const N: usize = 64;
-        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(N / 2);
+        let capacity = N / 2;
+        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(capacity);
 
-        let handles: Vec<_> = (0..N)
+        // Fill the mailbox to capacity synchronously first, so these sends
+        // are guaranteed to land in the queue rather than racing anything.
+        for id in 0..capacity {
+            mailbox.send(id).await.expect("queue not yet full");
+        }
+
+        // The queue is now full, so each of these spawned sends is
+        // guaranteed to block on not_full.notified() once it runs.
+        let handles: Vec<_> = (capacity..N)
             .map(|id| {
                 let mailbox = mailbox.clone();
                 tokio::spawn(async move { (id, mailbox.send(id).await) })
             })
             .collect();
 
-        // Race close_and_drain() against both the queue-filling sends and the
-        // blocked-on-not_full sends above.
         let drained = mailbox.close_and_drain();
         let drained_ids: std::collections::HashSet<usize> = drained.iter().copied().collect();
         assert_eq!(
             drained.len(),
             drained_ids.len(),
-            "close_and_drain() must not return the same envelope twice"
+            "regression guard: close_and_drain()'s internal drain (std::mem::take) \
+             must not duplicate an entry within a single call"
         );
 
-        let mut accepted = 0usize;
-        let mut rejected = 0usize;
+        for id in 0..capacity {
+            assert!(
+                drained_ids.contains(&id),
+                "id {id} was synchronously queued before close_and_drain() but missing from drained output"
+            );
+        }
+
         for handle in handles {
             let (id, result) = handle.await.expect("send task panicked");
             match result {
@@ -264,17 +283,20 @@ mod tests {
                         drained_ids.contains(&id),
                         "send({id}) returned Ok but {id} was not present in close_and_drain() output"
                     );
-                    accepted += 1;
                 }
-                Err(EntityError::MailboxClosed) => rejected += 1,
+                Err(EntityError::MailboxClosed) => {}
                 Err(other) => panic!("unexpected error from send(): {other:?}"),
             }
         }
+    }
 
-        assert_eq!(
-            accepted + rejected,
-            N,
-            "every send attempt must be either accepted-and-drained or rejected as closed — none silently lost"
-        );
+    #[tokio::test]
+    async fn send_then_recv_round_trip() {
+        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(4);
+
+        mailbox.send(42).await.expect("send");
+        let received = mailbox.recv().await.expect("recv");
+
+        assert_eq!(received, 42);
     }
 }
