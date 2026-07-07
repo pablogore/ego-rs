@@ -291,6 +291,23 @@ which the `Arc<Mutex<_>>` form cannot express.
 state and derived all external queries from it rather than maintaining a parallel flag;
 same principle here — the actor owns state, every external query is derived.
 
+**Invariant — at most one `Sender` per epoch.** `entity_ref()`'s single-flight critical
+section constructs exactly one `watch::channel` per insert and moves its `Sender` into
+exactly one spawned actor; nothing else in this design clones or retains a second handle
+to it (`TeardownGuard` clones the erased *mailbox*, never the `Sender`). This is what
+makes "the actor is the only writer" a fact about the object graph rather than a
+convention: a future change that clones the `Sender` out to a second holder (e.g. to let
+some other component publish state) would silently reintroduce a second writer and
+break this ADR's central claim. Any such change MUST first revisit this ADR.
+
+**Property — `watch::Receiver` cannot observe a stale value.** Unlike an `mpsc`
+channel, `watch::Receiver::borrow()` always returns the *most recently sent* value —
+there is no queue to lag behind; an intermediate state sent between two `borrow()` calls
+is simply superseded, never queued for later delivery. So `active_count()` cannot observe
+an out-of-date `EntityState` that some earlier `send()` already overwrote; the only
+question is *ordering* relative to other threads' actions (which ADR-001's single map
+lock already serializes), not staleness of the value itself.
+
 **Consequences.**
 - `active_count()` becomes correct and actor-level: it counts `Active` actors, not ID
   strings.
@@ -361,12 +378,17 @@ and `Drop` cannot run async code, so every step below is synchronous:
 
 1. **Close the mailbox.** `mailbox.close()` — a sync atomic store + `notify_waiters()`
    (`mailbox.rs:69-73`). Stops new sends, wakes any parked `recv()`/`send()`.
-2. **Synchronously drain the queue and terminally answer every remaining command.** The
+2. **Synchronously drain the queue, then terminally answer every remaining command.** The
    guard locks the mailbox's queue (`parking_lot::Mutex` per ADR-001 — see below for why
-   this *must not* be the current `tokio::sync::Mutex`), `std::mem::take`s the
-   `VecDeque<ActorEnvelope<C>>`, and for each `ActorEnvelope { reply, .. }` calls
-   `reply.send(Err(EntityError::EntityNotActive))` — `oneshot::Sender::send` is sync. This
-   is a new sync method on `BoundedMailbox`, e.g. `close_and_drain() -> VecDeque<T>`.
+   this *must not* be the current `tokio::sync::Mutex`) only long enough to
+   `std::mem::take` the `VecDeque<ActorEnvelope<C>>` and return it — this is
+   `close_and_drain() -> VecDeque<T>`, a new sync method on `BoundedMailbox`. **The lock is
+   released before any reply is sent:** the caller (this guard) iterates the *returned*
+   `VecDeque` and calls `reply.send(Err(EntityError::EntityNotActive))` — `oneshot::Sender::send`
+   is sync, but it runs entirely outside `close_and_drain()`, after the lock has already
+   been dropped. Do not "simplify" this in a future refactor by inlining the reply loop
+   into the locked section — the mutex must never be held across a call that reaches into
+   caller-supplied code (here, whatever `Drop`/wakeup a queued `oneshot::Sender` triggers).
 3. **Remove-if-mine (epoch).** Remove the map entry only if its epoch equals this guard's
    epoch (see epoch decision below), then publish the terminal `EntityState` via the
    `watch::Sender` (ADR-003) — the `Sender` being dropped also marks the channel closed,
@@ -486,6 +508,15 @@ shipped code. Per Non-Goals, the term "registry" is retained (no rename).
 
 ## ADR-008 — `MailboxClosed` is a distinct, caller-retryable terminal (spec FR-010)
 
+**Contract, stated plainly:** `MailboxClosed` is explicitly retryable — a caller
+observing it MAY re-call `entity_ref()` to reach the triple's next activation. **The
+runtime never retries automatically.** There is no hidden loop anywhere in this design
+that re-spawns an actor or re-sends a command on the caller's behalf. Retrying is a
+decision the caller makes, not a behavior `TokioEntityRef`/`EntityRuntime` performs for
+it. Everywhere else in this document or its code that says something like "the caller
+retries" is shorthand for this exact contract, not a hint that retry logic lives inside
+the crate.
+
 **Context.** A caller can hold a `TokioEntityRef` whose mailbox was live at lookup time
 but whose actor has since begun teardown — `deactivate()` step 1 closed the mailbox
 (ADR-005) — while step 3 has not yet removed the map entry. In that window a concurrent
@@ -559,6 +590,13 @@ ARCHITECTURE.md        MODIFIED  ADR-007
 There are **no non-test callers** of `entity_ref()` or `active_count()` in the
 workspace. `runtime.rs:129/161` are the definitions; `entity_ref_tokio.rs:112-118` are
 comments; all invocations live in three test files. Enumerated:
+
+**Forward-compatibility note.** This enumeration is a snapshot of *today's* callers, not
+a standing exemption. Any caller added after this change lands MUST explicitly handle or
+propagate the `Result`'s `Err(EntityError)` arm (`?`, a `match`, or an explicit
+`.unwrap()`/`.expect()` with a stated reason) — `entity_ref()` is no longer infallible,
+and a future PR silently reintroducing an `.unwrap()`-everywhere pattern would defeat the
+point of ADR-002's fail-closed contract.
 
 ### `entity_ref()` callers
 
