@@ -1,3 +1,5 @@
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -7,7 +9,7 @@ use kitlogger::KITLogger;
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use crate::runtime::logger::TeardownStack;
-use crate::runtime::runtime_builder::RuntimeInner;
+use crate::runtime::runtime_builder::{DependencyTable, RuntimeInner};
 use crate::runtime::RuntimeInfraError;
 
 /// The pair of security providers registered with a [`Runtime`].
@@ -27,6 +29,8 @@ pub struct RuntimeBuilder {
     authn: Option<Arc<dyn AuthenticationProvider>>,
     authz: Option<Arc<dyn AuthorizationProvider>>,
     logger: Option<Arc<KITLogger>>,
+    adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl RuntimeBuilder {
@@ -38,6 +42,8 @@ impl RuntimeBuilder {
             authn: None,
             authz: None,
             logger: None,
+            adapters: HashMap::new(),
+            configs: HashMap::new(),
         }
     }
 
@@ -69,6 +75,22 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a host-constructed adapter, resolvable via `resolve_adapter::<A>()`.
+    /// Last-write-wins: registering another value of the same concrete type `A`
+    /// REPLACES the previous one; only the most recent value per type is retained.
+    pub fn with_adapter<A: Send + Sync + 'static>(mut self, adapter: Arc<A>) -> Self {
+        self.adapters.insert(TypeId::of::<A>(), adapter as Arc<dyn Any + Send + Sync>);
+        self
+    }
+
+    /// Registers a host-constructed config value, resolvable via `resolve_config::<C>()`.
+    /// Last-write-wins (same semantics as `with_adapter`). CORE-016: accepts only an
+    /// already-constructed `Arc<C>`, never a raw config source/loader.
+    pub fn with_config<C: Send + Sync + 'static>(mut self, value: Arc<C>) -> Self {
+        self.configs.insert(TypeId::of::<C>(), value as Arc<dyn Any + Send + Sync>);
+        self
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
     /// Always succeeds — security and the logger are both optional. By the
@@ -88,6 +110,7 @@ impl RuntimeBuilder {
                 self.registry,
                 self.interceptor_chain,
                 security_providers,
+                DependencyTable::with_registrations(self.adapters, self.configs),
                 self.logger,
                 Mutex::new(teardown),
             )),
@@ -157,6 +180,7 @@ mod tests {
     use kitlogger::KITLogger;
 
     use super::{Runtime, RuntimeBuilder};
+    use crate::runtime::RuntimeError;
 
     struct StubAuthn;
 
@@ -286,5 +310,138 @@ mod tests {
             count_after_shutdown < count_after_build,
             "shutdown must release the teardown stack's own reference"
         );
+    }
+
+    // -- CORE-120: with_adapter / with_config -------------------------------
+
+    #[derive(Debug, PartialEq)]
+    struct StubAdapter(u32);
+
+    #[derive(Debug, PartialEq)]
+    struct StubConfig(String);
+
+    #[test]
+    fn with_adapter_registers_and_resolves() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(StubAdapter(7)))
+            .build();
+
+        let resolved = rt.inner().resolve_adapter::<StubAdapter>();
+        assert!(resolved.is_ok());
+        assert_eq!(*resolved.unwrap(), StubAdapter(7));
+    }
+
+    #[test]
+    fn with_config_registers_and_resolves() {
+        let rt = RuntimeBuilder::new()
+            .with_config(Arc::new(StubConfig("hello".to_string())))
+            .build();
+
+        let resolved = rt.inner().resolve_config::<StubConfig>();
+        assert!(resolved.is_ok());
+        assert_eq!(*resolved.unwrap(), StubConfig("hello".to_string()));
+    }
+
+    #[test]
+    fn with_adapter_last_write_wins() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(StubAdapter(1)))
+            .with_adapter(Arc::new(StubAdapter(2)))
+            .build();
+
+        let resolved = rt.inner().resolve_adapter::<StubAdapter>().unwrap();
+        assert_eq!(*resolved, StubAdapter(2));
+    }
+
+    #[test]
+    fn with_config_last_write_wins() {
+        let rt = RuntimeBuilder::new()
+            .with_config(Arc::new(StubConfig("first".to_string())))
+            .with_config(Arc::new(StubConfig("second".to_string())))
+            .build();
+
+        let resolved = rt.inner().resolve_config::<StubConfig>().unwrap();
+        assert_eq!(*resolved, StubConfig("second".to_string()));
+    }
+
+    // -- CORE-120: chained registration --------------------------------------
+
+    #[derive(Debug, PartialEq)]
+    struct StubAdapterB(u32);
+
+    #[derive(Debug, PartialEq)]
+    struct StubConfigD(String);
+
+    #[test]
+    fn chained_registration_multiple_types() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(StubAdapter(1)))
+            .with_config(Arc::new(StubConfig("c".to_string())))
+            .with_adapter(Arc::new(StubAdapterB(2)))
+            .with_config(Arc::new(StubConfigD("d".to_string())))
+            .build();
+
+        assert_eq!(*rt.inner().resolve_adapter::<StubAdapter>().unwrap(), StubAdapter(1));
+        assert_eq!(*rt.inner().resolve_adapter::<StubAdapterB>().unwrap(), StubAdapterB(2));
+        assert_eq!(*rt.inner().resolve_config::<StubConfig>().unwrap(), StubConfig("c".to_string()));
+        assert_eq!(*rt.inner().resolve_config::<StubConfigD>().unwrap(), StubConfigD("d".to_string()));
+    }
+
+    // -- CORE-120: unregistered type unchanged behavior ----------------------
+
+    #[test]
+    fn resolve_adapter_unregistered_returns_dependency_not_found() {
+        let rt = RuntimeBuilder::new().build();
+        let result = rt.inner().resolve_adapter::<StubAdapter>();
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    #[test]
+    fn resolve_config_unregistered_returns_dependency_not_found() {
+        let rt = RuntimeBuilder::new().build();
+        let result = rt.inner().resolve_config::<StubConfig>();
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+    }
+
+    // -- CORE-120: identity preservation (no clone-on-resolve) ---------------
+
+    #[test]
+    fn with_adapter_preserves_arc_identity() {
+        let original = Arc::new(StubAdapter(7));
+        let rt = RuntimeBuilder::new().with_adapter(original.clone()).build();
+
+        let resolved = rt.inner().resolve_adapter::<StubAdapter>().unwrap();
+        assert!(
+            std::ptr::eq(&*original, &*resolved),
+            "resolve_adapter must return the exact registered instance, not a clone"
+        );
+    }
+
+    #[test]
+    fn with_config_preserves_arc_identity() {
+        let original = Arc::new(StubConfig("hello".to_string()));
+        let rt = RuntimeBuilder::new().with_config(original.clone()).build();
+
+        let resolved = rt.inner().resolve_config::<StubConfig>().unwrap();
+        assert!(
+            std::ptr::eq(&*original, &*resolved),
+            "resolve_config must return the exact registered instance, not a clone"
+        );
+    }
+
+    // -- CORE-120: adapter/config namespace isolation ------------------------
+
+    #[derive(Debug, PartialEq)]
+    struct SharedType(u32);
+
+    #[test]
+    fn adapter_and_config_of_same_concrete_type_do_not_collide() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(SharedType(1)))
+            .with_config(Arc::new(SharedType(2)))
+            .build();
+
+        assert_eq!(*rt.inner().resolve_adapter::<SharedType>().unwrap(), SharedType(1));
+        assert_eq!(*rt.inner().resolve_config::<SharedType>().unwrap(), SharedType(2));
     }
 }
