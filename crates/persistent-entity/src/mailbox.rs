@@ -89,6 +89,20 @@ impl<T> BoundedMailbox<T> {
     /// The caller is responsible for terminally answering each returned
     /// item's reply channel — this method only closes and drains.
     ///
+    /// **Linearization guarantee.** `send()` checks `closed` under the same
+    /// `queue` lock it uses for `push_back`, and this method takes that same
+    /// lock to both mark the mailbox closed and drain it. So every `send()`
+    /// call that returns `Ok(())` is guaranteed to have its item appear in
+    /// the `VecDeque` returned by exactly one `close_and_drain()` call (or be
+    /// popped first by a concurrent `recv()`) — never both, never neither.
+    /// ADR-005's guaranteed-completion contract depends on this.
+    ///
+    /// **Terminal.** There is no operation that reopens a closed mailbox.
+    /// After this call returns, the queue stays empty forever and every
+    /// subsequent `send()` observes `closed` and returns
+    /// `Err(EntityError::MailboxClosed)` — calling `close_and_drain()` again
+    /// is safe and simply finds an already-empty queue.
+    ///
     /// Drains before notifying waiters: a woken `send()`/`recv()` re-checks
     /// the queue under its own lock acquisition, so notifying first would
     /// open an avoidable contention window against this method's own drain.
@@ -218,6 +232,38 @@ mod tests {
         let drained = mailbox.close_and_drain();
 
         assert!(drained.is_empty(), "nothing was queued, nothing to drain");
+    }
+
+    /// Fixes the terminal/idempotent contract (docstring above): a second
+    /// `close_and_drain()` call must not re-yield or duplicate anything the
+    /// first call already took, since Phase 3's teardown guard relies on
+    /// this being safe to call more than once.
+    #[tokio::test]
+    async fn close_and_drain_is_idempotent_on_repeated_calls() {
+        let mailbox: BoundedMailbox<TestEnvelope> = BoundedMailbox::new(4);
+        let (tx1, rx1) = oneshot::channel();
+        mailbox
+            .send(TestEnvelope { reply: tx1 })
+            .await
+            .expect("send 1");
+
+        let first = mailbox.close_and_drain();
+        assert_eq!(first.len(), 1, "first call drains the one queued envelope");
+
+        let second = mailbox.close_and_drain();
+        assert!(second.is_empty(), "second call finds nothing left to drain");
+
+        first
+            .into_iter()
+            .next()
+            .unwrap()
+            .reply
+            .send(Err(EntityError::EntityNotActive))
+            .expect("receiver still open");
+        assert!(matches!(
+            rx1.await.unwrap(),
+            Err(EntityError::EntityNotActive)
+        ));
     }
 
     /// Regression test for the lock-ordering guarantee: `send()` checks the
