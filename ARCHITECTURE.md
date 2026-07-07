@@ -115,8 +115,7 @@ flowchart TB
         ERB["EntityRuntimeBuilder<br/>Config: mailbox, concurrency,<br/>passivation, backends"]
 
         subgraph Registry["Registry &amp; Activation"]
-            REG["EntityRegistry<br/>• active: EntityTriple → ActorHandle<br/>• passivated: EntityTriple → version<br/>• pending_activations: EntityTriple → SharedActivation"]
-            ACT["SharedActivation<br/>• Mutex: spawn serialization<br/>• Watch channel: recovery<br/>outcome notification"]
+            REG["EntityRegistry<br/>• active: aggregate_id → { mailbox handle,<br/>published lifecycle state, epoch }<br/>• passivated: aggregate_id → version (advisory)"]
         end
 
         subgraph Actor["Actor Execution"]
@@ -134,25 +133,21 @@ flowchart TB
 
         subgraph Infra["Infrastructure"]
             SCH["Scheduler<br/>Semaphore-based<br/>concurrency budget"]
-            SUP["Supervisor<br/>Failure hooks<br/>Panic boundaries"]
         end
 
         REF["EntityRef&lt;C,E,S&gt;<br/>Per-command sender handle"]
     end
 
     PE -->|implements| REF
-    REF -->|get_active_sender| REG
-    REG -->|insert_active / remove| ACT
-    ACT -->|spawns| EA
+    ER -->|entity_ref() lookup-or-spawn| REG
+    REG -->|spawns| EA
     EA -->|writes| MB
     MB -->|lifecycle state| LS
     EA -->|load / persist| PF
     PF --> ES
     PF --> SS
     PF --> EP
-    EA -->|failure| SUP
     EA -->|concurrency slot| SCH
-    ER --> REG
     ERB -.->|builds| ER
     ER -->|entity_ref()| REF
 
@@ -172,27 +167,20 @@ The activation ordering model defines the precise timing of mutex scope, mailbox
 sequenceDiagram
     participant C as Caller (EntityRef)
     participant R as EntityRegistry
-    participant A as SharedActivation
     participant T as Actor Task
-    participant M as Mailbox (mpsc)
+    participant M as Mailbox (BoundedMailbox)
     participant P as EventStore
 
-    Note over C,P: ACTIVATION — Mutex Held
-    C->>R: get_active_sender(entity)
-    R-->>C: None (passivated or new)
-    C->>A: get_or_create_activation(entity)
-    C->>A: lock.lock() — Mutex ACQUIRED
-    C->>R: re-check get_active_sender()
-    R-->>C: Still None — I'm the spawner
-    C->>M: mpsc::channel(capacity) created
+    Note over C,P: ACTIVATION — Single-Flight Lock Held
+    C->>R: lookup_or_insert(aggregate_id)
+    R-->>C: no live entry — I'm the spawner
+    C->>M: BoundedMailbox::new(capacity) created
     Note right of M: Mailbox exists<br/>before spawn
-    C->>T: tokio::spawn(actor.run())
-    Note right of T: Actor may not start<br/>immediately
-    C->>R: insert_active(entity, handle)
-    Note right of R: VISIBLE but NOT READY<br/>Existence ≠ Readiness
-    C->>R: remove_passivated(entity)
-    C->>A: drop(guard) — Mutex RELEASED
-    C->>A: remove_activation(entity)
+    C->>R: insert entry { mailbox, state=Recovering, epoch }
+    Note right of R: Entry EXISTS but is NOT<br/>counted active — existence ≠ active count
+    C->>R: lock released
+    C->>T: tokio::spawn(actor.run()) — strictly after lock release
+    Note right of T: Spawning after release avoids the<br/>self-deadlock a panic-during-spawn<br/>would otherwise cause
     C->>M: send(first_command)
     Note right of M: Commands queue here<br/>during recovery
 
@@ -202,7 +190,8 @@ sequenceDiagram
     P-->>T: (snapshot, events)
     T->>T: replay events in order
     Note right of T: RECOVERY BARRIER<br/>No commands processed<br/>until recovery completes
-    T->>T: transition(Active)
+    T->>T: transition(Active) — actor publishes via watch::Sender
+    Note right of R: Now counted by active_count() —<br/>the actor is the sole writer of this state
 
     Note over C,P: COMMAND PROCESSING
     T->>M: recv() → first command
@@ -211,13 +200,14 @@ sequenceDiagram
     P-->>T: new_version
     T->>M: recv() → next command...
 
-    Note over C,P: PASSIVATION
-    C->>R: (idle timeout)
-    C->>R: remove_active(entity)
-    T->>T: drain remaining commands
-    T->>P: store final snapshot
-    T->>R: mark_passivated(entity, version)
-    T->>T: task ends
+    Note over C,P: PASSIVATION / TEARDOWN
+    T->>T: (idle timeout) passivate() begins
+    T->>T: drain remaining commands, store final snapshot
+    T->>T: task ends — on ANY exit (normal, panic, cancellation)
+    Note right of T: TeardownGuard::drop() fires —<br/>the one and only teardown path
+    T->>M: close_and_drain() — terminally answers anything still queued
+    T->>R: deactivate_if_mine(epoch) — remove entry
+    T->>R: publish terminal state (backstop only if not already published)
 ```
 
 ### Five-State Lifecycle Machine
@@ -239,28 +229,29 @@ sequenceDiagram
               └── on-demand recovery or restart → RECOVERING
 ```
 
-| State | In Registry? | Ready? | Commands |
-|-------|-------------|--------|----------|
+| State | In Registry (map entry)? | Counted by `active_count()`? | Commands |
+|-------|---------------------------|-------------------------------|----------|
 | `Recovering` | Yes | No | Buffered in mailbox, not executed |
 | `Active` | Yes | Yes | Executed FIFO |
-| `Passivating` | Yes (freezing) | Yes (draining) | Existing drained, new rejected |
-| `Passivated` | No | N/A | Triggers activation → Recovering |
-| `Failed` | No (removed) | No | Retry triggers new activation |
+| `Passivating` | Yes (draining) | Yes | Existing drained, new rejected |
+| `Passivated` | No (removed by `TeardownGuard`) | No | Triggers activation → Recovering |
+| `Failed` | No (removed by `TeardownGuard`) | No | Retry triggers new activation |
 
 ### Key Design Invariants
 
 | Invariant | Enforced By |
 |-----------|-------------|
-| Exactly one actor per entity triple | Mutex-based single-flight activation (FR-001) |
+| Exactly one actor per entity triple | Registry-map single-flight — `lookup_or_insert()`'s one lock acquisition, not a separate activation mutex (FR-001) |
+| Single source of truth for "active" | The actor is the sole writer of its lifecycle state; the registry only observes it via `watch::Receiver` |
 | No command processed before recovery | `recover_state().await` completes before `process_commands()` (FR-002) |
-| Mailbox exists before spawn | `mpsc::channel` created before `tokio::spawn` (FR-003) |
-| Mutex held only for setup, NOT recovery | Mutex released after `insert_active()`, before recovery starts (FR-004) |
-| FIFO command ordering per entity | mpsc channel ordered delivery (FR-005) |
+| Mailbox exists before spawn | `BoundedMailbox::new()` created before `tokio::spawn` (FR-003) |
+| Lock held only for map mutation, NOT spawn/recovery | Lock released before `tokio::spawn`; the erased mailbox's downcast also happens after release (FR-004) |
+| FIFO command ordering per entity | Bounded mailbox, ordered delivery (FR-005) |
 | Observable state is always consistent | Recovery barrier prevents partial-state observation (FR-006) |
 | Passivation is irreversible | PASSIVATING → ACTIVE forbidden (FR-008) |
 | Events never rolled back | Append-only event store (FR-026) |
 | Snapshots are pure optimization | Event stream always authoritative (FR-012) |
-| CAS forbidden | `tokio::sync::Mutex` for activation, not atomic CAS loops (§5 constitution) |
+| CAS forbidden | `parking_lot::Mutex` for the registry map, not atomic CAS loops (§5 constitution) |
 
 **Reference**: Full activation ordering specification at `specs/006-persistent-entity-runtime/activation-ordering/`.
 
@@ -275,9 +266,8 @@ crates/persistent-entity/
     ├── builder.rs            # EntityRuntimeBuilder<E>
     ├── entity_ref.rs         # EntityRef<C,E,S>
     ├── actor.rs              # EntityActor (recover → process → passivate)
-    ├── registry.rs           # EntityRegistry (3 maps)
-    ├── activation.rs         # SharedActivation (Mutex + Watch)
-    ├── mailbox.rs            # Mailbox<C>, CommandEnvelope<C>
+    ├── registry.rs           # EntityRegistry (single-flight routing map + advisory passivated map)
+    ├── mailbox.rs            # BoundedMailbox<T>, CommandEnvelope<C>
     ├── persistent_entity.rs  # PersistentEntity trait
     ├── lifecycle.rs          # LifecycleStateMachine
     ├── recovery.rs           # StateRecovery trait
@@ -286,7 +276,6 @@ crates/persistent-entity/
     ├── snapshot.rs           # SnapshotStrategy
     ├── command_context.rs    # CommandContext
     ├── scheduler.rs          # Scheduler (semaphore)
-    ├── supervisor.rs         # Failure hooks
     ├── error.rs              # EntityError
     └── testing.rs            # In-memory backends
 ```

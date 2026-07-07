@@ -73,9 +73,9 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 7: `ARCHITECTURE.md` alignment (ADR-007, last — pure doc, no code dependency)
 
-- [ ] TASK-025 Registry & Activation subgraph (`:117-120`): update `REG` node's `active` shape; delete `pending_activations → SharedActivation` and the `ACT` node.
-- [ ] TASK-026 Infrastructure subgraph (`:137-138`): delete the `SUP` (`Supervisor`) node.
-- [ ] TASK-027 Edges (`:144-146,153`): remove `REG→ACT`, `ACT→spawns→EA`, `EA→failure→SUP`; add `REF/EntityRuntime -->|entity_ref() lookup-or-spawn| REG`, `REG -->|spawns| EA`.
-- [ ] TASK-028 Activation Ordering sequence diagram (`:167-221`): drop participant `A`; fix the `:191-192` note (existence ≠ active count); replace caller-driven `remove_active` (`:215-219`) with actor-owned `deactivate()` on exit.
-- [ ] TASK-029 State table (`:242-248`): distinguish "in registry" (map entry exists) from active *count* (only `Active`).
-- [ ] TASK-030 Key Design Invariants (`:250-257`): re-attribute "one actor per triple" to the registry-map single-flight; "single source of truth" to actor-published state.
+- [x] TASK-025 Registry & Activation subgraph (`:117-120`): update `REG` node's `active` shape; delete `pending_activations → SharedActivation` and the `ACT` node.
+- [x] TASK-026 Infrastructure subgraph (`:137-138`): delete the `SUP` (`Supervisor`) node.
+- [x] TASK-027 Edges (`:144-146,153`): remove `REG→ACT`, `ACT→spawns→EA`, `EA→failure→SUP`; add `REF/EntityRuntime -->|entity_ref() lookup-or-spawn| REG`, `REG -->|spawns| EA`.
+- [x] TASK-028 Activation Ordering sequence diagram (`:167-221`): drop participant `A`; fix the `:191-192` note (existence ≠ active count); replace caller-driven `remove_active` (`:215-219`) with actor-owned `deactivate()` on exit.
+- [x] TASK-029 State table (`:242-248`): distinguish "in registry" (map entry exists) from active *count* (only `Active`).
+- [x] TASK-030 Key Design Invariants (`:250-257`): re-attribute "one actor per triple" to the registry-map single-flight; "single source of truth" to actor-published state.
