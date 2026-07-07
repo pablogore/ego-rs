@@ -53,8 +53,8 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 4: Remove dead activation/supervisor code (ADR-006)
 
-- [ ] TASK-014 Delete `crates/persistent-entity/src/activation.rs` (`SharedActivation` subsumed by the registry map mutex).
-- [ ] TASK-015 Delete `crates/persistent-entity/src/supervisor.rs` (dead, broken — `await`s a sync method, zero callers); confirm `lib.rs` still declares no `mod activation`/`mod supervisor`.
+- [x] TASK-014 Delete `crates/persistent-entity/src/activation.rs` (`SharedActivation` subsumed by the registry map mutex).
+- [x] TASK-015 Delete `crates/persistent-entity/src/supervisor.rs` (dead, broken — `await`s a sync method, zero callers); confirm `lib.rs` still declares no `mod activation`/`mod supervisor`.
 
 ## Phase 5: Adapt existing test call sites (Caller Impact Analysis)
 
