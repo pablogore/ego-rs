@@ -36,11 +36,11 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 2: Registry map rewrite (ADR-001, ADR-002, ADR-003)
 
-- [ ] TASK-003 RED: failing test — N concurrent `entity_ref()` calls for one triple resolve to the same mailbox `Arc` (spawn-count instrumentation, not ID-set size — NFR-002).
-- [ ] TASK-004 RED: failing test — `active_count()` excludes an entry whose published state is `Recovering`; counts it once it's `Active`.
-- [ ] TASK-005 GREEN: rewrite `EntityRegistry` (`registry.rs`): replace `active_entities: HashSet<String>` with a triple-keyed map `{ mailbox: Arc<dyn Any+Send+Sync>, rx: watch::Receiver<EntityState>, epoch: u64 }`, guarded by `parking_lot::Mutex`; add monotonic epoch counter, `lookup()`, insert-if-absent, `deactivate_if_mine(epoch)`, `active_count()` over state cells. Delete eager `mark_active`; keep `passivated_entities`/`mark_passivated` unchanged (advisory).
-- [ ] TASK-006 RED: failing test — a downcast mismatch on a live entry returns `Err`, does not spawn a competing actor (ADR-002, CRITICAL 1).
-- [ ] TASK-007 GREEN: `entity_ref::<C,S>()` downcasts the erased `Arc` *after* the lock is released; mismatch returns `Err(EntityError::Internal("routing type mismatch for triple …"))` plus `debug_assert!(false, ..)` in debug builds — never a spawn fallback.
+- [x] TASK-003 RED: failing test — N concurrent `entity_ref()` calls for one triple resolve to the same mailbox `Arc` (spawn-count instrumentation, not ID-set size — NFR-002).
+- [x] TASK-004 RED: failing test — `active_count()` excludes an entry whose published state is `Recovering`; counts it once it's `Active`.
+- [x] TASK-005 GREEN: rewrite `EntityRegistry` (`registry.rs`): replace `active_entities: HashSet<String>` with a triple-keyed map `{ mailbox: Arc<dyn Any+Send+Sync>, rx: watch::Receiver<EntityState>, epoch: u64 }`, guarded by `parking_lot::Mutex`; add monotonic epoch counter, `lookup()`, insert-if-absent, `deactivate_if_mine(epoch)`, `active_count()` over state cells. Delete eager `mark_active`; keep `passivated_entities`/`mark_passivated` unchanged (advisory).
+- [x] TASK-006 RED: failing test — a downcast mismatch on a live entry returns `Err`, does not spawn a competing actor (ADR-002, CRITICAL 1).
+- [x] TASK-007 GREEN: `entity_ref::<C,S>()` downcasts the erased `Arc` *after* the lock is released; mismatch returns `Err(EntityError::Internal("routing type mismatch for triple …"))` plus `debug_assert!(false, ..)` in debug builds — never a spawn fallback.
 
 ## Phase 3: Teardown guard + actor wiring (ADR-005, ADR-008)
 
