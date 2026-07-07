@@ -85,6 +85,12 @@ impl Default for TestContextBuilder {
 }
 
 /// Convenience: an authenticated `ServiceContext` for `principal()`, no logger.
+///
+/// This is a fixed-default helper, not a contract on which subject
+/// `principal()` uses — that default may change. A test whose assertions
+/// depend on identity (subject, tenant, roles, attributes) should build its
+/// own principal with [`PrincipalBuilder`](crate::identity::PrincipalBuilder)
+/// instead of relying on `test_context()`'s default.
 pub fn test_context() -> ServiceContext {
     TestContextBuilder::new()
         .security(authenticated(principal()))

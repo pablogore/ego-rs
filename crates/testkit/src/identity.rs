@@ -151,4 +151,10 @@ mod tests {
             Some("eu-west-1")
         );
     }
+
+    #[test]
+    #[should_panic(expected = "PrincipalBuilder subject must not be empty")]
+    fn empty_subject_override_panics() {
+        PrincipalBuilder::new().subject("").build();
+    }
 }
