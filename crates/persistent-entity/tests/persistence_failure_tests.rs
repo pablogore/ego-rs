@@ -1,5 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -104,7 +106,7 @@ async fn test_load_error_propagates_to_caller() {
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
 
-    let r = runtime.entity_ref("counter", "load-fail-1", handler());
+    let r = runtime.entity_ref("counter", "load-fail-1", handler()).unwrap();
 
     let res: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r.send_command(TestCommand::Increment(1), ctx()).await;
@@ -124,7 +126,7 @@ async fn test_snapshot_recovery_with_version_offset() {
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     {
-        let mut snap = snapshot_store.lock().unwrap();
+        let mut snap = snapshot_store.lock();
         snap.save_snapshot(
             "counter-snap-1",
             None,
@@ -140,7 +142,7 @@ async fn test_snapshot_recovery_with_version_offset() {
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
 
-    let r = runtime.entity_ref("counter", "snap-1", handler());
+    let r = runtime.entity_ref("counter", "snap-1", handler()).unwrap();
 
     let res: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r.send_command(TestCommand::Increment(8), ctx()).await;
@@ -168,7 +170,7 @@ async fn test_persist_failure_drains_mailbox() {
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
 
-    let r = runtime.entity_ref("counter", "persist-fail-1", handler());
+    let r = runtime.entity_ref("counter", "persist-fail-1", handler()).unwrap();
 
     let first: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r.send_command(TestCommand::Increment(1), ctx()).await;
@@ -193,7 +195,7 @@ async fn test_active_count_after_passivation() {
         .passivation_timeout(Duration::from_millis(50))
         .build();
 
-    let r = runtime.entity_ref("counter", "passive-1", handler());
+    let r = runtime.entity_ref("counter", "passive-1", handler()).unwrap();
     let _: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r.send_command(TestCommand::Increment(1), ctx()).await;
 
@@ -222,7 +224,7 @@ async fn test_reactivation_after_passivation() {
         .passivation_timeout(Duration::from_millis(30))
         .build();
 
-    let r1 = runtime.entity_ref("counter", "reactivate-1", handler());
+    let r1 = runtime.entity_ref("counter", "reactivate-1", handler()).unwrap();
     let first: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r1.send_command(TestCommand::Increment(10), ctx()).await;
     assert!(first.is_ok(), "first command must succeed");
@@ -239,7 +241,7 @@ async fn test_reactivation_after_passivation() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let r2 = runtime.entity_ref("counter", "reactivate-1", handler());
+    let r2 = runtime.entity_ref("counter", "reactivate-1", handler()).unwrap();
     let second: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r2.send_command(TestCommand::Increment(5), ctx()).await;
 
@@ -262,8 +264,8 @@ async fn test_multiple_entity_ids_active_simultaneously() {
         .passivation_timeout(Duration::from_secs(3600))
         .build();
 
-    let r1 = runtime.entity_ref("counter", "multi-reg-1", handler());
-    let r2 = runtime.entity_ref("counter", "multi-reg-2", handler());
+    let r1 = runtime.entity_ref("counter", "multi-reg-1", handler()).unwrap();
+    let r2 = runtime.entity_ref("counter", "multi-reg-2", handler()).unwrap();
 
     let _: Result<CommandResult<TestEvent, TestState>, EntityError> =
         r1.send_command(TestCommand::Increment(1), ctx()).await;

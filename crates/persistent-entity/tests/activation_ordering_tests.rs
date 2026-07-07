@@ -1,4 +1,7 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
@@ -9,6 +12,8 @@ use persistent_entity::test_entity::TestEntity;
 use persistent_entity::testing::{create_test_context, TestCommand, TestEvent, TestState};
 
 mod common;
+
+use common::CountingEventStore;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -23,11 +28,22 @@ fn build_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> 
     )
 }
 
-fn build_fast_passivation_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
+/// 500ms, not 50ms: the tests using this leave enough margin between "the
+/// idle timer elapsed" (confirmed via a bounded poll, not a guessed sleep)
+/// and "the post-burst `active_count()` check ran" that a slow/contended CI
+/// box can't let the entity idle-timeout a *second* time inside that window
+/// (see `wait_for_passivation` below). Wired with a [`CountingEventStore`] so
+/// callers can assert on the number of genuine activation (recovery)
+/// attempts — actor-level instrumentation (NFR-002).
+fn build_fast_passivation_runtime_with_counter(
+    load_calls: Arc<AtomicUsize>,
+) -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
+    let event_store = Arc::new(Mutex::new(CountingEventStore::new(load_calls)));
     Arc::new(
         persistent_entity::builder::EntityRuntimeBuilder::new()
-            .passivation_timeout(std::time::Duration::from_millis(50))
+            .passivation_timeout(std::time::Duration::from_millis(500))
             .snapshot_strategy(Arc::new(NoSnapshot))
+            .with_event_store(event_store)
             .build(),
     )
 }
@@ -35,6 +51,24 @@ fn build_fast_passivation_runtime() -> Arc<persistent_entity::runtime::EntityRun
 fn handler(
 ) -> Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> {
     Arc::new(TestEntity::new())
+}
+
+/// Waits for `active_count() == 0` via a bounded poll instead of a guessed
+/// sleep duration — explicit synchronization on the actual condition the
+/// caller needs (idle timeout has fired), not a fixed delay that either
+/// wastes time or, worse, races the real timer under load.
+async fn wait_for_passivation(runtime: &persistent_entity::runtime::EntityRuntime<TestEvent>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if runtime.active_count() == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "entity did not passivate within the deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 // ============================================================================
@@ -47,7 +81,8 @@ async fn test_activation_lookup_active_and_passivated() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-1", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-1", h.clone()).unwrap();
 
     // Entity is not active initially — send activates it
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
@@ -68,7 +103,8 @@ async fn test_activation_fifo_ordering() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-2", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-2", h.clone()).unwrap();
 
     let mut expected = 0u64;
     for i in 1..=10u64 {
@@ -98,7 +134,8 @@ async fn test_no_partial_state_observable() {
     let h = handler();
 
     // Build up state with multiple commands
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-3", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-3", h.clone()).unwrap();
     for _i in 1..=5u64 {
         let _: CommandResult<TestEvent, TestState> = entity_ref
             .send_command(TestCommand::Increment(10), create_test_context())
@@ -126,7 +163,8 @@ async fn test_activation_redirect() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-4", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-4", h.clone()).unwrap();
 
     // Send first command to activate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -155,12 +193,22 @@ async fn test_activation_redirect() {
 // ============================================================================
 
 /// No double spawn — concurrent tasks to passivated entity all go to one actor.
-#[tokio::test]
+///
+/// NFR-002: "no duplicate actor" is asserted at the actor-task level via a
+/// `CountingEventStore`'s `load()` call counter (one call per genuine
+/// recovery/activation attempt), in addition to the existing
+/// `active_count()` bound — `active_count()` alone cannot distinguish "one
+/// actor activated once" from "one actor survived N racing activation
+/// attempts that each got as far as recovery before losing the single-flight
+/// race," since only ONE of those attempts would ever reach `Active`.
+#[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_concurrent() {
-    let runtime = build_fast_passivation_runtime();
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-5", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-5", h.clone()).unwrap();
 
     // Activate then let passivate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -170,7 +218,9 @@ async fn test_no_double_spawn_concurrent() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for_passivation(&runtime).await;
+
+    let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
     // Concurrent sends should coalesce into single activation
     let results =
@@ -183,22 +233,41 @@ async fn test_no_double_spawn_concurrent() {
         "all concurrent commands should succeed"
     );
 
-    // At most 1 active entity should exist
+    // Single-flight (ADR-001) guarantees exactly one live entry per triple —
+    // there is no window where two entries coexist for the same aggregate_id,
+    // so this is exact, not a bound.
     let active_count = runtime.active_count();
-    assert!(
-        active_count <= 2,
-        "should have at most 2 active (one draining, one new): {}",
+    assert_eq!(
+        active_count, 1,
+        "single-flight guarantees exactly one active entity, got {}",
         active_count
+    );
+
+    // NFR-002: the 20-caller burst against the passivated entity must have
+    // triggered exactly one genuine reactivation attempt (recovery `load()`
+    // call), not merely produced one surviving `active_count()` entry.
+    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
+    assert_eq!(
+        reactivation_load_calls, 1,
+        "single-flight must coalesce the 20-caller burst into exactly one reactivation attempt, got {}",
+        reactivation_load_calls
     );
 }
 
 /// Mutex-based single-flight — concurrent activations serialize.
-#[tokio::test]
+///
+/// NFR-002: same rigor as `test_no_double_spawn_concurrent` — the
+/// serialization claim is asserted at the actor-task level via a
+/// `CountingEventStore`'s `load()` call counter, not only via
+/// `active_count()`.
+#[tokio::test(flavor = "multi_thread")]
 async fn test_activation_mutex_serializes() {
-    let runtime = build_fast_passivation_runtime();
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-6", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-6", h.clone()).unwrap();
 
     // Activate then let passivate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -208,7 +277,9 @@ async fn test_activation_mutex_serializes() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for_passivation(&runtime).await;
+
+    let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
     // Spawn 10 concurrent tasks — all should succeed with no duplicate spawns
     let n = 10;
@@ -217,7 +288,7 @@ async fn test_activation_mutex_serializes() {
         let rt = runtime.clone();
         let h = h.clone();
         handles.push(tokio::spawn(async move {
-            let ref_ = rt.entity_ref::<TestCommand, TestState>("test", "entity-6", h);
+            let ref_ = rt.entity_ref::<TestCommand, TestState>("test", "entity-6", h).unwrap();
             let result: Result<CommandResult<TestEvent, TestState>, EntityError> = ref_
                 .send_command(
                     TestCommand::Increment(1),
@@ -235,13 +306,31 @@ async fn test_activation_mutex_serializes() {
     }
 
     let active = runtime.active_count();
-    assert!(active <= 2, "at most 2 active entities: {}", active);
+    assert_eq!(
+        active, 1,
+        "single-flight guarantees exactly one active entity, got {}",
+        active
+    );
+
+    // NFR-002: the 10-caller burst against the passivated entity must have
+    // triggered exactly one genuine reactivation attempt.
+    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
+    assert_eq!(
+        reactivation_load_calls, 1,
+        "single-flight must serialize the 10-caller burst into exactly one reactivation attempt, got {}",
+        reactivation_load_calls
+    );
 }
 
 /// No double spawn across multiple entities — each gets exactly one actor.
-#[tokio::test]
+///
+/// Uses the long-passivation-timeout runtime: this test doesn't exercise
+/// reactivation, so a short idle timer only adds a race against its own
+/// `active_count()` check (10 fresh activations idling out before the check
+/// runs) without proving anything extra.
+#[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_multiple_entities() {
-    let runtime = build_fast_passivation_runtime();
+    let runtime = build_runtime();
     let h = handler();
 
     // Spawn commands for 10 different entities simultaneously
@@ -251,7 +340,8 @@ async fn test_no_double_spawn_multiple_entities() {
         let h = h.clone();
         let entity_id = format!("multi-{}", i);
         handles.push(tokio::spawn(async move {
-            let entity_ref = rt.entity_ref::<TestCommand, TestState>("test", &entity_id, h);
+            let entity_ref =
+                rt.entity_ref::<TestCommand, TestState>("test", &entity_id, h).unwrap();
             let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
                 .send_command(
                     TestCommand::Increment(1),
@@ -284,7 +374,8 @@ async fn test_recovery_barrier() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-7", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-7", h.clone()).unwrap();
 
     for _ in 0..50 {
         let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -321,7 +412,8 @@ async fn test_recovery_barrier() {
 async fn test_recovery_deterministic_replay() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-8", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-8", h.clone()).unwrap();
 
     // Build deterministic state
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -365,7 +457,8 @@ async fn test_recovery_deterministic_replay() {
 async fn test_recovery_failure_transitions_to_failed() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-9", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-9", h.clone()).unwrap();
 
     // Decrement on zero should fail
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
@@ -400,7 +493,8 @@ async fn test_recovery_failure_transitions_to_failed() {
 async fn test_recovery_retry_after_failure() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-10", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-10", h.clone()).unwrap();
 
     // Activate and do work
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -420,7 +514,8 @@ async fn test_recovery_retry_after_failure() {
 async fn test_zero_event_query() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("test", "entity-16", h.clone());
+    let entity_ref =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-16", h.clone()).unwrap();
 
     // Activate with a mutation
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -448,8 +543,10 @@ async fn test_multiple_entity_isolation() {
     let runtime = build_runtime();
     let h = handler();
 
-    let ref_a = runtime.entity_ref::<TestCommand, TestState>("test", "entity-a", h.clone());
-    let ref_b = runtime.entity_ref::<TestCommand, TestState>("test", "entity-b", h.clone());
+    let ref_a =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-a", h.clone()).unwrap();
+    let ref_b =
+        runtime.entity_ref::<TestCommand, TestState>("test", "entity-b", h.clone()).unwrap();
 
     // Mutate entity-a
     let _: CommandResult<TestEvent, TestState> = ref_a

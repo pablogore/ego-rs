@@ -7,6 +7,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use ego_domain::event::DomainEvent;
+use tokio::sync::watch;
 
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
 use crate::lifecycle::{EntityState, LifecycleStateMachine};
@@ -35,6 +36,12 @@ pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     pub(crate) lifecycle: LifecycleStateMachine,
     /// Shared entity registry.
     pub(crate) registry: Arc<EntityRegistry>,
+    /// Write side of this entry's published-state cell (ADR-003). The actor
+    /// is the sole writer during normal operation; publishes on every
+    /// `transition_to(_)`. [`crate::entity_ref_tokio::TeardownGuard`] holds a
+    /// clone as a Drop-time backstop for the panic/cancellation case where
+    /// the actor never gets to publish anything itself.
+    pub(crate) tx: watch::Sender<EntityState>,
     /// Persistence facade for loading and storing events/snapshots.
     pub(crate) persistence: Arc<PersistenceFacade<E>>,
     /// Event publisher for notifying downstream consumers.
@@ -57,6 +64,14 @@ where
     S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     Sig: PassivationSignal,
 {
+    /// Transitions the lifecycle state machine and publishes the new state
+    /// through `tx` (ADR-003) in one step, so every call site that mutates
+    /// lifecycle also keeps the registry's read view current.
+    fn transition(&mut self, state: EntityState) {
+        let _ = self.lifecycle.transition_to(state);
+        let _ = self.tx.send(state);
+    }
+
     /// Runs recovery, then the command loop, then passivation; drains mailbox on recovery failure.
     pub async fn run(&mut self) {
         self.recover_state().await;
@@ -129,7 +144,7 @@ where
             Ok((state, version)) => {
                 self.state = Some(state);
                 self.version = version;
-                let _ = self.lifecycle.transition_to(EntityState::Active);
+                self.transition(EntityState::Active);
 
                 if !self.event_sender.emit(SchedulerEvent::RecoveryCompleted {
                     entity: self.entity_id.clone(),
@@ -142,7 +157,7 @@ where
                 }
             }
             Err(e) => {
-                let _ = self.lifecycle.transition_to(EntityState::Failed);
+                self.transition(EntityState::Failed);
                 error!(
                     error = %e,
                     entity_id = %self.entity_id.aggregate_id(),
@@ -222,7 +237,7 @@ where
                         {
                             Ok(s) => s,
                             Err(e) => {
-                                let _ = self.lifecycle.transition_to(EntityState::Failed);
+                                self.transition(EntityState::Failed);
                                 error!(
                                     error = %e,
                                     entity_id = %self.entity_id.aggregate_id(),
@@ -286,7 +301,7 @@ where
                         let _ = reply.send(Ok(boxed));
                     }
                     Err(e) => {
-                        let _ = self.lifecycle.transition_to(EntityState::Failed);
+                        self.transition(EntityState::Failed);
                         error!(
                             error = %e,
                             entity_id = %self.entity_id.aggregate_id(),
@@ -310,22 +325,27 @@ where
         };
     }
 
-    /// Removes the entity from the active registry, closes the mailbox, and
-    /// drains all pending envelopes by sending `err` to each caller.
+    /// Closes the mailbox and drains all pending envelopes by sending `err`
+    /// to each caller. This is a prompt, best-effort drain — the guaranteed
+    /// path (ADR-005, FR-009) is `TeardownGuard::drop()`, which answers
+    /// whatever this loop didn't reach (including if this loop itself
+    /// panics). Registry-entry removal is no longer done here; it flows
+    /// exclusively through the guard once `run()` returns.
     async fn drain_mailbox_with_error(&mut self, err: crate::error::EntityError) {
         self.mailbox.close();
         while let Ok(envelope) = self.mailbox.recv().await {
             let _ = envelope.reply.send(Err(err.clone()));
         }
-        self.registry.remove_active(&self.entity_id.aggregate_id());
     }
 
     /// Drains the mailbox, snapshots state, and marks the entity passivated in the registry.
+    ///
+    /// Registry-entry removal is no longer done here; it flows exclusively
+    /// through `TeardownGuard::drop()` (ADR-005) once `run()` returns.
     async fn passivate(&mut self) {
         // Close the mailbox first so recv() returns MailboxClosed once empty,
         // rather than blocking forever waiting for the next command.
         self.mailbox.close();
-        self.registry.remove_active(&self.entity_id.aggregate_id());
 
         while let Ok(actor_envelope) = self.mailbox.recv().await {
             self.execute_command(actor_envelope).await;
@@ -343,7 +363,7 @@ where
             }
         }
 
-        let _ = self.lifecycle.transition_to(EntityState::Passivating);
+        self.transition(EntityState::Passivating);
 
         if let Some(state) = &self.state {
             let _ = self
@@ -360,6 +380,184 @@ where
         self.registry
             .mark_passivated(self.entity_id.aggregate_id(), self.version);
 
-        let _ = self.lifecycle.transition_to(EntityState::Passivated);
+        self.transition(EntityState::Passivated);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_context::CommandContext;
+    use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
+    use crate::entity_ref_tokio::TeardownGuard;
+    use crate::passivation_signal::ManualSignal;
+    use crate::persistence::PersistenceFacade;
+    use crate::scheduler_event::event_bus_channel;
+    use crate::snapshot::NoSnapshot;
+    use crate::testing::{NoopPublisher, TestState};
+    use async_trait::async_trait;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use tokio::sync::watch;
+
+    fn ctx() -> CommandContext {
+        crate::testing::create_test_context()
+    }
+
+    /// TASK-008 probe command: `Boom` panics inside `handle_command` itself —
+    /// a real panic raised by production code (`execute_command`'s call into
+    /// the handler), not a simulated/injected one.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    enum ProbeCommand {
+        Noop,
+        Boom,
+    }
+
+    #[derive(Debug)]
+    struct PanicOnBoomHandler;
+
+    #[async_trait]
+    impl PersistentEntity for PanicOnBoomHandler {
+        type Command = ProbeCommand;
+        type Event = crate::testing::TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> TestState {
+            TestState::new(0)
+        }
+
+        async fn handle_command(
+            &self,
+            command: &ProbeCommand,
+            _state: &TestState,
+            _context: &CommandContext,
+        ) -> Result<Vec<crate::testing::TestEvent>, crate::error::EntityError> {
+            match command {
+                ProbeCommand::Noop => Ok(vec![]),
+                ProbeCommand::Boom => panic!("TASK-008: intentional panic mid-processing"),
+            }
+        }
+
+        async fn apply_event(
+            &self,
+            state: &TestState,
+            _event: &crate::testing::TestEvent,
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+
+        async fn apply_events(
+            &self,
+            state: &TestState,
+            _events: &[crate::testing::TestEvent],
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+    }
+
+    /// TASK-008 / FR-009: an actor `Active` with N commands already queued
+    /// behind the one currently being processed must terminally answer all N
+    /// queued callers even when the in-processing command panics.
+    ///
+    /// The panic is real: `PanicOnBoomHandler::handle_command` calls
+    /// `panic!()` directly, which `execute_command` invokes via
+    /// `entity_handler.handle_command(...)` in the normal, unmodified
+    /// production path — nothing here catches or redirects the panic before
+    /// it unwinds through `process_commands` -> `run` -> the spawned task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panic_mid_processing_answers_all_already_enqueued_callers() {
+        const N: usize = 5;
+        let mailbox: BoundedMailbox<ActorEnvelope<ProbeCommand>> = BoundedMailbox::new(N + 1);
+
+        // The command currently being processed at panic time.
+        let (panic_tx, panic_rx) = oneshot::channel();
+        mailbox
+            .send(ActorEnvelope {
+                envelope: CommandEnvelope {
+                    command: ProbeCommand::Boom,
+                    context: ctx(),
+                },
+                reply: panic_tx,
+            })
+            .await
+            .expect("queueing the panicking command must succeed");
+
+        // N commands already enqueued behind it.
+        let mut queued_rxs = Vec::with_capacity(N);
+        for _ in 0..N {
+            let (tx, rx) = oneshot::channel();
+            mailbox
+                .send(ActorEnvelope {
+                    envelope: CommandEnvelope {
+                        command: ProbeCommand::Noop,
+                        context: ctx(),
+                    },
+                    reply: tx,
+                })
+                .await
+                .expect("queueing a trailing command must succeed");
+            queued_rxs.push(rx);
+        }
+
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("default".to_string(), "probe", "actor-panic-1");
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        // Wire the actor + TeardownGuard exactly like the production spawn
+        // path in `entity_ref_tokio.rs::TokioEntityRef::new` — the guarantee
+        // under test comes from the guard, not from anything inside
+        // `EntityActor::run()` itself.
+        let mut actor = EntityActor {
+            entity_id: entity_id.clone(),
+            mailbox: mailbox.clone(),
+            state: None,
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry: registry.clone(),
+            tx: tx.clone(),
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(PanicOnBoomHandler),
+            event_sender,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        };
+        let guard = TeardownGuard {
+            aggregate_id: entity_id.aggregate_id(),
+            registry,
+            epoch: 0,
+            mailbox,
+            tx,
+        };
+
+        let join_result = tokio::spawn(async move {
+            actor.run().await;
+            drop(guard);
+        })
+        .await;
+        assert!(
+            join_result.is_err(),
+            "the actor task must actually have panicked"
+        );
+
+        // The in-flight command's own reply Sender lives on the unwinding
+        // stack frame; dropping it on unwind closes the channel.
+        assert!(
+            panic_rx.await.is_err(),
+            "the in-flight command's reply channel must close on panic-unwind"
+        );
+
+        for rx in queued_rxs {
+            let resolved = tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("FR-009: every queued caller must eventually resolve, not hang forever");
+            let terminal = resolved.expect("oneshot sender must not be dropped without a value");
+            assert!(
+                terminal.is_err(),
+                "a queued command whose actor died mid-processing must resolve to a terminal Err"
+            );
+        }
     }
 }

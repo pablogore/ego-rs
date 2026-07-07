@@ -1,6 +1,8 @@
 /// Integration tests for the real `TokioEntityRef` → `EntityActor` path.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{PersistenceError, Snapshot};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -64,7 +66,7 @@ async fn test_real_actor_command_reply() {
         .passivation_timeout(Duration::from_secs(3600))
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("counter", "c1", handler());
+    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("counter", "c1", handler()).unwrap();
 
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
         entity_ref.send_command(TestCommand::Increment(5), ctx()).await;
@@ -97,7 +99,7 @@ async fn test_recovery_replays_seeded_events() {
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
     {
-        let mut store = event_store.lock().unwrap();
+        let mut store = event_store.lock();
         store
             .append(aggregate_key, None, 0, events)
             .expect("pre-seed must succeed");
@@ -110,7 +112,7 @@ async fn test_recovery_replays_seeded_events() {
         .build();
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler()).unwrap();
 
     // GetState emits no events — the actor returns the recovered state as-is.
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
@@ -146,7 +148,7 @@ async fn test_passivation_updates_registry() {
     );
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "p1", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "p1", handler()).unwrap();
 
     // Send a command before passivation fires — must be replied.
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
@@ -187,7 +189,7 @@ async fn test_recovery_failure_returns_error() {
         .build();
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "fail-1", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "fail-1", handler()).unwrap();
 
     // The actor fails recovery synchronously inside its spawned task.
     // send_command must get a reply (Err) rather than hanging forever.

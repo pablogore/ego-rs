@@ -1,4 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::DomainEvent;

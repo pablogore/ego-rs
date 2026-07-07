@@ -212,9 +212,9 @@ impl EntityRef for TestEntityRef {
         let k = self.key();
         let tc = &command;
 
-        if let Some(ref reg) = self.registry {
-            reg.mark_active(&self.entity_id);
-        }
+        // ponytail: TestEntityRef handles commands inline against its own in-memory
+        // `store`, never through a real registry-routed actor, so there is no live
+        // routing entry to mark — the registry field is accepted for API parity only.
 
         // Load current state (drop lock before await)
         let current_state = {
