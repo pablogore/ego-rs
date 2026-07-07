@@ -159,7 +159,7 @@ async fn test_activation_redirect() {
 // ============================================================================
 
 /// No double spawn — concurrent tasks to passivated entity all go to one actor.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_concurrent() {
     let runtime = build_fast_passivation_runtime();
     let h = handler();
@@ -188,17 +188,19 @@ async fn test_no_double_spawn_concurrent() {
         "all concurrent commands should succeed"
     );
 
-    // At most 1 active entity should exist
+    // Single-flight (ADR-001) guarantees exactly one live entry per triple —
+    // there is no window where two entries coexist for the same aggregate_id,
+    // so this is exact, not a bound.
     let active_count = runtime.active_count();
-    assert!(
-        active_count <= 2,
-        "should have at most 2 active (one draining, one new): {}",
+    assert_eq!(
+        active_count, 1,
+        "single-flight guarantees exactly one active entity, got {}",
         active_count
     );
 }
 
 /// Mutex-based single-flight — concurrent activations serialize.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_activation_mutex_serializes() {
     let runtime = build_fast_passivation_runtime();
     let h = handler();
@@ -241,11 +243,15 @@ async fn test_activation_mutex_serializes() {
     }
 
     let active = runtime.active_count();
-    assert!(active <= 2, "at most 2 active entities: {}", active);
+    assert_eq!(
+        active, 1,
+        "single-flight guarantees exactly one active entity, got {}",
+        active
+    );
 }
 
 /// No double spawn across multiple entities — each gets exactly one actor.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_multiple_entities() {
     let runtime = build_fast_passivation_runtime();
     let h = handler();

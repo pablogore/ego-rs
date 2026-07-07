@@ -58,10 +58,10 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 5: Adapt existing test call sites (Caller Impact Analysis)
 
-- [ ] TASK-016 `activation_ordering_tests.rs`: adapt every `entity_ref()` call site with `.unwrap()`/`?`; switch concurrency-probe tests to `#[tokio::test(flavor = "multi_thread")]` (NFR-001); tighten `active_count() <= 2` assertions at `:189,238` to `== 1`.
-- [ ] TASK-017 `persistence_failure_tests.rs`: adapt `entity_ref()` call sites (`:107,143,171,196,225,242,265,266`) with `.unwrap()`/`?`.
-- [ ] TASK-018 `real_actor_path_tests.rs`: adapt the `entity_ref()` call site (`:190`) with `.unwrap()`/`?`.
-- [ ] TASK-019 Run `cargo test --workspace`; confirm all three suites' observable expectations pass unchanged (per design's Caller Impact Analysis table).
+- [x] TASK-016 `activation_ordering_tests.rs`: adapt every `entity_ref()` call site with `.unwrap()`/`?`; switch concurrency-probe tests to `#[tokio::test(flavor = "multi_thread")]` (NFR-001); tighten `active_count() <= 2` assertions at `:189,238` to `== 1`.
+- [x] TASK-017 `persistence_failure_tests.rs`: adapt `entity_ref()` call sites (`:107,143,171,196,225,242,265,266`) with `.unwrap()`/`?`.
+- [x] TASK-018 `real_actor_path_tests.rs`: adapt the `entity_ref()` call site (`:190`) with `.unwrap()`/`?`.
+- [x] TASK-019 Run `cargo test --workspace`; confirm all three suites' observable expectations pass unchanged (per design's Caller Impact Analysis table).
 
 ## Phase 6: New `guaranteed_completion_tests.rs` (FR-009, FR-010, NFR-001/002)
 
