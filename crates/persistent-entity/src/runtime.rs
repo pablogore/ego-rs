@@ -126,12 +126,18 @@ where
     /// Spawns a real [`EntityActor`] via `tokio::spawn` and returns a ref
     /// backed by its mailbox.  This method MUST be called from within a Tokio
     /// runtime context (e.g., inside an `async fn` or `#[tokio::test]`).
+    ///
+    /// Returns `Err(EntityError::Internal(..))` if a live registry entry
+    /// exists for this triple but its erased mailbox does not downcast to
+    /// `BoundedMailbox<ActorEnvelope<C>>` (ADR-002) — a programming error
+    /// (mismatched `entity_type`/command type), never treated as "no live
+    /// entry" and never a fallback spawn.
     pub fn entity_ref<C, S>(
         &self,
         entity_type: &'static str,
         entity_id: impl Into<String>,
         entity_handler: Arc<dyn PersistentEntity<Command = C, Event = E, State = S>>,
-    ) -> impl EntityRef<Command = C>
+    ) -> Result<impl EntityRef<Command = C>, crate::error::EntityError>
     where
         C: Send + Sync + serde::Serialize + 'static,
         S: serde::Serialize + Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
@@ -144,10 +150,6 @@ where
 
         let triple = EntityTriple::new(tenant_id, entity_type, entity_id);
 
-        // Phase 2 shim: TokioEntityRef::new is now fallible (ADR-002's downcast-mismatch
-        // error), but entity_ref()'s public signature only becomes Result in Phase 3
-        // (TASK-013). The only failure this can currently produce is the never-in-practice
-        // routing type mismatch, so unwrapping here is a temporary, explicitly-scoped gap.
         TokioEntityRef::new(
             triple,
             self.registry.clone(),
@@ -159,7 +161,6 @@ where
             self.config.mailbox_capacity,
             self.config.passivation_timeout(),
         )
-        .expect("entity_ref: routing type mismatch (Phase 3 propagates this as Result)")
     }
 
     /// Returns the number of currently active entities.

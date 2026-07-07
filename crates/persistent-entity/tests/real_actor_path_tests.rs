@@ -64,7 +64,7 @@ async fn test_real_actor_command_reply() {
         .passivation_timeout(Duration::from_secs(3600))
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("counter", "c1", handler());
+    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("counter", "c1", handler()).unwrap();
 
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
         entity_ref.send_command(TestCommand::Increment(5), ctx()).await;
@@ -110,7 +110,7 @@ async fn test_recovery_replays_seeded_events() {
         .build();
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler()).unwrap();
 
     // GetState emits no events — the actor returns the recovered state as-is.
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
@@ -146,7 +146,7 @@ async fn test_passivation_updates_registry() {
     );
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "p1", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "p1", handler()).unwrap();
 
     // Send a command before passivation fires — must be replied.
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
@@ -187,7 +187,7 @@ async fn test_recovery_failure_returns_error() {
         .build();
 
     let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "fail-1", handler());
+        runtime.entity_ref::<TestCommand, TestState>("counter", "fail-1", handler()).unwrap();
 
     // The actor fails recovery synchronously inside its spawned task.
     // send_command must get a reply (Err) rather than hanging forever.
