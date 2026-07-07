@@ -31,8 +31,8 @@ If `feature-branch-chain` is chosen: PR1 base = tracker; PR2 base = PR1; PR3 bas
 
 ## Phase 1: Foundation — `parking_lot` + sync mailbox queue (ADR-001, ADR-005)
 
-- [ ] TASK-001 RED: failing test asserting `BoundedMailbox::close_and_drain()` synchronously drains the queue and replies `Err(EntityNotActive)` to every pending `oneshot` (`mailbox.rs`).
-- [ ] TASK-002 GREEN: add `parking_lot = "0.12"` to `crates/persistent-entity/Cargo.toml`; migrate `BoundedMailbox.queue` from `Arc<tokio::sync::Mutex<VecDeque<T>>>` to `Arc<parking_lot::Mutex<VecDeque<T>>>`; sync-ify `push`/`pop` sites in `send`/`recv`/`is_empty`/`is_full`/`len` (still `.await` on `Notify` outside the lock); implement sync `close_and_drain() -> VecDeque<T>` to pass TASK-001.
+- [x] TASK-001 RED: failing test asserting `BoundedMailbox::close_and_drain()` synchronously drains the queue and replies `Err(EntityNotActive)` to every pending `oneshot` (`mailbox.rs`).
+- [x] TASK-002 GREEN: add `parking_lot = "0.12"` to `crates/persistent-entity/Cargo.toml`; migrate `BoundedMailbox.queue` from `Arc<tokio::sync::Mutex<VecDeque<T>>>` to `Arc<parking_lot::Mutex<VecDeque<T>>>`; sync-ify `push`/`pop` sites in `send`/`recv`/`is_empty`/`is_full`/`len` (still `.await` on `Notify` outside the lock); implement sync `close_and_drain() -> VecDeque<T>` to pass TASK-001.
 
 ## Phase 2: Registry map rewrite (ADR-001, ADR-002, ADR-003)
 
