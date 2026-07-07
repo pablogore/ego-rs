@@ -83,11 +83,8 @@ impl<T> BoundedMailbox<T> {
     /// The caller is responsible for terminally answering each returned
     /// item's reply channel — this method only closes and drains.
     pub fn close_and_drain(&self) -> VecDeque<T> {
-        self.closed.store(true, Ordering::Release);
-        let drained = std::mem::take(&mut *self.queue.lock());
-        self.not_empty.notify_waiters();
-        self.not_full.notify_waiters();
-        drained
+        self.close();
+        std::mem::take(&mut *self.queue.lock())
     }
 
     /// Send a command to the mailbox.
@@ -140,17 +137,17 @@ impl<T> BoundedMailbox<T> {
     }
 
     /// Check if the mailbox is empty.
-    pub async fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.queue.lock().is_empty()
     }
 
     /// Check if the mailbox is full.
-    pub async fn is_full(&self) -> bool {
+    pub fn is_full(&self) -> bool {
         self.queue.lock().len() >= self.capacity
     }
 
     /// Get the current size of the mailbox.
-    pub async fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.queue.lock().len()
     }
 }
@@ -208,5 +205,52 @@ mod tests {
         let drained = mailbox.close_and_drain();
 
         assert!(drained.is_empty(), "nothing was queued, nothing to drain");
+    }
+
+    /// Regression test for the lock-ordering guarantee: `send()` checks the
+    /// `closed` flag inside the same `queue` lock critical section as the
+    /// `push_back`, so there is no window in which `close_and_drain()` can
+    /// take the queue after a message was accepted but before it lands in
+    /// the drained output. Every one of `N` concurrent `send()` attempts
+    /// must end up EITHER drained by `close_and_drain()` OR rejected with
+    /// `MailboxClosed` — never silently lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_and_drain_races_concurrent_sends_without_losing_envelopes() {
+        const N: usize = 64;
+        let mailbox: BoundedMailbox<usize> = BoundedMailbox::new(N);
+
+        let handles: Vec<_> = (0..N)
+            .map(|id| {
+                let mailbox = mailbox.clone();
+                tokio::spawn(async move { (id, mailbox.send(id).await) })
+            })
+            .collect();
+
+        // Race close_and_drain() against the still-running send() tasks above.
+        let drained = mailbox.close_and_drain();
+        let drained_ids: std::collections::HashSet<usize> = drained.into_iter().collect();
+
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+        for handle in handles {
+            let (id, result) = handle.await.expect("send task panicked");
+            match result {
+                Ok(()) => {
+                    assert!(
+                        drained_ids.contains(&id),
+                        "send({id}) returned Ok but {id} was not present in close_and_drain() output"
+                    );
+                    accepted += 1;
+                }
+                Err(EntityError::MailboxClosed) => rejected += 1,
+                Err(other) => panic!("unexpected error from send(): {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            accepted + rejected,
+            N,
+            "every send attempt must be either accepted-and-drained or rejected as closed — none silently lost"
+        );
     }
 }
