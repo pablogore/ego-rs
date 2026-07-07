@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
@@ -26,25 +28,20 @@ fn build_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> 
     )
 }
 
-fn build_fast_passivation_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
-    Arc::new(
-        persistent_entity::builder::EntityRuntimeBuilder::new()
-            .passivation_timeout(std::time::Duration::from_millis(50))
-            .snapshot_strategy(Arc::new(NoSnapshot))
-            .build(),
-    )
-}
-
-/// Same as [`build_fast_passivation_runtime`], but wired with a
-/// [`CountingEventStore`] so callers can assert on the number of genuine
-/// activation (recovery) attempts — actor-level instrumentation (NFR-002).
+/// 500ms, not 50ms: the tests using this leave enough margin between "the
+/// idle timer elapsed" (confirmed via a bounded poll, not a guessed sleep)
+/// and "the post-burst `active_count()` check ran" that a slow/contended CI
+/// box can't let the entity idle-timeout a *second* time inside that window
+/// (see `wait_for_passivation` below). Wired with a [`CountingEventStore`] so
+/// callers can assert on the number of genuine activation (recovery)
+/// attempts — actor-level instrumentation (NFR-002).
 fn build_fast_passivation_runtime_with_counter(
     load_calls: Arc<AtomicUsize>,
 ) -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
     let event_store = Arc::new(Mutex::new(CountingEventStore::new(load_calls)));
     Arc::new(
         persistent_entity::builder::EntityRuntimeBuilder::new()
-            .passivation_timeout(std::time::Duration::from_millis(50))
+            .passivation_timeout(std::time::Duration::from_millis(500))
             .snapshot_strategy(Arc::new(NoSnapshot))
             .with_event_store(event_store)
             .build(),
@@ -54,6 +51,24 @@ fn build_fast_passivation_runtime_with_counter(
 fn handler(
 ) -> Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> {
     Arc::new(TestEntity::new())
+}
+
+/// Waits for `active_count() == 0` via a bounded poll instead of a guessed
+/// sleep duration — explicit synchronization on the actual condition the
+/// caller needs (idle timeout has fired), not a fixed delay that either
+/// wastes time or, worse, races the real timer under load.
+async fn wait_for_passivation(runtime: &persistent_entity::runtime::EntityRuntime<TestEvent>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if runtime.active_count() == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "entity did not passivate within the deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 // ============================================================================
@@ -203,7 +218,7 @@ async fn test_no_double_spawn_concurrent() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for_passivation(&runtime).await;
 
     let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
@@ -262,7 +277,7 @@ async fn test_activation_mutex_serializes() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for_passivation(&runtime).await;
 
     let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
@@ -308,9 +323,14 @@ async fn test_activation_mutex_serializes() {
 }
 
 /// No double spawn across multiple entities — each gets exactly one actor.
+///
+/// Uses the long-passivation-timeout runtime: this test doesn't exercise
+/// reactivation, so a short idle timer only adds a race against its own
+/// `active_count()` check (10 fresh activations idling out before the check
+/// runs) without proving anything extra.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_spawn_multiple_entities() {
-    let runtime = build_fast_passivation_runtime();
+    let runtime = build_runtime();
     let h = handler();
 
     // Spawn commands for 10 different entities simultaneously
