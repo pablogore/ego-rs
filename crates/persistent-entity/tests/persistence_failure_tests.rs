@@ -1,5 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -124,7 +126,7 @@ async fn test_snapshot_recovery_with_version_offset() {
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     {
-        let mut snap = snapshot_store.lock().unwrap();
+        let mut snap = snapshot_store.lock();
         snap.save_snapshot(
             "counter-snap-1",
             None,

@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use ego_domain::DomainEvent;
@@ -102,6 +104,13 @@ impl Snapshot for NoopSnapshotStore {
 /// `Arc<Mutex<dyn ...>>` so that any backing store (in-memory, database,
 /// test stub) can be injected at construction time.
 ///
+/// The lock is `parking_lot::Mutex`, not `std::sync::Mutex`: a backing store
+/// that panics mid-call (a malformed adapter, a deserialization panic, a
+/// deliberately-injected test failure) must not permanently poison
+/// persistence for every other entity sharing this facade — the same
+/// non-poisoning rationale as `BoundedMailbox`'s queue and `EntityRegistry`'s
+/// map (see `openspec/changes/CORE-006A-activation-authority/design.md`).
+///
 /// The default constructor (`PersistenceFacade::new()`) creates a no-op
 /// facade that accepts writes but never persists anything.  Use
 /// [`PersistenceFacade::with_stores`] to supply real stores.
@@ -151,7 +160,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         tenant_id: Option<&str>,
     ) -> Result<(Option<SnapshotData>, Vec<StoredEventRow<E>>), String> {
         let snap = {
-            let store = self.snapshot_store.lock().unwrap();
+            let store = self.snapshot_store.lock();
             store
                 .load_snapshot(entity_id, tenant_id)
                 .map_err(|e| e.to_string())?
@@ -165,7 +174,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         let snap_version = snap_data.as_ref().map(|s| s.version).unwrap_or(0);
 
         let (stored, stored_base): (Vec<StoredEvent<E>>, u64) = {
-            let store = self.event_store.lock().unwrap();
+            let store = self.event_store.lock();
             // TODO: EventStore::load returns the full stream; events before snap_version are loaded
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
@@ -208,7 +217,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             .collect();
 
         let new_version = {
-            let mut store = self.event_store.lock().unwrap();
+            let mut store = self.event_store.lock();
             store
                 .append(entity_id, tenant_id, version as i64, stored)
                 .map_err(|e| e.to_string())?
@@ -225,7 +234,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         version: u64,
         data: &serde_json::Value,
     ) -> Result<(), String> {
-        let mut store = self.snapshot_store.lock().unwrap();
+        let mut store = self.snapshot_store.lock();
         store
             .save_snapshot(entity_id, tenant_id, version as i64, data.clone())
             .map_err(|e| e.to_string())

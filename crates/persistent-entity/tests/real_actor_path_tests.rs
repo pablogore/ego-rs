@@ -1,6 +1,8 @@
 /// Integration tests for the real `TokioEntityRef` → `EntityActor` path.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use ego_domain::persistence::{PersistenceError, Snapshot};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -97,7 +99,7 @@ async fn test_recovery_replays_seeded_events() {
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
     {
-        let mut store = event_store.lock().unwrap();
+        let mut store = event_store.lock();
         store
             .append(aggregate_key, None, 0, events)
             .expect("pre-seed must succeed");
