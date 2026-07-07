@@ -69,8 +69,8 @@ impl PrincipalBuilder {
     /// Only if the subject was explicitly overridden to an empty or
     /// whitespace-only string — the default subject is always valid.
     pub fn build(self) -> Principal {
-        let subject_id =
-            SubjectId::new(self.subject).expect("PrincipalBuilder subject must not be empty");
+        let subject_id = SubjectId::new(self.subject)
+            .expect("PrincipalBuilder subject must not be empty or whitespace-only");
         let mut principal = Principal::new(self.kind, subject_id);
         if let Some(tenant) = self.tenant {
             principal = principal.with_tenant_id(tenant);
@@ -153,13 +153,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "PrincipalBuilder subject must not be empty")]
+    #[should_panic(expected = "PrincipalBuilder subject must not be empty or whitespace-only")]
     fn empty_subject_override_panics() {
         PrincipalBuilder::new().subject("").build();
     }
 
     #[test]
-    #[should_panic(expected = "PrincipalBuilder subject must not be empty")]
+    #[should_panic(expected = "PrincipalBuilder subject must not be empty or whitespace-only")]
     fn whitespace_only_subject_override_panics() {
         PrincipalBuilder::new().subject("   ").build();
     }
