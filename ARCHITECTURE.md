@@ -253,7 +253,7 @@ sequenceDiagram
 | Snapshots are pure optimization | Event stream always authoritative (FR-012) |
 | CAS forbidden | `parking_lot::Mutex` for the registry map, not atomic CAS loops (§5 constitution) |
 
-**Reference**: Full activation ordering specification at `specs/006-persistent-entity-runtime/activation-ordering/`.
+**Reference**: Full activation ordering specification at `openspec/changes/archive/2026-06-22-persistent-entity-runtime/activation-ordering/`.
 
 ### Crate Layout
 
