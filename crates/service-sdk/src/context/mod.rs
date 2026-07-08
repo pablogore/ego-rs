@@ -7,6 +7,8 @@ use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
+use ego_domain::context::TenantId;
+
 use crate::runtime::{CanonicalTenant, CrossTenantPermit};
 
 /// A service context that propagates across service calls for tracing, tenant isolation,
@@ -32,9 +34,9 @@ use crate::runtime::{CanonicalTenant, CrossTenantPermit};
 /// deep clone of string fields and the additional-context map. For typical request contexts
 /// (3-5 string fields, empty or small map), this is a few heap allocations.
 ///
-/// The `allow_cross_tenant` flag is preserved on clone — a cloned context retains the same
-/// cross-tenant permission as the original. This is intentional: the permit authorizes the
-/// context value, not a single use.
+/// The cross-tenant grant is preserved on clone — a cloned context retains the same
+/// destination-scoped cross-tenant permission as the original. This is intentional: the
+/// permit authorizes the context value, not a single use.
 ///
 /// For hot paths that clone context frequently, prefer keeping `additional_context` empty
 /// and relying on the typed fields. Avoid storing large payloads in `additional_context`.
@@ -61,8 +63,12 @@ pub struct ServiceContext {
     pub timeout: Option<Duration>,
     /// The additional context.
     pub additional_context: HashMap<String, String>,
-    /// Whether cross-tenant access is allowed.
-    allow_cross_tenant: bool,
+    /// The destination tenant this context is authorized to cross into, if
+    /// any (CORE-008A AD-008/TASK-019). Set only via
+    /// [`ServiceContext::with_cross_tenant_access`], scoped to the
+    /// [`CrossTenantPermit`]'s own destination — a permit issued for
+    /// `tenant-b` can never make this context allowed for `tenant-c`.
+    allow_cross_tenant: Option<TenantId>,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
@@ -88,7 +94,7 @@ impl ServiceContext {
             deadline: None,
             timeout: None,
             additional_context: HashMap::new(),
-            allow_cross_tenant: false,
+            allow_cross_tenant: None,
             cancellation_token: None,
             security: None,
             logger: None,
@@ -168,17 +174,17 @@ impl ServiceContext {
         self
     }
 
-    /// Marks the context as permitted for cross-tenant access.
+    /// Marks the context as permitted for cross-tenant access into the
+    /// permit's own destination (CORE-008A AD-008/TASK-019).
     ///
     /// Requires a [`CrossTenantPermit`] issued by [`RuntimeInner::issue_cross_tenant_permit`].
     /// Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
-    /// fallback exists. The permit is a zero-size witness of authorization; it is borrowed
-    /// (not consumed) so one issued permit can authorize multiple context grants.
-    ///
-    /// Compile-time gate only. TASK-014 adds the runtime authorization check inside
-    /// `RuntimeInner::issue_cross_tenant_permit`.
-    pub fn with_cross_tenant_access(mut self, _permit: &CrossTenantPermit) -> Self {
-        self.allow_cross_tenant = true;
+    /// fallback exists. The permit is borrowed (not consumed) so one issued permit can
+    /// authorize multiple context grants, but the grant recorded here is scoped to
+    /// exactly the destination the permit was authorized for — see
+    /// [`ServiceContext::is_cross_tenant_allowed_for`].
+    pub fn with_cross_tenant_access(mut self, permit: &CrossTenantPermit) -> Self {
+        self.allow_cross_tenant = Some(permit.destination().clone());
         self
     }
 
@@ -249,12 +255,27 @@ impl ServiceContext {
         }
     }
 
-    /// Checks if cross-tenant access is allowed.
+    /// Checks if cross-tenant access is allowed for *some* destination.
+    ///
+    /// Kept for source compatibility with existing callers; prefer
+    /// [`ServiceContext::is_cross_tenant_allowed_for`] to check a specific
+    /// destination (CORE-008A AD-008/TASK-019).
     ///
     /// # Returns
-    /// `true` if cross-tenant access is enabled, `false` otherwise
+    /// `true` if a cross-tenant grant is present, `false` otherwise
     pub fn is_cross_tenant_allowed(&self) -> bool {
-        self.allow_cross_tenant
+        self.allow_cross_tenant.is_some()
+    }
+
+    /// Checks if cross-tenant access is allowed specifically for `destination`
+    /// (CORE-008A AD-008, closes the permit-reuse hole: a permit authorizing
+    /// `tenant-b` cannot be reused to reach `tenant-c`).
+    ///
+    /// # Returns
+    /// `true` only if a cross-tenant grant is present AND it was scoped to
+    /// this exact `destination`.
+    pub fn is_cross_tenant_allowed_for(&self, destination: &TenantId) -> bool {
+        self.allow_cross_tenant.as_ref() == Some(destination)
     }
 
     /// Checks if the current context has a tenant ID.
@@ -402,23 +423,76 @@ mod tests {
         SecurityContext::empty(principal)
     }
 
-    #[test]
-    fn with_cross_tenant_access_sets_flag() {
-        use crate::runtime::RuntimeInner;
-        let inner = RuntimeInner::for_test();
-        let permit = inner.issue_cross_tenant_permit();
+    // -- CORE-008A Phase 4 (TASK-018/019): destination-scoped cross-tenant --
+
+    use ego_domain::context::TenantId;
+    use ego_security_sdk::authorization::{AccessRequest, AuthorizationDecision, AuthorizationProvider};
+    use crate::runtime::RuntimeInner;
+
+    struct AllowCrossTenant;
+
+    #[async_trait::async_trait]
+    impl AuthorizationProvider for AllowCrossTenant {
+        async fn authorize(
+            &self,
+            _: &Principal,
+            _: &AccessRequest,
+            _: &SecurityContext,
+        ) -> Result<AuthorizationDecision, SecurityError> {
+            Ok(AuthorizationDecision::Allow)
+        }
+    }
+
+    fn authenticated_ctx() -> ServiceContext {
+        let principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
+        ServiceContext::new().with_security(Arc::new(SecurityContext::empty(principal)))
+    }
+
+    #[tokio::test]
+    async fn with_cross_tenant_access_sets_flag() {
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
+        let destination = TenantId::new("tenant-b").unwrap();
+        let permit = rt
+            .issue_cross_tenant_permit(&authenticated_ctx(), destination)
+            .await
+            .expect("Allow decision must yield a permit");
         let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
         assert!(ctx.is_cross_tenant_allowed());
     }
 
-    #[test]
-    fn clone_preserves_cross_tenant_flag() {
-        use crate::runtime::RuntimeInner;
-        let rt = RuntimeInner::for_test();
-        let permit = rt.issue_cross_tenant_permit();
+    #[tokio::test]
+    async fn clone_preserves_cross_tenant_flag() {
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
+        let destination = TenantId::new("tenant-b").unwrap();
+        let permit = rt
+            .issue_cross_tenant_permit(&authenticated_ctx(), destination)
+            .await
+            .expect("Allow decision must yield a permit");
         let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
         let cloned = ctx.clone();
         assert!(cloned.is_cross_tenant_allowed());
+    }
+
+    #[tokio::test]
+    async fn is_cross_tenant_allowed_for_matches_only_the_issued_destination() {
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
+        let tenant_b = TenantId::new("tenant-b").unwrap();
+        let permit = rt
+            .issue_cross_tenant_permit(&authenticated_ctx(), tenant_b.clone())
+            .await
+            .expect("Allow decision must yield a permit");
+        let ctx = ServiceContext::new().with_cross_tenant_access(&permit);
+
+        let tenant_c = TenantId::new("tenant-c").unwrap();
+        assert!(ctx.is_cross_tenant_allowed_for(&tenant_b));
+        assert!(!ctx.is_cross_tenant_allowed_for(&tenant_c));
+    }
+
+    #[test]
+    fn is_cross_tenant_allowed_for_is_false_with_no_grant() {
+        let ctx = ServiceContext::new();
+        let tenant_b = TenantId::new("tenant-b").unwrap();
+        assert!(!ctx.is_cross_tenant_allowed_for(&tenant_b));
     }
 
     #[test]

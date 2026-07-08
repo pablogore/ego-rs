@@ -1,10 +1,14 @@
 error[E0624]: method `issue_cross_tenant_permit` is private
- --> tests/compile_fail/issue_cross_tenant_permit_external.rs:8:30
-  |
-8 |     let _permit = rt.inner().issue_cross_tenant_permit();
-  |                              ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
-  |
- ::: src/runtime/runtime_builder.rs
-  |
-  |     pub(crate) fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
-  |     ------------------------------------------------------------------- private method defined here
+  --> tests/compile_fail/issue_cross_tenant_permit_external.rs:15:30
+   |
+15 |       let _permit = rt.inner().issue_cross_tenant_permit(&ctx, destination);
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/runtime/runtime_builder.rs
+   |
+   | /     pub(crate) async fn issue_cross_tenant_permit(
+   | |         &self,
+   | |         ctx: &ServiceContext,
+   | |         destination: TenantId,
+   | |     ) -> Result<CrossTenantPermit, SecurityError> {
+   | |_________________________________________________- private method defined here

@@ -11,11 +11,13 @@
 //! with an optional logger and its teardown stack.
 
 use std::any::{Any, TypeId};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use ego_domain::context::TenantId;
 use ego_security_sdk::authentication::AuthenticationProvider;
-use ego_security_sdk::authorization::AuthorizationProvider;
+use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
 use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 
@@ -252,17 +254,58 @@ impl RuntimeInner {
         Ok(())
     }
 
-    /// Mints a cross-tenant permit. No-op authorization today; TASK-014 will run
-    /// the AuthorizationProvider check here and change this to a fallible signature.
+    /// Mints a cross-tenant permit authorizing access to `destination`
+    /// (CORE-008A AD-008, FR-005/FR-006).
     ///
-    /// Compile-time gate only. TASK-014 adds the runtime authorization check.
+    /// Resolves the `Principal` from `ctx.security()`, then runs an
+    /// `AuthorizationProvider` capability check for the explicit
+    /// `"tenant:cross-tenant-access"` request (resource/action authorization
+    /// alone is never sufficient — FR-005). A `Deny` maps to
+    /// `SecurityError::CrossTenantDenied`; other provider failures propagate
+    /// unchanged. On `Allow`, mints a permit scoped to `destination`.
+    ///
+    /// # Errors
+    /// - [`SecurityError::CapabilityNotEnabled`] if no security context is
+    ///   attached, or if no `AuthorizationProvider` is configured on this
+    ///   runtime.
+    /// - [`SecurityError::CrossTenantDenied`] if the provider denies the
+    ///   cross-tenant capability check.
+    /// - Any other [`SecurityError`] the provider itself returns (e.g.
+    ///   `ProviderError` on backend failure/panic).
     // SAFETY: must remain pub(crate) — widening to pub would let external crates
-    // mint CrossTenantPermit without authorization. TASK-014 changes the body and
-    // signature, not the visibility.
-    // Used only in tests until TASK-014 wires up the runtime authorization check.
+    // mint CrossTenantPermit without authorization.
+    // Used only in tests until a real production caller adopts cross-tenant
+    // issuance (this framework-stage codebase has no application services yet).
     #[allow(dead_code)]
-    pub(crate) fn issue_cross_tenant_permit(&self) -> CrossTenantPermit {
-        CrossTenantPermit::new()
+    pub(crate) async fn issue_cross_tenant_permit(
+        &self,
+        ctx: &ServiceContext,
+        destination: TenantId,
+    ) -> Result<CrossTenantPermit, SecurityError> {
+        let provider = self
+            .authorization_provider()
+            .ok_or(SecurityError::CapabilityNotEnabled)?;
+        let resource = Resource {
+            kind: Cow::Borrowed("tenant"),
+            id: Some(destination.as_str().to_string()),
+        };
+        let action = Action(Cow::Borrowed("cross-tenant-access"));
+
+        match authorize_in_context(ctx.security(), resource, action, provider.as_ref()).await {
+            Ok(()) => {
+                let issued_to = ctx
+                    .security()
+                    .ok_or(SecurityError::CapabilityNotEnabled)?
+                    .principal()
+                    .subject_id
+                    .clone();
+                Ok(CrossTenantPermit::new(destination, issued_to))
+            }
+            Err(SecurityError::AuthorizationDenied { reason }) => {
+                Err(SecurityError::CrossTenantDenied { reason })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Test-only fixture equivalent to the removed `Default` impl.
@@ -298,6 +341,42 @@ impl RuntimeInner {
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
         )
+    }
+
+    /// Test fixture variant with an `AuthorizationProvider` configured
+    /// (CORE-008A TASK-018 — `for_test()`'s sibling helper for the
+    /// `issue_cross_tenant_permit` call-site migration; production code
+    /// configures both providers via `RuntimeBuilder::with_security`
+    /// instead). The authentication side is a stub never invoked by
+    /// `issue_cross_tenant_permit`, which only reads `authorization_provider()`.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_authz(provider: Arc<dyn AuthorizationProvider>) -> Self {
+        Self::new_with_logger(
+            ServiceRegistry::new(),
+            Arc::new(InterceptorChain::new()),
+            Some((Arc::new(NoopTestAuthn) as Arc<dyn AuthenticationProvider>, provider)),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            None,
+            Mutex::new(TeardownStack::new()),
+            TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+        )
+    }
+}
+
+/// Never-invoked authentication stub for [`RuntimeInner::for_test_with_authz`] —
+/// `issue_cross_tenant_permit` never calls `authenticate()`, only
+/// `authorization_provider()`.
+#[cfg(test)]
+struct NoopTestAuthn;
+
+#[cfg(test)]
+impl AuthenticationProvider for NoopTestAuthn {
+    fn authenticate(
+        &self,
+        _: &ego_security_sdk::credential::Credential,
+    ) -> Result<ego_security_sdk::context::SecurityContext, ego_security_sdk::AuthenticationError>
+    {
+        unimplemented!("NoopTestAuthn is never invoked by issue_cross_tenant_permit")
     }
 }
 
@@ -491,12 +570,103 @@ mod tests {
         assert!(t.resolve_config::<i32>().is_ok());
     }
 
-    // -- CrossTenantPermit issuer (S-2) ------------------------------------
+    // -- CrossTenantPermit issuer (CORE-008A Phase 4, AD-008) ---------------
 
-    #[test]
-    fn runtime_inner_issues_cross_tenant_permit() {
-        let inner = RuntimeInner::for_test();
-        let _permit = inner.issue_cross_tenant_permit();
+    use ego_security_sdk::authorization::{AccessRequest, AuthorizationDecision};
+
+    struct AllowCrossTenant;
+
+    #[async_trait::async_trait]
+    impl AuthorizationProvider for AllowCrossTenant {
+        async fn authorize(
+            &self,
+            _: &ego_security_sdk::principal::Principal,
+            _: &AccessRequest,
+            _: &SecurityContext,
+        ) -> Result<AuthorizationDecision, SecurityError> {
+            Ok(AuthorizationDecision::Allow)
+        }
+    }
+
+    struct DenyCrossTenant;
+
+    #[async_trait::async_trait]
+    impl AuthorizationProvider for DenyCrossTenant {
+        async fn authorize(
+            &self,
+            _: &ego_security_sdk::principal::Principal,
+            _: &AccessRequest,
+            _: &SecurityContext,
+        ) -> Result<AuthorizationDecision, SecurityError> {
+            Ok(AuthorizationDecision::Deny {
+                reason: "no cross-tenant capability".into(),
+            })
+        }
+    }
+
+    fn authenticated_ctx() -> ServiceContext {
+        let principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
+        let security = SecurityContext::empty(principal);
+        ServiceContext::new().with_security(Arc::new(security))
+    }
+
+    #[tokio::test]
+    async fn issue_cross_tenant_permit_denied_without_capability() {
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(DenyCrossTenant));
+        let ctx = authenticated_ctx();
+        let destination = TenantId::new("tenant-b").unwrap();
+
+        let result = rt.issue_cross_tenant_permit(&ctx, destination).await;
+
+        assert!(matches!(
+            result,
+            Err(SecurityError::CrossTenantDenied { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_cross_tenant_permit_denied_even_with_resource_action_alone() {
+        // A provider that denies the specific "tenant:cross-tenant-access"
+        // capability check is functionally equivalent to "authorized for the
+        // resource/action but without cross-tenant capability" (FR-005): the
+        // permit issuer only ever asks for the cross-tenant capability, so
+        // any Deny on that request is exactly this scenario.
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(DenyCrossTenant));
+        let ctx = authenticated_ctx();
+        let destination = TenantId::new("tenant-b").unwrap();
+
+        let result = rt.issue_cross_tenant_permit(&ctx, destination).await;
+
+        assert!(matches!(
+            result,
+            Err(SecurityError::CrossTenantDenied { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_cross_tenant_permit_allowed_yields_destination_scoped_permit() {
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
+        let ctx = authenticated_ctx();
+        let destination = TenantId::new("tenant-b").unwrap();
+
+        let result = rt.issue_cross_tenant_permit(&ctx, destination.clone()).await;
+
+        let permit = result.expect("Allow decision must yield a permit");
+        assert_eq!(permit.destination(), &destination);
+    }
+
+    #[tokio::test]
+    async fn issue_cross_tenant_permit_without_provider_is_capability_not_enabled() {
+        let rt = RuntimeInner::for_test();
+        let ctx = authenticated_ctx();
+        let destination = TenantId::new("tenant-b").unwrap();
+
+        let result = rt.issue_cross_tenant_permit(&ctx, destination).await;
+
+        assert!(matches!(
+            result,
+            Err(SecurityError::CapabilityNotEnabled)
+        ));
     }
 
     // -- CORE-008A Phase 2 (TASK-008): fallible enforce_tenant --------------
