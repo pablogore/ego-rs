@@ -6,5 +6,21 @@ error[E0624]: associated function `new` is private
   |
  ::: src/runtime/permit.rs
   |
-  |     pub(super) fn new() -> Self {
-  |     --------------------------- private associated function defined here
+  |     pub(super) fn new(destination: TenantId, issued_to: SubjectId) -> Self {
+  |     ---------------------------------------------------------------------- private associated function defined here
+
+error[E0061]: this function takes 2 arguments but 0 arguments were supplied
+ --> tests/compile_fail/cross_tenant_permit_new_external.rs:6:14
+  |
+6 |     let _p = CrossTenantPermit::new();
+  |              ^^^^^^^^^^^^^^^^^^^^^^-- two arguments of type `ego_domain::context::TenantId` and `SubjectId` are missing
+  |
+note: associated function defined here
+ --> src/runtime/permit.rs
+  |
+  |     pub(super) fn new(destination: TenantId, issued_to: SubjectId) -> Self {
+  |                   ^^^
+help: provide the arguments
+  |
+6 |     let _p = CrossTenantPermit::new(/* ego_domain::context::TenantId */, /* SubjectId */);
+  |                                     ++++++++++++++++++++++++++++++++++++++++++++++++++++

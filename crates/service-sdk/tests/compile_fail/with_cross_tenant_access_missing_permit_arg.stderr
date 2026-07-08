@@ -7,7 +7,7 @@ error[E0061]: this method takes 1 argument but 0 arguments were supplied
 note: method defined here
  --> src/context/mod.rs
   |
-  |     pub fn with_cross_tenant_access(mut self, _permit: &CrossTenantPermit) -> Self {
+  |     pub fn with_cross_tenant_access(mut self, permit: &CrossTenantPermit) -> Self {
   |            ^^^^^^^^^^^^^^^^^^^^^^^^
 help: provide the argument
   |
