@@ -446,3 +446,186 @@ unaffected by this invariant.)
 or equivalent MUST receive `ServiceContext` through ownership transfer, explicit parameter
 passing, or cloning at the call site before the spawn boundary. No spawned task MAY perform
 an ambient lookup to obtain a `ServiceContext` after crossing the spawn boundary.
+
+---
+
+## Declarative Authorization with `#[authorize]` Macro (CORE-015)
+
+### Requirement: `#[authorize]` Syntax Contract
+
+The macro `#[authorize]` accepts exactly two named arguments: `context = <ident>` and `permission = "<resource>:<action>"`.
+
+**Acceptance criteria:**
+
+- AC-1.1: `#[authorize(context = ctx, permission = "orders:read")]` on a service method inside `#[service]` compiles and generates an authorization guard.
+- AC-1.2: The named argument `context` receives an identifier, not an expression or path.
+- AC-1.3: The named argument `permission` receives a string literal, not a const reference, macro call, or any other expression form.
+
+---
+
+### Requirement: Named-Argument Form Is Required
+
+**Acceptance criteria:**
+
+- AC-2.1: `#[authorize(ctx, "orders:read")]` (positional) fails compilation with error E4 (`unknown argument`).
+- AC-2.2: `#[authorize(context = ctx, perm = "orders:read")]` (unknown key name) fails compilation with error E4.
+- AC-2.3: `#[authorize(context = ctx)]` (missing `permission`) fails compilation with error E4b.
+- AC-2.4: `#[authorize(permission = "orders:read")]` (missing `context`) fails compilation with error E4b.
+
+---
+
+### Requirement: Compile-Time Structural Validation of Permission Literal
+
+The permission literal must satisfy: exactly one `:`, non-empty string before `:` (resource), non-empty string after `:` (action). No semantic constraints are applied beyond this structure.
+
+**Acceptance criteria:**
+
+- AC-3.1: A permission literal with no `:` (e.g., `"ordersread"`) fails compilation with error E1.
+- AC-3.2: A permission literal with more than one `:` (e.g., `"a:b:c"`) fails compilation with error E1b.
+- AC-3.3: A permission literal with an empty resource (e.g., `":read"`) fails compilation with error E2.
+- AC-3.4: A permission literal with an empty action (e.g., `"orders:"`) fails compilation with error E3.
+- AC-3.5: A non-literal value for `permission` (e.g., a const reference `PERM_CONST`) fails compilation with the non-literal error.
+- AC-3.6: A valid literal like `"orders:read"` does not trigger E2 (non-empty resource is correctly identified).
+
+---
+
+### Requirement: Guard Execution Order and Behavior
+
+Authorization guard executes BEFORE the method body; exactly one `authorize_in_context` call per annotated method.
+
+**Acceptance criteria:**
+
+- AC-4.1: When the authorization provider denies the request, the service method body does not execute (no observable side effect from the body).
+- AC-4.2: The generated proxy contains exactly one call to `authorize_in_context` per `#[authorize]`-annotated method.
+- AC-4.3: The authorization guard appears as the first executable step in the generated proxy body, before `enforce_tenant`, interceptor `on_request`, and the inner method call.
+
+---
+
+### Requirement: Fail-Closed Policy When Security Is Enabled
+
+Authorization is fail-closed when security is enabled — absent or unavailable providers must return an error.
+
+| Security state | Guard behavior | Error returned |
+|---|---|---|
+| `ctx.security()` is `None` (security capability disabled) | Guard not emitted; call proceeds | — |
+| Security enabled; `runtime.upgrade()` returns `None` (runtime dropped) | Fail closed | `SecurityError::ProviderError("authorization provider unavailable: runtime dropped")` |
+| Security enabled; authorization resolution yields `CapabilityNotEnabled` | Fail closed | `SecurityError::CapabilityNotEnabled` |
+| Security enabled; provider present; provider denies | Fail closed | `SecurityError::AuthorizationDenied { .. }` (propagated from provider) |
+| Security enabled; provider present; provider allows | Guard passes; body executes | — |
+
+**Acceptance criteria:**
+
+- AC-5.1: When `ctx.security()` is `None`, the method body executes without any authorization check.
+- AC-5.2: When the runtime `Weak` reference has been dropped and `ctx.security()` is `Some`, the method returns `Err(E::from(SecurityError::ProviderError(...)))`.
+- AC-5.3: When authorization resolution yields `SecurityError::CapabilityNotEnabled`, the generated guard propagates that error and the method body does not execute.
+- AC-5.4: When the provider returns `Deny`, the method returns `Err(E::from(SecurityError::AuthorizationDenied { .. }))` and the body does not execute.
+- AC-5.5: When the provider returns `Allow`, the method body executes and returns its result.
+
+---
+
+### Requirement: Compile-Time `From<SecurityError>` Bound on Error Type
+
+**Acceptance criteria:**
+
+- AC-6.1: A method whose `Result<_, E>` has an error type `E` that does not implement `From<SecurityError>` fails compilation with error E_from.
+- AC-6.2: The compile error is rustc's standard trait bound diagnostic, triggered by the `__assert_from_security_error::<E>()` helper; the span targets the error type with a message identifying the missing `impl From<SecurityError> for E`. No custom `compile_error!` is emitted.
+
+---
+
+### Requirement: `#[authorize]` Outside `#[service]` Emits Compile Error
+
+**Acceptance criteria:**
+
+- AC-7.1: `#[authorize]` applied to a free function (outside any `#[service]` impl block) fails compilation with error E5.
+- AC-7.2: `#[authorize]` applied to a function inside a plain `impl` block (not `#[service]`) fails compilation with error E5.
+- AC-7.3: When `#[authorize]` is used correctly inside `#[service]`, error E5 is never emitted.
+
+---
+
+### Requirement: Marker Execution Order Is Fixed and Lexical-Order-Independent
+
+The pipeline order is fixed and independent of attribute lexical order:
+
+```
+1. authorize
+2. [future pre-body marker]
+3. enforce_tenant
+4. chain.on_request
+5. inner.method(args)
+6. chain.on_response / on_error
+7. [future post-body marker]
+8. return result
+```
+
+**Acceptance criteria:**
+
+- AC-8.1: A method annotated `#[audit] #[authorize(...)]` generates the same proxy body as `#[authorize(...)] #[audit]` — the order of authorization relative to other markers is determined by the pipeline, not by lexical attribute position.
+- AC-8.2: The generated proxy always places the authorization guard at slot 1 (before `enforce_tenant`, before interceptors).
+
+---
+
+### Requirement: `ServiceContext` Remains a Pure DTO
+
+**Acceptance criteria:**
+
+- AC-9.1: No new methods, fields, or trait implementations are added to `ServiceContext` in this change.
+- AC-9.2: `ServiceContext` does not expose a reference or accessor to any runtime provider.
+
+---
+
+### Requirement: `RuntimeInner::authorization_provider()` Accessor Added
+
+**Acceptance criteria:**
+
+- AC-10.1: `RuntimeInner` exposes `pub fn authorization_provider(&self) -> Option<Arc<dyn AuthorizationProvider>>`.
+- AC-10.2: The method returns `None` when no security providers are configured.
+- AC-10.3: The method returns `Some(Arc<dyn AuthorizationProvider>)` (an owned clone) when an authorization provider is configured.
+- AC-10.4: The authentication provider remains inaccessible; only the authorization `Arc` is exposed.
+
+**Accessibility contract**: This accessor is `pub` solely to satisfy Rust's visibility rules for code generated by proc-macros. It is not part of the application programming model; application code must not call it directly. Any future public accessor on `RuntimeInner` requires an explicit ADR.
+
+---
+
+### Non-Functional: No New Public API Beyond `RuntimeInner::authorization_provider()` and `#[authorize]`
+
+- No new types, traits, or functions are added to any public crate surface beyond those two items.
+
+---
+
+### Non-Functional: Generated Internals Are Not Public API
+
+The following generated identifiers are implementation details, not part of any stability contract:
+
+| Identifier | Role |
+|---|---|
+| `__rt` | Temporary `Arc<RuntimeInner>` in the proxy body |
+| `__provider` | Temporary `Arc<dyn AuthorizationProvider>` in the proxy body |
+| `__assert_from_security_error` | Zero-size helper function enforcing the `From<SecurityError>` bound |
+
+These names MUST NOT appear in hand-written application code. `cargo expand` output is a debugging aid, not a compatibility contract.
+
+---
+
+### Non-Functional: Allocation Overhead Is Accepted
+
+Generated code constructs `Resource { kind: "...".to_string(), .. }` and `Action("...".to_string())` — two `String` allocations per authorized call. These allocations are intentional, reusing the stable `security-sdk` `Resource`/`Action` owned API. Allocation-free variants are deferred to a future `security-sdk` API change.
+
+---
+
+### Diagnostics Contract for `#[authorize]` Errors
+
+All errors are span-targeted at the offending token.
+
+| Code | Trigger | Required message |
+|---|---|---|
+| E1 | Permission literal has no `:` | `#[authorize] permission "foo" must have the form "resource:action"` |
+| E1b | Permission literal has more than one `:` | `#[authorize] permission "a:b:c" must have exactly one ':' (form "resource:action")` |
+| E2 | Empty resource (e.g., `":read"`) | `#[authorize] resource in ":read" must not be empty` |
+| E3 | Empty action (e.g., `"orders:"`) | `#[authorize] action in "orders:" must not be empty` |
+| E4 | Unknown named argument | `#[authorize] unknown argument 'foo'; expected 'context' and 'permission'` |
+| E4b | Missing required argument | `#[authorize] missing required argument; both 'context' and 'permission' are required` |
+| E5 | `#[authorize]` used outside `#[service]` | `#[authorize] can only be used on methods inside a #[service] trait` |
+| E6 | `context = <ident>` names a param not present in the method signature | `#[authorize] context parameter 'ctx' not found in method signature` |
+| E_from | Method error type lacks `From<SecurityError>` | rustc trait bound error at error type (e.g., `the trait bound \`OrderError: From<SecurityError>\` is not satisfied`); emitted by `__assert_from_security_error::<E>()` helper — no custom message |
+| AD-4 (non-literal) | `permission` value is not a string literal | `#[authorize] permission must be a string literal known at compile time` |
+| AD-4 (non-ident) | `context` value is not an identifier | `#[authorize] context must be a parameter name (identifier), not an expression` |
