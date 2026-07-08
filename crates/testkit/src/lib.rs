@@ -25,4 +25,5 @@ pub use authz::{DenyAllAuthorizationProvider, ScriptedAuthorizationProvider};
 pub use config::TestConfig;
 pub use context::{test_context, TestContextBuilder};
 pub use identity::{principal, PrincipalBuilder};
+pub use logger::{CapturedRecord, CapturingLogger};
 pub use security::{authenticated, authenticated_with_claims};
