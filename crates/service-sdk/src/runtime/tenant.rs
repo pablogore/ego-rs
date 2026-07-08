@@ -1,8 +1,10 @@
-//! Canonical tenant model and resolution seam (CORE-008A, Phase 1).
+//! Canonical tenant model and resolution seam (CORE-008A).
 //!
-//! Purely additive in this phase — nothing calls `TenantResolver::resolve`
-//! yet, and no `ServiceContext` field references `CanonicalTenant`. Wiring
-//! lands in Phase 2 (design.md's Migration Step 2).
+//! `TenantResolver::resolve` is wired into `RuntimeInner::enforce_tenant`
+//! (Phase 2). Still inert end-to-end: no `#[operation]` is marked
+//! `#[tenant_scoped]` yet (Phase 3), so the macro's generated unmarked-path
+//! call discards `enforce_tenant`'s `Result` and no operation observably
+//! changes behavior.
 
 use ego_domain::context::TenantId;
 use ego_security_sdk::context::SecurityContext;
@@ -37,9 +39,9 @@ use ego_security_sdk::error::SecurityError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalTenant(Repr);
 
-// Not wired into any non-test caller until Phase 2 (TASK-009) —
-// `dead_code` is expected here in a `cargo build` (not `cargo test`) of
-// this crate alone, same as `CrossTenantPermit::new()` in `permit.rs`.
+// `Systemwide` is not constructed by any production caller as of Phase 2 —
+// the macro's unmarked-op path never calls it (Implementation Note 2); it
+// remains available for explicit/manual resolver use (AD-002).
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Repr {
@@ -52,8 +54,6 @@ enum Repr {
 impl CanonicalTenant {
     /// Mints a scoped canonical tenant. Visible only within `crate::runtime`
     /// and its sibling submodules — the only caller is [`TenantResolver::resolve`].
-    // Used only in tests until Phase 2 (TASK-009) wires `enforce_tenant`.
-    #[allow(dead_code)]
     pub(super) fn scoped(tenant: TenantId) -> Self {
         Self(Repr::Scoped(tenant))
     }
@@ -101,16 +101,11 @@ pub enum TenantEnforcementMode {
 /// and an optional caller-supplied tenant hint. Not `dyn`-dispatched — the
 /// resolution policy is a fixed invariant, not a per-deployment plugin.
 pub struct TenantResolver {
-    // Not read outside tests until Phase 2 (TASK-009) constructs a
-    // `TenantResolver` from `RuntimeInner` and calls `resolve`.
-    #[allow(dead_code)]
     mode: TenantEnforcementMode,
 }
 
 impl TenantResolver {
     /// Builds a resolver enforcing the given [`TenantEnforcementMode`].
-    // Used only in tests until Phase 2 (TASK-009) wires `enforce_tenant`.
-    #[allow(dead_code)]
     pub(crate) fn new(mode: TenantEnforcementMode) -> Self {
         Self { mode }
     }
@@ -120,8 +115,6 @@ impl TenantResolver {
     /// Branch order matters: (a) is checked before (b)/(c) — a
     /// present-but-conflicting hint must never be evaluated against an
     /// absent Principal tenant claim (gap fix, see tasks.md TASK-003).
-    // Used only in tests until Phase 2 (TASK-009) wires `enforce_tenant`.
-    #[allow(dead_code)]
     pub(crate) fn resolve(
         &self,
         security: Option<&SecurityContext>,
@@ -158,8 +151,6 @@ impl TenantResolver {
     /// Validates a raw tenant string into the domain `TenantId` newtype.
     /// An empty tenant string (violating `TenantId`'s non-empty invariant)
     /// is treated as an unresolvable context, not a panic or silent default.
-    // Used only in tests until Phase 2 (TASK-009) wires `enforce_tenant`.
-    #[allow(dead_code)]
     fn validated(raw: &str) -> Result<TenantId, SecurityError> {
         TenantId::new(raw).map_err(|_| SecurityError::MissingContext)
     }

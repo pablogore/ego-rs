@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
+use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 
 use crate::context::ServiceContext;
@@ -24,6 +25,9 @@ use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use super::logger::TeardownStack;
 use super::permit::CrossTenantPermit;
+#[cfg(test)]
+use super::tenant::TenantEnforcementMode;
+use super::tenant::TenantResolver;
 
 // ---------------------------------------------------------------------------
 // Internal: grouped resolved-instance tables
@@ -116,6 +120,10 @@ pub struct RuntimeInner {
         Option<(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)>,
     /// Resolved instances for projection, adapter, and config injection.
     resolved: DependencyTable,
+    /// Resolves the canonical tenant for enforcement (CORE-008A AD-001/AD-009).
+    /// Built from the [`TenantEnforcementMode`] configured via
+    /// `RuntimeBuilder::with_tenant_enforcement_mode` (AD-012).
+    tenant_resolver: TenantResolver,
     /// The logger constructed by the host and registered via `RuntimeBuilder::with_logger`.
     logger: Option<Arc<KITLogger>>,
     /// Infrastructure teardown stack, drained in reverse construction order on shutdown.
@@ -160,6 +168,7 @@ impl RuntimeInner {
         resolved: DependencyTable,
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
+        tenant_resolver: TenantResolver,
     ) -> Self {
         Self {
             registry,
@@ -168,6 +177,7 @@ impl RuntimeInner {
             resolved,
             logger,
             teardown,
+            tenant_resolver,
         }
     }
 
@@ -225,8 +235,22 @@ impl RuntimeInner {
         self.security_providers.as_ref().map(|(_, authz)| authz)
     }
 
-    /// No-op stub — runtime tenant enforcement is pending TASK-014.
-    pub fn enforce_tenant(&self, _ctx: &ServiceContext) {}
+    /// Resolves and enforces the canonical tenant for this call (CORE-008A
+    /// AD-009). On success, writes the resolved [`super::tenant::CanonicalTenant`]
+    /// into `ctx` via `ctx.set_resolved_tenant` and returns `Ok(())`. On
+    /// failure, returns `Err` without mutating `ctx`.
+    ///
+    /// Still inert as of Phase 2: no `#[operation]` is marked
+    /// `#[tenant_scoped]` yet, so the macro's generated unmarked-path call
+    /// discards this `Result` (see `service-sdk-macros` TASK-009B). Phase 3
+    /// wires a fallible `?` call for `#[tenant_scoped]` operations.
+    pub fn enforce_tenant(&self, ctx: &mut ServiceContext) -> Result<(), SecurityError> {
+        let security = ctx.security();
+        let hint = ctx.tenant_hint();
+        let canonical = self.tenant_resolver.resolve(security, hint)?;
+        ctx.set_resolved_tenant(canonical);
+        Ok(())
+    }
 
     /// Mints a cross-tenant permit. No-op authorization today; TASK-014 will run
     /// the AuthorizationProvider check here and change this to a fallible signature.
@@ -256,6 +280,15 @@ impl RuntimeInner {
     /// below).
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
+        Self::for_test_with_mode(TenantEnforcementMode::AuthenticatedOnly)
+    }
+
+    /// Test fixture variant that lets a test configure the tenant enforcement
+    /// mode explicitly (mirrors `RuntimeBuilder::with_tenant_enforcement_mode`
+    /// in production). `for_test()`'s default is `AuthenticatedOnly` — there
+    /// is no separate, more permissive default for tests (AD-012).
+    #[cfg(test)]
+    pub(crate) fn for_test_with_mode(mode: TenantEnforcementMode) -> Self {
         Self::new_with_logger(
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
@@ -263,6 +296,7 @@ impl RuntimeInner {
             DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
+            TenantResolver::new(mode),
         )
     }
 }
@@ -465,6 +499,65 @@ mod tests {
         let _permit = inner.issue_cross_tenant_permit();
     }
 
+    // -- CORE-008A Phase 2 (TASK-008): fallible enforce_tenant --------------
+
+    use ego_security_sdk::context::SecurityContext;
+    use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
+
+    fn ctx_with_tenant(tenant: Option<&str>) -> ServiceContext {
+        let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
+        principal.tenant_id = tenant.map(|t| t.to_string());
+        let security = SecurityContext::empty(principal);
+        ServiceContext::new().with_security(Arc::new(security))
+    }
+
+    #[test]
+    fn enforce_tenant_ok_sets_canonical_tenant_on_resolvable_context() {
+        let rt = RuntimeInner::for_test();
+        let mut ctx = ctx_with_tenant(Some("tenant-a"));
+
+        let result = rt.enforce_tenant(&mut ctx);
+
+        assert!(result.is_ok());
+        assert!(ctx.canonical_tenant().is_some());
+    }
+
+    #[test]
+    fn enforce_tenant_err_leaves_canonical_tenant_unset_on_unresolvable_context() {
+        let rt = RuntimeInner::for_test();
+        // Unauthenticated (no security attached) + default AuthenticatedOnly mode -> MissingContext.
+        let mut ctx = ServiceContext::new();
+
+        let result = rt.enforce_tenant(&mut ctx);
+
+        assert!(matches!(result, Err(SecurityError::MissingContext)));
+        assert!(ctx.canonical_tenant().is_none());
+    }
+
+    #[test]
+    fn enforce_tenant_default_mode_is_authenticated_only() {
+        let rt = RuntimeInner::for_test();
+        // No security, but a supplied hint via tenant_id — must still fail
+        // closed under the default AuthenticatedOnly mode.
+        let mut ctx = ServiceContext::new().with_tenant_id("tenant-z");
+
+        let result = rt.enforce_tenant(&mut ctx);
+
+        assert!(matches!(result, Err(SecurityError::MissingContext)));
+    }
+
+    #[test]
+    fn with_tenant_enforcement_mode_allow_system_internal_changes_resolution() {
+        let rt = RuntimeInner::for_test_with_mode(TenantEnforcementMode::AllowSystemInternal);
+        // No security, but AllowSystemInternal + a supplied hint -> resolves.
+        let mut ctx = ServiceContext::new().with_tenant_id("tenant-internal");
+
+        let result = rt.enforce_tenant(&mut ctx);
+
+        assert!(result.is_ok());
+        assert!(ctx.canonical_tenant().is_some());
+    }
+
     // -- authorization_provider accessor (CORE-015 / AC-10) ----------------
 
     #[test]
@@ -520,6 +613,7 @@ mod tests {
             DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
+            TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
         );
 
         let result = rt.authorization_provider();

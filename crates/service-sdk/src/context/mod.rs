@@ -7,7 +7,7 @@ use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::CrossTenantPermit;
+use crate::runtime::{CanonicalTenant, CrossTenantPermit};
 
 /// A service context that propagates across service calls for tracing, tenant isolation,
 /// and other cross-cutting concerns.
@@ -46,7 +46,10 @@ use crate::runtime::CrossTenantPermit;
 /// passing to both an interceptor chain and an inner handler in the same call.
 #[derive(Clone)]
 pub struct ServiceContext {
-    /// The tenant ID.
+    /// A caller-supplied tenant hint — a non-authoritative ingress value only
+    /// (CORE-008A AD-011). It is a resolver *input*, never the enforced tenant;
+    /// read it via [`ServiceContext::tenant_hint`]. The authoritative value,
+    /// once resolved, is [`ServiceContext::canonical_tenant`].
     pub tenant_id: Option<String>,
     /// The correlation ID.
     pub correlation_id: Option<String>,
@@ -66,6 +69,10 @@ pub struct ServiceContext {
     pub security: Option<Arc<SecurityContext>>,
     /// Attached logger, propagated from `Runtime` via `Runtime::logger()`, if any.
     pub logger: Option<Arc<KITLogger>>,
+    /// The authoritative, resolver-produced canonical tenant (CORE-008A AD-011).
+    /// Set ONLY via [`ServiceContext::set_resolved_tenant`] (`pub(crate)`,
+    /// called by `RuntimeInner::enforce_tenant`) — there is no public setter.
+    resolved_tenant: Option<CanonicalTenant>,
 }
 
 impl ServiceContext {
@@ -85,6 +92,7 @@ impl ServiceContext {
             cancellation_token: None,
             security: None,
             logger: None,
+            resolved_tenant: None,
         }
     }
 
@@ -253,6 +261,9 @@ impl ServiceContext {
     ///
     /// # Returns
     /// `true` if a tenant ID is set, `false` otherwise
+    #[deprecated(
+        note = "use canonical_tenant() for the enforced value or tenant_hint() for the raw ingress value"
+    )]
     pub fn has_tenant(&self) -> bool {
         self.tenant_id.is_some()
     }
@@ -261,8 +272,41 @@ impl ServiceContext {
     ///
     /// # Returns
     /// The tenant ID if set, or `None` if not set
+    #[deprecated(
+        note = "use canonical_tenant() for the enforced value or tenant_hint() for the raw ingress value"
+    )]
     pub fn tenant_id(&self) -> Option<&str> {
         self.tenant_id.as_deref()
+    }
+
+    /// Returns the non-authoritative, caller-supplied tenant hint (CORE-008A
+    /// AD-011) — the honest name for the ingress value carried by `tenant_id`.
+    /// This is a resolver *input*; it is never the enforced tenant. Use
+    /// [`ServiceContext::canonical_tenant`] for the authoritative value.
+    pub fn tenant_hint(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
+    }
+
+    /// `true` if a caller-supplied tenant hint is present. See
+    /// [`ServiceContext::tenant_hint`].
+    pub fn has_tenant_hint(&self) -> bool {
+        self.tenant_id.is_some()
+    }
+
+    /// Returns the authoritative, resolver-produced canonical tenant
+    /// (CORE-008A AD-011), or `None` if `RuntimeInner::enforce_tenant` has not
+    /// run for this context yet. This is the ONLY value enforcement and
+    /// cross-tenant checks read.
+    pub fn canonical_tenant(&self) -> Option<&CanonicalTenant> {
+        self.resolved_tenant.as_ref()
+    }
+
+    /// Sets the resolved canonical tenant. The sole writer is
+    /// `RuntimeInner::enforce_tenant` — there is no public mutator, so a
+    /// resolved tenant is immutable for the duration of an operation
+    /// (CORE-008A AD-004/AD-011, FR-014).
+    pub(crate) fn set_resolved_tenant(&mut self, t: CanonicalTenant) {
+        self.resolved_tenant = Some(t);
     }
 
     /// Gets the correlation ID.
@@ -319,6 +363,7 @@ impl std::fmt::Debug for ServiceContext {
             .field("cancellation_token", &self.cancellation_token)
             .field("security", &self.security)
             .field("logger", &self.logger.is_some())
+            .field("resolved_tenant", &self.resolved_tenant)
             .finish()
     }
 }
@@ -408,5 +453,56 @@ mod tests {
         use kitlogger::KITLogger;
         let ctx = ServiceContext::new().with_logger(Arc::new(KITLogger::default()));
         assert!(ctx.logger().is_some());
+    }
+
+    // -- CORE-008A Phase 2 (TASK-006): canonical tenant on ServiceContext --
+
+    #[test]
+    fn canonical_tenant_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert!(ctx.canonical_tenant().is_none());
+    }
+
+    #[test]
+    fn set_resolved_tenant_makes_canonical_tenant_available() {
+        use crate::runtime::{TenantEnforcementMode, TenantResolver};
+
+        let resolver = TenantResolver::new(TenantEnforcementMode::AllowSystemInternal);
+        let canonical = resolver
+            .resolve(None, Some("tenant-a"))
+            .expect("AllowSystemInternal + hint resolves");
+
+        let mut ctx = ServiceContext::new();
+        ctx.set_resolved_tenant(canonical);
+
+        assert!(ctx.canonical_tenant().is_some());
+    }
+
+    #[test]
+    fn tenant_hint_matches_legacy_tenant_id_field() {
+        let ctx = ServiceContext::new().with_tenant_id("tenant-x");
+
+        assert_eq!(ctx.tenant_hint(), Some("tenant-x"));
+        assert!(ctx.has_tenant_hint());
+
+        #[allow(deprecated)]
+        {
+            assert_eq!(ctx.tenant_id(), Some("tenant-x"));
+            assert!(ctx.has_tenant());
+        }
+    }
+
+    #[test]
+    fn tenant_hint_is_none_by_default_matching_legacy() {
+        let ctx = ServiceContext::new();
+
+        assert_eq!(ctx.tenant_hint(), None);
+        assert!(!ctx.has_tenant_hint());
+
+        #[allow(deprecated)]
+        {
+            assert_eq!(ctx.tenant_id(), None);
+            assert!(!ctx.has_tenant());
+        }
     }
 }
