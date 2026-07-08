@@ -200,6 +200,7 @@ async fn test_context_explicit_carry() {
 }
 
 #[tokio::test]
+#[allow(deprecated)]
 async fn test_tenant_isolation() {
     let a = ServiceContext::new().with_tenant_id("tenant-a");
     let b = ServiceContext::new().with_tenant_id("tenant-b");

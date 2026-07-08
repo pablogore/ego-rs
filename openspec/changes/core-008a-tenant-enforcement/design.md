@@ -158,7 +158,11 @@ capability-token pattern (`permit.rs`: private constructor, trusted-module-only)
 a value whose mere existence is proof it passed the D2 policy.
 
 Rejected: public constructor / public fields (would let any holder assert an
-unvalidated tenant — the exact `ServiceContext.tenant_id` hole this change closes).
+unvalidated tenant into the *canonical* value — the same class of hole
+`ServiceContext.tenant_id` has as a hint field. Wording correction,
+code-review fix: AD-011 deliberately keeps `tenant_id` itself `pub` as a
+non-authoritative hint — see AD-011's transition rule — so this AD closes
+the hole for the *canonical* value, not for the raw hint field's visibility).
 
 Satisfies: **FR-008**.
 
@@ -818,6 +822,20 @@ change):**
    resolved and validated by the time a request reaches the application layer;
    enforcing it at the data layer (e.g. `WHERE tenant_id = $1` filtering) is a
    distinct, unscheduled follow-up.
+6. `TenantResolver::resolve`'s hot-path allocation (code-review finding,
+   deliberately NOT fixed here) — every successful resolution re-validates
+   and re-allocates a `TenantId`/`String` from `Principal.tenant_id`, even
+   though the same bytes already exist as an owned `String` on `Principal`.
+   `resolve()`'s `&SecurityContext` shared-reference signature makes this
+   allocation structurally unavoidable without a real API change (e.g.
+   `Principal.tenant_id` becoming an `Arc<str>`-backed `TenantId`, or
+   `resolve()` consuming an owned `SecurityContext`) — and `Principal` is
+   `security-sdk`'s type, not `service-sdk`'s, so that change is out of this
+   AD's scope. Left as a named follow-up rather than reopening
+   `security-sdk`'s `Principal` shape unilaterally from within CORE-008A.
+   Tracked in [ego-rs#139](https://github.com/pablogore/ego-rs/issues/139) —
+   scoping confirmed it touches 4 crates (`security-sdk`, `security-jwt`,
+   `testkit`, `service-sdk`), not just `security-sdk`.
 
 None of these is an open architectural question; each has a settled direction and a
 named future home.

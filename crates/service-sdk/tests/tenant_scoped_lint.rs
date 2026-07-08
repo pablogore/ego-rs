@@ -6,16 +6,32 @@
 //! participant (this project's Strict TDD test command, already the exact
 //! gate `.gitlab-ci.yml`'s `test` stage runs), not an unenforced shell script.
 //!
+//! # AST-based, not line-based (code-review fix)
+//!
+//! The original version of this test matched `#[operation]` immediately
+//! preceding a method and scanned that SAME item's body for tenant
+//! identifiers. That structurally could never catch anything real: every
+//! `#[operation]` in this codebase's convention is declared on a bodyless
+//! trait method (`;`-terminated) — see `crates/service-sdk/examples/order_service.rs`
+//! — while the actual logic lives in a separate, unattributed
+//! `impl Trait for Struct` block the old scanner never visited. The
+//! "zero violations" result was vacuous, not a guarantee.
+//!
+//! This version parses each file with `syn` and does two passes: (1) collect,
+//! per trait, which `#[operation]` methods are also `#[tenant_scoped]`; (2)
+//! for every `impl Trait for X` block, check each method's REAL body — the
+//! one that actually runs — against pass 1's classification for that trait.
+//!
 //! # Known limitation (explicit, not hidden — AD-007)
 //!
-//! This is an **identifier-name heuristic**, not a security audit. It only
-//! catches `#[operation]` methods that reference a tenant-related identifier
-//! **directly in their own body** (`tenant_hint`, `canonical_tenant`,
-//! `TenantId`, or an `ExecutionContext`-style `.tenant_id(` accessor call).
-//! An operation that touches tenant-scoped data through an indirect path —
-//! e.g. a repository or projection call that filters by tenant internally
-//! without the operation itself naming a tenant identifier — produces a
-//! **false negative** this detector cannot see. This is an accepted
+//! This is still an **identifier-name heuristic**, not a security audit. It
+//! flags an impl method only when its body references a tenant-related
+//! identifier directly (`tenant_hint`, `canonical_tenant`, `TenantId`,
+//! `tenant_id`) AND its trait's `#[operation]` declaration lacks
+//! `#[tenant_scoped]`. An operation that touches tenant-scoped data through
+//! an indirect path (e.g. a repository call that filters by tenant
+//! internally, several calls removed from any of these identifiers) produces
+//! a **false negative** this detector cannot see. This is an accepted
 //! best-effort tradeoff during the migration window (AD-007); the long-term
 //! fix is the secure-by-default flip already recorded as a design.md
 //! follow-up, not a progressively stronger heuristic here. Passing this test
@@ -33,14 +49,17 @@
 //!
 //! Run with: cargo test -p ego-service-sdk tenant_scoped_lint
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Identifiers that indicate an operation body reads tenant-related state.
+use syn::visit::Visit;
+use syn::{Item, ItemImpl, ItemTrait, TraitItem};
+
+/// Identifiers that indicate a method body reads tenant-related state.
 /// Deliberately narrow (see module doc's "Known limitation") — a broader net
 /// (e.g. bare `"tenant"`) would produce false *positives* against unrelated
 /// code, which would break this test's own "zero violations" gate.
-const TENANT_IDENTIFIERS: [&str; 4] =
-    ["tenant_hint", "canonical_tenant", "TenantId", ".tenant_id("];
+const TENANT_IDENTIFIERS: [&str; 4] = ["tenant_hint", "canonical_tenant", "TenantId", "tenant_id"];
 
 struct Violation {
     location: String,
@@ -83,113 +102,124 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Scans `source` for `#[operation]`-annotated methods that reference a
-/// tenant identifier in their body without a `#[tenant_scoped]` attribute on
-/// the same method. Line-based, not a full parse — a deliberately simple
-/// heuristic consistent with this test's documented best-effort scope.
-fn find_violations_in_source(source: &str, file_label: &str) -> Vec<Violation> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut violations = Vec::new();
-    let mut i = 0;
+fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
 
-    while i < lines.len() {
-        if !lines[i].trim_start().starts_with("#[operation]") {
-            i += 1;
-            continue;
-        }
-
-        // #[tenant_scoped] may appear immediately before or after #[operation]
-        // in the attribute cluster preceding the method signature.
-        let mut has_tenant_scoped = false;
-
-        let mut b = i;
-        while b > 0 {
-            let t = lines[b - 1].trim();
-            if t.starts_with("#[") || t.starts_with("///") || t.starts_with("//") {
-                if t.starts_with("#[tenant_scoped") {
-                    has_tenant_scoped = true;
+/// Walks `items`, recursing into inline `mod { ... }` bodies (external
+/// `mod foo;` declarations have no inline content and are not followed —
+/// this scan operates per already-collected file, not across the module
+/// tree), invoking `on_trait`/`on_impl` for every trait/impl item found.
+fn walk_items<'a>(
+    items: &'a [Item],
+    on_trait: &mut impl FnMut(&'a ItemTrait),
+    on_impl: &mut impl FnMut(&'a ItemImpl),
+) {
+    for item in items {
+        match item {
+            Item::Trait(t) => on_trait(t),
+            Item::Impl(i) => on_impl(i),
+            Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    walk_items(inner, on_trait, on_impl);
                 }
-                b -= 1;
-            } else {
-                break;
             }
+            _ => {}
         }
+    }
+}
 
-        // Scan forward for the method signature line (contains "fn ").
-        let mut sig_line_idx = None;
-        let mut f = i + 1;
-        while f < lines.len() && f - i <= 20 {
-            let t = lines[f].trim();
-            if t.starts_with("#[tenant_scoped") {
-                has_tenant_scoped = true;
-            }
-            if t.contains("fn ") {
-                sig_line_idx = Some(f);
-                break;
-            }
-            f += 1;
-        }
+/// Collects every identifier name appearing anywhere in a syntax subtree.
+/// Used instead of a raw string `contains` check on the body so formatting
+/// (line breaks, spacing around `.method(`) can never hide or fake a match.
+#[derive(Default)]
+struct IdentCollector {
+    found: HashSet<String>,
+}
 
-        let Some(sig_idx) = sig_line_idx else {
-            i += 1;
-            continue;
+impl<'ast> Visit<'ast> for IdentCollector {
+    fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+        self.found.insert(ident.to_string());
+    }
+}
+
+fn body_references_tenant_identifier(block: &syn::Block) -> bool {
+    let mut collector = IdentCollector::default();
+    collector.visit_block(block);
+    TENANT_IDENTIFIERS
+        .iter()
+        .any(|id| collector.found.contains(*id))
+}
+
+/// Pass 1: `trait_name -> method_name -> has_tenant_scoped`, for every method
+/// carrying `#[operation]` (the only methods the runtime treats as tenant
+/// classification targets at all).
+fn collect_trait_operations(files: &[(String, syn::File)]) -> HashMap<String, HashMap<String, bool>> {
+    let mut trait_ops: HashMap<String, HashMap<String, bool>> = HashMap::new();
+    for (_, file) in files {
+        let mut on_trait = |t: &ItemTrait| {
+            let entry = trait_ops.entry(t.ident.to_string()).or_default();
+            for item in &t.items {
+                if let TraitItem::Fn(m) = item {
+                    if has_attr(&m.attrs, "operation") {
+                        entry.insert(m.sig.ident.to_string(), has_attr(&m.attrs, "tenant_scoped"));
+                    }
+                }
+            }
         };
+        let mut on_impl = |_: &ItemImpl| {};
+        walk_items(&file.items, &mut on_trait, &mut on_impl);
+    }
+    trait_ops
+}
 
-        let fn_name = lines[sig_idx]
-            .split("fn ")
-            .nth(1)
-            .and_then(|s| s.split(['(', '<']).next())
-            .unwrap_or("<unknown>")
-            .trim()
-            .to_string();
+/// Pass 2: for every `impl Trait for X` method whose trait marks it
+/// `#[operation]` but NOT `#[tenant_scoped]` (per pass 1), check the method's
+/// real body — the one that actually executes — for a tenant identifier.
+fn find_violations(files: &[(String, syn::File)]) -> Vec<Violation> {
+    let trait_ops = collect_trait_operations(files);
+    let mut violations = Vec::new();
 
-        // Capture the body between the signature's opening `{` and its
-        // matching `}`. A `;` reached before any `{` means a bodyless trait
-        // declaration (today's only real production shape) — nothing to scan.
-        let mut depth = 0i32;
-        let mut started = false;
-        let mut body = String::new();
-        let mut has_body = false;
-
-        'outer: for line in &lines[sig_idx..] {
-            for ch in line.chars() {
-                if !started {
-                    if ch == ';' {
-                        break 'outer;
+    for (label, file) in files {
+        let mut on_trait = |_: &ItemTrait| {};
+        let mut on_impl = |i: &ItemImpl| {
+            let Some((_, trait_path, _)) = &i.trait_ else {
+                return; // inherent impl, not a trait impl — nothing to classify
+            };
+            let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
+                return;
+            };
+            let Some(methods) = trait_ops.get(&trait_name) else {
+                return; // not a trait this scan has any #[operation] record for
+            };
+            for item in &i.items {
+                if let syn::ImplItem::Fn(m) = item {
+                    let method_name = m.sig.ident.to_string();
+                    let Some(&is_tenant_scoped) = methods.get(&method_name) else {
+                        continue; // not an #[operation] method on this trait
+                    };
+                    if !is_tenant_scoped && body_references_tenant_identifier(&m.block) {
+                        violations.push(Violation {
+                            location: format!("{label}: impl {trait_name} fn {method_name}"),
+                        });
                     }
-                    if ch == '{' {
-                        started = true;
-                        has_body = true;
-                        depth = 1;
-                    }
-                    continue;
                 }
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break 'outer;
-                        }
-                    }
-                    _ => {}
-                }
-                body.push(ch);
             }
-            body.push('\n');
-        }
-
-        if has_body && !has_tenant_scoped && TENANT_IDENTIFIERS.iter().any(|id| body.contains(id))
-        {
-            violations.push(Violation {
-                location: format!("{file_label}:{} fn {}", sig_idx + 1, fn_name),
-            });
-        }
-
-        i = sig_idx + 1;
+        };
+        walk_items(&file.items, &mut on_trait, &mut on_impl);
     }
 
     violations
+}
+
+/// Test convenience: parses a single source string (trait + its impl,
+/// together, as real fixtures in this codebase always are) and scans it.
+fn find_violations_in_source(source: &str, label: &str) -> Vec<Violation> {
+    let file = match syn::parse_file(source) {
+        Ok(f) => f,
+        Err(e) => panic!("tenant_scoped_lint fixture failed to parse: {e}"),
+    };
+    find_violations(&[(label.to_string(), file)])
 }
 
 #[test]
@@ -198,16 +228,16 @@ fn tenant_scoped_lint_workspace_has_zero_violations() {
     let root = workspace_root(&manifest_dir);
     let crates_dir = root.join("crates");
 
-    let mut violations = Vec::new();
+    let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&crates_dir) {
         for entry in entries.flatten() {
             let src_dir = entry.path().join("src");
             if !src_dir.is_dir() {
                 continue;
             }
-            let mut files = Vec::new();
-            collect_rs_files(&src_dir, &mut files);
-            for file in files {
+            let mut rs_files = Vec::new();
+            collect_rs_files(&src_dir, &mut rs_files);
+            for file in rs_files {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -216,22 +246,27 @@ fn tenant_scoped_lint_workspace_has_zero_violations() {
                     .unwrap_or(&file)
                     .display()
                     .to_string();
-                violations.extend(find_violations_in_source(&content, &label));
+                let Ok(parsed) = syn::parse_file(&content) else {
+                    continue; // not this test's job to report unrelated parse errors
+                };
+                files.push((label, parsed));
             }
         }
     }
 
     assert!(
-        !violations.is_empty() || crates_dir.is_dir(),
+        !files.is_empty(),
         "workspace scan found no crates under {} — the scan is silently \
          scanning zero files (CWD/workspace-root resolution is broken)",
         crates_dir.display()
     );
 
+    let violations = find_violations(&files);
+
     assert!(
         violations.is_empty(),
-        "found #[operation] method(s) referencing a tenant identifier without \
-         #[tenant_scoped] (AD-007 fail-open mitigation):\n{}",
+        "found #[operation] impl method(s) referencing a tenant identifier without \
+         #[tenant_scoped] on the trait declaration (AD-007 fail-open mitigation):\n{}",
         violations
             .iter()
             .map(|v| v.location.as_str())
@@ -240,18 +275,26 @@ fn tenant_scoped_lint_workspace_has_zero_violations() {
     );
 }
 
-/// Proves the detector is not inert — i.e. it doesn't unconditionally return
-/// an empty violation list regardless of what it scans (the "fails when
-/// pointed at a deliberately-unmarked tenant-touching fixture" requirement).
-/// The fixture is an in-memory literal, not a file under `crates/*/src/`, so
-/// it can never itself become a real workspace violation.
+/// The regression test for the original defect: a bodyless trait declaration
+/// (today's only real production shape for `#[operation]`) paired with a
+/// SEPARATE `impl Trait for Struct` block carrying the real, tenant-touching
+/// body. The old line-based scanner only ever looked at the trait
+/// declaration and could never see this. This must be flagged.
 #[test]
-fn tenant_scoped_lint_detects_deliberately_unmarked_fixture() {
+fn tenant_scoped_lint_detects_violation_in_impl_block_not_trait_declaration() {
     let fixture = r#"
-        #[operation]
-        async fn leaks_tenant(&self, ctx: ServiceContext) -> Result<(), Err> {
-            let hint = ctx.tenant_hint();
-            Ok(())
+        trait LeakyService {
+            #[operation]
+            async fn leaks_tenant(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        struct LeakyServiceImpl;
+
+        impl LeakyService for LeakyServiceImpl {
+            async fn leaks_tenant(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let hint = ctx.tenant_hint();
+                Ok(())
+            }
         }
     "#;
 
@@ -259,23 +302,32 @@ fn tenant_scoped_lint_detects_deliberately_unmarked_fixture() {
 
     assert!(
         !violations.is_empty(),
-        "detector must flag an #[operation] method referencing tenant_hint() \
-         without #[tenant_scoped] — an empty result here would mean the \
-         detector silently does nothing"
+        "detector must flag an #[operation] impl method referencing tenant_hint() \
+         in its real body when the trait declaration lacks #[tenant_scoped] — the \
+         exact shape every real #[operation] takes in this codebase"
     );
 }
 
-/// Control case: the same tenant-touching body, correctly marked, must NOT
-/// be flagged — proves the detector isn't so broad it would block Phase 6's
+/// Control case: the same tenant-touching impl body, but the trait
+/// declaration correctly marks the method `#[tenant_scoped]` — must NOT be
+/// flagged, proving the detector isn't so broad it would block legitimate
 /// marker adoption.
 #[test]
 fn tenant_scoped_lint_allows_marked_operation() {
     let fixture = r#"
-        #[operation]
-        #[tenant_scoped]
-        async fn reads_tenant(&self, ctx: ServiceContext) -> Result<(), Err> {
-            let hint = ctx.tenant_hint();
-            Ok(())
+        trait ScopedService {
+            #[operation]
+            #[tenant_scoped]
+            async fn reads_tenant(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        struct ScopedServiceImpl;
+
+        impl ScopedService for ScopedServiceImpl {
+            async fn reads_tenant(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let hint = ctx.tenant_hint();
+                Ok(())
+            }
         }
     "#;
 
@@ -283,19 +335,28 @@ fn tenant_scoped_lint_allows_marked_operation() {
 
     assert!(
         violations.is_empty(),
-        "a #[tenant_scoped]-marked operation must never be flagged"
+        "a #[tenant_scoped]-marked operation must never be flagged, even though its \
+         impl body references a tenant identifier"
     );
 }
 
-/// Control case: an unmarked operation whose body does NOT reference any
-/// tenant identifier must NOT be flagged — proves the heuristic doesn't
+/// Control case: an unmarked operation whose impl body does NOT reference
+/// any tenant identifier must NOT be flagged — proves the heuristic doesn't
 /// over-fire on ordinary, genuinely tenant-less operations.
 #[test]
 fn tenant_scoped_lint_allows_unmarked_non_tenant_operation() {
     let fixture = r#"
-        #[operation]
-        async fn health_check(&self, ctx: ServiceContext) -> Result<(), Err> {
-            Ok(())
+        trait HealthService {
+            #[operation]
+            async fn health_check(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        struct HealthServiceImpl;
+
+        impl HealthService for HealthServiceImpl {
+            async fn health_check(&self, ctx: ServiceContext) -> Result<(), Err> {
+                Ok(())
+            }
         }
     "#;
 
@@ -303,24 +364,127 @@ fn tenant_scoped_lint_allows_unmarked_non_tenant_operation() {
 
     assert!(
         violations.is_empty(),
-        "an unmarked operation with no tenant-identifier reference must not be flagged"
+        "an unmarked operation whose impl body has no tenant-identifier reference \
+         must not be flagged"
     );
 }
 
-/// A bodyless trait method declaration (today's only real production shape
-/// for `#[operation]`) must never be scanned as if it had a body — proves
-/// the `;`-before-`{` bodyless-declaration guard works.
+/// The trait declaration itself is bodyless (`;`-terminated) and is never
+/// scanned for tenant identifiers — only its `#[tenant_scoped]` presence is
+/// read from it. Even if the trait's surrounding text mentions a tenant
+/// identifier (e.g. in a doc comment, or a return type named `TenantId`),
+/// that must never produce a violation on its own.
 #[test]
-fn tenant_scoped_lint_ignores_bodyless_trait_declaration() {
+fn tenant_scoped_lint_ignores_trait_declaration_text_itself() {
     let fixture = r#"
-        #[operation]
-        async fn scoped_op(&self, ctx: ServiceContext) -> Result<String, Err>;
+        trait LookupService {
+            /// Returns the canonical_tenant for diagnostics.
+            #[operation]
+            async fn lookup(&self, ctx: ServiceContext) -> Result<TenantId, Err>;
+        }
+
+        struct LookupServiceImpl;
+
+        impl LookupService for LookupServiceImpl {
+            async fn lookup(&self, ctx: ServiceContext) -> Result<TenantId, Err> {
+                Ok(default_tenant_id())
+            }
+        }
     "#;
 
     let violations = find_violations_in_source(fixture, "fixture");
 
     assert!(
         violations.is_empty(),
-        "a bodyless trait method declaration must never be scanned as a violation"
+        "the trait declaration's doc comment and return type must never themselves \
+         trigger a violation — only the impl body's own identifiers count, and this \
+         impl body references no TENANT_IDENTIFIERS token"
+    );
+}
+
+/// A method appearing only as an inherent impl (no trait), or on a trait this
+/// scan has no `#[operation]` record for, must be skipped rather than
+/// guessed at — avoids false positives on unrelated code.
+#[test]
+fn tenant_scoped_lint_ignores_inherent_impl_and_untracked_traits() {
+    let fixture = r#"
+        struct Standalone;
+
+        impl Standalone {
+            async fn touches_tenant_hint(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let hint = ctx.tenant_hint();
+                Ok(())
+            }
+        }
+
+        trait UnrelatedTrait {
+            async fn plain_method(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        impl UnrelatedTrait for Standalone {
+            async fn plain_method(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let hint = ctx.tenant_hint();
+                Ok(())
+            }
+        }
+    "#;
+
+    let violations = find_violations_in_source(fixture, "fixture");
+
+    assert!(
+        violations.is_empty(),
+        "an inherent impl method, and a method on a trait with no #[operation] \
+         methods recorded, must not be flagged — this scan only classifies methods \
+         the framework itself treats as operations"
+    );
+}
+
+// -- CORE-008A Phase 6 (TASK-029) — FR-007 structural transport-independence --
+
+/// Identifiers that would indicate a transport dependency leaking into the
+/// runtime's tenant-resolution/enforcement path. Deliberately narrow, same
+/// best-effort spirit as `TENANT_IDENTIFIERS` above — this is a structural
+/// smoke check, not a full dependency-graph audit.
+const TRANSPORT_IDENTIFIERS: [&str; 6] =
+    ["axum", "tonic", "hyper", "HeaderMap", "grpc", "http::header"];
+
+/// FR-007: the runtime's tenant-resolution seam (`runtime/tenant.rs`) and the
+/// enforcement path it feeds (`runtime_builder.rs`) MUST reference no
+/// transport-specific type or header/metadata extraction logic — only an
+/// already-resolved tenant value. Extends TASK-014's scan test rather than
+/// adding a third scanning mechanism (ladder rung 2: reuse what's already
+/// here). This check is a plain text scan, unrelated to the AST-based
+/// #[tenant_scoped] classification above.
+#[test]
+fn runtime_tenant_enforcement_path_has_no_transport_dependency() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root(&manifest_dir);
+
+    let files = [
+        root.join("crates/service-sdk/src/runtime/tenant.rs"),
+        root.join("crates/service-sdk/src/runtime/runtime_builder.rs"),
+    ];
+
+    let mut found_any_file = false;
+    for file in &files {
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        found_any_file = true;
+        for ident in TRANSPORT_IDENTIFIERS {
+            assert!(
+                !content.contains(ident),
+                "found transport-specific identifier {ident:?} in {} — the runtime layer \
+                 must carry no transport dependency (FR-007)",
+                file.display()
+            );
+        }
+    }
+
+    assert!(
+        found_any_file,
+        "neither runtime/tenant.rs nor runtime_builder.rs was found under {} — \
+         the scan is silently scanning zero files",
+        root.display()
     );
 }

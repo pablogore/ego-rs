@@ -23,6 +23,12 @@ tracing-subscriber = "0.3"
 mockall = "0.12"
 insta = { version = "1", features = ["filters"] }
 trybuild = "1"
+# tenant_scoped_lint.rs (CORE-008A TASK-014, code-review fix): AST-based scan
+# instead of line-based text matching. Already present transitively via
+# ego-service-sdk-macros's own syn dependency; pinned here directly so the
+# lint's parsing is explicit and version-matched.
+syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+proc-macro2 = "1.0"
 # Test-only: capture-buffer exporter construction for TASK-008/TASK-022
 # (KITLogger::with_exporter_and_format takes Arc<console_exporter::ConsoleExporterImpl>;
 # kitlogger's crate root re-exports neither type it needs, per design.md's grounding finding).

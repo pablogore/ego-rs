@@ -257,12 +257,15 @@ impl ServiceContext {
 
     /// Checks if cross-tenant access is allowed for *some* destination.
     ///
-    /// Kept for source compatibility with existing callers; prefer
-    /// [`ServiceContext::is_cross_tenant_allowed_for`] to check a specific
-    /// destination (CORE-008A AD-008/TASK-019).
-    ///
     /// # Returns
     /// `true` if a cross-tenant grant is present, `false` otherwise
+    #[deprecated(
+        note = "checks 'is any permit attached', not 'is access allowed to the tenant \
+                actually being accessed' — gating a real access decision on this method \
+                instead of is_cross_tenant_allowed_for(destination) would let a permit \
+                for one destination authorize access to a different one. Use \
+                is_cross_tenant_allowed_for(destination) instead (CORE-008A AD-008)."
+    )]
     pub fn is_cross_tenant_allowed(&self) -> bool {
         self.allow_cross_tenant.is_some()
     }
@@ -424,31 +427,16 @@ mod tests {
     }
 
     // -- CORE-008A Phase 4 (TASK-018/019): destination-scoped cross-tenant --
+    // AllowCrossTenant/authenticated_ctx moved to crate::test_support
+    // (code-review fix: this copy had already drifted, missing the
+    // DenyCrossTenant variant runtime_builder.rs's copy has).
 
     use ego_domain::context::TenantId;
-    use ego_security_sdk::authorization::{AccessRequest, AuthorizationDecision, AuthorizationProvider};
     use crate::runtime::RuntimeInner;
-
-    struct AllowCrossTenant;
-
-    #[async_trait::async_trait]
-    impl AuthorizationProvider for AllowCrossTenant {
-        async fn authorize(
-            &self,
-            _: &Principal,
-            _: &AccessRequest,
-            _: &SecurityContext,
-        ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Allow)
-        }
-    }
-
-    fn authenticated_ctx() -> ServiceContext {
-        let principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-        ServiceContext::new().with_security(Arc::new(SecurityContext::empty(principal)))
-    }
+    use crate::test_support::{authenticated_ctx, AllowCrossTenant};
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn with_cross_tenant_access_sets_flag() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
         let destination = TenantId::new("tenant-b").unwrap();
@@ -461,6 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn clone_preserves_cross_tenant_flag() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
         let destination = TenantId::new("tenant-b").unwrap();

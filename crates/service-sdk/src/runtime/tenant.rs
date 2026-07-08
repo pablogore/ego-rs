@@ -125,10 +125,14 @@ impl TenantResolver {
                 // (a) Authenticated but no Principal tenant claim — a caller-supplied
                 // hint is never trusted as a substitute (D2 gap fix).
                 None => Err(SecurityError::MissingContext),
-                // (b) Authenticated, hint absent or agreeing — Principal is canonical.
+                // (b) Authenticated, hint absent/blank or agreeing — Principal is
+                // canonical. A blank hint (code-review fix) is treated the same as
+                // an absent one: a transport binding that defaults a missing header
+                // to `Some(String::new())` instead of `None` must not spuriously
+                // mismatch against a real Principal tenant.
                 Some(principal_tenant) => match supplied_tenant {
                     None => Ok(CanonicalTenant::scoped(Self::validated(principal_tenant)?)),
-                    Some(hint) if hint == principal_tenant => {
+                    Some(hint) if hint.trim().is_empty() || hint == principal_tenant => {
                         Ok(CanonicalTenant::scoped(Self::validated(principal_tenant)?))
                     }
                     // (c) Authenticated, hint disagrees — hard error, never a silent pick.
@@ -230,6 +234,23 @@ mod tests {
         let result = resolver.resolve(Some(&security), Some("tenant-a"));
 
         let canonical = result.expect("expected Ok(Scoped(\"tenant-a\"))");
+        assert_eq!(
+            canonical.tenant_id().map(TenantId::as_str),
+            Some("tenant-a")
+        );
+    }
+
+    // Branch (b), code-review fix — authenticated, hint is a blank string (as a
+    // transport binding might produce for a missing header): treated as absent,
+    // never as a mismatch against the Principal's real tenant.
+    #[test]
+    fn resolve_authenticated_blank_hint_resolves_to_principal_tenant() {
+        let resolver = TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly);
+        let security = security_with_tenant(Some("tenant-a"));
+
+        let result = resolver.resolve(Some(&security), Some(""));
+
+        let canonical = result.expect("expected Ok(Scoped(\"tenant-a\")), not TenantMismatch");
         assert_eq!(
             canonical.tenant_id().map(TenantId::as_str),
             Some("tenant-a")

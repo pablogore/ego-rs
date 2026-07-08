@@ -7,19 +7,11 @@
 //! mutable state between concurrent resolutions, idempotent on retry, and
 //! immutable/non-divergent across a `ServiceContext` clone.
 
-use std::sync::Arc;
-
-use ego_security_sdk::context::SecurityContext;
-use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::RuntimeBuilder;
 
-fn authenticated_ctx(tenant: &str) -> ServiceContext {
-    let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-    principal.tenant_id = Some(tenant.to_string());
-    let security = SecurityContext::empty(principal);
-    ServiceContext::new().with_security(Arc::new(security))
-}
+mod common;
+use common::authenticated_ctx;
 
 fn resolved_tenant_id(ctx: &ServiceContext) -> Option<&str> {
     ctx.canonical_tenant().and_then(|c| c.tenant_id()).map(|t| t.as_str())
@@ -35,12 +27,12 @@ async fn concurrent_operations_with_different_tenants_do_not_cross_contaminate()
     let inner_b = runtime.inner().clone();
 
     let handle_a = tokio::spawn(async move {
-        let mut ctx = authenticated_ctx("tenant-a");
+        let mut ctx = authenticated_ctx(Some("tenant-a"));
         inner_a.enforce_tenant(&mut ctx).expect("tenant-a resolves");
         resolved_tenant_id(&ctx).map(str::to_owned)
     });
     let handle_b = tokio::spawn(async move {
-        let mut ctx = authenticated_ctx("tenant-b");
+        let mut ctx = authenticated_ctx(Some("tenant-b"));
         inner_b.enforce_tenant(&mut ctx).expect("tenant-b resolves");
         resolved_tenant_id(&ctx).map(str::to_owned)
     });
@@ -60,14 +52,14 @@ fn retried_call_resolves_to_the_identical_canonical_tenant() {
     let runtime = RuntimeBuilder::new().build();
     let inner = runtime.inner();
 
-    let mut first_attempt = authenticated_ctx("tenant-a");
+    let mut first_attempt = authenticated_ctx(Some("tenant-a"));
     inner
         .enforce_tenant(&mut first_attempt)
         .expect("first attempt resolves");
 
     // Retry: a fresh ServiceContext, same Principal/tenant, as a real
     // retried call would construct.
-    let mut retried_attempt = authenticated_ctx("tenant-a");
+    let mut retried_attempt = authenticated_ctx(Some("tenant-a"));
     inner
         .enforce_tenant(&mut retried_attempt)
         .expect("retried attempt resolves");
@@ -82,7 +74,7 @@ fn retried_call_resolves_to_the_identical_canonical_tenant() {
 // TASK-022: `ServiceContext` clone behavior under tenant resolution.
 #[test]
 fn clone_before_resolution_neither_copy_has_a_canonical_tenant() {
-    let ctx = authenticated_ctx("tenant-a");
+    let ctx = authenticated_ctx(Some("tenant-a"));
     let cloned = ctx.clone();
 
     assert!(ctx.canonical_tenant().is_none());
@@ -92,7 +84,7 @@ fn clone_before_resolution_neither_copy_has_a_canonical_tenant() {
 #[test]
 fn clone_after_resolution_carries_the_same_canonical_tenant_and_cannot_diverge() {
     let runtime = RuntimeBuilder::new().build();
-    let mut ctx = authenticated_ctx("tenant-a");
+    let mut ctx = authenticated_ctx(Some("tenant-a"));
     runtime
         .inner()
         .enforce_tenant(&mut ctx)

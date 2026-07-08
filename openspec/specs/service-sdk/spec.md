@@ -73,17 +73,23 @@ Generated proxy methods MUST receive `ServiceContext` as an explicit parameter. 
 async fn <method>(&self, ctx: ServiceContext, request: <RequestType>) -> Result<<ResponseType>>
 ```
 
-Tenant enforcement MUST be called as `self.enforce_tenant(&ctx)?`. Interceptor hooks MUST
-receive the context explicitly: `interceptor.on_request(&ctx)`, `interceptor.on_response(&ctx)`,
-`interceptor.on_error(&ctx)`. No ambient read (`current()`) or scope wrap (`scope()`) is
-permitted inside the generated body.
+For an operation marked `#[tenant_scoped]`, tenant enforcement MUST be called as the fallible
+`rt.enforce_tenant(&mut ctx)?` (CORE-008A AD-009) — a `mut` binding is required because
+`enforce_tenant` is the sole writer of the context's resolver-derived canonical tenant on
+success. This call MUST be placed before the inner operation call, so the operation body is
+never entered when enforcement fails (FR-009). An operation with no `#[tenant_scoped]` marker
+keeps the pre-existing best-effort call, whose `Result` is discarded (D1's valid tenant-less
+system/single-tenant execution mode). Interceptor hooks MUST receive the context explicitly:
+`interceptor.on_request(&ctx)`, `interceptor.on_response(&ctx)`, `interceptor.on_error(&ctx)`.
+No ambient read (`current()`) or scope wrap (`scope()`) is permitted inside the generated body.
 
 #### Scenario: Generated proxy compiles with explicit ctx parameter
 
 - GIVEN a service trait annotated with the proxy derive macro
 - WHEN the macro expands the forwarding method
 - THEN the generated method accepts `ctx: ServiceContext` as the first user-visible parameter
-- AND the body calls `self.enforce_tenant(&ctx)` before forwarding the request
+- AND, for a `#[tenant_scoped]` method, the body calls `rt.enforce_tenant(&mut ctx)?` before
+  forwarding the request
 
 #### Scenario: Interceptors receive context from parameter, not ambient state
 
@@ -94,10 +100,14 @@ permitted inside the generated body.
 
 #### Scenario: Tenant enforcement behavior preserved
 
-- GIVEN a `ServiceContext` with `tenant_id = "tenant-a"`
+- GIVEN a `#[tenant_scoped]` operation and a `ServiceContext` whose authenticated `Principal`
+  has `tenant_id = "tenant-a"`
 - WHEN a proxy-generated method is called with that context
-- THEN `enforce_tenant` uses the tenant from the explicit `ctx` parameter
-- AND a context with a mismatched tenant returns the same enforcement error as before this change
+- THEN `enforce_tenant` derives the canonical tenant from the `Principal`, exposed via
+  `ctx.canonical_tenant()`, before the operation body runs
+- AND a context whose caller-supplied tenant hint disagrees with the Principal's tenant fails
+  the call with `SecurityError::TenantMismatch` before the operation body is entered — the
+  fallible check can actually prevent execution, not merely log or ignore the disagreement
 
 ---
 
@@ -424,9 +434,13 @@ a `ServiceContext`: it was given one explicitly. There is no fallback ambient me
 **INV-002 — Interceptor Order Preserved**: The interceptor chain execution order (`on_request`
 → handler → `on_response` / `on_error`) MUST be identical before and after this change.
 
-**INV-003 — Tenant Enforcement Preserved**: `enforce_tenant` MUST be called with the same
-`ServiceContext` that was passed to the proxy method. No tenant check may be skipped or
-reordered.
+**INV-003 — Tenant Enforcement Preserved**: for a `#[tenant_scoped]` operation, `enforce_tenant`
+MUST be called with the same `ServiceContext` that was passed to the proxy method, and it is a
+**fallible** check (CORE-008A AD-009, FR-009): on failure the operation body MUST NOT be
+entered — the caller observes the enforcement error as the outcome of the call. No tenant check
+may be skipped or reordered. (An operation with no `#[tenant_scoped]` marker keeps the
+pre-existing best-effort, non-blocking call — D1's valid tenant-less execution mode — and is
+unaffected by this invariant.)
 
 **INV-004 — Spawned Task Ownership**: Any asynchronous task created through `tokio::spawn`
 or equivalent MUST receive `ServiceContext` through ownership transfer, explicit parameter

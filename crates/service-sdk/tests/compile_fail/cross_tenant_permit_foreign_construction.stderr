@@ -1,7 +1,9 @@
-error[E0560]: struct `CrossTenantPermit` has no field named `_private`
- --> tests/compile_fail/cross_tenant_permit_foreign_construction.rs:5:34
-  |
-5 |     let _p = CrossTenantPermit { _private: () };
-  |                                  ^^^^^^^^ `CrossTenantPermit` does not have this field
-  |
-  = note: all struct fields are already assigned
+error[E0451]: fields `destination` and `issued_to` of struct `CrossTenantPermit` are private
+  --> tests/compile_fail/cross_tenant_permit_foreign_construction.rs:10:9
+   |
+ 9 |     let _p = CrossTenantPermit {
+   |              ----------------- in this type
+10 |         destination: ego_domain::context::TenantId::new("tenant-b").unwrap(),
+   |         ^^^^^^^^^^^ private field
+11 |         issued_to: ego_security_sdk::principal::SubjectId::new("alice").unwrap(),
+   |         ^^^^^^^^^ private field

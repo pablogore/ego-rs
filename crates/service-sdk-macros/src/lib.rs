@@ -232,16 +232,17 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         (ctx, call_args)
                     };
 
-                // CORE-008A TASK-009B: the context parameter's binding must be `mut` so
-                // `enforce_tenant(&mut ctx_param)` (both the unmarked path below and the
-                // future #[tenant_scoped] path, TASK-012) can borrow it mutably. Every
-                // other parameter keeps its plain binding.
+                // CORE-008A TASK-012: the context parameter's binding is `mut` only for
+                // `#[tenant_scoped]` methods, which call `enforce_tenant(&mut ctx_param)`.
+                // Unmarked operations no longer touch enforce_tenant at all (code-review
+                // fix) and must keep a plain binding — an unconditional `mut` here would
+                // produce an `unused_mut` warning on every unmarked operation.
                 let sig_params: Vec<proc_macro2::TokenStream> = arg_names
                     .iter()
                     .zip(arg_types.iter())
                     .enumerate()
                     .map(|(i, (name, ty))| {
-                        if Some(i) == ctx_param_idx {
+                        if Some(i) == ctx_param_idx && has_tenant_scoped {
                             quote! { mut #name: #ty }
                         } else {
                             quote! { #name: #ty }
@@ -367,17 +368,15 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         }
                     }
                 } else {
-                    // Upgrade from Weak each time. The authorization guard may have
-                    // already checked the runtime (and failed fast on Err), so by the
-                    // time we reach this point the upgrade will succeed or the guard
-                    // already returned. Either way, a fresh upgrade here is correct and
-                    // avoids lifetime conflicts with the scoped `__rt`/`__tenant_rt`
-                    // locals declared above.
-                    quote! {
-                        if let Some(rt) = self.runtime.upgrade() {
-                            let _ = rt.enforce_tenant(&mut #ctx_param);
-                        }
-                    }
+                    // Unmarked operations do not call enforce_tenant at all (code-review
+                    // fix, CORE-008A): the old best-effort call ran the real resolver and
+                    // silently populated `ctx.canonical_tenant()` for authenticated
+                    // requests even though the operation isn't tenant-scoped, and its
+                    // Result was discarded regardless — real work for a value nobody
+                    // consumes. Skipping the call entirely restores true "zero behavior
+                    // change" for unmarked ops (TASK-013), matching the pre-Phase-3
+                    // literal no-op.
+                    quote! {}
                 };
 
                 forwarding_methods.push(quote! {
@@ -407,6 +406,22 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 });
                 output_items.push(TraitItem::Fn(clean));
             } else {
+                // A #[tenant_scoped] method missing #[operation] must not fall through
+                // unstripped: the standalone `tenant_scoped` attribute macro would later
+                // fire its generic "must be inside a #[service] trait" error even though
+                // it genuinely is inside one, masking the real problem. Catch it here
+                // with a message that names the actual missing attribute.
+                let has_tenant_scoped_without_operation = method
+                    .attrs
+                    .iter()
+                    .any(|a| SdkAttr::detect(a) == Some(SdkAttr::TenantScoped));
+                if has_tenant_scoped_without_operation {
+                    let err = syn::Error::new_spanned(
+                        &method.sig.ident,
+                        "#[tenant_scoped] requires #[operation] on the same method",
+                    );
+                    return TokenStream::from(err.to_compile_error());
+                }
                 output_items.push(item.clone());
             }
         } else {
