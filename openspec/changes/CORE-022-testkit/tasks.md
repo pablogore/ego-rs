@@ -53,8 +53,8 @@ Decision needed before apply: Resolved — chained PRs, stacked-to-main
 
 ## Phase 6: Test Configuration (AD-5)
 
-- [ ] 6.1 **[RED]** In `crates/testkit/src/config.rs`: tests that `TestConfig::new().with_value(42u32).with_value("s".to_string())` collects both distinct-typed values without loss; `.set("k", json!(v))` is reflected only in `.provider()`'s JSON-subtree view and is a separate contract from `.with_value` (assert `.set()` alone leaves the typed-value collection empty). Tests fail. (The "observed via `resolve_config` by a real service" scenario is deferred to Phase 8, once `ServiceTestFixture` exists — do not fake DI here.)
-- [ ] 6.2 **[GREEN]** Implement `TestConfig` (`root: serde_json::Value`, `typed: Vec<(TypeId, Arc<dyn Any + Send + Sync>)>`), `with_value::<C>`, `set`, `provider()` → `ConfigurationProvider::from_value`. Re-export in `lib.rs`. Tests pass.
+- [x] 6.1 **[RED]** In `crates/testkit/src/config.rs`: tests that `TestConfig::new().with_value(42u32).with_value("s".to_string())` collects both distinct-typed values without loss; `.set("k", json!(v))` is reflected only in `.provider()`'s JSON-subtree view and is a separate contract from `.with_value` (assert `.set()` alone leaves the typed-value collection empty). Tests fail. (The "observed via `resolve_config` by a real service" scenario is deferred to Phase 8, once `ServiceTestFixture` exists — do not fake DI here.)
+- [x] 6.2 **[GREEN]** Implement `TestConfig` (`root: serde_json::Value`, `typed: HashMap<TypeId, Arc<dyn Any + Send + Sync>>` — mirrors `RuntimeInner`'s `DependencyTable.configs` storage shape, not the design skeleton's `Vec`), `with_value::<C>`, `set`, `provider()` → `ConfigurationProvider::from_value`. Re-export in `lib.rs`. Tests pass.
 
 ## Phase 7: Capturing Logger (AD-6) — concern #2
 

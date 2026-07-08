@@ -190,6 +190,19 @@ a service's typed config fields will not see values set via `.set()`. Use
 `.with_value::<C>` for anything a service resolves through DI; use `.set()` only
 for the JSON-subtree/host-boundary contract (e.g. logging settings).
 
+**Open item found during Phase 6 review, to resolve at the start of Phase 8:**
+`TestConfig.typed` (`HashMap<TypeId, Arc<dyn Any + Send + Sync>>`) is type-erased
+at rest, matching `RuntimeInner`'s `DependencyTable` *container shape* — but
+container-shape match is not itself a draining path. `RuntimeBuilder::with_config`
+is generic (`fn with_config<C: Send + Sync + 'static>(self, value: Arc<C>)`) and
+needs a concrete `C` at the call site; there is no way to iterate a type-erased
+map and call a generic method per entry without already knowing `C` per key, and
+`DependencyTable`/`with_registrations` are `pub(super)` in `service-sdk`, not
+reachable from `testkit`. Phase 8 must capture a per-value closure at
+`with_value::<C>()` call time (e.g. `Box<dyn FnOnce(RuntimeBuilder) -> RuntimeBuilder>`)
+instead of relying on the type-erased map to drain itself — decide this before
+starting `fixtures.rs`, not mid-implementation.
+
 ### AD-6: Capturable logger = real `KITLogger` + writer-side capture, not a fake logger
 
 | Option | Tradeoff | Decision |
