@@ -43,6 +43,28 @@ pub enum SecurityError {
     /// An access request descriptor was malformed (e.g. bad `"resource:action"` format).
     #[error("invalid access request: {0}")]
     InvalidAccessRequest(String),
+
+    /// A caller-supplied tenant disagreed with the authoritative tenant.
+    ///
+    /// `Display` is deliberately redacted (AD-010 exposure boundary,
+    /// NFR-003): no raw tenant identifier is interpolated, since `Display`
+    /// output may reach external callers, error responses, or log sinks.
+    /// `expected`/`actual` remain available as programmatic fields for
+    /// `match`-based handling and appear in `Debug` for local diagnostics.
+    #[error("tenant mismatch")]
+    TenantMismatch {
+        /// The tenant the runtime expected (e.g. `Principal.tenant_id`).
+        expected: String,
+        /// The tenant value actually supplied/observed.
+        actual: String,
+    },
+
+    /// Cross-tenant access was requested but not authorized.
+    #[error("cross-tenant access denied: {reason}")]
+    CrossTenantDenied {
+        /// Why cross-tenant access was denied.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -136,5 +158,47 @@ mod tests {
         // Compile-time check: SecurityError must be Send + Sync + 'static + std::error::Error.
         fn assert_bounds<T: std::error::Error + Send + Sync + 'static>() {}
         assert_bounds::<SecurityError>();
+    }
+
+    // TASK-001 (CORE-008A, RED): SecurityError::TenantMismatch / CrossTenantDenied.
+
+    #[test]
+    fn tenant_mismatch_display_redacts_both_identifiers() {
+        let err = SecurityError::TenantMismatch {
+            expected: "tenant-a".into(),
+            actual: "tenant-b".into(),
+        };
+        let display = err.to_string();
+        assert!(
+            !display.contains("tenant-a") && !display.contains("tenant-b"),
+            "Display MUST NOT contain either raw tenant identifier (AD-010, NFR-003), got: {}",
+            display
+        );
+    }
+
+    #[test]
+    fn tenant_mismatch_debug_may_contain_identifiers() {
+        let err = SecurityError::TenantMismatch {
+            expected: "tenant-a".into(),
+            actual: "tenant-b".into(),
+        };
+        let debug = format!("{:?}", err);
+        assert!(
+            debug.contains("tenant-a") && debug.contains("tenant-b"),
+            "Debug MAY contain raw identifiers for internal diagnostics, got: {}",
+            debug
+        );
+    }
+
+    #[test]
+    fn display_cross_tenant_denied() {
+        let err = SecurityError::CrossTenantDenied {
+            reason: "no cross-tenant capability".into(),
+        };
+        assert!(
+            err.to_string().contains("cross-tenant access denied"),
+            "expected 'cross-tenant access denied', got: {}",
+            err
+        );
     }
 }
