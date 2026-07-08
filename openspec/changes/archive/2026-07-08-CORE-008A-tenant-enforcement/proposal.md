@@ -219,23 +219,23 @@ explicitly out of scope (D6).
 
 ## Success Criteria
 
-- [ ] Spec phase defines the contracts under Desired Outcome without
+- [x] Spec phase defines the contracts under Desired Outcome without
       inheriting implementation details from this proposal.
-- [ ] Every finding (1–10) maps to at least one requirement or explicit
+- [x] Every finding (1–10) maps to at least one requirement or explicit
       non-goal.
-- [ ] All six product decisions (D1–D6) appear as requirements or ADs; none
+- [x] All six product decisions (D1–D6) appear as requirements or ADs; none
       is softened, reordered, or dropped.
-- [ ] `design.md` contains the "Transport-independent Tenant Resolution" AD
+- [x] `design.md` contains the "Transport-independent Tenant Resolution" AD
       (D4) and explicit answers to all 9 Open Questions (D1, D3, D4, D5).
-- [ ] `openspec/specs/service-sdk/spec.md:76` and INV-003 describe behavior
+- [x] `openspec/specs/service-sdk/spec.md:76` and INV-003 describe behavior
       the code actually enforces.
-- [ ] Rejection paths (missing tenant, mismatch, unauthorized cross-tenant,
+- [x] Rejection paths (missing tenant, mismatch, unauthorized cross-tenant,
       permitted internal mode) each have at least one acceptance scenario.
-- [ ] An authorized cross-tenant access (valid `CrossTenantPermit`) has at
+- [x] An authorized cross-tenant access (valid `CrossTenantPermit`) has at
       least one acceptance scenario — not only rejection paths.
-- [ ] `ServiceContext` no longer behaving as a parallel writable authority on
+- [x] `ServiceContext` no longer behaving as a parallel writable authority on
       the authenticated path has at least one acceptance scenario.
-- [ ] A tenant enforcement failure aborts execution before the service
+- [x] A tenant enforcement failure aborts execution before the service
       operation body is entered, regardless of the mechanism design.md
       chooses (`?`, interceptor, middleware, wrapper) — has at least one
       acceptance scenario.

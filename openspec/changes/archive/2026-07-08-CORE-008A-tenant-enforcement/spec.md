@@ -461,10 +461,10 @@ written to hold under any answer design.md gives.
       operation body is entered, regardless of mechanism — FR-009.
 - [x] Tenant authority remains stable for the duration of an operation once
       established — FR-014.
-- [ ] `design.md` contains the "Transport-independent Tenant Resolution"
+- [x] `design.md` contains the "Transport-independent Tenant Resolution"
       AD (D4) and explicit answers to all 9 Open Questions — pending
       design phase, not this spec's deliverable.
-- [ ] `openspec/specs/service-sdk/spec.md:76` and INV-003 describe behavior
+- [x] `openspec/specs/service-sdk/spec.md:76` and INV-003 describe behavior
       the code actually enforces — FR-013 defines the contract; satisfied
       at apply/archive time, not by this spec document itself.
 
