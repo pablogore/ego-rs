@@ -48,8 +48,8 @@ Decision needed before apply: Resolved — chained PRs, stacked-to-main
 
 ## Phase 5: Scripted Authorization Provider (AD-3)
 
-- [ ] 5.1 **[RED]** In `crates/testkit/src/authz.rs`: tests for `allow_all()` → `Ok(Allow)` for any `(kind, action)`; `deny_all().allow(kind, action)` → allows only that pair, denies all else; `.deny(kind, action, reason)` → surfaces through `authorize_in_context` as `Err(SecurityError::AuthorizationDenied)`; compile-time assertion that `ScriptedAuthorizationProvider` is `Send + Sync` and object-safe as `Arc<dyn AuthorizationProvider>`. Tests fail.
-- [ ] 5.2 **[GREEN]** Implement `ScriptedAuthorizationProvider` (default decision + `(kind, action)` rule map) implementing the real async `AuthorizationProvider` trait. Re-export ungated `DenyAllAuthorizationProvider`; re-export `AllowAllAuthorizationProvider` only behind `#[cfg(feature = "dev-providers")]`. Re-export in `lib.rs`. Tests pass.
+- [x] 5.1 **[RED]** In `crates/testkit/src/authz.rs`: tests for `allow_all()` → `Ok(Allow)` for any `(kind, action)`; `deny_all().allow(kind, action)` → allows only that pair, denies all else; `.deny(kind, action, reason)` → surfaces through `authorize_in_context` as `Err(SecurityError::AuthorizationDenied)`; compile-time assertion that `ScriptedAuthorizationProvider` is `Send + Sync` and object-safe as `Arc<dyn AuthorizationProvider>`. Tests fail.
+- [x] 5.2 **[GREEN]** Implement `ScriptedAuthorizationProvider` (default decision + `(kind, action)` rule map) implementing the real async `AuthorizationProvider` trait. Re-export ungated `DenyAllAuthorizationProvider`; re-export `AllowAllAuthorizationProvider` only behind `#[cfg(feature = "dev-providers")]`. Re-export in `lib.rs`. Tests pass.
 
 ## Phase 6: Test Configuration (AD-5)
 
