@@ -833,6 +833,9 @@ change):**
    `security-sdk`'s type, not `service-sdk`'s, so that change is out of this
    AD's scope. Left as a named follow-up rather than reopening
    `security-sdk`'s `Principal` shape unilaterally from within CORE-008A.
+   Tracked in [ego-rs#139](https://github.com/pablogore/ego-rs/issues/139) —
+   scoping confirmed it touches 4 crates (`security-sdk`, `security-jwt`,
+   `testkit`, `service-sdk`), not just `security-sdk`.
 
 None of these is an open architectural question; each has a settled direction and a
 named future home.
