@@ -473,6 +473,11 @@ mod tests {
         assert!(cloned.is_cross_tenant_allowed());
     }
 
+    // CORE-008A Phase 5 (TASK-023, Mandatory Seed 3): this test already
+    // proves a `CrossTenantPermit` issued for `tenant-b` cannot be reused
+    // to reach `tenant-c` — the exact scenario TASK-023 specifies. No new
+    // test was added for TASK-023; this one (added in Phase 4 for TASK-019)
+    // already satisfies it verbatim.
     #[tokio::test]
     async fn is_cross_tenant_allowed_for_matches_only_the_issued_destination() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
@@ -552,6 +557,12 @@ mod tests {
         assert!(ctx.canonical_tenant().is_some());
     }
 
+    // CORE-008A Phase 5 (TASK-024, Mandatory Seed 4): this test already
+    // proves the deprecated `tenant_id()`/`has_tenant()` accessors keep
+    // functioning correctly during the migration window and stay identical
+    // to `tenant_hint()`/`has_tenant_hint()` — the exact scenario TASK-024
+    // specifies. No new test was added for TASK-024; this one (added in
+    // Phase 2 for TASK-006) already satisfies it verbatim.
     #[test]
     fn tenant_hint_matches_legacy_tenant_id_field() {
         let ctx = ServiceContext::new().with_tenant_id("tenant-x");
