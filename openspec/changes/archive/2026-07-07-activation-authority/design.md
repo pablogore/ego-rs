@@ -291,14 +291,26 @@ which the `Arc<Mutex<_>>` form cannot express.
 state and derived all external queries from it rather than maintaining a parallel flag;
 same principle here — the actor owns state, every external query is derived.
 
-**Invariant — at most one `Sender` per epoch.** `entity_ref()`'s single-flight critical
-section constructs exactly one `watch::channel` per insert and moves its `Sender` into
-exactly one spawned actor; nothing else in this design clones or retains a second handle
-to it (`TeardownGuard` clones the erased *mailbox*, never the `Sender`). This is what
-makes "the actor is the only writer" a fact about the object graph rather than a
-convention: a future change that clones the `Sender` out to a second holder (e.g. to let
-some other component publish state) would silently reintroduce a second writer and
-break this ADR's central claim. Any such change MUST first revisit this ADR.
+**Invariant — the actor is the only *normal-path* writer; `TeardownGuard` holds a
+Drop-time backstop clone, never a competing live writer.** `entity_ref()`'s
+single-flight critical section constructs exactly one `watch::channel` per insert and
+moves its `Sender` into exactly one spawned actor. **Revisited during implementation
+(post-review, per this ADR's own instruction below):** ADR-005's guaranteed-completion
+requirement (FR-009) forces `TeardownGuard` to also hold a clone of that `Sender`, used
+*exclusively* as a Drop-time backstop publish — it fires `EntityState::Failed` only if
+the actor died before ever publishing a terminal state itself (e.g. a panic before its
+first `transition_to`), and is a no-op if the actor already published `Failed` or
+`Passivated`. Without this backstop, an actor that panics before its first transition
+would leave the entry permanently in `Recovering` with no terminal signal, violating
+FR-009's "every command's death is observable" guarantee.
+
+This means "the actor is the only writer" is no longer type-enforced against *any*
+write (two live `Sender`s exist for the entry's lifetime), but it remains true for
+every *normal* transition — the guard's clone only ever writes on the exit path, after
+the actor has stopped running in the same task, never concurrently with it. A future
+change that lets some other component call `.send()` on this clone *outside* `Drop`, or
+that removes the "already-published" check, would reintroduce a real second writer and
+must revisit this ADR again.
 
 **Property — `watch::Receiver` cannot observe a stale value.** Unlike an `mpsc`
 channel, `watch::Receiver::borrow()` always returns the *most recently sent* value —

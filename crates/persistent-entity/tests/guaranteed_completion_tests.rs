@@ -521,11 +521,8 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
         }));
     }
 
-    // Gate the panic until every caller has enqueued (see
-    // `PanicOnLoadEventStore`'s doc comment) — otherwise a straggler racing
-    // past the teardown window could legitimately trigger its own second
-    // activation attempt, inflating `load_calls` past 1 without any actual
-    // bug (this is a test-determinism concern, not a production one).
+    // Wait until every one of the 20 caller tasks has begun executing —
+    // bounded poll, not a blind sleep.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if started.load(Ordering::SeqCst) == N {
@@ -537,8 +534,37 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
         );
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
+
+    // Gate the panic until every caller has actually enqueued its command
+    // (see `PanicOnLoadEventStore`'s doc comment) — otherwise a straggler
+    // racing past the teardown window could legitimately trigger its own
+    // second activation attempt, inflating `load_calls` past 1 without any
+    // actual bug (this is a test-determinism concern, not a production one).
+    // Polling the real mailbox length is a genuine signal; a fixed
+    // `yield_now()` budget is a guess that gets less reliable as N grows or
+    // the machine is under load (see the 100-caller sibling test).
+    let aggregate_id =
+        EntityTriple::new("default".to_string(), "probe", "recovery-panic-20").aggregate_id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let enqueued = runtime
+            .registry
+            .lookup(&aggregate_id)
+            .and_then(|erased| {
+                erased
+                    .downcast::<BoundedMailbox<ActorEnvelope<TestCommand>>>()
+                    .ok()
+            })
+            .map(|mailbox| mailbox.len())
+            .unwrap_or(0);
+        if enqueued == N {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "all {N} commands must be enqueued within the deadline, saw {enqueued}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     let _ = release_tx.send(());
 
@@ -929,13 +955,7 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
     }
 
     // Wait until every one of the 100 caller tasks has begun executing —
-    // bounded poll, not a blind sleep. `entity_ref()` and the `mailbox.send()`
-    // half of `send_command()` are both non-yielding while the mailbox has
-    // room (default capacity is 1000, N=100), so a task that has started at
-    // all completes that whole enqueue prefix within its first poll, before
-    // it ever reaches the `.await` on the reply — the `yield_now()` loop
-    // below gives the scheduler a few turns to actually finish delivering
-    // that first poll to every task before the gate opens.
+    // bounded poll, not a blind sleep.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if started.load(Ordering::SeqCst) == N {
@@ -947,8 +967,36 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
         );
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
+
+    // Wait until all 100 commands have actually been enqueued into the
+    // mailbox — a real signal, not a fixed `yield_now()` budget guessing how
+    // many scheduler turns 100 tasks need under unknown CPU contention. The
+    // actor is blocked in recovery (gated on `release_panic`) and hasn't
+    // reached `process_commands()` yet, so the mailbox only grows here; once
+    // it hits N, every caller has genuinely enqueued and it's safe to
+    // release the panic without a straggler racing past teardown into a
+    // second, legitimate activation (which would inflate `load_calls` past 1
+    // with no actual bug — a test-determinism concern, not a production one).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let enqueued = runtime
+            .registry
+            .lookup(&aggregate_id)
+            .and_then(|erased| {
+                erased
+                    .downcast::<BoundedMailbox<ActorEnvelope<TestCommand>>>()
+                    .ok()
+            })
+            .map(|mailbox| mailbox.len())
+            .unwrap_or(0);
+        if enqueued == N {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "all {N} commands must be enqueued within the deadline, saw {enqueued}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     let _ = release_tx.send(());

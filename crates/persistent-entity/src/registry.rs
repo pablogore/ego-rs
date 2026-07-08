@@ -368,4 +368,50 @@ mod tests {
             "the current epoch's removal attempt must remove the entry"
         );
     }
+
+    /// TASK-024 (poison safety, design.md Testing Strategy): a panic from
+    /// `make_mailbox` fires WHILE `lookup_or_insert`'s `parking_lot::Mutex`
+    /// guard is still held (the panic unwinds through the lock, not after
+    /// it's released — unlike the Round-3 `tokio::spawn`-outside-runtime
+    /// scenario covered elsewhere). `parking_lot::Mutex` does not poison on
+    /// panic, so the registry must remain fully usable for every other
+    /// triple afterward.
+    #[test]
+    fn panic_inside_the_critical_section_does_not_poison_the_registry() {
+        let registry = EntityRegistry::new();
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.lookup_or_insert("triple-poison", || panic!("boom: construction failure"));
+        }));
+        assert!(
+            panicked.is_err(),
+            "the panic must propagate, not be swallowed"
+        );
+
+        // The lock must not be poisoned: another triple's lookup_or_insert
+        // must still succeed, and the panicking triple must have left no
+        // partial entry behind (make_mailbox panicked before `active.insert`).
+        assert!(
+            registry.lookup("triple-poison").is_none(),
+            "a panic during construction must not leave a partial entry"
+        );
+
+        let outcome = registry.lookup_or_insert("triple-other", || erased_probe(7usize));
+        let mailbox = match outcome {
+            RouteOutcome::Inserted { mailbox, .. } => mailbox,
+            RouteOutcome::Existing { .. } => {
+                panic!("expected a fresh insert for an unrelated triple")
+            }
+        };
+        assert_eq!(
+            *mailbox.downcast::<usize>().expect("erased as usize"),
+            7,
+            "an unrelated triple must activate normally after the other triple's construction panic"
+        );
+        assert_eq!(
+            registry.active_count(),
+            0,
+            "triple-other is Recovering, not yet Active — active_count must still be usable post-panic"
+        );
+    }
 }
