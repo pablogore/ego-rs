@@ -77,9 +77,9 @@ Decision needed before apply: Resolved — chained PRs, stacked-to-main
 
 ## Phase 10: Final Assembly & Verification
 
-- [ ] 10.1 Review `crates/testkit/src/lib.rs`'s full `pub use` surface against design.md's Interfaces/Contracts section — every listed public type/fn is exported, nothing extra (especially not the AD-10 stub, per concern #3).
-- [ ] 10.2 Run `cargo test --workspace` — all `ego-testkit` tests plus existing workspace tests green, no regressions.
-- [ ] 10.3 Run `cargo clippy -p ego-testkit -- -D warnings` — zero warnings.
-- [ ] 10.4 Run `cargo doc -p ego-testkit --no-deps` — `#![deny(missing_docs)]` builds clean.
-- [ ] 10.5 Run `cargo build --workspace` (default features) and confirm `ego-security-sdk/test-helpers` is NOT enabled — `dev-providers` stays opt-in (AD-3, Migration section).
-- [ ] 10.6 Run `cargo fmt --check` — no formatting drift.
+- [x] 10.1 Review `crates/testkit/src/lib.rs`'s full `pub use` surface against design.md's Interfaces/Contracts section — every listed public type/fn is exported, nothing extra (especially not the AD-10 stub, per concern #3). Verified: exact match, `PairingAuthnStub`/`drain_into` correctly absent.
+- [x] 10.2 Run `cargo test --workspace` — all `ego-testkit` tests plus existing workspace tests green, no regressions. Verified: full workspace suite green.
+- [x] 10.3 Run `cargo clippy -p ego-testkit -- -D warnings` — zero warnings. **`ego-testkit` itself is clean** (`cargo clippy -p ego-testkit --no-deps --all-targets --all-features -- -D warnings` passes with zero warnings). The literal command fails only because it also lints the path-dependency `ego-service-sdk`, which has a pre-existing, unrelated `clippy::derivable_impls` warning on `LogFormatSetting`'s manual `Default` impl (`crates/service-sdk/src/runtime/config_provider.rs:46`) — flagged since Phase 5, not introduced by CORE-022, out of this change's scope (design.md: "TestKit touches no existing crate source").
+- [x] 10.4 Run `cargo doc -p ego-testkit --no-deps` — `#![deny(missing_docs)]` builds clean. Verified.
+- [x] 10.5 Run `cargo build --workspace` (default features) and confirm `ego-security-sdk/test-helpers` is NOT enabled — `dev-providers` stays opt-in (AD-3, Migration section). Verified: `cargo tree --workspace -e features` shows neither feature enabled anywhere by default.
+- [x] 10.6 Run `cargo fmt --check` — no formatting drift. Found and fixed one drift in `crates/testkit/src/authz.rs` (a line that grew too long after the Phase 5→Round 4 `check()` helper refactor); all other repo-wide drift is pre-existing in unrelated files (`crates/domain/src/auth/*`), out of scope.

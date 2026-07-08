@@ -122,7 +122,13 @@ mod tests {
         kind: &str,
         action: &str,
     ) -> Result<(), SecurityError> {
-        authorize_in_context(ctx, resource(kind), Action(action.to_string().into()), provider).await
+        authorize_in_context(
+            ctx,
+            resource(kind),
+            Action(action.to_string().into()),
+            provider,
+        )
+        .await
     }
 
     #[tokio::test]
