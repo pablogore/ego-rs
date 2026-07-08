@@ -540,6 +540,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "console-exporter",
+ "ego-domain",
  "ego-security-sdk",
  "ego-service-sdk-macros",
  "insta",

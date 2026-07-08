@@ -5,6 +5,7 @@ mod logger;
 mod permit;
 mod resolvable;
 mod runtime_builder;
+mod tenant;
 
 pub use builder::{Runtime, RuntimeBuilder};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
@@ -13,6 +14,7 @@ pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{Resolvable, ResolvableContainer};
 pub use runtime_builder::{RuntimeError, RuntimeInner};
+pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
 
 /// CORE-017 Phase 5 integration tests (TASK-021/TASK-022).
 ///

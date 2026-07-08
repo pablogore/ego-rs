@@ -17,4 +17,5 @@ fn cross_tenant_api_visibility_contract() {
     t.compile_fail("tests/compile_fail/cross_tenant_permit_foreign_construction.rs");
     t.compile_fail("tests/compile_fail/cross_tenant_permit_new_external.rs");
     t.compile_fail("tests/compile_fail/issue_cross_tenant_permit_external.rs");
+    t.compile_fail("tests/compile_fail/canonical_tenant_external_construct.rs");
 }

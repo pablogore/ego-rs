@@ -14,6 +14,7 @@ serde_json = "1"
 kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 ego-security-sdk = { path = "../security-sdk" }
+ego-domain = { path = "../domain" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }

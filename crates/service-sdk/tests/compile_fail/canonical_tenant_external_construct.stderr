@@ -1,0 +1,10 @@
+error[E0624]: associated function `scoped` is private
+ --> tests/compile_fail/canonical_tenant_external_construct.rs:9:62
+  |
+9 |     let _tenant = ego_service_sdk::runtime::CanonicalTenant::scoped(tenant_id);
+  |                                                              ^^^^^^ private associated function
+  |
+ ::: src/runtime/tenant.rs
+  |
+  |     pub(super) fn scoped(tenant: TenantId) -> Self {
+  |     ---------------------------------------------- private associated function defined here
