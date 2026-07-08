@@ -10,6 +10,7 @@ use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use crate::runtime::logger::TeardownStack;
 use crate::runtime::runtime_builder::{DependencyTable, RuntimeInner};
+use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::RuntimeInfraError;
 
 /// The pair of security providers registered with a [`Runtime`].
@@ -17,12 +18,20 @@ pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn Authoriza
 
 /// Builder for constructing a [`Runtime`] with optional security providers.
 ///
-/// `RuntimeBuilder` has no configurable scalar fields of its own — all
+/// `RuntimeBuilder` has no configurable scalar fields of its own beyond
+/// [`RuntimeBuilder::with_tenant_enforcement_mode`] (CORE-008A) — all other
 /// runtime tunables (mailbox capacity, concurrency budget, passivation
-/// timeout, tenant mode) belong to the entity-level runtime and are
-/// configured via [`persistent_entity::EntityRuntimeBuilder::from_value`].
-/// Pass a `serde_json::Value` obtained from `kit_config::ConfigLoader` to
-/// that builder, not to this one.
+/// timeout, and the **persistence-side** `single_tenant_mode` / `tenant_id`)
+/// belong to the entity-level runtime and are configured via
+/// [`persistent_entity::EntityRuntimeBuilder::from_value`]. Pass a
+/// `serde_json::Value` obtained from `kit_config::ConfigLoader` to that
+/// builder, not to this one.
+///
+/// **Naming disambiguation (CORE-008A AD-012):** the persistence-side tenant
+/// mode above (`EntityRuntimeBuilder`, CORE-016) is a distinct concept from
+/// the enforcement-side [`TenantEnforcementMode`] configured here via
+/// [`RuntimeBuilder::with_tenant_enforcement_mode`]. Neither this builder nor
+/// its docs reuse the bare phrase "tenant mode" for the enforcement concept.
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
     interceptor_chain: Arc<InterceptorChain>,
@@ -31,6 +40,7 @@ pub struct RuntimeBuilder {
     logger: Option<Arc<KITLogger>>,
     adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    tenant_enforcement_mode: TenantEnforcementMode,
 }
 
 impl RuntimeBuilder {
@@ -44,6 +54,7 @@ impl RuntimeBuilder {
             logger: None,
             adapters: HashMap::new(),
             configs: HashMap::new(),
+            tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
         }
     }
 
@@ -91,6 +102,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers the tenant enforcement policy for this runtime (CORE-008A
+    /// AD-012). Default is [`TenantEnforcementMode::AuthenticatedOnly`] —
+    /// unauthenticated tenant-scoped calls fail closed with `MissingContext`.
+    /// Selected once at construction; there is no setter to change it after
+    /// `build()` — construct a new `Runtime` with a different mode instead.
+    ///
+    /// Distinct from the persistence-side tenant mode on
+    /// `persistent_entity::EntityRuntimeBuilder` (CORE-016) — see this
+    /// struct's type-level doc.
+    pub fn with_tenant_enforcement_mode(mut self, mode: TenantEnforcementMode) -> Self {
+        self.tenant_enforcement_mode = mode;
+        self
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
     /// Always succeeds — security and the logger are both optional. By the
@@ -113,6 +138,7 @@ impl RuntimeBuilder {
                 DependencyTable::with_registrations(self.adapters, self.configs),
                 self.logger,
                 Mutex::new(teardown),
+                TenantResolver::new(self.tenant_enforcement_mode),
             )),
         }
     }

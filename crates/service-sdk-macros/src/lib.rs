@@ -181,6 +181,13 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
                 let return_type = &method.sig.output;
 
+                // Index of the context parameter within arg_names/arg_types, if any (None
+                // for the parameterless phantom-ctx case below). Needed both to build
+                // inner_call_args (clone the ctx arg) and, as of CORE-008A TASK-009B, to
+                // bind that same parameter as `mut` in the generated signature so
+                // `enforce_tenant(&mut ctx_param)` can take a mutable borrow of it.
+                let mut ctx_param_idx: Option<usize> = None;
+
                 // Clone the first param (context) so the original stays alive for enforce_tenant and interceptor calls.
                 let (ctx_param, inner_call_args): (proc_macro2::TokenStream, Vec<_>) =
                     if arg_names.is_empty() {
@@ -200,6 +207,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                             let first = &arg_names[0];
                             (quote! { #first }, 0)
                         };
+                        ctx_param_idx = Some(clone_idx);
                         let call_args = arg_names
                             .iter()
                             .enumerate()
@@ -213,6 +221,23 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                             .collect();
                         (ctx, call_args)
                     };
+
+                // CORE-008A TASK-009B: the context parameter's binding must be `mut` so
+                // `enforce_tenant(&mut ctx_param)` (both the unmarked path below and the
+                // future #[tenant_scoped] path, TASK-012) can borrow it mutably. Every
+                // other parameter keeps its plain binding.
+                let sig_params: Vec<proc_macro2::TokenStream> = arg_names
+                    .iter()
+                    .zip(arg_types.iter())
+                    .enumerate()
+                    .map(|(i, (name, ty))| {
+                        if Some(i) == ctx_param_idx {
+                            quote! { mut #name: #ty }
+                        } else {
+                            quote! { #name: #ty }
+                        }
+                    })
+                    .collect();
 
                 // Authorization guards emit .await — only async methods are valid targets.
                 if let Some(ref _args) = maybe_authorize {
@@ -288,19 +313,24 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
-                // enforce_tenant is always a best-effort no-op; upgrade from Weak each time.
-                // The authorization guard may have already checked the runtime (and failed fast on
-                // Err), so by the time we reach this point the upgrade will succeed or the guard
-                // already returned. Either way, a fresh upgrade here is correct and avoids
-                // lifetime conflicts with the scoped `__rt` inside the `if` block above.
+                // enforce_tenant is fallible (CORE-008A AD-009), but for an unmarked
+                // operation (no #[tenant_scoped] — that branch lands in Phase 3,
+                // TASK-012) the call remains best-effort: the Result is discarded so a
+                // resolution failure never surfaces here, matching today's no-op
+                // observable behavior. Upgrade from Weak each time. The authorization
+                // guard may have already checked the runtime (and failed fast on Err),
+                // so by the time we reach this point the upgrade will succeed or the
+                // guard already returned. Either way, a fresh upgrade here is correct
+                // and avoids lifetime conflicts with the scoped `__rt` inside the `if`
+                // block above.
                 let enforce_tenant_block = quote! {
                     if let Some(rt) = self.runtime.upgrade() {
-                        rt.enforce_tenant(&#ctx_param);
+                        let _ = rt.enforce_tenant(&mut #ctx_param);
                     }
                 };
 
                 forwarding_methods.push(quote! {
-                    async fn #method_name(&self, #(#arg_names: #arg_types),*) #return_type {
+                    async fn #method_name(&self, #(#sig_params),*) #return_type {
                         #authorize_guard
                         #enforce_tenant_block
                         let inner_ref = self.inner.clone();
