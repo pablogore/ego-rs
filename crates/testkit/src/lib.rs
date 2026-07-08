@@ -19,6 +19,7 @@ mod identity;
 mod logger;
 mod security;
 
+pub use assertions::{assert_authorized, assert_denied};
 #[cfg(feature = "dev-providers")]
 pub use authz::AllowAllAuthorizationProvider;
 pub use authz::{DenyAllAuthorizationProvider, ScriptedAuthorizationProvider};

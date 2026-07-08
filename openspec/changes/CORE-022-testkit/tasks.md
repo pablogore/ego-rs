@@ -72,8 +72,8 @@ Decision needed before apply: Resolved — chained PRs, stacked-to-main
 
 ## Phase 9: Assertion Helpers (AD-8)
 
-- [ ] 9.1 **[RED]** In `crates/testkit/src/assertions.rs`: tests that `assert_authorized` passes when `authorize_in_context` returns `Ok`, panics with a clear message otherwise; `assert_denied` passes only on `Err(SecurityError::AuthorizationDenied)`; `assert_service_error!(result, Variant { .. })` passes on matching variant and `#[should_panic]`s on a non-matching one regardless of message text. Tests fail.
-- [ ] 9.2 **[GREEN]** Implement `assert_authorized`/`assert_denied` (calling the real `authorize_in_context`) and `#[macro_export] assert_service_error!` (`matches!`-based). Re-export functions in `lib.rs` (the macro is crate-root via `#[macro_export]`). Tests pass.
+- [x] 9.1 **[RED]** In `crates/testkit/src/assertions.rs`: tests that `assert_authorized` passes when `authorize_in_context` returns `Ok`, panics with a clear message otherwise; `assert_denied` passes only on `Err(SecurityError::AuthorizationDenied)`; `assert_service_error!(result, Variant { .. })` passes on matching variant and `#[should_panic]`s on a non-matching one regardless of message text. Tests fail.
+- [x] 9.2 **[GREEN]** Implement `assert_authorized`/`assert_denied` (calling the real `authorize_in_context`) and `#[macro_export] assert_service_error!` (`matches!`-based). Re-export functions in `lib.rs` (the macro is crate-root via `#[macro_export]`). Tests pass.
 
 ## Phase 10: Final Assembly & Verification
 
