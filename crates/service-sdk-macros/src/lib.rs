@@ -1,4 +1,5 @@
-//! Proc-macro attributes for the Service SDK: `#[service]`, `#[operation]`, and `#[authorize]`.
+//! Proc-macro attributes for the Service SDK: `#[service]`, `#[operation]`,
+//! `#[authorize]`, and `#[tenant_scoped]` (CORE-008A).
 
 mod authorize;
 
@@ -10,6 +11,7 @@ mod authorize;
 enum SdkAttr {
     Operation,
     Authorize,
+    TenantScoped,
 }
 
 impl SdkAttr {
@@ -18,6 +20,8 @@ impl SdkAttr {
             Some(Self::Operation)
         } else if attr.path().is_ident("authorize") {
             Some(Self::Authorize)
+        } else if attr.path().is_ident("tenant_scoped") {
+            Some(Self::TenantScoped)
         } else {
             None
         }
@@ -111,6 +115,12 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             let has_operation = method.attrs.iter().any(|a| SdkAttr::detect(a) == Some(SdkAttr::Operation));
             if has_operation {
                 let method_name = &method.sig.ident;
+
+                // CORE-008A TASK-012: per-method opt-in classification (AD-007).
+                let has_tenant_scoped = method
+                    .attrs
+                    .iter()
+                    .any(|a| SdkAttr::detect(a) == Some(SdkAttr::TenantScoped));
 
                 // Must detect and parse before stripping: consuming #[authorize] here prevents the E5 standalone sentinel from firing.
                 let authorize_attr = method
@@ -313,19 +323,60 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
-                // enforce_tenant is fallible (CORE-008A AD-009), but for an unmarked
-                // operation (no #[tenant_scoped] — that branch lands in Phase 3,
-                // TASK-012) the call remains best-effort: the Result is discarded so a
-                // resolution failure never surfaces here, matching today's no-op
-                // observable behavior. Upgrade from Weak each time. The authorization
-                // guard may have already checked the runtime (and failed fast on Err),
-                // so by the time we reach this point the upgrade will succeed or the
-                // guard already returned. Either way, a fresh upgrade here is correct
-                // and avoids lifetime conflicts with the scoped `__rt` inside the `if`
-                // block above.
-                let enforce_tenant_block = quote! {
-                    if let Some(rt) = self.runtime.upgrade() {
-                        let _ = rt.enforce_tenant(&mut #ctx_param);
+                // enforce_tenant is fallible (CORE-008A AD-009). A #[tenant_scoped]
+                // operation gets the fallible `?` branch below (TASK-012); an unmarked
+                // operation keeps today's best-effort call — the Result is discarded so
+                // a resolution failure never surfaces, matching the pre-Phase-3 no-op
+                // observable behavior (TASK-013 regression check).
+                let enforce_tenant_block = if has_tenant_scoped {
+                    let tenant_err_ty = match &method.sig.output {
+                        syn::ReturnType::Type(_, ty) => result_error_type(ty).cloned(),
+                        _ => None,
+                    };
+
+                    match tenant_err_ty {
+                        Some(err_ty) => quote! {
+                            // Const-closure assertion mirroring #[authorize]'s pattern
+                            // (CORE-008A TASK-012): evaluated at type-check time only,
+                            // generates no code.
+                            const _: fn() = || {
+                                fn assert_from<E: From<ego_service_sdk::security::SecurityError>>() {}
+                                assert_from::<#err_ty>();
+                            };
+
+                            // Fallible enforcement — fails fast before the inner call
+                            // (FR-009). A dropped runtime is itself an unresolvable
+                            // context, not a disabled-tenancy bypass.
+                            let __tenant_rt = self.runtime.upgrade().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
+                                    ego_service_sdk::security::SecurityError::MissingContext
+                                )
+                            })?;
+                            __tenant_rt
+                                .enforce_tenant(&mut #ctx_param)
+                                .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
+                        },
+                        None => {
+                            let err = syn::Error::new(
+                                method.sig.output.span(),
+                                "#[tenant_scoped] requires the method return type to be written as `Result<_, E>` \
+                                 directly (type aliases are not supported in proc-macro context; \
+                                 expand the alias inline, e.g. `Result<MyResponse, MyError>`)",
+                            );
+                            return TokenStream::from(err.to_compile_error());
+                        }
+                    }
+                } else {
+                    // Upgrade from Weak each time. The authorization guard may have
+                    // already checked the runtime (and failed fast on Err), so by the
+                    // time we reach this point the upgrade will succeed or the guard
+                    // already returned. Either way, a fresh upgrade here is correct and
+                    // avoids lifetime conflicts with the scoped `__rt`/`__tenant_rt`
+                    // locals declared above.
+                    quote! {
+                        if let Some(rt) = self.runtime.upgrade() {
+                            let _ = rt.enforce_tenant(&mut #ctx_param);
+                        }
                     }
                 };
 
@@ -607,6 +658,22 @@ pub fn authorize(_args: TokenStream, _input: TokenStream) -> TokenStream {
     let err = syn::Error::new(
         Span::call_site(),
         "#[authorize] can only be used on methods inside a #[service] trait",
+    );
+    TokenStream::from(err.to_compile_error())
+}
+
+/// Tenant-enforcement classification marker for `#[service]` methods (CORE-008A
+/// AD-007/TASK-012) — rejected at compile time when used outside `#[service]`.
+///
+/// Mirrors `#[authorize]`, not `#[operation]`: a `#[tenant_scoped]` marker that
+/// silently did nothing when misapplied would be a false sense of enforcement,
+/// exactly the fail-open risk AD-007 already flags for a forgotten marker.
+/// Failing loudly here is cheaper than debugging a mistakenly-inert tenant guard.
+#[proc_macro_attribute]
+pub fn tenant_scoped(_args: TokenStream, _input: TokenStream) -> TokenStream {
+    let err = syn::Error::new(
+        Span::call_site(),
+        "#[tenant_scoped] can only be used on methods inside a #[service] trait",
     );
     TokenStream::from(err.to_compile_error())
 }
