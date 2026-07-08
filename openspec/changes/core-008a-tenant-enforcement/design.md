@@ -102,13 +102,33 @@ Satisfies: **FR-007, FR-011** (Open Question 9).
 `crates/service-sdk/src/runtime/tenant.rs`, wrapping the existing domain newtype:
 
 ```rust
-pub enum CanonicalTenant {
+pub struct CanonicalTenant(Repr);   // opaque wrapper — see note below
+
+enum Repr {
     /// A concrete resolved tenant (authenticated or permitted-internal path).
     Scoped(ego_domain::context::TenantId),
     /// Valid tenant-less system / single-tenant execution (D1).
     Systemwide,
 }
+
+impl CanonicalTenant {
+    pub fn tenant_id(&self) -> Option<&ego_domain::context::TenantId>;  // None for Systemwide
+    pub fn is_systemwide(&self) -> bool;
+}
 ```
+
+**Opaque wrapper, not a raw public enum (implementation-verified at apply time).**
+A plain `pub enum CanonicalTenant { Scoped(TenantId), Systemwide }` cannot satisfy
+AD-003: Rust enum variants always share the visibility of their enum, so a public
+`Scoped(TenantId)` tuple variant would be freely constructible by any external
+crate holding a `TenantId` (itself public) — defeating "only `TenantResolver` may
+create a `CanonicalTenant`" the moment it compiled. `#[non_exhaustive]` doesn't fix
+this either: applied per-variant it also blocks external *matching*, which would
+break `ServiceContext::canonical_tenant()`'s intended read path (AD-011). The
+wrapper above — a private `Repr` enum behind a public struct, `pub(super)`
+constructors, public read-only accessors — is the smallest fix consistent with
+this AD's actual intent, and mirrors `CrossTenantPermit`'s existing
+`pub(super)`-constructor pattern in `permit.rs`.
 
 - **Reuses** `ego_domain::context::TenantId` (already validated non-empty) — no new identity type. Rung 2 of the ladder: it already lives here.
 - **Lives in service-sdk**, not domain: the `Systemwide` arm is a *runtime execution* concept (D1), and enforcement is a runtime concern. Domain stays runtime-neutral (its `ExecutionContext`/`TenantId` are unchanged; they become *derived-from*, never independently authoritative — AD-006).
@@ -690,7 +710,8 @@ table adds no new requirement.
 
 ```rust
 // AD-001 / AD-002 / AD-012 — crates/service-sdk/src/runtime/tenant.rs
-pub enum CanonicalTenant { Scoped(ego_domain::context::TenantId), Systemwide }
+pub struct CanonicalTenant(Repr);   // opaque wrapper (AD-003 note above), not a raw public enum
+enum Repr { Scoped(ego_domain::context::TenantId), Systemwide }
 pub enum TenantEnforcementMode { AuthenticatedOnly, AllowSystemInternal }
 
 pub struct TenantResolver { mode: TenantEnforcementMode }
