@@ -190,6 +190,34 @@ a service's typed config fields will not see values set via `.set()`. Use
 `.with_value::<C>` for anything a service resolves through DI; use `.set()` only
 for the JSON-subtree/host-boundary contract (e.g. logging settings).
 
+**Open item found during Phase 6 review — resolved in Phase 8:**
+`TestConfig.typed` (`HashMap<TypeId, Arc<dyn Any + Send + Sync>>`) was type-erased
+at rest, matching `RuntimeInner`'s `DependencyTable` *container shape* — but
+container-shape match is not itself a draining path. `RuntimeBuilder::with_config`
+is generic (`fn with_config<C: Send + Sync + 'static>(self, value: Arc<C>)`) and
+needs a concrete `C` at the call site; there is no way to iterate a type-erased
+map and call a generic method per entry without already knowing `C` per key, and
+`DependencyTable`/`with_registrations` are `pub(super)` in `service-sdk`, not
+reachable from `testkit`.
+
+Resolution (Phase 8): `TestConfig.typed` was changed to
+`Vec<Box<dyn FnOnce(RuntimeBuilder) -> RuntimeBuilder + Send>>`. Each
+`with_value::<C>(value)` call now pushes
+`Box::new(move |b: RuntimeBuilder| b.with_config(Arc::new(value)))` — the closure
+captures its own concrete `C` at push time, so no `TypeId` bookkeeping is needed
+in `TestConfig` at all. A new `pub(crate) fn drain_into(self, builder: RuntimeBuilder)
+-> RuntimeBuilder` folds the closures over the builder in insertion order
+(`self.typed.into_iter().fold(builder, |b, apply| apply(b))`). Because
+`RuntimeBuilder::with_config` itself does last-write-wins by `TypeId`
+(`self.configs.insert(TypeId::of::<C>(), ..)`), applying the closures in
+insertion order reproduces the exact same last-write-wins semantics as calling
+`with_config` directly multiple times. `ServiceTestFixture`'s `FixtureBuilder::build`
+calls `config.drain_into(RuntimeBuilder::new())` before `.with_security`/`.with_logger`/`.build()`.
+`TestConfig`'s Phase 6 tests that inspected `.typed` directly by `TypeId` +
+downcast were rewritten to build a real `RuntimeBuilder`/`Runtime` via
+`drain_into` and assert through `resolve_config::<C>()` — a stronger,
+end-to-end-through-the-real-seam test than the old private-field inspection.
+
 ### AD-6: Capturable logger = real `KITLogger` + writer-side capture, not a fake logger
 
 | Option | Tradeoff | Decision |
@@ -301,6 +329,22 @@ would imply an authentication-driven execution model TestKit does not offer.
 > stub disappears and `FixtureBuilder` drops the authn dependency — no other part
 > of this design changes. Until then the stub is the minimum needed to keep the
 > `#[authorize]` seam working for services under test.
+
+**Known, accepted risk (found during Phase 8 review):** the stub's *type name*
+stays private (`pub(crate)`, never re-exported), but its *behavior* is
+technically reachable from outside TestKit: `ServiceTestFixture::runtime()`
+returns the real `&Runtime`, and production's own `Runtime::security_providers()`
+is `pub`, returning `Option<&(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)>`.
+A test author *could* call `.authenticate()` on the returned authn provider
+directly. No test does this today, and doing so still only reaches the stub's
+documented fixed-context behavior (not a security bypass), but this is a real
+gap between "not part of the public surface" and "not reachable" — `runtime()`
+exposes the real production accessor set, which includes this one. Accepted
+because `runtime()` itself is required by design (forward compatibility with a
+future public `Runtime::resolve`, and needed for `authorization_provider()` in
+tests); restricting it would mean re-deriving a narrower fixture-specific
+`Runtime` view, which is exactly the kind of parallel/shortcut type this design
+otherwise rejects everywhere else (see AD-1, AD-6).
 
 ## Data Flow
 

@@ -582,6 +582,7 @@ dependencies = [
  "kitlogger-log-domain",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

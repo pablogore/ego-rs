@@ -24,3 +24,4 @@ kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", bra
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
+tokio = { version = "1.0", features = ["macros", "rt"] }

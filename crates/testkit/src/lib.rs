@@ -19,6 +19,13 @@ mod identity;
 mod logger;
 mod security;
 
+pub use assertions::{assert_authorized, assert_denied};
+#[cfg(feature = "dev-providers")]
+pub use authz::AllowAllAuthorizationProvider;
+pub use authz::{DenyAllAuthorizationProvider, ScriptedAuthorizationProvider};
+pub use config::TestConfig;
 pub use context::{test_context, TestContextBuilder};
+pub use fixtures::{FixtureBuilder, ServiceTestFixture};
 pub use identity::{principal, PrincipalBuilder};
+pub use logger::{CapturedRecord, CapturingLogger};
 pub use security::{authenticated, authenticated_with_claims};
