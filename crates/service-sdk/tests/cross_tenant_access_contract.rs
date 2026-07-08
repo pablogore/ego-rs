@@ -1,6 +1,7 @@
 use ego_service_sdk::context::ServiceContext;
 
 #[test]
+#[allow(deprecated)]
 fn is_cross_tenant_allowed_defaults_to_false() {
     let ctx = ServiceContext::new();
     assert!(!ctx.is_cross_tenant_allowed());

@@ -9,6 +9,13 @@ pub mod interceptor;
 pub mod registry;
 pub mod runtime;
 
+// Shared #[cfg(test)] fixtures for internal unit tests (code-review fix:
+// consolidates near-identical AllowCrossTenant/DenyCrossTenant/authenticated_ctx
+// stubs that had already drifted — context/mod.rs's copy was missing the
+// Deny variant).
+#[cfg(test)]
+mod test_support;
+
 pub use context::*;
 pub use contract::*;
 pub use di::*;

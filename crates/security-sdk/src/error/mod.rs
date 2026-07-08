@@ -60,7 +60,15 @@ pub enum SecurityError {
     },
 
     /// Cross-tenant access was requested but not authorized.
-    #[error("cross-tenant access denied: {reason}")]
+    ///
+    /// `Display` is deliberately redacted (AD-010 exposure boundary,
+    /// code-review fix): a provider-supplied `reason` can incidentally
+    /// mention a tenant identifier (e.g. "tenant-b not permitted"), so it
+    /// must not be interpolated into output that may reach external
+    /// callers, error responses, or log sinks. `reason` remains available
+    /// as a programmatic field for `match`-based handling and appears in
+    /// `Debug` for local diagnostics.
+    #[error("cross-tenant access denied")]
     CrossTenantDenied {
         /// Why cross-tenant access was denied.
         reason: String,
@@ -191,14 +199,33 @@ mod tests {
     }
 
     #[test]
-    fn display_cross_tenant_denied() {
+    fn display_cross_tenant_denied_redacts_reason() {
         let err = SecurityError::CrossTenantDenied {
-            reason: "no cross-tenant capability".into(),
+            reason: "tenant-b not permitted".into(),
         };
+        let displayed = err.to_string();
         assert!(
-            err.to_string().contains("cross-tenant access denied"),
+            displayed.contains("cross-tenant access denied"),
             "expected 'cross-tenant access denied', got: {}",
-            err
+            displayed
+        );
+        assert!(
+            !displayed.contains("tenant-b"),
+            "Display must not leak the provider-supplied reason (AD-010): got {}",
+            displayed
+        );
+    }
+
+    #[test]
+    fn cross_tenant_denied_debug_may_contain_reason() {
+        let err = SecurityError::CrossTenantDenied {
+            reason: "tenant-b not permitted".into(),
+        };
+        let debugged = format!("{:?}", err);
+        assert!(
+            debugged.contains("tenant-b"),
+            "Debug is the internal-diagnostics channel and may retain the reason: got {}",
+            debugged
         );
     }
 }

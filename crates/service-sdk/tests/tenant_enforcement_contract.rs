@@ -31,8 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ego_security_sdk::context::SecurityContext;
-use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::ServiceErrorTrait;
@@ -42,6 +40,9 @@ use ego_service_sdk::security::SecurityError;
 use ego_service_sdk_macros::service;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::{operation, tenant_scoped};
+
+mod common;
+use common::{authenticated_ctx, authenticated_ctx_with_hint};
 
 /// Wraps `SecurityError` directly (not stringified) so tests can `match` on
 /// the concrete variant — required for NFR-003 ("assert on a distinguishable
@@ -121,21 +122,6 @@ fn make_proxy(
     let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = TenantContractServiceRef::new(inner, chain, runtime_weak);
     (rt, proxy)
-}
-
-fn authenticated_ctx(tenant: Option<&str>) -> ServiceContext {
-    let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-    principal.tenant_id = tenant.map(|t| t.to_string());
-    let security = SecurityContext::empty(principal);
-    ServiceContext::new().with_security(Arc::new(security))
-}
-
-fn authenticated_ctx_with_hint(tenant: Option<&str>, hint: Option<&str>) -> ServiceContext {
-    let ctx = authenticated_ctx(tenant);
-    match hint {
-        Some(h) => ctx.with_tenant_id(h),
-        None => ctx,
-    }
 }
 
 // ---------------------------------------------------------------------------

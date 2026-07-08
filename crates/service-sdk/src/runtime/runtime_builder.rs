@@ -571,44 +571,11 @@ mod tests {
     }
 
     // -- CrossTenantPermit issuer (CORE-008A Phase 4, AD-008) ---------------
+    // AllowCrossTenant/DenyCrossTenant/authenticated_ctx moved to
+    // crate::test_support (code-review fix: was duplicated with context/mod.rs's
+    // copy, which had already drifted missing the Deny variant).
 
-    use ego_security_sdk::authorization::{AccessRequest, AuthorizationDecision};
-
-    struct AllowCrossTenant;
-
-    #[async_trait::async_trait]
-    impl AuthorizationProvider for AllowCrossTenant {
-        async fn authorize(
-            &self,
-            _: &ego_security_sdk::principal::Principal,
-            _: &AccessRequest,
-            _: &SecurityContext,
-        ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Allow)
-        }
-    }
-
-    struct DenyCrossTenant;
-
-    #[async_trait::async_trait]
-    impl AuthorizationProvider for DenyCrossTenant {
-        async fn authorize(
-            &self,
-            _: &ego_security_sdk::principal::Principal,
-            _: &AccessRequest,
-            _: &SecurityContext,
-        ) -> Result<AuthorizationDecision, SecurityError> {
-            Ok(AuthorizationDecision::Deny {
-                reason: "no cross-tenant capability".into(),
-            })
-        }
-    }
-
-    fn authenticated_ctx() -> ServiceContext {
-        let principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-        let security = SecurityContext::empty(principal);
-        ServiceContext::new().with_security(Arc::new(security))
-    }
+    use crate::test_support::{authenticated_ctx, AllowCrossTenant, DenyCrossTenant};
 
     // CORE-008A Phase 6 (TASK-028, FR-005/NFR-002): this test and its sibling
     // below already prove permit denial without a cross-tenant capability,
