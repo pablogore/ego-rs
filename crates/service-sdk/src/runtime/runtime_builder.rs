@@ -610,6 +610,14 @@ mod tests {
         ServiceContext::new().with_security(Arc::new(security))
     }
 
+    // CORE-008A Phase 6 (TASK-028, FR-005/NFR-002): this test and its sibling
+    // below already prove permit denial without a cross-tenant capability,
+    // and denial even with resource/action-only authorization — the exact
+    // scenarios TASK-028 specifies. `issue_cross_tenant_permit` is
+    // `pub(crate)` (AD-008), so these scenarios cannot be exercised from the
+    // external `tests/tenant_enforcement_contract.rs` acceptance suite; see
+    // that file's module doc for the full explanation. No new test was added
+    // for TASK-028's denial half.
     #[tokio::test]
     async fn issue_cross_tenant_permit_denied_without_capability() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(DenyCrossTenant));
@@ -643,6 +651,12 @@ mod tests {
         ));
     }
 
+    // CORE-008A Phase 6 (TASK-028, FR-006/NFR-002 positive path): this test
+    // proves a permit is minted end to end on an `Allow` decision; combined
+    // with `context/mod.rs`'s `is_cross_tenant_allowed_for_matches_only_the_issued_destination`
+    // (attach + check `is_cross_tenant_allowed_for` == true for the issued
+    // destination), the full "issued, attached, not rejected as a tenant
+    // violation" flow FR-006 describes is already covered verbatim.
     #[tokio::test]
     async fn issue_cross_tenant_permit_allowed_yields_destination_scoped_permit() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));

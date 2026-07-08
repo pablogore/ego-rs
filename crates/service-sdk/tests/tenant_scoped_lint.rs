@@ -324,3 +324,52 @@ fn tenant_scoped_lint_ignores_bodyless_trait_declaration() {
         "a bodyless trait method declaration must never be scanned as a violation"
     );
 }
+
+// -- CORE-008A Phase 6 (TASK-029) — FR-007 structural transport-independence --
+
+/// Identifiers that would indicate a transport dependency leaking into the
+/// runtime's tenant-resolution/enforcement path. Deliberately narrow, same
+/// best-effort spirit as `TENANT_IDENTIFIERS` above — this is a structural
+/// smoke check, not a full dependency-graph audit.
+const TRANSPORT_IDENTIFIERS: [&str; 6] =
+    ["axum", "tonic", "hyper", "HeaderMap", "grpc", "http::header"];
+
+/// FR-007: the runtime's tenant-resolution seam (`runtime/tenant.rs`) and the
+/// enforcement path it feeds (`runtime_builder.rs`) MUST reference no
+/// transport-specific type or header/metadata extraction logic — only an
+/// already-resolved tenant value. Extends TASK-014's scan test rather than
+/// adding a third scanning mechanism (ladder rung 2: reuse what's already
+/// here).
+#[test]
+fn runtime_tenant_enforcement_path_has_no_transport_dependency() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root(&manifest_dir);
+
+    let files = [
+        root.join("crates/service-sdk/src/runtime/tenant.rs"),
+        root.join("crates/service-sdk/src/runtime/runtime_builder.rs"),
+    ];
+
+    let mut found_any_file = false;
+    for file in &files {
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        found_any_file = true;
+        for ident in TRANSPORT_IDENTIFIERS {
+            assert!(
+                !content.contains(ident),
+                "found transport-specific identifier {ident:?} in {} — the runtime layer \
+                 must carry no transport dependency (FR-007)",
+                file.display()
+            );
+        }
+    }
+
+    assert!(
+        found_any_file,
+        "neither runtime/tenant.rs nor runtime_builder.rs was found under {} — \
+         the scan is silently scanning zero files",
+        root.display()
+    );
+}
