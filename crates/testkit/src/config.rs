@@ -1,29 +1,17 @@
-//! Test configuration builder — [`TestConfig`] (CORE-022 Phase 6, design.md AD-5).
+//! Test configuration builder — [`TestConfig`] (CORE-022 Phase 6, design.md AD-5;
+//! drain mechanism resolved in Phase 8 — see the note on [`TestConfig::drain_into`]).
 
-use std::any::{Any, TypeId};
-use std::collections::HashMap;
-use std::sync::Arc;
+use ego_service_sdk::{ConfigurationProvider, RuntimeBuilder};
 
-use ego_service_sdk::ConfigurationProvider;
-
-/// Collects test configuration along two separate, non-overlapping views:
-/// a typed collection (keyed by [`TypeId`], matching the container shape
-/// `RuntimeInner`'s `DependencyTable` uses for `resolve_config::<C>()`) and a
-/// JSON-subtree view exposed through the real [`ConfigurationProvider`].
+/// Collects test configuration along two separate, non-overlapping views: a
+/// typed collection observable through `resolve_config::<C>()` once drained
+/// into a real `Runtime` (Phase 8, AD-9), and a JSON-subtree view exposed
+/// through the real [`ConfigurationProvider`].
 ///
 /// `.with_value` and `.set` never touch each other's storage.
-///
-/// Container-shape match is not, by itself, an integration path: production's
-/// only config-registration entry point, `RuntimeBuilder::with_config::<C>()`,
-/// is generic and needs a concrete `C` at the call site — a type-erased
-/// `HashMap<TypeId, Arc<dyn Any>>` cannot be drained into it without knowing
-/// `C` per entry. Phase 8 (AD-9 fixture wiring) must resolve this — e.g. by
-/// capturing a `Box<dyn FnOnce(RuntimeBuilder) -> RuntimeBuilder>` per call to
-/// `with_value::<C>()` instead of a type-erased value — before this typed
-/// collection can actually reach a real `Runtime`.
 pub struct TestConfig {
     root: serde_json::Value,
-    typed: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    typed: Vec<Box<dyn FnOnce(RuntimeBuilder) -> RuntimeBuilder + Send>>,
 }
 
 impl TestConfig {
@@ -31,15 +19,19 @@ impl TestConfig {
     pub fn new() -> Self {
         Self {
             root: serde_json::Value::Object(serde_json::Map::new()),
-            typed: HashMap::new(),
+            typed: Vec::new(),
         }
     }
 
     /// Registers a typed config value resolvable via `resolve_config::<C>()`
-    /// once fed into `RuntimeBuilder::with_config` (Phase 8). Distinct types
-    /// coexist; registering the same type twice overwrites the prior value.
+    /// once the fixture drains this `TestConfig` into a `RuntimeBuilder`.
+    /// Distinct types coexist; registering the same
+    /// type twice overwrites the prior value (matches
+    /// `RuntimeBuilder::with_config`'s own last-write-wins semantics).
     pub fn with_value<C: Send + Sync + 'static>(mut self, value: C) -> Self {
-        self.typed.insert(TypeId::of::<C>(), Arc::new(value));
+        self.typed.push(Box::new(move |builder: RuntimeBuilder| {
+            builder.with_config(std::sync::Arc::new(value))
+        }));
         self
     }
 
@@ -60,6 +52,26 @@ impl TestConfig {
     pub fn provider(&self) -> ConfigurationProvider {
         ConfigurationProvider::from_value(self.root.clone())
     }
+
+    /// Applies every registered `.with_value::<C>()` closure to `builder`, in
+    /// insertion order, and returns the resulting builder.
+    ///
+    /// Resolved (Phase 8, design.md AD-5 "Open item"): production's only
+    /// config-registration entry point, `RuntimeBuilder::with_config::<C>()`,
+    /// is generic and needs a concrete `C` at the call site — a type-erased
+    /// `HashMap<TypeId, Arc<dyn Any>>` cannot be drained into it without
+    /// already knowing `C` per entry, and `DependencyTable`/its
+    /// `with_registrations` constructor are `pub(super)` in `service-sdk`
+    /// (unreachable from `testkit`). Each `with_value::<C>()` call now
+    /// captures a closure that already knows its own concrete `C`, so
+    /// draining never needs to inspect a type-erased map. Because
+    /// `RuntimeBuilder::with_config` itself does last-write-wins by
+    /// `TypeId` (`self.configs.insert(TypeId::of::<C>(), ..)`), folding these
+    /// closures in insertion order reproduces the exact same last-write-wins
+    /// semantics as calling `with_config` directly multiple times.
+    pub(crate) fn drain_into(self, builder: RuntimeBuilder) -> RuntimeBuilder {
+        self.typed.into_iter().fold(builder, |b, apply| apply(b))
+    }
 }
 
 impl Default for TestConfig {
@@ -79,37 +91,29 @@ mod tests {
             .with_value(42u32)
             .with_value("s".to_string());
 
-        assert_eq!(config.typed.len(), 2);
-        let stored_u32 = config.typed[&TypeId::of::<u32>()]
-            .clone()
-            .downcast::<u32>()
-            .expect("u32 value stored under its own TypeId");
-        assert_eq!(*stored_u32, 42);
-        let stored_string = config.typed[&TypeId::of::<String>()]
-            .clone()
-            .downcast::<String>()
-            .expect("String value stored under its own TypeId");
-        assert_eq!(*stored_string, "s");
+        // Stronger than the old direct-`.typed`-inspection test: drains into a
+        // real `RuntimeBuilder` and observes both values through the real
+        // `resolve_config::<C>()` seam a service would use.
+        let rt = config.drain_into(RuntimeBuilder::new()).build();
+        assert_eq!(*rt.inner().resolve_config::<u32>().unwrap(), 42);
+        assert_eq!(
+            *rt.inner().resolve_config::<String>().unwrap(),
+            "s".to_string()
+        );
     }
 
     #[test]
     fn with_value_same_type_twice_overwrites_prior_value() {
         let config = TestConfig::new().with_value(1u32).with_value(2u32);
 
-        assert_eq!(config.typed.len(), 1);
-        let stored = config.typed[&TypeId::of::<u32>()]
-            .clone()
-            .downcast::<u32>()
-            .expect("u32 value stored under its own TypeId");
-        assert_eq!(*stored, 2);
+        let rt = config.drain_into(RuntimeBuilder::new()).build();
+        assert_eq!(*rt.inner().resolve_config::<u32>().unwrap(), 2);
     }
 
     #[test]
     fn set_is_reflected_in_provider_json_view() {
-        let config = TestConfig::new().set(
-            "logging",
-            json!({ "enabled": false, "format": "text" }),
-        );
+        let config =
+            TestConfig::new().set("logging", json!({ "enabled": false, "format": "text" }));
 
         // Round-trips through the REAL `ConfigurationProvider` — proves
         // `.set()` actually reaches the JSON root the provider reads from,
@@ -128,7 +132,10 @@ mod tests {
     #[test]
     fn with_value_alone_leaves_root_untouched() {
         let config = TestConfig::new().with_value(42u32);
-        assert_eq!(config.root, serde_json::Value::Object(serde_json::Map::new()));
+        assert_eq!(
+            config.root,
+            serde_json::Value::Object(serde_json::Map::new())
+        );
     }
 
     #[test]
