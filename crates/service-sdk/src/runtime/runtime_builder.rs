@@ -29,7 +29,7 @@ use super::logger::TeardownStack;
 use super::permit::CrossTenantPermit;
 #[cfg(test)]
 use super::tenant::TenantEnforcementMode;
-use super::tenant::TenantResolver;
+use super::tenant::{EstablishedTenantFacts, TenantResolver};
 
 // ---------------------------------------------------------------------------
 // Internal: grouped resolved-instance tables
@@ -242,14 +242,23 @@ impl RuntimeInner {
     /// into `ctx` via `ctx.set_resolved_tenant` and returns `Ok(())`. On
     /// failure, returns `Err` without mutating `ctx`.
     ///
-    /// Still inert as of Phase 2: no `#[operation]` is marked
-    /// `#[tenant_scoped]` yet, so the macro's generated unmarked-path call
-    /// discards this `Result` (see `service-sdk-macros` TASK-009B). Phase 3
-    /// wires a fallible `?` call for `#[tenant_scoped]` operations.
+    /// Wired into `#[tenant_scoped]`-generated operations via a fallible `?`
+    /// call (`service-sdk-macros`); unmarked operations never call this at
+    /// all (AD-007).
+    ///
+    /// Gathers the closed set of Established Facts (AD-013) from `ctx` —
+    /// the authenticated `SecurityContext`, the caller-supplied hint, and any
+    /// already-established cross-tenant grant — and hands them to
+    /// `TenantResolver::resolve` as a single value. This function only
+    /// orchestrates the gathering; it never itself decides the tenant
+    /// outcome.
     pub fn enforce_tenant(&self, ctx: &mut ServiceContext) -> Result<(), SecurityError> {
-        let security = ctx.security();
-        let hint = ctx.tenant_hint();
-        let canonical = self.tenant_resolver.resolve(security, hint)?;
+        let facts = EstablishedTenantFacts::new(
+            ctx.security(),
+            ctx.tenant_hint(),
+            ctx.cross_tenant_grant(),
+        );
+        let canonical = self.tenant_resolver.resolve(facts)?;
         ctx.set_resolved_tenant(canonical);
         Ok(())
     }
@@ -618,12 +627,11 @@ mod tests {
         ));
     }
 
-    // CORE-008A Phase 6 (TASK-028, FR-006/NFR-002 positive path): this test
-    // proves a permit is minted end to end on an `Allow` decision; combined
-    // with `context/mod.rs`'s `is_cross_tenant_allowed_for_matches_only_the_issued_destination`
-    // (attach + check `is_cross_tenant_allowed_for` == true for the issued
-    // destination), the full "issued, attached, not rejected as a tenant
-    // violation" flow FR-006 describes is already covered verbatim.
+    // CORE-008A Phase 6 (TASK-028, FR-006/NFR-002 positive path): proves a
+    // permit is minted end to end on an `Allow` decision. This covers
+    // issuance only — see `enforce_tenant_succeeds_for_authorized_cross_tenant_grant`
+    // below for the full issued → attached → consumed → operation-succeeds
+    // flow FR-006 actually requires (AD-013).
     #[tokio::test]
     async fn issue_cross_tenant_permit_allowed_yields_destination_scoped_permit() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
@@ -634,6 +642,43 @@ mod tests {
 
         let permit = result.expect("Allow decision must yield a permit");
         assert_eq!(permit.destination(), &destination);
+    }
+
+    // FR-006 end-to-end acceptance scenario (AD-013): a Principal authenticated
+    // on tenant-a, holding a validly-issued CrossTenantPermit for tenant-b,
+    // invokes enforce_tenant with a hint of tenant-b — and it succeeds, not
+    // rejected as a tenant violation. This is the test the original CORE-008A
+    // review claimed was "already covered verbatim" by the issuance-only and
+    // getter-only tests above; it was not — neither of those ever calls
+    // enforce_tenant, so issuance and consumption were never actually proven
+    // connected until this test.
+    #[tokio::test]
+    async fn enforce_tenant_succeeds_for_authorized_cross_tenant_grant() {
+        use crate::runtime::CanonicalTenant;
+
+        let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
+        let ctx = ctx_with_tenant(Some("tenant-a"));
+        let destination = TenantId::new("tenant-b").unwrap();
+
+        let permit = rt
+            .issue_cross_tenant_permit(&ctx, destination.clone())
+            .await
+            .expect("Allow decision must yield a permit");
+
+        let mut ctx = ctx
+            .with_cross_tenant_access(&permit)
+            .with_tenant_id("tenant-b");
+
+        rt.enforce_tenant(&mut ctx).expect(
+            "a valid grant for the requested destination must succeed, not TenantMismatch",
+        );
+
+        assert_eq!(
+            ctx.canonical_tenant()
+                .and_then(CanonicalTenant::tenant_id)
+                .map(TenantId::as_str),
+            Some("tenant-b")
+        );
     }
 
     #[tokio::test]
