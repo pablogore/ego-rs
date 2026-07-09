@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use ego_domain::context::TenantId;
 use ego_security_sdk::context::SecurityContext;
 use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
 use ego_service_sdk::context::ServiceContext;
@@ -19,7 +20,7 @@ use ego_service_sdk::context::ServiceContext;
 #[allow(dead_code)] // not every consumer uses every helper in this module
 pub fn authenticated_ctx(tenant: Option<&str>) -> ServiceContext {
     let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-    principal.tenant_id = tenant.map(|t| t.to_string());
+    principal.tenant_id = tenant.map(|t| TenantId::new(t).unwrap());
     let security = SecurityContext::empty(principal);
     ServiceContext::new().with_security(Arc::new(security))
 }

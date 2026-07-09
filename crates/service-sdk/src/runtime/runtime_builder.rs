@@ -657,7 +657,7 @@ mod tests {
 
     fn ctx_with_tenant(tenant: Option<&str>) -> ServiceContext {
         let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-        principal.tenant_id = tenant.map(|t| t.to_string());
+        principal.tenant_id = tenant.map(|t| TenantId::new(t).unwrap());
         let security = SecurityContext::empty(principal);
         ServiceContext::new().with_security(Arc::new(security))
     }

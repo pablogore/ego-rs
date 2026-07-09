@@ -246,6 +246,7 @@ struct RawClaims {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use ego_domain::context::TenantId;
     use serde_json::json;
 
     use crate::test_helpers::{fixed_clock, future_ts, hs256_secret, make_hs256_token, now_clock, past_ts};
@@ -475,7 +476,10 @@ mod tests {
             now_clock().as_ref(),
         )
         .unwrap();
-        assert_eq!(ctx.principal.tenant_id.as_deref(), Some("primary"));
+        assert_eq!(
+            ctx.principal.tenant_id.as_ref().map(TenantId::as_str),
+            Some("primary")
+        );
         // tid must remain in custom since it was not consumed
         assert_eq!(ctx.claims.custom.get("tid"), Some(&json!("secondary")));
         assert!(!ctx.claims.custom.contains_key("tenant_id"));

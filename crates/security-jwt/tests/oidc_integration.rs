@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ego_domain::auth::{AuthenticationError, ClaimSet, ClaimValue};
+use ego_domain::context::TenantId;
 use ego_security_sdk::{AuthenticationProvider, Credential, PrincipalMapper, Principal, Claims};
 use security_jwt::{
     JwtAlgorithm, OidcAuthenticationProvider, MultiIssuerAuthenticationProvider,
@@ -500,7 +501,10 @@ fn us006_default_mapper_maps_all_standard_claims() {
 
     assert_eq!(ctx.principal.subject_id.as_str(), "std-user");
     assert!(ctx.principal.roles.iter().any(|r| r.0 == "admin"));
-    assert_eq!(ctx.principal.tenant_id.as_deref(), Some("tenant-99"));
+    assert_eq!(
+        ctx.principal.tenant_id.as_ref().map(TenantId::as_str),
+        Some("tenant-99")
+    );
 }
 
 struct PreferredUsernameToPrincipalMapper;

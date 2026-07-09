@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use ego_domain::context::TenantId;
 use ego_security_sdk::principal::{Principal, PrincipalKind, Role, SubjectId};
 
 /// Default subject id used when a test does not override it. Always
@@ -73,7 +74,9 @@ impl PrincipalBuilder {
             .expect("PrincipalBuilder subject must not be empty or whitespace-only");
         let mut principal = Principal::new(self.kind, subject_id);
         if let Some(tenant) = self.tenant {
-            principal = principal.with_tenant_id(tenant);
+            let tenant_id = TenantId::new(tenant)
+                .expect("PrincipalBuilder tenant must not be empty or whitespace-only");
+            principal = principal.with_tenant_id(tenant_id);
         }
         for role in self.roles {
             principal = principal.with_role(role);
@@ -145,7 +148,7 @@ mod tests {
             .attribute("region", "eu-west-1")
             .build();
         assert_eq!(p.kind, PrincipalKind::Service);
-        assert_eq!(p.tenant_id.as_deref(), Some("acme"));
+        assert_eq!(p.tenant_id.as_ref().map(TenantId::as_str), Some("acme"));
         assert_eq!(
             p.attributes.get("region").map(String::as_str),
             Some("eu-west-1")
@@ -162,5 +165,17 @@ mod tests {
     #[should_panic(expected = "PrincipalBuilder subject must not be empty or whitespace-only")]
     fn whitespace_only_subject_override_panics() {
         PrincipalBuilder::new().subject("   ").build();
+    }
+
+    #[test]
+    #[should_panic(expected = "PrincipalBuilder tenant must not be empty or whitespace-only")]
+    fn empty_tenant_override_panics() {
+        PrincipalBuilder::new().tenant("").build();
+    }
+
+    #[test]
+    #[should_panic(expected = "PrincipalBuilder tenant must not be empty or whitespace-only")]
+    fn whitespace_only_tenant_override_panics() {
+        PrincipalBuilder::new().tenant("   ").build();
     }
 }

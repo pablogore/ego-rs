@@ -121,7 +121,7 @@ impl TenantResolver {
         supplied_tenant: Option<&str>,
     ) -> Result<CanonicalTenant, SecurityError> {
         match security {
-            Some(security) => match security.principal().tenant_id.as_deref() {
+            Some(security) => match security.principal().tenant_id.as_ref() {
                 // (a) Authenticated but no Principal tenant claim — a caller-supplied
                 // hint is never trusted as a substitute (D2 gap fix).
                 None => Err(SecurityError::MissingContext),
@@ -129,34 +129,35 @@ impl TenantResolver {
                 // canonical. A blank hint (code-review fix) is treated the same as
                 // an absent one: a transport binding that defaults a missing header
                 // to `Some(String::new())` instead of `None` must not spuriously
-                // mismatch against a real Principal tenant.
-                Some(principal_tenant) => match supplied_tenant {
-                    None => Ok(CanonicalTenant::scoped(Self::validated(principal_tenant)?)),
-                    Some(hint) if hint.trim().is_empty() || hint == principal_tenant => {
-                        Ok(CanonicalTenant::scoped(Self::validated(principal_tenant)?))
+                // mismatch against a real Principal tenant. The Principal's tenant
+                // is already validated at JWT-mapping time (CORE-024) — clone, don't
+                // re-validate.
+                Some(principal_tenant) => {
+                    let expected = principal_tenant.as_str();
+                    if let Some(hint) = supplied_tenant {
+                        // (c) Authenticated, hint present, non-blank, and disagrees —
+                        // hard error, never a silent pick.
+                        if !hint.trim().is_empty() && hint != expected {
+                            return Err(SecurityError::TenantMismatch {
+                                expected: expected.to_string(),
+                                actual: hint.to_string(),
+                            });
+                        }
                     }
-                    // (c) Authenticated, hint disagrees — hard error, never a silent pick.
-                    Some(hint) => Err(SecurityError::TenantMismatch {
-                        expected: principal_tenant.to_string(),
-                        actual: hint.to_string(),
-                    }),
-                },
+                    Ok(CanonicalTenant::scoped(principal_tenant.clone()))
+                }
             },
             // (d)/(e) No SecurityContext: system/internal branch.
             None => match (self.mode, supplied_tenant) {
-                (TenantEnforcementMode::AllowSystemInternal, Some(hint)) => {
-                    Ok(CanonicalTenant::scoped(Self::validated(hint)?))
-                }
+                // (d) System-internal hint is untrusted raw input — parse it
+                // inline here (validated() is deleted, see design AD-2). This is
+                // the ONLY remaining raw-string→TenantId parse in resolve().
+                (TenantEnforcementMode::AllowSystemInternal, Some(hint)) => TenantId::new(hint)
+                    .map(CanonicalTenant::scoped)
+                    .map_err(|_| SecurityError::MissingContext),
                 _ => Err(SecurityError::MissingContext),
             },
         }
-    }
-
-    /// Validates a raw tenant string into the domain `TenantId` newtype.
-    /// An empty tenant string (violating `TenantId`'s non-empty invariant)
-    /// is treated as an unresolvable context, not a panic or silent default.
-    fn validated(raw: &str) -> Result<TenantId, SecurityError> {
-        TenantId::new(raw).map_err(|_| SecurityError::MissingContext)
     }
 }
 
@@ -171,7 +172,7 @@ mod tests {
 
     fn principal_with_tenant(tenant: Option<&str>) -> Principal {
         let mut p = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-        p.tenant_id = tenant.map(|t| t.to_string());
+        p.tenant_id = tenant.map(|t| TenantId::new(t).unwrap());
         p
     }
 

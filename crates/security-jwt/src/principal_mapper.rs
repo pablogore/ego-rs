@@ -14,6 +14,7 @@ const STANDARD_JWT_CLAIM_KEYS: &[&str] = &["exp", "nbf", "iat", "jti", "iss", "a
 use ego_domain::auth::{ClaimSet, ClaimValue, StandardClaims};
 use ego_security_sdk::{Principal, PrincipalKind,     PrincipalMapper, Role, SubjectId};
 use ego_domain::auth::AuthenticationError;
+use ego_domain::context::TenantId;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -125,8 +126,10 @@ impl PrincipalMapper for DefaultPrincipalMapper {
                 (None, None)
             };
 
-        if let Some(ref tid) = tenant_id {
-            principal = principal.with_tenant_id(tid.clone());
+        if let Some(tid) = tenant_id {
+            let tenant = TenantId::new(tid)
+                .map_err(|_| AuthenticationError::InvalidToken("invalid tenant claim".into()))?;
+            principal = principal.with_tenant_id(tenant);
         }
 
         // Build standard claims from the claim set
@@ -344,7 +347,21 @@ mod tests {
             ("exp", ClaimValue::Integer(9_999_999_999)),
         ]);
         let (principal, _) = DefaultPrincipalMapper.map(&cs).unwrap();
-        assert_eq!(principal.tenant_id.as_deref(), Some("tenant-42"));
+        assert_eq!(
+            principal.tenant_id.as_ref().map(TenantId::as_str),
+            Some("tenant-42")
+        );
+    }
+
+    #[test]
+    fn maps_invalid_tenant_claim_fails() {
+        let cs = make_claims(vec![
+            ("sub", ClaimValue::String("u1".into())),
+            ("tid", ClaimValue::String("   ".into())),
+            ("exp", ClaimValue::Integer(9_999_999_999)),
+        ]);
+        let err = DefaultPrincipalMapper.map(&cs).unwrap_err();
+        assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
     #[test]
