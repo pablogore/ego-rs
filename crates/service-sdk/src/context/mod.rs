@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use ego_domain::context::TenantId;
 
-use crate::runtime::{CanonicalTenant, CrossTenantPermit};
+use crate::runtime::{CanonicalTenant, CrossTenantGrant, CrossTenantPermit};
 
 /// A service context that propagates across service calls for tracing, tenant isolation,
 /// and other cross-cutting concerns.
@@ -64,11 +64,15 @@ pub struct ServiceContext {
     /// The additional context.
     pub additional_context: HashMap<String, String>,
     /// The destination tenant this context is authorized to cross into, if
-    /// any (CORE-008A AD-008/TASK-019). Set only via
+    /// any (CORE-008A AD-008/TASK-019), held as the AD-013 Established Fact
+    /// [`TenantResolver::resolve`] consumes. Set only via
     /// [`ServiceContext::with_cross_tenant_access`], scoped to the
     /// [`CrossTenantPermit`]'s own destination — a permit issued for
-    /// `tenant-b` can never make this context allowed for `tenant-c`.
-    allow_cross_tenant: Option<TenantId>,
+    /// `tenant-b` can never make this context allowed for `tenant-c`. Stored
+    /// as `CrossTenantGrant` (not a raw `TenantId`) so [`ServiceContext::cross_tenant_grant`]
+    /// can hand `TenantResolver::resolve` a borrowed reference instead of
+    /// cloning on every `enforce_tenant` call, most of which never consume it.
+    allow_cross_tenant: Option<CrossTenantGrant>,
     /// Optional push-style cancellation token.
     pub cancellation_token: Option<CancellationToken>,
     /// Attached security context carrying the authenticated principal, if any.
@@ -184,7 +188,7 @@ impl ServiceContext {
     /// exactly the destination the permit was authorized for — see
     /// [`ServiceContext::is_cross_tenant_allowed_for`].
     pub fn with_cross_tenant_access(mut self, permit: &CrossTenantPermit) -> Self {
-        self.allow_cross_tenant = Some(permit.destination().clone());
+        self.allow_cross_tenant = Some(CrossTenantGrant::new(permit.destination().clone()));
         self
     }
 
@@ -278,7 +282,24 @@ impl ServiceContext {
     /// `true` only if a cross-tenant grant is present AND it was scoped to
     /// this exact `destination`.
     pub fn is_cross_tenant_allowed_for(&self, destination: &TenantId) -> bool {
-        self.allow_cross_tenant.as_ref() == Some(destination)
+        self.allow_cross_tenant
+            .as_ref()
+            .is_some_and(|grant| grant.destination() == destination)
+    }
+
+    /// Retrieves the already-established cross-tenant grant, if any, as an
+    /// AD-013 Established Fact ready for `TenantResolver::resolve` to
+    /// consume. `RuntimeInner::enforce_tenant` calls this alongside
+    /// [`ServiceContext::security`]/[`ServiceContext::tenant_hint`] to
+    /// gather the closed fact set before evaluation — this accessor does
+    /// not itself decide anything, it only reports what was already set via
+    /// [`ServiceContext::with_cross_tenant_access`]. Borrowed, not cloned —
+    /// `resolve` only ever reads the destination in the narrow branch where
+    /// an authenticated hint disagrees with the principal's own tenant, so
+    /// paying a clone on every call regardless of outcome is wasted work
+    /// (code-review fix).
+    pub(crate) fn cross_tenant_grant(&self) -> Option<&CrossTenantGrant> {
+        self.allow_cross_tenant.as_ref()
     }
 
     /// Checks if the current context has a tenant ID.
@@ -533,15 +554,18 @@ mod tests {
 
     #[test]
     fn set_resolved_tenant_makes_canonical_tenant_available() {
-        use crate::runtime::{TenantEnforcementMode, TenantResolver};
+        use crate::runtime::{RuntimeInner, TenantEnforcementMode};
 
-        let resolver = TenantResolver::new(TenantEnforcementMode::AllowSystemInternal);
-        let canonical = resolver
-            .resolve(None, Some("tenant-a"))
+        // Routed through the same public seam production code uses
+        // (`RuntimeInner::enforce_tenant`) rather than constructing a
+        // crate-internal `EstablishedTenantFacts` by hand — this test only
+        // needs to prove `set_resolved_tenant`/`canonical_tenant` work, not
+        // exercise `TenantResolver::resolve`'s own branches (code-review fix).
+        let rt = RuntimeInner::for_test_with_mode(TenantEnforcementMode::AllowSystemInternal);
+        let mut ctx = ServiceContext::new().with_tenant_id("tenant-a");
+
+        rt.enforce_tenant(&mut ctx)
             .expect("AllowSystemInternal + hint resolves");
-
-        let mut ctx = ServiceContext::new();
-        ctx.set_resolved_tenant(canonical);
 
         assert!(ctx.canonical_tenant().is_some());
     }

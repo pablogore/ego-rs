@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ego_domain::context::TenantId;
+
 use crate::principal::SubjectId;
 
 /// What kind of actor a [`Principal`] represents.
@@ -60,7 +62,7 @@ pub struct Principal {
     /// Canonical, validated subject id.
     pub subject_id: SubjectId,
     /// Tenant/workspace this principal belongs to, if any.
-    pub tenant_id: Option<String>,
+    pub tenant_id: Option<TenantId>,
     /// Roles assigned to this principal (sorted for deterministic iteration).
     pub roles: BTreeSet<Role>,
     /// Free-form attributes.
@@ -79,9 +81,14 @@ impl Principal {
         }
     }
 
-    /// Builder: sets the tenant id.
-    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
-        self.tenant_id = Some(tenant_id.into());
+    /// Builder: sets the tenant id. Takes a pre-validated `TenantId`;
+    /// validation is the caller's responsibility (the type is the proof).
+    ///
+    /// Not to be confused with `ServiceContext::with_tenant_id` (service-sdk),
+    /// which takes any raw string as a non-authoritative caller-supplied hint —
+    /// a different type, a different trust boundary.
+    pub fn with_tenant_id(mut self, tenant_id: TenantId) -> Self {
+        self.tenant_id = Some(tenant_id);
         self
     }
 
@@ -107,6 +114,7 @@ impl Principal {
 mod tests {
     use super::{Principal, PrincipalKind, Role};
     use crate::principal::SubjectId;
+    use ego_domain::context::TenantId;
 
     fn make_subject(s: &str) -> SubjectId {
         SubjectId::new(s).unwrap()
@@ -139,16 +147,16 @@ mod tests {
     #[test]
     fn with_tenant_id_sets_field() {
         let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
-            .with_tenant_id("acme");
-        assert_eq!(p.tenant_id, Some("acme".into()));
+            .with_tenant_id(TenantId::new("acme").unwrap());
+        assert_eq!(p.tenant_id, Some(TenantId::new("acme").unwrap()));
     }
 
     #[test]
     fn with_tenant_id_overwrites() {
         let p = Principal::new(PrincipalKind::User, make_subject("u:1"))
-            .with_tenant_id("acme")
-            .with_tenant_id("contoso");
-        assert_eq!(p.tenant_id, Some("contoso".into()));
+            .with_tenant_id(TenantId::new("acme").unwrap())
+            .with_tenant_id(TenantId::new("contoso").unwrap());
+        assert_eq!(p.tenant_id, Some(TenantId::new("contoso").unwrap()));
     }
 
     #[test]
@@ -209,13 +217,13 @@ mod tests {
     fn subject_id_and_attributes() {
         let p = Principal::new(PrincipalKind::User, make_subject("user:42"))
             .with_role(Role("admin".into()))
-            .with_tenant_id("acme")
+            .with_tenant_id(TenantId::new("acme").unwrap())
             .with_attribute("region", "eu-west-1");
 
         assert_eq!(p.kind, PrincipalKind::User);
         assert_eq!(p.subject_id.as_str(), "user:42");
         assert!(p.has_role(&Role("admin".into())));
-        assert_eq!(p.tenant_id, Some("acme".into()));
+        assert_eq!(p.tenant_id, Some(TenantId::new("acme").unwrap()));
         assert_eq!(
             p.attributes.get("region").map(String::as_str),
             Some("eu-west-1")

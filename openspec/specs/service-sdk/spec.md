@@ -404,6 +404,411 @@ It does not redefine that constraint.
   show zero diff
 
 ---
+
+## Tenant Enforcement & Cross-Tenant Access (CORE-008A)
+
+This section describes the canonical tenant model, resolution authority, fail-closed
+enforcement, and authorization-gated cross-tenant access built by CORE-008A and
+subsequently closed out (FR-006 consumption gap) by later work. It supersedes the
+narrower, now-stale "TenantResolver does not re-validate..." section previously here,
+which covered only one delta (CORE-024) against an already-obsolete `resolve()`
+signature.
+
+**Resolution seam.** `TenantResolver::resolve` (`crates/service-sdk/src/runtime/tenant.rs`)
+is the single algorithm mandated below. It takes one argument, a closed
+`EstablishedTenantFacts<'a>` value:
+
+```rust
+pub(crate) struct EstablishedTenantFacts<'a> {
+    security: Option<&'a SecurityContext>,
+    hint: Option<&'a str>,
+    cross_tenant_grant: Option<&'a CrossTenantGrant>,
+}
+
+impl<'a> EstablishedTenantFacts<'a> {
+    pub(crate) fn new(
+        security: Option<&'a SecurityContext>,
+        hint: Option<&'a str>,
+        cross_tenant_grant: Option<&'a CrossTenantGrant>,
+    ) -> Self;
+}
+
+impl TenantResolver {
+    pub(crate) fn resolve(
+        &self,
+        facts: EstablishedTenantFacts<'_>,
+    ) -> Result<CanonicalTenant, SecurityError>;
+}
+```
+
+`RuntimeInner::enforce_tenant` gathers `facts` from `ServiceContext` (`ctx.security()`,
+`ctx.tenant_hint()`, `ctx.cross_tenant_grant()`) and calls `resolve` once per
+tenant-scoped operation. **AD-013 (Fact Establishment vs. Policy Evaluation)** governs
+this seam: `TenantResolver::resolve` is a Policy Evaluator — it derives its decision
+exclusively from the closed, immutable `facts` it was handed, and never itself fetches,
+queries, or authorizes anything during evaluation. Establishing a cross-tenant grant is
+a separate, upstream Fact Establishment step (`RuntimeInner::issue_cross_tenant_permit`
++ `ServiceContext::with_cross_tenant_access`) that must complete before `resolve` ever
+runs — see FR-006 below.
+
+---
+
+### Requirement: Tenant-Scoped Fail-Closed Enforcement Is Operation-Level, Not Global (FR-001)
+
+Tenant-scoped operations MUST fail closed when the canonical tenant cannot be resolved
+and validated for that operation. A valid tenant-less system/single-tenant execution
+mode MUST remain available; fail-closed enforcement applies only to operations
+classified as tenant-scoped, not to every operation in the runtime. Classification is
+the `#[tenant_scoped]` macro attribute (see "Explicit Context in Proxy Dispatch" above,
+which resolves the mechanism this requirement's archived form left open) — unmarked
+operations never call `enforce_tenant` at all.
+
+#### Scenario: Tenant-scoped operation fails closed without resolvable tenant
+
+- GIVEN an operation annotated `#[tenant_scoped]`
+- WHEN it is invoked and `RuntimeInner::enforce_tenant` cannot resolve a canonical
+  tenant for the call
+- THEN the call fails with an explicit `SecurityError` and the operation is not executed
+
+#### Scenario: Non-tenant-scoped operation is unaffected by missing tenant
+
+- GIVEN an operation with no `#[tenant_scoped]` marker, running in a valid
+  system/single-tenant execution mode
+- WHEN it is invoked with no tenant present
+- THEN the call proceeds and executes normally; no tenant error occurs
+
+---
+
+### Requirement: Principal Is the Canonical Tenant Authority on the Authenticated Path (FR-002)
+
+When a request is authenticated (a `Principal` exists via JWT/API key/OIDC),
+`Principal.tenant_id` (`Option<TenantId>`, already validated at `Principal`
+construction) MUST be treated as canonical. `TenantResolver::resolve` MUST derive the
+tenant visible to the service operation from `Principal.tenant_id` automatically — it
+MUST NOT re-validate that value via `TenantId::new()` or any equivalent; it is cloned
+directly into the returned `CanonicalTenant`. If a caller-supplied hint
+(`facts.hint`) is present, non-blank after trimming, and disagrees with
+`Principal.tenant_id`, the call MUST fail with `SecurityError::TenantMismatch` — the
+resolver MUST NOT silently prefer either value (unless FR-006's cross-tenant grant
+covers exactly that hint's destination — see below). A blank or whitespace-only hint is
+treated as absent, not as a mismatch. If the authenticated Principal carries no tenant
+claim at all (`Principal.tenant_id` is `None`), the resolver MUST NOT treat any
+caller-supplied hint as a substitute for it — the call MUST fail closed with
+`SecurityError::MissingContext`, regardless of whether a hint is present or absent, and
+this check MUST be evaluated before the hint-agreement check (a present-but-conflicting
+hint must never be evaluated against an absent Principal tenant claim).
+
+#### Scenario: Derivation from Principal succeeds without manual tenant assignment
+
+- GIVEN a `SecurityContext` wrapping a `Principal` with `tenant_id = Some(TenantId::new("tenant-a").unwrap())` and no conflicting hint
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(Some(&security), None, None))` is called
+- THEN `Ok(CanonicalTenant::scoped(tenant))` is returned where `tenant` is a clone of the Principal's `TenantId` — no call to `TenantId::new()` occurs during this resolution
+
+#### Scenario: Caller-supplied tenant conflicting with Principal is a hard error
+
+- GIVEN a `SecurityContext` wrapping a `Principal` with `tenant_id = Some(TenantId::new("tenant-a").unwrap())`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(Some(&security), Some("tenant-b"), None))` is called
+- THEN `Err(SecurityError::TenantMismatch { expected: "tenant-a", actual: "tenant-b" })` is returned; neither value is silently chosen
+
+#### Scenario: Blank hint is treated as absent, not a mismatch
+
+- GIVEN a `SecurityContext` wrapping a `Principal` with `tenant_id = Some(TenantId::new("tenant-a").unwrap())`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(Some(&security), Some(""), None))` is called
+- THEN `Ok(CanonicalTenant::scoped(tenant))` is returned for `"tenant-a"` — a blank hint never triggers `TenantMismatch`
+
+#### Scenario: Authenticated Principal without a tenant claim fails closed regardless of a caller-supplied hint
+
+- GIVEN a `SecurityContext` wrapping a `Principal` with `tenant_id = None`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(Some(&security), Some("tenant-x"), None))` is called
+- THEN `Err(SecurityError::MissingContext)` is returned; the hint is never used as a substitute for the missing Principal tenant claim
+
+#### Scenario: No validation call reachable on the Principal-derived path (structural)
+
+- GIVEN the source of `TenantResolver::resolve()`
+- WHEN the Principal-derived branch (the `Some(security)` match arm) is inspected
+- THEN no call to `TenantId::new(...)` appears on the path that handles `security.principal().tenant_id` — the only operation performed on that value is a clone into `CanonicalTenant::scoped(...)`
+
+**Tests**: `tenant::tests::resolve_authenticated_hint_absent_resolves_to_principal_tenant`, `tenant::tests::resolve_authenticated_hint_agrees_resolves_to_principal_tenant`, `tenant::tests::resolve_authenticated_blank_hint_resolves_to_principal_tenant`, `tenant::tests::resolve_authenticated_hint_disagrees_is_tenant_mismatch`, `tenant::tests::resolve_authenticated_no_principal_tenant_fails_closed_even_with_hint`, `tenant::tests::resolve_authenticated_no_principal_tenant_fails_closed_without_hint`. The "no re-validation" property is verified by code inspection at review time, not a runtime assertion — once `Principal.tenant_id` is `Option<TenantId>`, there is no invalid value a unit test could construct to distinguish "validated once" from "re-validated every call".
+
+#### Out of Scope for This Requirement
+
+- **No change to `ServiceContext.tenant_id` / `tenant_hint()`** (`crates/service-sdk/src/context/mod.rs`). That is a deliberately-raw ingress hint per AD-011, a different concept from the authenticated Principal's tenant claim. `testkit::TestContextBuilder`, which builds this hint, is likewise untouched.
+- **`TenantEnforcementMode` variants and the hint-mismatch/agreement decision logic are unchanged** by the CORE-024 validate-once delta — only the source of validation for the Principal-derived value was removed, not the resolution algorithm's branches.
+
+---
+
+### Requirement: Explicit System/Internal Request Mode (FR-003)
+
+An unauthenticated call (no `Principal`, `facts.security == None`) MUST be routed
+through a distinct, explicit system/internal branch of `TenantResolver::resolve` rather
+than being treated as a variant of FR-002's mismatch case. A caller-supplied hint is
+valid in this mode only when the runtime was configured with
+`TenantEnforcementMode::AllowSystemInternal` (via
+`RuntimeBuilder::with_tenant_enforcement_mode`; the default is `AuthenticatedOnly`).
+This is the ONE remaining raw-string parse in `resolve()`: `TenantId::new(hint.trim())`
+— the hint is trimmed of leading/trailing whitespace before validation so incidental
+whitespace (e.g. from a transport header) does not mint a `TenantId` that silently
+fails to `==` a clean one downstream.
+
+#### Scenario: Internal mode accepts caller-supplied tenant when explicitly permitted
+
+- GIVEN `TenantResolver::new(TenantEnforcementMode::AllowSystemInternal)` and no `SecurityContext`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(None, Some("tenant-c"), None))` is called
+- THEN `Ok(CanonicalTenant::scoped(tenant))` is returned for `"tenant-c"`, without being treated as a `TenantMismatch`
+
+#### Scenario: Internal-mode hint is trimmed before validation
+
+- GIVEN `TenantResolver::new(TenantEnforcementMode::AllowSystemInternal)` and no `SecurityContext`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(None, Some(" tenant-c "), None))` is called
+- THEN `Ok(CanonicalTenant::scoped(tenant))` is returned where `tenant.as_str() == "tenant-c"` — the stored value is trimmed, not the raw untrimmed hint
+
+#### Scenario: Internal mode rejects tenant when not permitted
+
+- GIVEN `TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly)` (the default) and no `SecurityContext`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(None, Some("tenant-c"), None))` is called
+- THEN `Err(SecurityError::MissingContext)` is returned — the call does not proceed as an authenticated-tenant call; it is handled per FR-004
+
+**Tests**: `tenant::tests::resolve_unauthenticated_allow_system_internal_with_hint_resolves_to_hint`, `tenant::tests::resolve_unauthenticated_allow_system_internal_trims_whitespace_in_hint`, `tenant::tests::resolve_unauthenticated_authenticated_only_mode_fails_closed`.
+
+---
+
+### Requirement: Neither Authenticated Nor Internal-Permitted Fails Closed (FR-004)
+
+A call that is neither authenticated (no `Principal`) nor covered by a
+runtime-permitted system/internal mode MUST fail with `SecurityError::MissingContext`
+before a tenant-scoped operation body executes. (The archived spec anticipated a
+possible separate `MissingAuthentication` variant; the shipped `SecurityError` enum —
+`crates/security-sdk/src/error/mod.rs` — has no such variant. `MissingContext` alone
+covers this case, which the archived spec's own wording already permitted: "the three
+conditions may surface through `RuntimeError`, `ServiceError`, `SecurityError`, or any
+combination design.md chooses.")
+
+#### Scenario: Unauthenticated, non-internal call is rejected
+
+- GIVEN `TenantResolver::new(TenantEnforcementMode::AllowSystemInternal)` and no `SecurityContext`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(None, None, None))` is called
+- THEN `Err(SecurityError::MissingContext)` is returned, and the operation body is never entered
+
+**Tests**: `tenant::tests::resolve_unauthenticated_allow_system_internal_without_hint_fails_closed`.
+
+---
+
+### Requirement: CrossTenantPermit Requires Authorized Capability (FR-005)
+
+`CrossTenantPermit` MUST be issued only after `AuthorizationProvider` confirms the
+requesting Principal holds an explicit cross-tenant capability. The current mechanism:
+`RuntimeInner::issue_cross_tenant_permit(&self, ctx: &ServiceContext, destination: TenantId)`
+(`crates/service-sdk/src/runtime/runtime_builder.rs`) builds a `Resource { kind: "tenant", id: Some(destination) }`
+/ `Action("cross-tenant-access")` request and calls `authorize_in_context` against the
+configured `AuthorizationProvider`. Being authorized for the target resource/action
+under a different action name is never checked — only this specific
+`"tenant:cross-tenant-access"` capability grants a permit. A `Deny` decision maps to
+`SecurityError::CrossTenantDenied`; if no `AuthorizationProvider` is configured, the
+call fails with `SecurityError::CapabilityNotEnabled`.
+
+#### Scenario: Permit denied for principal without cross-tenant capability
+
+- GIVEN a Principal whose `AuthorizationProvider` denies the `"tenant:cross-tenant-access"` request
+- WHEN `issue_cross_tenant_permit` is called for a destination tenant
+- THEN `Err(SecurityError::CrossTenantDenied { .. })` is returned and no `CrossTenantPermit` is issued
+
+#### Scenario: No provider configured fails closed
+
+- GIVEN a runtime with no `AuthorizationProvider` configured
+- WHEN `issue_cross_tenant_permit` is called
+- THEN `Err(SecurityError::CapabilityNotEnabled)` is returned
+
+**Tests**: `runtime_builder::tests::issue_cross_tenant_permit_denied_without_capability`, `runtime_builder::tests::issue_cross_tenant_permit_denied_even_with_resource_action_alone`, `runtime_builder::tests::issue_cross_tenant_permit_without_provider_is_capability_not_enabled`.
+
+---
+
+### Requirement: Authorized Cross-Tenant Access Succeeds (FR-006)
+
+A Principal holding the `"tenant:cross-tenant-access"` capability, confirmed via
+`AuthorizationProvider`, MUST be able to obtain a `CrossTenantPermit` and successfully
+execute a cross-tenant operation using it. Per **AD-013**, this is wired as Fact
+Establishment feeding Policy Evaluation, not as a callback performed during resolution:
+
+1. `RuntimeInner::issue_cross_tenant_permit` mints a `CrossTenantPermit { destination, issued_to }`
+   only on an `Allow` decision (FR-005).
+2. `ServiceContext::with_cross_tenant_access(&permit)` attaches it, storing a
+   `CrossTenantGrant` (`crates/service-sdk/src/runtime/tenant.rs`) — an AD-013
+   Established Fact — scoped to exactly the permit's `destination`. A permit issued for
+   `tenant-b` can never authorize a grant for `tenant-c`.
+3. `RuntimeInner::enforce_tenant` gathers `EstablishedTenantFacts` (`ctx.security()`,
+   `ctx.tenant_hint()`, `ctx.cross_tenant_grant()`) and hands them to
+   `TenantResolver::resolve` as a single closed value.
+4. Inside `resolve`, ONLY when an authenticated hint disagrees with the Principal's own
+   tenant AND a `CrossTenantGrant` is present whose `destination` exactly matches the
+   (trimmed) hint, resolution succeeds with `CanonicalTenant::scoped(grant.destination().clone())`
+   instead of a hard `TenantMismatch`. `resolve` never fetches, checks, or re-derives
+   the grant itself — it only reads the Established Fact it was handed (AD-013). A
+   grant scoped to a different destination than the hint still produces
+   `TenantMismatch`; an unused grant (hint absent or agreeing) has no effect.
+
+#### Scenario: Authorized cross-tenant access succeeds end to end
+
+- GIVEN a Principal authenticated on `"tenant-a"`, and an `AuthorizationProvider` that allows `"tenant:cross-tenant-access"`
+- WHEN the Principal calls `issue_cross_tenant_permit` for `"tenant-b"`, attaches the resulting permit via `ctx.with_cross_tenant_access(&permit).with_tenant_id("tenant-b")`, and `RuntimeInner::enforce_tenant(&mut ctx)` runs
+- THEN `enforce_tenant` returns `Ok(())`, and `ctx.canonical_tenant().and_then(CanonicalTenant::tenant_id)` is `Some("tenant-b")` — not rejected as a tenant violation
+
+#### Scenario: Grant scoped to a different destination than the hint still mismatches
+
+- GIVEN a Principal authenticated on `"tenant-a"` holding a grant for `"tenant-c"`
+- WHEN `resolver.resolve(EstablishedTenantFacts::new(Some(&security), Some("tenant-b"), Some(&grant)))` is called
+- THEN `Err(SecurityError::TenantMismatch { expected: "tenant-a", actual: "tenant-b" })` is returned — the grant does not act as a blanket cross-tenant switch
+
+#### Scenario: Unused grant does not affect an ordinary same-tenant call
+
+- GIVEN a Principal authenticated on `"tenant-a"` holding a grant for `"tenant-b"`, and no hint supplied
+- WHEN `resolver.resolve` is called
+- THEN resolution succeeds with `"tenant-a"`, as if no grant existed
+
+**Tests**: `runtime_builder::tests::enforce_tenant_succeeds_for_authorized_cross_tenant_grant` (full issued → attached → consumed → operation-succeeds flow), `runtime_builder::tests::issue_cross_tenant_permit_allowed_yields_destination_scoped_permit`, `tenant::tests::resolve_authorized_cross_tenant_grant_succeeds`, `tenant::tests::resolve_authorized_cross_tenant_grant_succeeds_with_whitespace_in_hint`, `tenant::tests::resolve_grant_for_different_destination_is_still_tenant_mismatch`, `tenant::tests::resolve_unused_grant_does_not_affect_hint_absent_resolution`, `tenant::tests::resolve_redundant_grant_matching_own_tenant_resolves_normally`, `context::tests::is_cross_tenant_allowed_for_matches_only_the_issued_destination`.
+
+---
+
+### Requirement: Runtime Is Transport-Independent for Tenant Resolution (FR-007)
+
+`TenantResolver::resolve` and `RuntimeInner::enforce_tenant` MUST consume only
+transport-neutral inputs (`EstablishedTenantFacts`: an already-produced
+`SecurityContext`, an optional `&str` hint, an optional `&CrossTenantGrant`). Neither
+MUST depend on any transport-specific mechanism (HTTP headers, gRPC metadata, or any
+other transport concept) to obtain or validate the tenant.
+
+#### Scenario: Runtime enforcement contains no transport-specific dependency
+
+- GIVEN `crates/service-sdk/src/runtime/tenant.rs` and `runtime_builder.rs`'s `enforce_tenant`
+- WHEN reviewed for dependencies
+- THEN neither references any HTTP, gRPC, or other transport-specific type, or header/metadata extraction logic — only `SecurityContext`, `&str`, and `CrossTenantGrant`
+
+---
+
+### Requirement: Exactly One Canonical In-Runtime Tenant Representation (FR-008)
+
+Exactly one representation of tenant MUST be canonical inside the runtime at the point
+an operation executes: `CanonicalTenant` (`crates/service-sdk/src/runtime/tenant.rs`).
+It wraps a private `Repr` enum (`Scoped(TenantId)` for a resolved tenant, `Systemwide`
+for D1's valid tenant-less mode); its constructors are `pub(super)`, reachable only
+within `crate::runtime`, so only `TenantResolver::resolve` may mint one. `Principal.tenant_id`,
+`ServiceContext.tenant_id` (the ingress hint), domain `ExecutionContext`/`TenantId`, and
+`ClaimSet::tenant()` are ingress/legacy carriers only — none is independently
+authoritative for the same operation at execution time. `Principal.tenant_id` is the
+authoritative *input* on the authenticated path; `TenantResolver`'s output is the
+authoritative *runtime* value; `ServiceContext.tenant_id` is demoted to a
+non-authoritative ingress hint (read via `ctx.tenant_hint()`).
+
+#### Scenario: Divergent ingress values converge to one authoritative value
+
+- GIVEN a request where the Principal's tenant claim and a caller-supplied hint could disagree
+- WHEN `RuntimeInner::enforce_tenant` runs
+- THEN exactly one `CanonicalTenant` is produced and stored via `ctx.set_resolved_tenant`, and every downstream tenant-aware read (`ctx.canonical_tenant()`) observes that same value
+
+#### Scenario: Only the runtime can construct a CanonicalTenant
+
+- GIVEN code outside `crate::runtime` in `service-sdk`
+- WHEN it attempts to construct a `CanonicalTenant` directly (e.g. `CanonicalTenant::scoped(...)`)
+- THEN compilation fails with a visibility error — `scoped`/`systemwide` are `pub(super)`
+
+**Tests**: `tenant::tests::canonical_tenant_scoped_is_constructible_within_runtime`, `tenant::tests::canonical_tenant_systemwide_is_constructible_within_runtime`.
+
+---
+
+### Requirement: Tenant Enforcement Is Fallible and Aborts Before the Operation Body (FR-009)
+
+Unchanged in substance since archival. This is already the enforced contract described
+above under "Explicit Context in Proxy Dispatch" (`rt.enforce_tenant(&mut ctx)?` called
+before the inner operation, per AD-009) and **INV-003** ("Tenant Enforcement
+Preserved"). No further requirement is added here; see those sections and their
+scenarios ("Tenant enforcement behavior preserved") for the acceptance contract.
+
+---
+
+### Requirement: ServiceContext Is Not a Parallel Writable Tenant Authority (FR-010)
+
+On the authenticated path, the service-visible tenant MUST be derived per FR-002, not
+independently settable by arbitrary code holding a `ServiceContext`. `ServiceContext.tenant_id`
+remains a `pub` field (the ingress hint, per AD-011) but mutating it after resolution has
+already run has no effect on enforcement: `resolved_tenant` is a separate private field,
+written only by the `pub(crate)` `set_resolved_tenant`, whose sole caller is
+`RuntimeInner::enforce_tenant`.
+
+#### Scenario: Direct tenant mutation cannot override the derived, authenticated tenant
+
+- GIVEN a `ServiceContext` whose `canonical_tenant()` was already resolved to `"tenant-a"` (derived from `Principal.tenant_id`)
+- WHEN code sets `ctx.tenant_id = Some("tenant-b".into())` directly
+- THEN `ctx.canonical_tenant()` still returns `"tenant-a"` — the mutated hint field is never read again for an already-resolved operation
+
+---
+
+### Requirement: A Canonical Tenant Is Available Before Operation Execution (FR-011)
+
+Before a tenant-scoped operation executes, a canonical tenant value MUST be available
+to the runtime for that operation. This is satisfied by the macro-generated call to
+`rt.enforce_tenant(&mut ctx)?` placed before the inner operation call (see "Explicit
+Context in Proxy Dispatch" above) — on the authenticated path this happens
+automatically via FR-002's derivation, without the calling code manually assigning a
+tenant per call.
+
+#### Scenario: A canonical tenant is present at the start of execution without manual per-call assignment
+
+- GIVEN an authenticated request to a `#[tenant_scoped]` operation
+- WHEN the generated proxy method runs
+- THEN `enforce_tenant` has already populated `ctx.canonical_tenant()` before the inner operation body executes, without the caller having set it manually
+
+**Tests**: `runtime_builder::tests::enforce_tenant_ok_sets_canonical_tenant_on_resolvable_context`.
+
+---
+
+### Requirement: Tenant Error Taxonomy Is Reachable in Code (FR-012)
+
+`SecurityError::TenantMismatch { expected, actual }`, `SecurityError::MissingContext`,
+and `SecurityError::CrossTenantDenied { reason }` MUST each be distinguishable by
+callers — reachable in code (`crates/security-sdk/src/error/mod.rs`), not only
+referenced in documentation. `MissingContext` covers both FR-002's "no tenant claim"
+case and FR-004's "neither authenticated nor internal-permitted" case; the archived
+spec's own wording ("MissingAuthentication/MissingContext... may surface through
+RuntimeError, ServiceError, SecurityError, or any combination") permits this
+consolidation — no separate `MissingAuthentication` variant exists or is required.
+
+#### Scenario: Each tenant failure mode is programmatically distinguishable
+
+- GIVEN the three failure conditions defined in FR-002, FR-004, and FR-005
+- WHEN each is triggered independently
+- THEN a caller can `match` on `SecurityError::TenantMismatch { .. }`, `SecurityError::MissingContext`, or `SecurityError::CrossTenantDenied { .. }` respectively — no two conditions are indistinguishable
+
+---
+
+### Requirement: service-sdk Spec Contract Matches Enforced Behavior (FR-013)
+
+Unchanged in intent since archival, and satisfied by this document itself: this spec
+section (and "Explicit Context in Proxy Dispatch" / INV-003 above) describes the
+fallible `enforce_tenant` check the code actually enforces, including the FR-006
+cross-tenant consumption path that was still an open gap when CORE-008A originally
+archived. No further requirement is added here.
+
+---
+
+### Requirement: Tenant Authority Is Immutable During Operation Execution (FR-014)
+
+Once the canonical tenant has been established for an operation (per
+FR-002/FR-003/FR-011), the tenant used for enforcement MUST remain stable for the
+duration of that operation. `CanonicalTenant` has no setters, no public fields, and no
+`&mut` API — it is immutable from the instant `TenantResolver::resolve` returns it
+(there is no mutation point to close). `ServiceContext.resolved_tenant` is written
+exactly once per operation, only by `set_resolved_tenant` (`pub(crate)`, sole caller
+`enforce_tenant`); no downstream code — including a later mutation of the raw
+`ctx.tenant_id` hint field on a cloned context — can alter the tenant an in-flight
+operation enforces against.
+
+#### Scenario: Downstream mutation attempts do not affect an operation already in progress
+
+- GIVEN an operation whose `ctx.canonical_tenant()` has already been resolved
+- WHEN downstream code attempts to alter `ctx.tenant_id` (the hint field) or clones `ctx`
+- THEN all subsequent enforcement decisions for that operation observe the original `CanonicalTenant`, not the attempted alteration — there is no API to mutate `resolved_tenant` outside `crate::runtime`
+
+---
+
 ## Non-Functional Requirements
 
 ### NFR-001: No Behavioral Regression

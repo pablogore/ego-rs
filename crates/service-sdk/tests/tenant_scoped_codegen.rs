@@ -142,7 +142,7 @@ async fn tenant_scoped_op_succeeds_and_body_observes_canonical_tenant_when_resol
     let (_rt, proxy) = make_proxy(service.clone());
 
     let mut principal = Principal::new(PrincipalKind::User, SubjectId::new("alice").unwrap());
-    principal.tenant_id = Some("tenant-a".to_string());
+    principal.tenant_id = Some(ego_domain::context::TenantId::new("tenant-a").unwrap());
     let security = SecurityContext::empty(principal);
     let ctx = ServiceContext::new().with_security(Arc::new(security));
 
