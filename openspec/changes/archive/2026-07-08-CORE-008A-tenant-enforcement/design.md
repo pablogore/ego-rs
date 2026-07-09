@@ -198,7 +198,7 @@ runtime-internal type that never crosses the runtime boundary: it is not part of
 the domain layer, not part of any event/message payload, not part of persistence or
 wire/serialized contracts, and not part of any public cross-crate API beyond the
 read-only `ServiceContext::canonical_tenant()` accessor (AD-011). It is neither
-`Serialize`/`Deserialize` nor exposed to transport (FR-007/AD-013). This is
+`Serialize`/`Deserialize` nor exposed to transport (FR-007/AD-002). This is
 already implied by AD-002 (lives in service-sdk; domain stays runtime-neutral) and
 by the operation-scoped, never-persisted lifecycle above; it is stated here
 explicitly so the containment invariant is unmissable rather than given its own
@@ -247,4 +247,70 @@ boundary, not an oversight.
 
 Satisfies: **FR-008**.
 
-(See tasks.md for implementation-specific Notes and Phase descriptions, and see proposal.md/spec.md for full architectural decisions AD-007 through AD-013.)
+### AD-013 — Fact Establishment vs. Policy Evaluation
+
+**Decision.** Components responsible for policy evaluation MUST derive their
+decision exclusively from a closed, immutable set of Established Facts. They
+MUST NOT establish new facts during evaluation, nor perform the action implied
+by the decision they produce.
+
+**Pipeline:**
+
+```
+Infrastructure
+  ↓
+Fact Establishment
+  ↓
+Established Facts
+  ↓
+Policy Evaluation
+  ↓
+Decision
+  ↓
+Enforcement
+```
+
+**Definition.** A Policy Evaluator is a component whose sole responsibility is
+to derive a deterministic decision from a closed, immutable set of Established
+Facts. It neither establishes new facts during evaluation nor performs the
+action implied by the decision.
+
+**Operational rule.** A component belongs to Policy Evaluation only if its
+decision depends exclusively on facts already present in its input. If the
+component can establish additional facts during execution — whether by
+discovering, querying, observing mutable state, or any other mechanism — it
+belongs to Fact Establishment or to another stage, not to Policy Evaluation.
+
+**Scope.** Framework-wide, as the preferred architectural shape for
+policy-evaluating components. Deviation requires explicit architectural
+justification, not merely convenience.
+
+**Evidence available today** (not a claim of universal conformance — Config,
+TestKit, and the logging subsystem were not audited):
+
+- `TenantResolver::resolve()` (`crates/service-sdk/src/runtime/tenant.rs`) —
+  Policy Evaluator. Depends only on already-resolved `SecurityContext`/hint;
+  establishes nothing during evaluation.
+- `AuthorizationProvider`/`RbacProvider`
+  (`crates/security-sdk/src/authorization/`,
+  `crates/security-sdk/src/providers/rbac/`) — Fact Establishment.
+  `authorize()` is `async` and fetches permissions mid-decision
+  (`self.store.permissions_for_role(role).await?`) — it establishes the fact
+  it then reasons over, so it is not itself a Policy Evaluator, even though it
+  also contains matching logic internally.
+- `ServiceRegistry::resolve()` (DI) — Policy Evaluator. Pure, in-memory,
+  deterministic lookup over already-registered facts.
+
+**Consequence for FR-006.** Cross-tenant authorization (`CrossTenantPermit` /
+the resulting grant) must reach `TenantResolver` as an Established Fact,
+already established by the authorization subsystem before policy evaluation
+begins — never as a callback performed during resolution.
+
+**Status.** This AD defines the architectural seam for closing the FR-006
+gap (`CrossTenantPermit` issuance exists; consumption in the enforcement
+path does not — confirmed by direct verification, not yet implemented). It
+does not itself satisfy FR-006; the implementation that wires the
+cross-tenant grant into `TenantResolver::resolve()` as an Established Fact
+is a separate, still-pending change.
+
+(See tasks.md for implementation-specific Notes and Phase descriptions, and see proposal.md/spec.md for full architectural decisions AD-007 through AD-012.)
