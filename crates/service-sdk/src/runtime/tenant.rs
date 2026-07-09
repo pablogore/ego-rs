@@ -117,14 +117,14 @@ impl CrossTenantGrant {
 pub(crate) struct EstablishedTenantFacts<'a> {
     security: Option<&'a SecurityContext>,
     hint: Option<&'a str>,
-    cross_tenant_grant: Option<CrossTenantGrant>,
+    cross_tenant_grant: Option<&'a CrossTenantGrant>,
 }
 
 impl<'a> EstablishedTenantFacts<'a> {
     pub(crate) fn new(
         security: Option<&'a SecurityContext>,
         hint: Option<&'a str>,
-        cross_tenant_grant: Option<CrossTenantGrant>,
+        cross_tenant_grant: Option<&'a CrossTenantGrant>,
     ) -> Self {
         Self { security, hint, cross_tenant_grant }
     }
@@ -173,6 +173,15 @@ impl TenantResolver {
         &self,
         facts: EstablishedTenantFacts<'_>,
     ) -> Result<CanonicalTenant, SecurityError> {
+        // Normalized once, here, for every branch below — both the
+        // authenticated disagreement/grant checks and the system-internal
+        // raw parse must compare the same trimmed value, or incidental
+        // whitespace on the caller-supplied hint (e.g. from a transport
+        // header) spuriously mismatches an otherwise-agreeing tenant,
+        // defeats an otherwise-covering grant, or mints a `TenantId` that
+        // silently fails to `==` a clean one downstream (code-review fix —
+        // consolidates what were two independent per-branch trims).
+        let hint = facts.hint.map(str::trim);
         match facts.security {
             Some(security) => match security.principal().tenant_id.as_ref() {
                 // (a) Authenticated but no Principal tenant claim — a caller-supplied
@@ -187,16 +196,16 @@ impl TenantResolver {
                 // re-validate.
                 Some(principal_tenant) => {
                     let expected = principal_tenant.as_str();
-                    if let Some(hint) = facts.hint {
+                    if let Some(hint) = hint {
                         // (c) Authenticated, hint present, non-blank, and disagrees.
-                        if !hint.trim().is_empty() && hint != expected {
+                        if !hint.is_empty() && hint != expected {
                             // (c') AD-013/FR-006: an Established cross-tenant grant
                             // scoped to exactly this hint's destination lets the
                             // disagreement resolve to the granted tenant instead of
                             // a hard error. The grant's TenantId was already
                             // validated at permit-issuance time — clone it, don't
                             // re-parse `hint`.
-                            if let Some(grant) = &facts.cross_tenant_grant {
+                            if let Some(grant) = facts.cross_tenant_grant {
                                 if grant.destination().as_str() == hint {
                                     return Ok(CanonicalTenant::scoped(
                                         grant.destination().clone(),
@@ -215,7 +224,7 @@ impl TenantResolver {
                 }
             },
             // (d)/(e) No SecurityContext: system/internal branch.
-            None => match (self.mode, facts.hint) {
+            None => match (self.mode, hint) {
                 // (d) System-internal hint is untrusted raw input — parse it
                 // inline here (validated() is deleted, see design AD-2). This is
                 // the ONLY remaining raw-string→TenantId parse in resolve().
@@ -257,9 +266,26 @@ mod tests {
     fn facts<'a>(
         security: Option<&'a SecurityContext>,
         hint: Option<&'a str>,
-        grant: Option<CrossTenantGrant>,
+        grant: Option<&'a CrossTenantGrant>,
     ) -> EstablishedTenantFacts<'a> {
         EstablishedTenantFacts::new(security, hint, grant)
+    }
+
+    fn assert_tenant_mismatch(
+        result: Result<CanonicalTenant, SecurityError>,
+        expected: &str,
+        actual: &str,
+    ) {
+        match result {
+            Err(SecurityError::TenantMismatch {
+                expected: got_expected,
+                actual: got_actual,
+            }) => {
+                assert_eq!(got_expected, expected);
+                assert_eq!(got_actual, actual);
+            }
+            other => panic!("expected Err(TenantMismatch{{..}}), got: {:?}", other),
+        }
     }
 
     // Branch (a) — MUST be checked before (b)/(c): a present-but-conflicting
@@ -348,13 +374,7 @@ mod tests {
 
         let result = resolver.resolve(facts(Some(&security), Some("tenant-b"), None));
 
-        match result {
-            Err(SecurityError::TenantMismatch { expected, actual }) => {
-                assert_eq!(expected, "tenant-a");
-                assert_eq!(actual, "tenant-b");
-            }
-            other => panic!("expected Err(TenantMismatch{{..}}), got: {:?}", other),
-        }
+        assert_tenant_mismatch(result, "tenant-a", "tenant-b");
     }
 
     // Branch (c) — authenticated, hint disagrees, grant scoped to a DIFFERENT
@@ -368,16 +388,10 @@ mod tests {
         let result = resolver.resolve(facts(
             Some(&security),
             Some("tenant-b"),
-            Some(grant_for("tenant-c")),
+            Some(&grant_for("tenant-c")),
         ));
 
-        match result {
-            Err(SecurityError::TenantMismatch { expected, actual }) => {
-                assert_eq!(expected, "tenant-a");
-                assert_eq!(actual, "tenant-b");
-            }
-            other => panic!("expected Err(TenantMismatch{{..}}), got: {:?}", other),
-        }
+        assert_tenant_mismatch(result, "tenant-a", "tenant-b");
     }
 
     // Branch (c') — AD-013/FR-006: authenticated, hint disagrees, but an
@@ -392,10 +406,32 @@ mod tests {
         let result = resolver.resolve(facts(
             Some(&security),
             Some("tenant-b"),
-            Some(grant_for("tenant-b")),
+            Some(&grant_for("tenant-b")),
         ));
 
         let canonical = result.expect("valid grant for the requested destination must succeed");
+        assert_eq!(
+            canonical.tenant_id().map(TenantId::as_str),
+            Some("tenant-b")
+        );
+    }
+
+    // Code-review fix — a hint with incidental surrounding whitespace (e.g. a
+    // transport header value) must still match an otherwise-covering grant;
+    // the comparison must not be sensitive to whitespace the caller didn't
+    // intend as part of the tenant identifier.
+    #[test]
+    fn resolve_authorized_cross_tenant_grant_succeeds_with_whitespace_in_hint() {
+        let resolver = TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly);
+        let security = security_with_tenant(Some("tenant-a"));
+
+        let result = resolver.resolve(facts(
+            Some(&security),
+            Some(" tenant-b "),
+            Some(&grant_for("tenant-b")),
+        ));
+
+        let canonical = result.expect("whitespace around the hint must not defeat a valid grant");
         assert_eq!(
             canonical.tenant_id().map(TenantId::as_str),
             Some("tenant-b")
@@ -410,7 +446,7 @@ mod tests {
         let resolver = TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly);
         let security = security_with_tenant(Some("tenant-a"));
 
-        let result = resolver.resolve(facts(Some(&security), None, Some(grant_for("tenant-b"))));
+        let result = resolver.resolve(facts(Some(&security), None, Some(&grant_for("tenant-b"))));
 
         let canonical = result.expect("expected Ok(Scoped(\"tenant-a\"))");
         assert_eq!(
@@ -430,13 +466,29 @@ mod tests {
         let result = resolver.resolve(facts(
             Some(&security),
             Some("tenant-b"),
-            Some(grant_for("tenant-b")),
+            Some(&grant_for("tenant-b")),
         ));
 
         let canonical = result.expect("expected Ok(Scoped(\"tenant-b\"))");
         assert_eq!(
             canonical.tenant_id().map(TenantId::as_str),
             Some("tenant-b")
+        );
+    }
+
+    // Code-review fix — branch (d)'s raw-hint parse must trim the same as the
+    // authenticated branches, or a whitespace-padded system-internal hint
+    // mints a TenantId that silently never `==` a clean one downstream.
+    #[test]
+    fn resolve_unauthenticated_allow_system_internal_trims_whitespace_in_hint() {
+        let resolver = TenantResolver::new(TenantEnforcementMode::AllowSystemInternal);
+
+        let result = resolver.resolve(facts(None, Some(" tenant-c "), None));
+
+        let canonical = result.expect("whitespace-padded hint must still resolve");
+        assert_eq!(
+            canonical.tenant_id().map(TenantId::as_str),
+            Some("tenant-c")
         );
     }
 
@@ -461,7 +513,7 @@ mod tests {
     fn resolve_grant_has_no_effect_without_security_context() {
         let resolver = TenantResolver::new(TenantEnforcementMode::AllowSystemInternal);
 
-        let result = resolver.resolve(facts(None, Some("tenant-c"), Some(grant_for("tenant-c"))));
+        let result = resolver.resolve(facts(None, Some("tenant-c"), Some(&grant_for("tenant-c"))));
 
         let canonical = result.expect("expected Ok(Scoped(\"tenant-c\")) via the raw-hint path");
         assert_eq!(

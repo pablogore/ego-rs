@@ -15,15 +15,14 @@ pub use permit::CrossTenantPermit;
 pub use resolvable::{Resolvable, ResolvableContainer};
 pub use runtime_builder::{RuntimeError, RuntimeInner};
 pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
-// Crate-internal only (AD-013 Established Fact types) — `crate::context`
+// Crate-internal only (AD-013 Established Fact type) — `crate::context`
 // needs `CrossTenantGrant` to expose `ServiceContext::cross_tenant_grant`,
-// neither of which is part of this crate's external API.
+// which is not part of this crate's external API. `EstablishedTenantFacts`
+// stays a `crate::runtime`-internal detail: every caller that needs it
+// (`runtime_builder::enforce_tenant`, `tenant`'s own tests) already lives in
+// this module tree and imports it directly via `super::tenant::...`
+// (code-review fix — no crate-wide re-export needed).
 pub(crate) use tenant::CrossTenantGrant;
-// `EstablishedTenantFacts` is only reached from outside `crate::runtime` by
-// `crate::context`'s own test module, which calls `TenantResolver::resolve`
-// directly.
-#[cfg(test)]
-pub(crate) use tenant::EstablishedTenantFacts;
 
 /// CORE-017 Phase 5 integration tests (TASK-021/TASK-022).
 ///
