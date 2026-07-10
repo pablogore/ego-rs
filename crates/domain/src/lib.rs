@@ -22,8 +22,12 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | `command`       | `Command` marker trait for mutating operations |
+//! | `context`       | Identity types — `AggregateId`, `EntityId`, `TenantId`, `CorrelationId`, `CausationId`, `RequestId`, `Metadata` |
+//! | `effect`        | Effect value types describing execution outcomes |
 //! | `event`         | `DomainEvent` trait for event-sourced state |
+//! | `idempotency`   | `IdempotencyKey` for safe external effect retry |
 //! | `query`         | `Query` trait with typed `Output` for reads |
+//! | `read_side`     | Projection engine — processors, sessions, runners, storage SPIs |
 //! | `actor`         | `Actor` trait, `ActorId`, `actor_id!` macro (CORE-002) |
 //! | `observability` | `Observability` trait, `SemanticEvent`, `Level` (CORE-005) |
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
@@ -33,22 +37,21 @@
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
 
-/// Execution context — identity, correlation, and metadata.
+/// Identity types — `AggregateId`, `EntityId`, `TenantId`, `CorrelationId`, `CausationId`, `RequestId`, `Metadata`.
 pub mod context;
 
 /// Effect value types describing execution outcomes.
 pub mod effect;
 
 /// CQRS command marker trait.
+pub mod command;
+
 /// Idempotency key for safe external effect retry.
 pub mod idempotency;
-
-pub mod command;
 
 /// Domain event trait for event-sourced state.
 pub mod event;
 
-/// Example: HelloQuery / HelloResponse.
 /// Observability port — SemanticEvent, Level, Observability trait.
 pub mod observability;
 
@@ -57,9 +60,6 @@ pub mod persistence;
 
 /// CQRS query marker trait with typed Output.
 pub mod query;
-
-/// Execution envelope — transport-neutral payload, identity, correlation, and metadata carrier.
-pub mod envelope;
 
 /// Read side projection engine — processors, sessions, runners, and storage SPIs.
 pub mod read_side;
@@ -78,7 +78,6 @@ pub use context::{
     TenantIdError,
 };
 pub use effect::{Effect, ExternalEffectDescription, HandlerResult};
-pub use envelope::ExecutionEnvelope;
 pub use event::DomainEvent;
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};

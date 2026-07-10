@@ -225,21 +225,6 @@ flowchart LR
     Interpreter --> Ext["ExternalEffects:<br/>dispatch after commit"]
 ```
 
-### ExecutionEnvelope (`envelope/`)
-
-Transport-neutral payload carrier with identity/correlation/metadata.
-
-```rust
-pub struct ExecutionEnvelope<P> {
-    pub payload: P,
-    pub aggregate_id: Option<AggregateId>,
-    pub tenant_id: Option<TenantId>,
-    pub correlation_id: Option<CorrelationId>,
-    pub causation_id: Option<CausationId>,
-    pub metadata: Metadata,
-}
-```
-
 ---
 
 ## 🛠 Service SDK
@@ -665,7 +650,6 @@ flowchart LR
 | `crates/domain/src/query.rs` | `Query` trait with `Output` |
 | `crates/domain/src/effect.rs` | `Effect<E,R,S>` enum, `ExternalEffectDescription` |
 | `crates/domain/src/context.rs` | Identity types (`AggregateId`, `EntityId`, `TenantId`, `CorrelationId`, `CausationId`, `RequestId`, `Metadata`) |
-| `crates/domain/src/envelope.rs` | `ExecutionEnvelope<P>` |
 | `crates/domain/src/persistence/mod.rs` | `EventStore`, `Repository`, `Snapshot` SPIs |
 | `crates/domain/src/read_side/` | Projection engine (17 modules) |
 | `crates/domain/src/idempotency.rs` | `IdempotencyKey` |
