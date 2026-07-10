@@ -566,7 +566,7 @@ assert_eq!(counter.request_count.load(Ordering::Relaxed), 1);
 // Test context explicit carry
 let ctx = ServiceContext::new().with_tenant_id("my-tenant");
 let ctx2 = ctx.clone();
-assert_eq!(ctx2.tenant_id(), Some("my-tenant"));
+assert_eq!(ctx2.tenant_hint(), Some("my-tenant"));
 ```
 
 ### Persistent Entity Testing

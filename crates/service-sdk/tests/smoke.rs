@@ -186,7 +186,7 @@ async fn test_service_context() {
         .with_correlation_id("corr-1")
         .with_trace_id("trace-1");
 
-    assert_eq!(ctx.tenant_id(), Some("tenant-1"));
+    assert_eq!(ctx.tenant_hint(), Some("tenant-1"));
     assert_eq!(ctx.correlation_id(), Some("corr-1"));
     assert_eq!(ctx.trace_id(), Some("trace-1"));
 }
@@ -195,7 +195,7 @@ async fn test_service_context() {
 async fn test_context_explicit_carry() {
     let ctx = ServiceContext::new().with_tenant_id("scoped-tenant");
     let ctx2 = ctx.clone();
-    assert_eq!(ctx2.tenant_id(), Some("scoped-tenant"));
+    assert_eq!(ctx2.tenant_hint(), Some("scoped-tenant"));
     // No scope() call; no current() call.
 }
 
@@ -205,8 +205,8 @@ async fn test_tenant_isolation() {
     let a = ServiceContext::new().with_tenant_id("tenant-a");
     let b = ServiceContext::new().with_tenant_id("tenant-b");
 
-    assert_eq!(a.tenant_id(), Some("tenant-a"));
-    assert_eq!(b.tenant_id(), Some("tenant-b"));
+    assert_eq!(a.tenant_hint(), Some("tenant-a"));
+    assert_eq!(b.tenant_hint(), Some("tenant-b"));
     assert!(!a.is_cross_tenant_allowed());
 }
 

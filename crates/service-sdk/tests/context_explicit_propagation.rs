@@ -17,7 +17,7 @@ async fn test_service_context_explicit_field_carry() {
 
     // Clone and assert fields on the owned value directly
     let ctx2 = ctx.clone();
-    assert_eq!(ctx2.tenant_id(), Some("tenant1"));
+    assert_eq!(ctx2.tenant_hint(), Some("tenant1"));
     assert_eq!(ctx2.correlation_id(), Some("correlation1"));
     assert_eq!(ctx2.trace_id(), Some("trace1"));
 }
@@ -28,10 +28,10 @@ async fn test_service_context_explicit_tenant_carry() {
 
     // Clone preserves the tenant field
     let ctx2 = ctx.clone();
-    assert_eq!(ctx2.tenant_id(), Some("test-tenant"));
+    assert_eq!(ctx2.tenant_hint(), Some("test-tenant"));
 
     // The original is still intact
-    assert_eq!(ctx.tenant_id(), Some("test-tenant"));
+    assert_eq!(ctx.tenant_hint(), Some("test-tenant"));
 }
 
 #[tokio::test]
@@ -61,11 +61,11 @@ async fn test_service_context_explicit_independence() {
     let ctx_a = ServiceContext::new().with_tenant_id("tenant_a");
     let ctx_b = ServiceContext::new().with_tenant_id("tenant_b");
 
-    assert_eq!(ctx_a.tenant_id(), Some("tenant_a"));
-    assert_eq!(ctx_b.tenant_id(), Some("tenant_b"));
+    assert_eq!(ctx_a.tenant_hint(), Some("tenant_a"));
+    assert_eq!(ctx_b.tenant_hint(), Some("tenant_b"));
 
     // Mutating ctx_a does NOT affect ctx_b
     let ctx_a_clone = ctx_a.clone();
-    assert_eq!(ctx_a_clone.tenant_id(), Some("tenant_a"));
-    assert_eq!(ctx_b.tenant_id(), Some("tenant_b"));
+    assert_eq!(ctx_a_clone.tenant_hint(), Some("tenant_a"));
+    assert_eq!(ctx_b.tenant_hint(), Some("tenant_b"));
 }
