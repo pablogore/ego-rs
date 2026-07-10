@@ -691,12 +691,15 @@ an operation executes: `CanonicalTenant` (`crates/service-sdk/src/runtime/tenant
 It wraps a private `Repr` enum (`Scoped(TenantId)` for a resolved tenant, `Systemwide`
 for D1's valid tenant-less mode); its constructors are `pub(super)`, reachable only
 within `crate::runtime`, so only `TenantResolver::resolve` may mint one. `Principal.tenant_id`,
-`ServiceContext.tenant_id` (the ingress hint), domain `ExecutionContext`/`TenantId`, and
-`ClaimSet::tenant()` are ingress/legacy carriers only — none is independently
-authoritative for the same operation at execution time. `Principal.tenant_id` is the
-authoritative *input* on the authenticated path; `TenantResolver`'s output is the
+`ServiceContext.tenant_id` (the ingress hint), and `ClaimSet::tenant()` are
+ingress/legacy carriers only — none is independently authoritative for the
+same operation at execution time. `Principal.tenant_id` is the authoritative
+*input* on the authenticated path; `TenantResolver`'s output is the
 authoritative *runtime* value; `ServiceContext.tenant_id` is demoted to a
 non-authoritative ingress hint (read via `ctx.tenant_hint()`).
+
+(Previously: also listed domain `ExecutionContext` among ingress/legacy tenant
+carriers. That type is deleted by this change and no longer exists.)
 
 #### Scenario: Divergent ingress values converge to one authoritative value
 

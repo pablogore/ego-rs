@@ -36,9 +36,6 @@ pub mod runtime;
 /// the described outcomes (replies, events, state mutations).
 pub mod interpreter;
 
-/// Runtime implementation of execution context — identity, correlation, metadata.
-pub mod context;
-
 /// Read side projection runtime — scheduling, backpressure, and batch execution.
 pub mod read_side;
 
@@ -49,5 +46,3 @@ pub use runtime::lifecycle::ExecutionState;
 pub use runtime::runtime::Runtime;
 
 pub use interpreter::{interpret_composed, EffectInterpreter, InterpretationError};
-
-pub use context::RuntimeExecutionContext;

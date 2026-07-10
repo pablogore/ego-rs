@@ -8,7 +8,7 @@ CORE-008A migrated tenant context to `tenant_hint()`/`canonical_tenant()` but le
 
 1. **15 Rust call sites of deprecated `ServiceContext::tenant_id()`/`has_tenant()`**, plus documentation examples — in 4 service-sdk integration test files, 2 call sites inside `context/mod.rs`'s own test module that exist solely to prove the deprecated accessors alias the hint correctly, and one `COOKBOOK.md` example (found during review, not part of the original 15/2 count). Decided during proposal review: the migration window closes now — `tenant_id()`/`has_tenant()` are deleted in this change, not just silenced. Worst offender: `context_explicit_propagation.rs` — the showcase for the NEW explicit-propagation model — has 7 call sites.
 2. **Stale architecture doc**: `docs/architecture.md:89` ("ServiceContext (TaskLocal-scoped)") and `:118` ("ServiceContext propagates via `tokio::task::TaskLocal`") describe the ambient model removed by the archived change `2026-06-22-remove-ambient-service-context`.
-3. **Orphaned pre-migration abstraction**: `ExecutionContext` trait + `DomainExecutionContext` (`crates/domain/src/context.rs`) and `RuntimeExecutionContext` (`crates/runtime/src/context.rs`, re-exported at `lib.rs:53`) — implemented, tested, publicly exported, zero production callers (verified: referenced only in their own files and `lib.rs` re-exports). The runtime uses `CommandContext` (`crates/persistent-entity/src/command_context.rs`) instead.
+3. **Orphaned pre-migration abstraction**: `ExecutionContext` trait + `DomainExecutionContext` (`crates/domain/src/context.rs`), `RuntimeExecutionContext` (`crates/runtime/src/context.rs`, re-exported at `lib.rs:53`), and `ExecutionEnvelope` (`crates/domain/src/envelope.rs`, the type these existed to wrap) — implemented, tested, publicly exported, zero production callers (verified: referenced only in their own files, each other's, and `lib.rs` re-exports). The actual runtime command-handling path uses `CommandContext` (`crates/persistent-entity/src/command_context.rs`) instead — a separate, narrower struct built independently, not a drop-in replacement (it lacks `correlation_id`/`request_id`/`aggregate_id`, and its `tenant_id`/`causation_id` are unvalidated `String`s rather than the domain newtypes). The deletion below is justified by zero callers alone, not by functional equivalence with `CommandContext`.
 
 ## Scope
 
@@ -17,7 +17,7 @@ CORE-008A migrated tenant context to `tenant_hint()`/`canonical_tenant()` but le
 - Delete `ServiceContext::tenant_id()` and `has_tenant()` (the deprecated methods) once no caller references them.
 - Remove the two `#[allow(deprecated)]` legacy-alias unit tests in `context/mod.rs` (`tenant_hint_matches_legacy_tenant_id_field`, `tenant_hint_is_none_by_default_matching_legacy`) — their subject no longer exists once the methods are deleted.
 - Correct `docs/architecture.md:89,118` to describe explicit propagation.
-- Resolve the orphaned `ExecutionContext` types — delete `ExecutionContext`/`DomainExecutionContext` (`crates/domain/src/context.rs`) and `RuntimeExecutionContext` (`crates/runtime/src/context.rs`, plus its `lib.rs` re-exports). Decided during proposal review (no longer an open design-phase question): zero production callers, superseded by `CommandContext`.
+- Resolve the orphaned `ExecutionContext` types — delete `ExecutionContext`/`DomainExecutionContext` (`crates/domain/src/context.rs`), `RuntimeExecutionContext` (`crates/runtime/src/context.rs`, plus its `lib.rs` re-exports), and `ExecutionEnvelope` (`crates/domain/src/envelope.rs`, plus its `lib.rs` re-export) — the same zero-caller orphan family, found during PR2 code review. Justification is zero production callers, not equivalence with `CommandContext` (see Intent above).
 
 ### Out of Scope
 - New runtime features.
@@ -49,7 +49,7 @@ One living-spec correction is required as a direct consequence: `openspec/specs/
 ## Decisions (resolved during proposal review — not deferred to design)
 
 - **Deprecated accessors**: `tenant_id()`/`has_tenant()` are deleted in this change, per the Accessor Selection Rule above governing what replaces each call site.
-- **Orphan types**: `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext` are deleted, not documented as an extension point. Zero production callers (grep-verified), superseded by `CommandContext`; git history preserves them if ever needed.
+- **Orphan types**: `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext`/`ExecutionEnvelope` are deleted, not documented as an extension point. Zero production callers (grep-verified) is the justification — `CommandContext` is a separate, narrower struct (missing `correlation_id`/`request_id`/`aggregate_id`), not a functional replacement; git history preserves the deleted types if ever needed.
 
 Design phase is not required to re-litigate either decision; it may proceed straight to spec/tasks unless it finds new evidence.
 
@@ -64,7 +64,8 @@ Mechanical: migrate each `ctx.tenant_id()`/`has_tenant()` call site per the Acce
 | `crates/service-sdk/tests/{smoke,context_propagation,context_cross_service,context_explicit_propagation}.rs` | Modified — accessor migration to `tenant_hint()` |
 | `crates/service-sdk/src/context/mod.rs` | Modified — delete `tenant_id()`/`has_tenant()` and their 2 legacy-alias tests |
 | `docs/architecture.md` | Modified — 2 stale lines |
-| `crates/domain/src/context.rs`, `crates/runtime/src/context.rs`, `crates/{domain,runtime}/src/lib.rs` | Modified — delete `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext` and their re-exports |
+| `crates/domain/src/context.rs`, `crates/domain/src/envelope.rs`, `crates/runtime/src/context.rs`, `crates/{domain,runtime}/src/lib.rs` | Modified — delete `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext`/`ExecutionEnvelope` and their re-exports |
+| `COOKBOOK.md` | Modified — removed the `ExecutionEnvelope` section and file-map row |
 | `openspec/specs/service-sdk/spec.md:694` | Modified — reword the tenant-authority-precedence line to drop the `ExecutionContext` reference (wording only, no FR/requirement change) |
 
 Verified clean, no changes needed: `examples/`, `benches/`, `docs/` (none reference these types), and no remaining code/comment references anywhere in the workspace outside the files listed above (full-workspace grep, zero hits).
@@ -85,5 +86,5 @@ Trivial: all changes are docs/test/dead-code edits, revert cleanly via `git reve
 
 - [ ] `cargo build --workspace` and `cargo test --workspace` pass with `ServiceContext::tenant_id()`/`has_tenant()` fully removed (no remaining callers, no `#[allow(deprecated)]` left to silence).
 - [ ] `docs/architecture.md` contains no TaskLocal/ambient-propagation claims.
-- [ ] `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext` and their re-exports are deleted; workspace still builds green.
+- [ ] `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext`/`ExecutionEnvelope` and their re-exports are deleted; workspace still builds green.
 - [ ] No stale documentation examples remain referencing the deleted accessors (e.g. `COOKBOOK.md`).
