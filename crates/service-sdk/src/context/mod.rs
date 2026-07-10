@@ -302,28 +302,6 @@ impl ServiceContext {
         self.allow_cross_tenant.as_ref()
     }
 
-    /// Checks if the current context has a tenant ID.
-    ///
-    /// # Returns
-    /// `true` if a tenant ID is set, `false` otherwise
-    #[deprecated(
-        note = "use canonical_tenant() for the enforced value or tenant_hint() for the raw ingress value"
-    )]
-    pub fn has_tenant(&self) -> bool {
-        self.tenant_id.is_some()
-    }
-
-    /// Gets the current tenant ID.
-    ///
-    /// # Returns
-    /// The tenant ID if set, or `None` if not set
-    #[deprecated(
-        note = "use canonical_tenant() for the enforced value or tenant_hint() for the raw ingress value"
-    )]
-    pub fn tenant_id(&self) -> Option<&str> {
-        self.tenant_id.as_deref()
-    }
-
     /// Returns the non-authoritative, caller-supplied tenant hint (CORE-008A
     /// AD-011) — the honest name for the ingress value carried by `tenant_id`.
     /// This is a resolver *input*; it is never the enforced tenant. Use
@@ -568,39 +546,5 @@ mod tests {
             .expect("AllowSystemInternal + hint resolves");
 
         assert!(ctx.canonical_tenant().is_some());
-    }
-
-    // CORE-008A Phase 5 (TASK-024, Mandatory Seed 4): this test already
-    // proves the deprecated `tenant_id()`/`has_tenant()` accessors keep
-    // functioning correctly during the migration window and stay identical
-    // to `tenant_hint()`/`has_tenant_hint()` — the exact scenario TASK-024
-    // specifies. No new test was added for TASK-024; this one (added in
-    // Phase 2 for TASK-006) already satisfies it verbatim.
-    #[test]
-    fn tenant_hint_matches_legacy_tenant_id_field() {
-        let ctx = ServiceContext::new().with_tenant_id("tenant-x");
-
-        assert_eq!(ctx.tenant_hint(), Some("tenant-x"));
-        assert!(ctx.has_tenant_hint());
-
-        #[allow(deprecated)]
-        {
-            assert_eq!(ctx.tenant_id(), Some("tenant-x"));
-            assert!(ctx.has_tenant());
-        }
-    }
-
-    #[test]
-    fn tenant_hint_is_none_by_default_matching_legacy() {
-        let ctx = ServiceContext::new();
-
-        assert_eq!(ctx.tenant_hint(), None);
-        assert!(!ctx.has_tenant_hint());
-
-        #[allow(deprecated)]
-        {
-            assert_eq!(ctx.tenant_id(), None);
-            assert!(!ctx.has_tenant());
-        }
     }
 }
