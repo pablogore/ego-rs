@@ -74,8 +74,8 @@ pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use command::Command;
 pub use context::{
     AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
-    CorrelationIdError, DomainExecutionContext, EntityId, EntityIdError, ExecutionContext,
-    Metadata, RequestId, RequestIdError, TenantId, TenantIdError,
+    CorrelationIdError, EntityId, EntityIdError, Metadata, RequestId, RequestIdError, TenantId,
+    TenantIdError,
 };
 pub use effect::{Effect, ExternalEffectDescription, HandlerResult};
 pub use envelope::ExecutionEnvelope;
