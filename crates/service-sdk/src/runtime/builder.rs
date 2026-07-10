@@ -6,15 +6,20 @@ use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 
+use crate::contract::{ServiceContract, VersionConstraint};
+use crate::di::Injectable;
 use crate::interceptor::InterceptorChain;
-use crate::registry::ServiceRegistry;
+use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
-use crate::runtime::runtime_builder::{DependencyTable, RuntimeInner};
+use crate::runtime::runtime_builder::{DependencyTable, RuntimeError, RuntimeInner};
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
-use crate::runtime::RuntimeInfraError;
+use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 
 /// The pair of security providers registered with a [`Runtime`].
 pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
+
+/// A recorded `(service_name, S::validate)` pair for `with_injectable`/`try_build` (AD-3).
+type ValidatorEntry = (&'static str, fn(&RuntimeInner) -> Result<(), RuntimeError>);
 
 /// Builder for constructing a [`Runtime`] with optional security providers.
 ///
@@ -41,6 +46,9 @@ pub struct RuntimeBuilder {
     adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     tenant_enforcement_mode: TenantEnforcementMode,
+    /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
+    /// Read only by `try_build()`; has no effect on `build()` (AD-3).
+    validators: Vec<ValidatorEntry>,
 }
 
 impl RuntimeBuilder {
@@ -55,6 +63,7 @@ impl RuntimeBuilder {
             adapters: HashMap::new(),
             configs: HashMap::new(),
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
+            validators: Vec::new(),
         }
     }
 
@@ -102,6 +111,31 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a service implementation under `Tag`, resolvable later via
+    /// `Runtime::resolve::<Tag>()` (AD-1/AD-2, F-01). The version is always
+    /// derived from `<Tag as ServiceContract>::version()` — there is no
+    /// caller-supplied version parameter. Registering the same `(Tag,
+    /// version)` twice returns `Err(RegistryError::DuplicateService)`; unlike
+    /// `with_adapter`/`with_config`'s last-write-wins, a duplicate service
+    /// registration is surfaced, not silently replaced (see design.md AD-2).
+    pub fn with_service<Tag>(mut self, svc: Arc<Tag::Service>) -> Result<Self, RegistryError>
+    where
+        Tag: Resolvable + 'static,
+    {
+        let raw: Arc<dyn Any + Send + Sync> = Arc::new(ResolvableContainer(svc));
+        self.registry.register::<Tag>(<Tag as ServiceContract>::version(), raw)?;
+        Ok(self)
+    }
+
+    /// Records `S::validate` — a pure `dependencies()` presence check that
+    /// constructs nothing — to be run by `try_build()` (AD-3, F-02). Has
+    /// zero effect on `build()`; the bookkeeping recorded here only takes
+    /// effect when the caller later calls `try_build()` instead of `build()`.
+    pub fn with_injectable<S: Injectable>(mut self) -> Self {
+        self.validators.push((std::any::type_name::<S>(), S::validate));
+        self
+    }
+
     /// Registers the tenant enforcement policy for this runtime (CORE-008A
     /// AD-012). Default is [`TenantEnforcementMode::AuthenticatedOnly`] —
     /// unauthenticated tenant-scoped calls fail closed with `MissingContext`.
@@ -142,6 +176,32 @@ impl RuntimeBuilder {
             )),
         }
     }
+
+    /// Consumes the builder and produces a [`Runtime`], first running every
+    /// `with_injectable`-recorded validator against the freshly built
+    /// runtime's resolved tables. Fails fast on the first missing
+    /// dependency, naming both the missing type and the requesting service
+    /// (AD-3/AD-4). Calls the existing infallible [`Self::build`] unchanged
+    /// — `Injectable::build` is never invoked here, only `Injectable::validate`.
+    pub fn try_build(mut self) -> Result<Runtime, RuntimeError> {
+        let validators = std::mem::take(&mut self.validators);
+        let rt = self.build();
+        for (service_name, validate) in validators {
+            if let Err(err) = validate(rt.inner()) {
+                let err = match err {
+                    RuntimeError::DependencyNotFound { type_name, .. } => {
+                        RuntimeError::DependencyNotFound {
+                            type_name,
+                            service_name: Some(service_name),
+                        }
+                    }
+                    other => other,
+                };
+                return Err(err);
+            }
+        }
+        Ok(rt)
+    }
 }
 
 impl Default for RuntimeBuilder {
@@ -171,6 +231,28 @@ impl Runtime {
     /// Returns the registered logger, if any.
     pub fn logger(&self) -> Option<&Arc<KITLogger>> {
         self.inner.logger()
+    }
+
+    /// Resolves `Tag` to its concrete macro-generated proxy — the canonical
+    /// registration/resolution path (AD-1/AD-2, F-01). Internally identical
+    /// to the hand-rolled `{Trait}Ref::new(inner, chain, weak)` path: same
+    /// interceptor chain, same weak runtime handle, same generated
+    /// `create_proxy` body — so the guard order it enforces is unchanged and
+    /// not bypassable through `resolve`. Not cached: each call constructs a
+    /// fresh proxy value wrapping the same registered `Arc`-backed instance.
+    pub fn resolve<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>
+    where
+        Tag: Resolvable + 'static,
+    {
+        let raw = self
+            .inner
+            .registry
+            .resolve_raw::<Tag>(&VersionConstraint::Exact(<Tag as ServiceContract>::version()))
+            .map_err(|err| match err {
+                RegistryError::ServiceNotFound => RuntimeError::ServiceNotFound,
+                _ => RuntimeError::ServiceNotFound,
+            })?;
+        Tag::create_proxy(raw, self.inner.interceptor_chain.clone(), Arc::downgrade(&self.inner))
     }
 
     /// Drains initialized infrastructure in reverse construction order.
@@ -469,5 +551,78 @@ mod tests {
 
         assert_eq!(*rt.inner().resolve_adapter::<SharedType>().unwrap(), SharedType(1));
         assert_eq!(*rt.inner().resolve_config::<SharedType>().unwrap(), SharedType(2));
+    }
+
+    // -- CORE-025 TASK-015: with_injectable / try_build ----------------------
+    //
+    // Hand-rolled `Injectable` (mirrors testkit's `HandRolledService`
+    // pattern) — the `#[service]` macro is a dev-dependency here and its
+    // generated code references `ego_service_sdk::...` paths that don't
+    // resolve from inside this crate's own unit tests, so services needing
+    // the real `Resolvable`/`Tag` machinery (TASK-013/014) are tested as
+    // integration tests instead (`tests/with_service_resolve.rs`).
+
+    use std::any::TypeId;
+
+    use crate::di::{AdapterRef, DepKey, Injectable};
+    use crate::runtime::RuntimeInner;
+
+    struct NeedsAdapter {
+        adapter: AdapterRef<StubAdapter>,
+    }
+
+    impl Injectable for NeedsAdapter {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Adapter(
+                TypeId::of::<StubAdapter>(),
+                std::any::type_name::<StubAdapter>(),
+            )]
+        }
+
+        fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(Self {
+                adapter: rt.resolve_adapter::<StubAdapter>()?,
+            })
+        }
+    }
+
+    #[test]
+    fn try_build_fails_fast_on_missing_dependency_naming_both_type_and_service() {
+        // `Runtime` (the `Ok` type) doesn't implement `Debug`, so `expect_err`
+        // isn't available here — match manually instead.
+        let err = match RuntimeBuilder::new().with_injectable::<NeedsAdapter>().try_build() {
+            Err(e) => e,
+            Ok(_) => panic!("try_build must fail fast when a recorded dependency is missing"),
+        };
+
+        match err {
+            RuntimeError::DependencyNotFound { type_name, service_name } => {
+                assert_eq!(type_name, std::any::type_name::<StubAdapter>());
+                assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
+            }
+            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_build_succeeds_identically_to_build_when_all_dependencies_present() {
+        let rt = RuntimeBuilder::new()
+            .with_adapter(Arc::new(StubAdapter(7)))
+            .with_injectable::<NeedsAdapter>()
+            .try_build()
+            .expect("all recorded dependencies present, try_build must succeed");
+
+        let svc = NeedsAdapter::build(rt.inner())
+            .expect("build() succeeds using the same resolved adapter try_build validated");
+        assert_eq!(*svc.adapter, StubAdapter(7));
+    }
+
+    #[test]
+    fn build_remains_infallible_and_untouched_by_with_injectable_bookkeeping() {
+        // A required adapter is missing, but calling build() (not try_build())
+        // must still succeed — with_injectable bookkeeping has no effect on
+        // build(), matching the existing "build() Behavior Is Unchanged" contract.
+        let rt = RuntimeBuilder::new().with_injectable::<NeedsAdapter>().build();
+        assert!(rt.inner().resolve_adapter::<StubAdapter>().is_err());
     }
 }

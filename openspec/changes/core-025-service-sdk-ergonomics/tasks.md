@@ -187,14 +187,14 @@ Independent of Phases 1-3; can run in parallel. Must land before Phase 5.
 
 Depends on Phase 4 (`Tag::Service` must exist to compile the generic signature).
 
-### TASK-013: `RuntimeBuilder::with_service::<Tag>(Arc<Tag::Service>) -> Result<Self, RegistryError>`
+### TASK-013: [x] `RuntimeBuilder::with_service::<Tag>(Arc<Tag::Service>) -> Result<Self, RegistryError>`
 - File: `crates/service-sdk/src/runtime/builder.rs`.
 - Per design.md's exact code: wrap the `Arc<Tag::Service>` in `ResolvableContainer`, coerce to `Arc<dyn Any + Send + Sync>`, call the existing `self.registry.register::<Tag>(<Tag as ServiceContract>::version(), raw)`.
 - Satisfies: service-sdk spec "Canonical Service Registration" requirement, both scenarios (first registration succeeds; duplicate rejected via the registry's own `DuplicateService`, not silently overwritten).
 - Test-first: write both scenarios' tests against a test-only service trait/tag (mirroring the `#[service]`-macro shape) before implementing.
 - Depends on: TASK-012.
 
-### TASK-014: `Runtime::resolve::<Tag>() -> Result<Tag::Proxy, RuntimeError>`
+### TASK-014: [x] `Runtime::resolve::<Tag>() -> Result<Tag::Proxy, RuntimeError>`
 - File: `crates/service-sdk/src/runtime/builder.rs` (`impl Runtime` block).
 - Calls `self.inner.registry.resolve_raw::<Tag>(&VersionConstraint::Exact(<Tag as ServiceContract>::version()))`, then **explicitly** maps `RegistryError::ServiceNotFound -> RuntimeError::ServiceNotFound` (any other `RegistryError` variant reached this way maps the same way — `resolve_raw` only returns `ServiceNotFound`) before calling `Tag::create_proxy(raw, self.inner.interceptor_chain.clone(), Arc::downgrade(&self.inner))`. This mapping step is explicit, not automatic from `resolve_raw`'s return type — implement it, do not skip it.
 - Satisfies: service-sdk spec "Canonical Service Resolution Yields the Concrete Generated Proxy" requirement, all 3 scenarios (registered tag resolves and invokes identically to the hand-rolled path; unregistered tag → `ServiceNotFound`; tenant-scoped operation still fails closed through the same guard order).
@@ -207,7 +207,7 @@ Depends on Phase 4 (`Tag::Service` must exist to compile the generic signature).
 
 Depends on Phase 1 (struct-variant error) and Phase 3 (`validate()`/`check_dependency`).
 
-### TASK-015: `with_injectable::<S: Injectable>(self) -> Self` + `try_build(self) -> Result<Runtime, RuntimeError>`
+### TASK-015: [x] `with_injectable::<S: Injectable>(self) -> Self` + `try_build(self) -> Result<Runtime, RuntimeError>`
 - File: `crates/service-sdk/src/runtime/builder.rs`.
 - `with_injectable` records `S::validate` as a monomorphic `fn(&RuntimeInner) -> Result<(), RuntimeError>` (e.g. push into a `Vec<(&'static str, fn(&RuntimeInner) -> Result<(), RuntimeError>)>` pairing the fn pointer with `type_name::<S>()`).
 - `try_build()` calls the existing infallible `build()` (line 124, **unchanged**), then runs every recorded validator against `rt.inner()`, returning the **first** failure with `service_name` rewritten to `Some(type_name::<S>())` (F-08's "report every missing dep" is explicitly deferred — first-failure semantics are correct for this slice). `Injectable::build` is never invoked during validation.
@@ -215,7 +215,7 @@ Depends on Phase 1 (struct-variant error) and Phase 3 (`validate()`/`check_depen
 - Test-first: write all 3 scenarios (missing adapter caught at `try_build()`; all deps present succeeds identically to `build()`; `build()` itself remains infallible and untouched by `with_injectable` bookkeeping) before implementing.
 - Depends on: TASK-001, TASK-009, TASK-010.
 
-### TASK-016: Regression check — CORE-018b's "`RuntimeBuilder::build()` Behavior Is Unchanged" tests
+### TASK-016: [x] Regression check — CORE-018b's "`RuntimeBuilder::build()` Behavior Is Unchanged" tests
 - Run the existing test suite covering that requirement (logger wiring, teardown ordering, security-provider installation scenarios in `runtime/builder.rs`'s test module) and confirm every one passes **unmodified** — zero edits to those tests' bodies or assertions.
 - This is the explicit acceptance gate for TASK-015's claim that `with_injectable`/`try_build` do not alter `build()`'s existing contract (the proposal's Modified Capabilities section states this requirement stays as-is).
 - Depends on: TASK-015.
@@ -226,14 +226,14 @@ Depends on Phase 1 (struct-variant error) and Phase 3 (`validate()`/`check_depen
 
 Depends on Phase 5 (`with_service`/`resolve` must exist to forward to).
 
-### TASK-017: `FixtureBuilder::with_service::<Tag>(Arc<Tag::Service>) -> Result<Self, RegistryError>`
+### TASK-017: [x] `FixtureBuilder::with_service::<Tag>(Arc<Tag::Service>) -> Result<Self, RegistryError>`
 - File: `crates/testkit/src/fixtures.rs`.
 - Thin pass-through: records the registration on the fixture's internal `RuntimeBuilder` (accumulated the same way `.config(..)`/`.authorization(..)` already are, before `build()` runs) by forwarding verbatim to `RuntimeBuilder::with_service`. No parallel `InterceptorChain`/`Weak` assembly.
 - Satisfies: testkit spec "TestKit Trait-Proxy Registration and Resolution Use the Canonical Production Path" requirement, scenario 1.
 - Test-first per that scenario before implementing.
 - Depends on: TASK-013.
 
-### TASK-018: `ServiceTestFixture::resolve::<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>`
+### TASK-018: [x] `ServiceTestFixture::resolve::<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>`
 - File: `crates/testkit/src/fixtures.rs` (`impl ServiceTestFixture`, alongside the existing `service::<S: Injectable>()` at lines 78-80 and the `runtime()` accessor at 84-86 — note its doc comment "forward compatibility with a future public `Runtime::resolve`" is now stale and should be updated/removed since that future has arrived).
 - Thin pass-through to `self.runtime.resolve::<Tag>()`. No bespoke proxy assembly.
 - Satisfies: testkit spec requirement, scenarios 2 and 3 (same generated proxy + guard order as production `resolve()`; unregistered tag fails the same way with `ServiceNotFound`).

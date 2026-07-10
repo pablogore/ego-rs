@@ -10,7 +10,8 @@ use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
 use ego_security_sdk::AuthenticationError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::di::Injectable;
-use ego_service_sdk::runtime::RuntimeError;
+use ego_service_sdk::registry::RegistryError;
+use ego_service_sdk::runtime::{Resolvable, RuntimeError};
 use ego_service_sdk::{Runtime, RuntimeBuilder};
 
 use crate::authz::ScriptedAuthorizationProvider;
@@ -79,10 +80,22 @@ impl ServiceTestFixture {
         S::build(self.runtime.inner())
     }
 
-    /// The underlying real `Runtime`, for forward compatibility with a future
-    /// public `Runtime::resolve`.
+    /// The underlying real `Runtime`. Prefer [`Self::resolve`] for
+    /// trait-proxy resolution and [`Self::service`] for `Injectable`
+    /// construction — this accessor remains for direct access to the
+    /// runtime's other methods (e.g. `security_providers`, `logger`).
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    /// Resolves `Tag` to its concrete generated proxy — a thin pass-through
+    /// to [`Runtime::resolve`], the identical production path (AD-5, F-06/
+    /// F-07). No parallel or bespoke proxy construction happens in TestKit.
+    pub fn resolve<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>
+    where
+        Tag: Resolvable + 'static,
+    {
+        self.runtime.resolve::<Tag>()
     }
 
     /// Records captured by this fixture's `CapturingLogger` so far.
@@ -104,6 +117,10 @@ pub struct FixtureBuilder {
     unauthenticated: bool,
     authorization: Arc<dyn AuthorizationProvider>,
     config: TestConfig,
+    /// Accumulates `with_service` registrations before the fixture builds
+    /// its real `Runtime` (AD-5) — the fixture registers before it builds,
+    /// same as `.config(..)`/`.authorization(..)` accumulate today.
+    runtime_builder: RuntimeBuilder,
 }
 
 impl FixtureBuilder {
@@ -113,7 +130,20 @@ impl FixtureBuilder {
             unauthenticated: false,
             authorization: Arc::new(ScriptedAuthorizationProvider::allow_all()),
             config: TestConfig::new(),
+            runtime_builder: RuntimeBuilder::new(),
         }
+    }
+
+    /// Registers a trait-proxy service on the fixture's internal
+    /// `RuntimeBuilder` — a thin pass-through to the identical production
+    /// `RuntimeBuilder::with_service` (AD-5, F-06/F-07). No parallel
+    /// `InterceptorChain`/`Weak` assembly happens in TestKit.
+    pub fn with_service<Tag>(mut self, svc: Arc<Tag::Service>) -> Result<Self, RegistryError>
+    where
+        Tag: Resolvable + 'static,
+    {
+        self.runtime_builder = self.runtime_builder.with_service::<Tag>(svc)?;
+        Ok(self)
     }
 
     /// Overrides the authenticated principal (default: `principal()`).
@@ -156,7 +186,7 @@ impl FixtureBuilder {
 
         let runtime = self
             .config
-            .drain_into(RuntimeBuilder::new())
+            .drain_into(self.runtime_builder)
             .with_security(Arc::new(PairingAuthnStub), self.authorization)
             .with_logger(logger.logger())
             .build();
@@ -185,9 +215,12 @@ mod tests {
     use std::sync::Arc;
 
     use ego_security_sdk::authorization::AuthorizationProvider;
+    use ego_service_sdk::context::ServiceContext;
     use ego_service_sdk::di::{ConfigValue, DepKey, Injectable};
     use ego_service_sdk::runtime::RuntimeError;
     use ego_service_sdk::ServiceError;
+    #[allow(unused_imports)]
+    use ego_service_sdk_macros::operation;
     use ego_service_sdk_macros::service;
 
     use crate::config::TestConfig;
@@ -353,5 +386,63 @@ mod tests {
         let fixture = ServiceTestFixture::builder().unauthenticated().build();
 
         assert!(fixture.context().security().is_none());
+    }
+
+    // -- CORE-025 TASK-017/018: with_service / resolve pass-throughs --------
+
+    use async_trait::async_trait;
+
+    #[service(version = "1.0.0")]
+    pub trait GreetingService {
+        #[operation]
+        async fn greet(&self, ctx: ServiceContext, name: String) -> Result<String, ServiceError>;
+    }
+
+    struct GreetingServiceImpl;
+
+    #[async_trait]
+    impl GreetingService for GreetingServiceImpl {
+        async fn greet(&self, _ctx: ServiceContext, name: String) -> Result<String, ServiceError> {
+            Ok(format!("hello, {name}"))
+        }
+    }
+
+    #[test]
+    fn fixture_builder_with_service_registers_reachable_via_resolve() {
+        let inner: Arc<dyn GreetingService> = Arc::new(GreetingServiceImpl);
+        let fixture = ServiceTestFixture::builder()
+            .with_service::<GreetingServiceTag>(inner)
+            .expect("registration succeeds")
+            .build();
+
+        assert!(
+            fixture.resolve::<GreetingServiceTag>().is_ok(),
+            "with_service registration must be reachable via resolve — no separate TestKit-only registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixture_resolve_yields_same_generated_proxy_as_production() {
+        let inner: Arc<dyn GreetingService> = Arc::new(GreetingServiceImpl);
+        let fixture = ServiceTestFixture::builder()
+            .with_service::<GreetingServiceTag>(inner)
+            .expect("registration succeeds")
+            .build();
+
+        let proxy = fixture
+            .resolve::<GreetingServiceTag>()
+            .expect("registered tag resolves through the fixture's real runtime");
+        let out = proxy
+            .greet(fixture.context(), "world".to_string())
+            .await
+            .expect("invocation succeeds through the real generated proxy");
+        assert_eq!(out, "hello, world");
+    }
+
+    #[test]
+    fn fixture_resolve_unregistered_tag_fails_the_same_way_production_does() {
+        let fixture = ServiceTestFixture::new();
+        let result = fixture.resolve::<GreetingServiceTag>();
+        assert!(matches!(result, Err(RuntimeError::ServiceNotFound)));
     }
 }
