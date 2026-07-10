@@ -470,6 +470,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
         impl ego_service_sdk::runtime::Resolvable for #tag_name {
             type Proxy = #ref_name;
+            type Service = dyn #trait_name;
 
             fn create_proxy(
                 inner: std::sync::Arc<dyn std::any::Any + std::marker::Send + std::marker::Sync>,

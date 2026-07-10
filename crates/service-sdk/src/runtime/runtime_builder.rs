@@ -22,7 +22,7 @@ use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 
 use crate::context::ServiceContext;
-use crate::di::{AdapterRef, ConfigValue, ProjectionRef};
+use crate::di::{AdapterRef, ConfigValue, DepKey, ProjectionRef};
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use super::logger::TeardownStack;
@@ -226,6 +226,29 @@ impl RuntimeInner {
     /// Returns `DependencyNotFound` if no instance was registered for `C`.
     pub fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
         self.resolved.resolve_config::<C>()
+    }
+
+    /// Checks whether a single dependency's backing instance is present in
+    /// this runtime's resolved tables — a pure presence check that
+    /// constructs nothing (AD-3 / OQ-2). Used by `Injectable::validate()`'s
+    /// generic default.
+    ///
+    /// `DepKey::Entity` unconditionally returns `Err`: no entity table exists
+    /// yet (CORE-006 is not landed), so a declared `Entity` dependency must
+    /// not silently pass validation — this is the same blind spot `build()`'s
+    /// resolution path already has, not a regression introduced here.
+    pub(crate) fn check_dependency(&self, dep: &DepKey) -> Result<(), RuntimeError> {
+        let (present, type_name) = match dep {
+            DepKey::Entity(_, name) => (false, *name),
+            DepKey::Projection(id, name) => (self.resolved.projections.contains_key(id), *name),
+            DepKey::Adapter(id, name) => (self.resolved.adapters.contains_key(id), *name),
+            DepKey::Config(id, name) => (self.resolved.configs.contains_key(id), *name),
+        };
+        if present {
+            Ok(())
+        } else {
+            Err(RuntimeError::DependencyNotFound { type_name, service_name: None })
+        }
     }
 
     /// Returns the configured authorization provider, if any.
@@ -791,6 +814,76 @@ mod tests {
             rt.authorization_provider().is_none(),
             "Expected None when security_providers is None"
         );
+    }
+
+    // -- CORE-025 TASK-010: RuntimeInner::check_dependency presence check --
+    // Test-first (RED before check_dependency exists): 4 arms — adapter,
+    // config, and projection present/missing, plus Entity always-Err.
+
+    #[test]
+    fn check_dependency_adapter_present_is_ok() {
+        let mut rt = RuntimeInner::for_test();
+        let instance = Arc::new(MyProjection(1)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .adapters
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let dep = DepKey::Adapter(TypeId::of::<MyProjection>(), "MyProjection");
+        assert!(rt.check_dependency(&dep).is_ok());
+    }
+
+    #[test]
+    fn check_dependency_adapter_missing_is_err_named() {
+        let rt = RuntimeInner::for_test();
+        let dep = DepKey::Adapter(TypeId::of::<MyProjection>(), "MyProjection");
+        assert_dependency_not_found_named(rt.check_dependency(&dep), "MyProjection");
+    }
+
+    #[test]
+    fn check_dependency_config_present_is_ok() {
+        let mut rt = RuntimeInner::for_test();
+        let instance = Arc::new(String::from("v")) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .configs
+            .insert(TypeId::of::<String>(), instance);
+
+        let dep = DepKey::Config(TypeId::of::<String>(), "String");
+        assert!(rt.check_dependency(&dep).is_ok());
+    }
+
+    #[test]
+    fn check_dependency_config_missing_is_err_named() {
+        let rt = RuntimeInner::for_test();
+        let dep = DepKey::Config(TypeId::of::<String>(), "String");
+        assert_dependency_not_found_named(rt.check_dependency(&dep), "String");
+    }
+
+    #[test]
+    fn check_dependency_projection_present_is_ok() {
+        let mut rt = RuntimeInner::for_test();
+        let instance = Arc::new(MyProjection(2)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .projections
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let dep = DepKey::Projection(TypeId::of::<MyProjection>(), "MyProjection");
+        assert!(rt.check_dependency(&dep).is_ok());
+    }
+
+    #[test]
+    fn check_dependency_projection_missing_is_err_named() {
+        let rt = RuntimeInner::for_test();
+        let dep = DepKey::Projection(TypeId::of::<MyProjection>(), "MyProjection");
+        assert_dependency_not_found_named(rt.check_dependency(&dep), "MyProjection");
+    }
+
+    #[test]
+    fn check_dependency_entity_is_always_err_regardless_of_table_state() {
+        // No entity table exists yet (CORE-006) — Entity must be a fail-safe
+        // always-Err, never silently Ok, regardless of what else is resolved.
+        let rt = RuntimeInner::for_test();
+        let dep = DepKey::Entity(TypeId::of::<MyProjection>(), "MyProjection");
+        assert_dependency_not_found_named(rt.check_dependency(&dep), "MyProjection");
     }
 
     // -- CORE-025 TASK-001: RuntimeError::DependencyNotFound struct variant --
