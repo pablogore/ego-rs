@@ -134,6 +134,7 @@ Independent of Phases 1-3; can run in parallel with everything above.
 ### TASK-012: Full workspace build, test, and grep sweep
 - Run `cargo build --workspace` — zero errors.
 - Run `cargo test --workspace` — all tests pass, zero `#[deprecated]` warnings for `tenant_id()`/`has_tenant()`.
+- Run `cargo doc --workspace --no-deps` — zero errors/broken doctest references to the deleted APIs (public-API deletions can break doctests or rustdoc intra-doc links even when `cargo build`/`cargo test` stay green).
 - Re-run the three acceptance greps workspace-wide:
   - `rg "\.tenant_id\(\)|\.has_tenant\(\)" crates/` → zero matches (only the `pub tenant_id: Option<String>` field and `tenant_hint()` reader survive).
   - `rg "ExecutionContext" crates/ --type rust` → zero Rust-source references (scoped to `crates/`; the historical note TASK-011 adds to `openspec/specs/service-sdk/spec.md` is expected and intentionally outside this sweep).

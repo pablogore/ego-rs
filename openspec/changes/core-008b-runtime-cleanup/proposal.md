@@ -86,3 +86,4 @@ Trivial: all changes are docs/test/dead-code edits, revert cleanly via `git reve
 - [ ] `cargo build --workspace` and `cargo test --workspace` pass with `ServiceContext::tenant_id()`/`has_tenant()` fully removed (no remaining callers, no `#[allow(deprecated)]` left to silence).
 - [ ] `docs/architecture.md` contains no TaskLocal/ambient-propagation claims.
 - [ ] `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext` and their re-exports are deleted; workspace still builds green.
+- [ ] No stale documentation examples remain referencing the deleted accessors (e.g. `COOKBOOK.md`).
