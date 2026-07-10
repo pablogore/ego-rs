@@ -252,7 +252,7 @@ mod tests {
 
         let result = fixture.service::<HandRolledService>();
 
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         // DependencyNotFound, never a panic.
         assert!(matches!(
             fixture.service::<HandRolledService>(),
-            Err(RuntimeError::DependencyNotFound)
+            Err(RuntimeError::DependencyNotFound { .. })
         ));
 
         // Logger stays at default: fresh, nothing captured yet.

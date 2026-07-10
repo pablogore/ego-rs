@@ -478,7 +478,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             ) -> Result<Self::Proxy, ego_service_sdk::runtime::RuntimeError> {
                 let container = inner
                     .downcast::<ego_service_sdk::runtime::ResolvableContainer<dyn #trait_name>>()
-                    .map_err(|_| ego_service_sdk::runtime::RuntimeError::DependencyNotFound)?;
+                    .map_err(|_| ego_service_sdk::runtime::RuntimeError::ServiceNotFound)?;
                 Ok(#ref_name::new(container.0.clone(), chain, runtime))
             }
         }

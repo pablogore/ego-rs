@@ -419,14 +419,14 @@ mod tests {
     fn resolve_adapter_unregistered_returns_dependency_not_found() {
         let rt = RuntimeBuilder::new().build();
         let result = rt.inner().resolve_adapter::<StubAdapter>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     #[test]
     fn resolve_config_unregistered_returns_dependency_not_found() {
         let rt = RuntimeBuilder::new().build();
         let result = rt.inner().resolve_config::<StubConfig>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     // -- CORE-120: identity preservation (no clone-on-resolve) ---------------

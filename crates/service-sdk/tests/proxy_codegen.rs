@@ -269,7 +269,7 @@ fn injectable_build_returns_dependency_not_found_for_di_fields() {
     let rt = test_runtime();
     let result = InjectableServiceImpl::build(rt.inner());
     assert!(
-        matches!(result, Err(RuntimeError::DependencyNotFound)),
+        matches!(result, Err(RuntimeError::DependencyNotFound { .. })),
         "build() must return DependencyNotFound when resolvers are missing"
     );
 }
