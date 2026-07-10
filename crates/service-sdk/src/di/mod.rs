@@ -74,14 +74,14 @@ impl<T> Deref for ConfigValue<T> {
 /// A discriminated key identifying the kind and type of a dependency.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DepKey {
-    /// An entity dependency, keyed by type.
-    Entity(TypeId),
-    /// A projection dependency, keyed by type.
-    Projection(TypeId),
-    /// An adapter dependency, keyed by type.
-    Adapter(TypeId),
-    /// A configuration value dependency, keyed by type.
-    Config(TypeId),
+    /// An entity dependency, keyed by type, with its type name for diagnostics.
+    Entity(TypeId, &'static str),
+    /// A projection dependency, keyed by type, with its type name for diagnostics.
+    Projection(TypeId, &'static str),
+    /// An adapter dependency, keyed by type, with its type name for diagnostics.
+    Adapter(TypeId, &'static str),
+    /// A configuration value dependency, keyed by type, with its type name for diagnostics.
+    Config(TypeId, &'static str),
 }
 
 /// Trait that a service struct implements (via macro) to declare its dependencies.
@@ -105,10 +105,10 @@ mod tests {
     /// REQ-011 / TASK-008 — DI primitives are discriminated by DepKey variant.
     #[test]
     fn di_primitives_are_recognizable() {
-        let entity_key = DepKey::Entity(TypeId::of::<()>());
-        let projection_key = DepKey::Projection(TypeId::of::<()>());
-        let adapter_key = DepKey::Adapter(TypeId::of::<()>());
-        let config_key = DepKey::Config(TypeId::of::<()>());
+        let entity_key = DepKey::Entity(TypeId::of::<()>(), "()");
+        let projection_key = DepKey::Projection(TypeId::of::<()>(), "()");
+        let adapter_key = DepKey::Adapter(TypeId::of::<()>(), "()");
+        let config_key = DepKey::Config(TypeId::of::<()>(), "()");
 
         // Same inner TypeId, different variant — must not be equal.
         assert_ne!(entity_key, projection_key);

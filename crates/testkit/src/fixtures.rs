@@ -202,7 +202,7 @@ mod tests {
 
     impl Injectable for HandRolledService {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Config(std::any::TypeId::of::<u32>())]
+            vec![DepKey::Config(std::any::TypeId::of::<u32>(), "u32")]
         }
 
         fn build(rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, RuntimeError> {
@@ -252,7 +252,7 @@ mod tests {
 
         let result = fixture.service::<HandRolledService>();
 
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         // DependencyNotFound, never a panic.
         assert!(matches!(
             fixture.service::<HandRolledService>(),
-            Err(RuntimeError::DependencyNotFound)
+            Err(RuntimeError::DependencyNotFound { .. })
         ));
 
         // Logger stays at default: fresh, nothing captured yet.

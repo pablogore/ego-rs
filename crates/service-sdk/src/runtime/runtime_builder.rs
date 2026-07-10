@@ -73,7 +73,7 @@ impl DependencyTable {
             .get(&TypeId::of::<T>())
             .and_then(|arc| arc.clone().downcast::<T>().ok())
             .map(ProjectionRef::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+            .ok_or_else(dependency_not_found::<T>)
     }
 
     fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
@@ -81,7 +81,7 @@ impl DependencyTable {
             .get(&TypeId::of::<A>())
             .and_then(|arc| arc.clone().downcast::<A>().ok())
             .map(AdapterRef::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+            .ok_or_else(dependency_not_found::<A>)
     }
 
     fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
@@ -89,8 +89,14 @@ impl DependencyTable {
             .get(&TypeId::of::<C>())
             .and_then(|arc| arc.clone().downcast::<C>().ok())
             .map(ConfigValue::new)
-            .ok_or(RuntimeError::DependencyNotFound)
+            .ok_or_else(dependency_not_found::<C>)
     }
+}
+
+/// Builds a `DependencyNotFound` naming `T`, with no requesting service attached yet
+/// (the `try_build()` validator path fills in `service_name` on the way out).
+fn dependency_not_found<T: 'static>() -> RuntimeError {
+    RuntimeError::DependencyNotFound { type_name: std::any::type_name::<T>(), service_name: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,12 +400,22 @@ impl AuthenticationProvider for NoopTestAuthn {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during proxy resolution or dependency injection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
     /// The requested service was not found in the registry.
+    #[error("service not found")]
     ServiceNotFound,
     /// A dependency was not found during resolution.
-    DependencyNotFound,
+    #[error(
+        "dependency `{type_name}` not found{}",
+        service_name.map(|s| format!(" (required by `{s}`)")).unwrap_or_default()
+    )]
+    DependencyNotFound {
+        /// The name of the missing dependency's type.
+        type_name: &'static str,
+        /// The name of the requesting service, when known.
+        service_name: Option<&'static str>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +443,7 @@ mod tests {
         let rt = RuntimeInner::for_test();
         assert!(matches!(
             rt.resolve_projection::<()>(),
-            Err(RuntimeError::DependencyNotFound)
+            Err(RuntimeError::DependencyNotFound { .. })
         ));
     }
 
@@ -435,21 +451,21 @@ mod tests {
     fn resolve_projection_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<ProjectionRef<()>, RuntimeError> = rt.resolve_projection();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     #[test]
     fn resolve_adapter_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<AdapterRef<()>, RuntimeError> = rt.resolve_adapter();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     #[test]
     fn resolve_config_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<ConfigValue<()>, RuntimeError> = rt.resolve_config();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
     }
 
     // -- Successful downcast -------------------------------------------------
@@ -497,6 +513,18 @@ mod tests {
 
     // -- Incorrect type downcast --------------------------------------------
 
+    /// Asserts `result` is `Err(DependencyNotFound { type_name: expected, .. })`,
+    /// panicking with the actual value otherwise.
+    fn assert_dependency_not_found_named<T>(result: Result<T, RuntimeError>, expected: &str) {
+        match result {
+            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
+                assert_eq!(type_name, expected);
+            }
+            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
+            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
+        }
+    }
+
     #[test]
     fn resolve_projection_returns_not_found_for_wrong_type() {
         let mut rt = RuntimeInner::for_test();
@@ -507,7 +535,7 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_projection::<MyProjection>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert_dependency_not_found_named(result, std::any::type_name::<MyProjection>());
     }
 
     #[test]
@@ -519,7 +547,7 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_adapter::<MyProjection>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert_dependency_not_found_named(result, std::any::type_name::<MyProjection>());
     }
 
     #[test]
@@ -531,7 +559,7 @@ mod tests {
             .insert(TypeId::of::<MyProjection>(), instance);
 
         let result = rt.resolve_config::<String>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound)));
+        assert_dependency_not_found_named(result, std::any::type_name::<String>());
     }
 
     // -- Concurrent resolution -----------------------------------------------
@@ -553,9 +581,9 @@ mod tests {
 
         for h in handles {
             let (r1, r2, r3) = h.join().unwrap();
-            assert!(matches!(r1, Err(RuntimeError::DependencyNotFound)));
-            assert!(matches!(r2, Err(RuntimeError::DependencyNotFound)));
-            assert!(matches!(r3, Err(RuntimeError::DependencyNotFound)));
+            assert!(matches!(r1, Err(RuntimeError::DependencyNotFound { .. })));
+            assert!(matches!(r2, Err(RuntimeError::DependencyNotFound { .. })));
+            assert!(matches!(r3, Err(RuntimeError::DependencyNotFound { .. })));
         }
     }
 
@@ -763,6 +791,41 @@ mod tests {
             rt.authorization_provider().is_none(),
             "Expected None when security_providers is None"
         );
+    }
+
+    // -- CORE-025 TASK-001: RuntimeError::DependencyNotFound struct variant --
+
+    #[test]
+    fn dependency_not_found_display_names_type_and_service_when_both_known() {
+        let err = RuntimeError::DependencyNotFound {
+            type_name: "X",
+            service_name: Some("Y"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('X'), "message must name the missing type: {msg}");
+        assert!(msg.contains('Y'), "message must name the requesting service: {msg}");
+    }
+
+    #[test]
+    fn dependency_not_found_display_omits_service_gracefully_when_none() {
+        let err = RuntimeError::DependencyNotFound {
+            type_name: "X",
+            service_name: None,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('X'), "message must name the missing type: {msg}");
+    }
+
+    #[test]
+    fn dependency_not_found_is_a_real_std_error() {
+        fn boxed_error() -> Result<(), Box<dyn std::error::Error>> {
+            Err(RuntimeError::DependencyNotFound {
+                type_name: "X",
+                service_name: Some("Y"),
+            })?
+        }
+        let err = boxed_error().unwrap_err();
+        assert!(err.to_string().contains('X'));
     }
 
     #[test]

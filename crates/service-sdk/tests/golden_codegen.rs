@@ -105,6 +105,24 @@ struct GoldenInjectableService {
     name: String,
 }
 
+/// Shared `insta` filters for `DepKey` snapshots: normalizes non-deterministic
+/// `TypeId` Debug output and `std::any::type_name`'s fully-qualified,
+/// compiler-version-sensitive path down to its trailing segment(s), so
+/// snapshots stay stable across toolchains.
+///
+/// The `type_name` filter is deliberately NOT anchored to `"..."` quote
+/// boundaries — it matches any `path::of::segments` occurrence in the line
+/// and keeps only the last one. This also normalizes generic parameters
+/// (e.g. `"alloc::vec::Vec<crate_x::Foo>"` -> `"Vec<Foo>"`), since a nested
+/// generic argument is itself a path the same pattern independently matches.
+fn dep_key_snapshot_filters() -> [(&'static str, &'static str); 3] {
+    [
+        (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
+        (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
+        (r"(?:[\w]+::)+([\w]+)", "$1"),
+    ]
+}
+
 #[test]
 fn golden_struct_dependencies_mixed() {
     // dependencies() returns DepKey values with TypeId. TypeId is non-deterministic
@@ -114,10 +132,7 @@ fn golden_struct_dependencies_mixed() {
     // Order is determined by field declaration order.
     // We snapshot the Debug output with TypeId values replaced by a placeholder.
     insta::with_settings!({
-        filters => vec![
-            (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
-            (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
-        ],
+        filters => dep_key_snapshot_filters(),
     }, {
         insta::assert_debug_snapshot!("struct_dependencies_mixed", deps);
     });
@@ -149,10 +164,7 @@ struct GoldenSingleProjectionService {
 fn golden_struct_dependencies_single_projection() {
     let deps = <GoldenSingleProjectionService as Injectable>::dependencies();
     insta::with_settings!({
-        filters => vec![
-            (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
-            (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
-        ],
+        filters => dep_key_snapshot_filters(),
     }, {
         insta::assert_debug_snapshot!("struct_dependencies_single_projection", deps);
     });
