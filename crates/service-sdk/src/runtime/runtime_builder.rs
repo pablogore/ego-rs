@@ -73,10 +73,7 @@ impl DependencyTable {
             .get(&TypeId::of::<T>())
             .and_then(|arc| arc.clone().downcast::<T>().ok())
             .map(ProjectionRef::new)
-            .ok_or_else(|| RuntimeError::DependencyNotFound {
-                type_name: std::any::type_name::<T>(),
-                service_name: None,
-            })
+            .ok_or_else(dependency_not_found::<T>)
     }
 
     fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
@@ -84,10 +81,7 @@ impl DependencyTable {
             .get(&TypeId::of::<A>())
             .and_then(|arc| arc.clone().downcast::<A>().ok())
             .map(AdapterRef::new)
-            .ok_or_else(|| RuntimeError::DependencyNotFound {
-                type_name: std::any::type_name::<A>(),
-                service_name: None,
-            })
+            .ok_or_else(dependency_not_found::<A>)
     }
 
     fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
@@ -95,11 +89,14 @@ impl DependencyTable {
             .get(&TypeId::of::<C>())
             .and_then(|arc| arc.clone().downcast::<C>().ok())
             .map(ConfigValue::new)
-            .ok_or_else(|| RuntimeError::DependencyNotFound {
-                type_name: std::any::type_name::<C>(),
-                service_name: None,
-            })
+            .ok_or_else(dependency_not_found::<C>)
     }
+}
+
+/// Builds a `DependencyNotFound` naming `T`, with no requesting service attached yet
+/// (the `try_build()` validator path fills in `service_name` on the way out).
+fn dependency_not_found<T: 'static>() -> RuntimeError {
+    RuntimeError::DependencyNotFound { type_name: std::any::type_name::<T>(), service_name: None }
 }
 
 // ---------------------------------------------------------------------------
