@@ -9,7 +9,7 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError};
+use ego_service_sdk::runtime::{Resolvable, RuntimeBuilder, RuntimeError};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -79,6 +79,24 @@ fn service_on_trait_generates_tag_and_ref() {
 
     // Must compile: OrderServiceRef::new(inner, chain, runtime_weak)
     let _ref_obj = OrderServiceRef::new(inner, chain, runtime_weak);
+}
+
+#[test]
+fn create_proxy_returns_service_not_found_for_wrong_shaped_arc() {
+    // create_proxy expects an Arc<ResolvableContainer<dyn OrderService>>. Handing it
+    // an unrelated concrete type must fail the downcast and surface ServiceNotFound,
+    // not panic.
+    let wrong_shaped: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42i32);
+    let chain = Arc::new(InterceptorChain::new());
+    let rt = test_runtime();
+    let runtime_weak = Arc::downgrade(rt.inner());
+
+    let result = OrderServiceTag::create_proxy(wrong_shaped, chain, runtime_weak);
+
+    assert!(
+        matches!(result, Err(RuntimeError::ServiceNotFound)),
+        "create_proxy must return ServiceNotFound when the stored Any does not downcast to the expected container"
+    );
 }
 
 // ---------------------------------------------------------------------------

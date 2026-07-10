@@ -403,11 +403,16 @@ impl AuthenticationProvider for NoopTestAuthn {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during proxy resolution or dependency injection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
     /// The requested service was not found in the registry.
+    #[error("service not found")]
     ServiceNotFound,
     /// A dependency was not found during resolution.
+    #[error(
+        "dependency `{type_name}` not found{}",
+        service_name.map(|s| format!(" (required by `{s}`)")).unwrap_or_default()
+    )]
     DependencyNotFound {
         /// The name of the missing dependency's type.
         type_name: &'static str,
@@ -415,22 +420,6 @@ pub enum RuntimeError {
         service_name: Option<&'static str>,
     },
 }
-
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeError::ServiceNotFound => write!(f, "service not found"),
-            RuntimeError::DependencyNotFound { type_name, service_name: Some(service_name) } => {
-                write!(f, "dependency `{type_name}` not found (required by `{service_name}`)")
-            }
-            RuntimeError::DependencyNotFound { type_name, service_name: None } => {
-                write!(f, "dependency `{type_name}` not found")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -537,7 +526,13 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_projection::<MyProjection>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        match result {
+            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
+                assert_eq!(type_name, std::any::type_name::<MyProjection>());
+            }
+            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
+            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
+        }
     }
 
     #[test]
@@ -549,7 +544,13 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_adapter::<MyProjection>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        match result {
+            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
+                assert_eq!(type_name, std::any::type_name::<MyProjection>());
+            }
+            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
+            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
+        }
     }
 
     #[test]
@@ -561,7 +562,13 @@ mod tests {
             .insert(TypeId::of::<MyProjection>(), instance);
 
         let result = rt.resolve_config::<String>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        match result {
+            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
+                assert_eq!(type_name, std::any::type_name::<String>());
+            }
+            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
+            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
+        }
     }
 
     // -- Concurrent resolution -----------------------------------------------

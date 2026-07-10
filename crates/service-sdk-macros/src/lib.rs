@@ -30,7 +30,7 @@ impl SdkAttr {
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Ident, ItemFn, ItemStruct, ItemTrait, TraitItem};
@@ -599,33 +599,19 @@ fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
             let ident_str = segment.ident.to_string();
             if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
                 if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                    match ident_str.as_str() {
-                        "ProjectionRef" => {
-                            return Some(quote! {
-                                ego_service_sdk::di::DepKey::Projection(
-                                    std::any::TypeId::of::<#inner_ty>(),
-                                    std::any::type_name::<#inner_ty>()
-                                )
-                            });
-                        }
-                        "AdapterRef" => {
-                            return Some(quote! {
-                                ego_service_sdk::di::DepKey::Adapter(
-                                    std::any::TypeId::of::<#inner_ty>(),
-                                    std::any::type_name::<#inner_ty>()
-                                )
-                            });
-                        }
-                        "ConfigValue" => {
-                            return Some(quote! {
-                                ego_service_sdk::di::DepKey::Config(
-                                    std::any::TypeId::of::<#inner_ty>(),
-                                    std::any::type_name::<#inner_ty>()
-                                )
-                            });
-                        }
-                        _ => {}
-                    }
+                    let variant = match ident_str.as_str() {
+                        "ProjectionRef" => "Projection",
+                        "AdapterRef" => "Adapter",
+                        "ConfigValue" => "Config",
+                        _ => return None,
+                    };
+                    let variant = format_ident!("{}", variant);
+                    return Some(quote! {
+                        ego_service_sdk::di::DepKey::#variant(
+                            std::any::TypeId::of::<#inner_ty>(),
+                            std::any::type_name::<#inner_ty>()
+                        )
+                    });
                 }
             }
         }
