@@ -247,7 +247,7 @@ Depends on Phase 5 (`with_service`/`resolve` must exist to forward to).
 Depends on Phase 5 (registration/resolution) and Phase 6 (fail-fast DI), since
 the Quick Path in design.md shows both flows.
 
-### TASK-019: New example demonstrating the Quick Path
+### TASK-019: [x] New example demonstrating the Quick Path
 - File: `crates/service-sdk/examples/hello_service.rs` (new file — do not edit the pre-existing `order_service.rs`, which is a different, older "manual equivalent" example unrelated to this change).
 - Uses the real `#[service]`/`#[operation]` macros (not a manual equivalent), demonstrates: `RuntimeBuilder::new().with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)?.build()`, then `rt.resolve::<HelloServiceTag>()?` and an invocation — matching design.md's Quick Path minimal-service snippet verbatim in spirit.
 - Doubles as acceptance evidence per the proposal (F-09 "doubles as acceptance evidence that the happy path exists").
@@ -260,7 +260,7 @@ the Quick Path in design.md shows both flows.
 Depends on every prior phase — this is a single realistic walkthrough, not a
 restatement of the unit tests already written per-task above.
 
-### TASK-020: One acceptance test file covering all 5 proposal scenarios in sequence
+### TASK-020: [x] One acceptance test file covering all 5 proposal scenarios in sequence
 - File: `crates/service-sdk/tests/service_sdk_ergonomics_acceptance.rs` (new).
 - One realistic developer-journey narrative, not isolated unit assertions:
   1. Minimal service (no deps): define, `with_service`, `build()`, `resolve()`, invoke.
@@ -274,11 +274,11 @@ restatement of the unit tests already written per-task above.
 
 ## Phase 10 — Documentation and scope-boundary checks
 
-### TASK-021: `cargo doc --workspace --no-deps` — no new warnings
+### TASK-021: [x] `cargo doc --workspace --no-deps` — no new warnings
 - Run `cargo doc --workspace --no-deps` and diff the warning count against the pre-existing baseline established since CORE-008B (that change's TASK-012 already ran this check and recorded zero errors — confirm no *new* warnings are introduced by this change's additive public surface: `with_service`, `resolve`, `with_injectable`, `try_build`, `Injectable::validate`, `RuntimeInner::check_dependency`, `Resolvable::Service`, the enriched `DepKey`/`RuntimeError::DependencyNotFound`).
 - Depends on: all implementation tasks (TASK-001 through TASK-019).
 
-### TASK-022: Explicit exclusion — do NOT touch `COOKBOOK.md`
+### TASK-022: [x] Explicit exclusion — do NOT touch `COOKBOOK.md`
 - No code change. Recorded here so it is not done as an incidental drive-by: `COOKBOOK.md` (repo root) is explicitly **out of scope** for this change (proposal's F-05, deferred — "must sequence AFTER code lands, otherwise goes stale immediately"). Any cookbook rewrite documenting `with_service`/`resolve`/`try_build` is a separate, later change.
 - No dependency; this is a standing note for the apply phase, not an executable task.
 

@@ -543,6 +543,7 @@ dependencies = [
  "ego-domain",
  "ego-security-sdk",
  "ego-service-sdk-macros",
+ "ego-testkit",
  "insta",
  "kitlogger",
  "kitlogger-formatter",
