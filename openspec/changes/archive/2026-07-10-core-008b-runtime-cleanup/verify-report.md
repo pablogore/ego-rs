@@ -2,7 +2,7 @@
 
 **Change**: core-008b-runtime-cleanup
 **Branch verified**: `opsx/core-008b-runtime-cleanup-pr2-orphan-types` (batch 2, on top of `develop` with batch 1 / PR1 #145 already merged)
-**Verdict**: PASS WITH WARNINGS
+**Verdict**: PASS
 
 ## Task completeness
 
@@ -44,7 +44,7 @@
 | Build/test pass, `tenant_id()`/`has_tenant()` fully removed, no `#[allow(deprecated)]` left | CONFIRMED |
 | `docs/architecture.md` has no TaskLocal/ambient-propagation claims | CONFIRMED |
 | `ExecutionContext`/`DomainExecutionContext`/`RuntimeExecutionContext` deleted, workspace builds green | CONFIRMED |
-| No stale documentation examples referencing deleted accessors (e.g. `COOKBOOK.md`) | PARTIAL — see WARNING below |
+| No stale documentation examples referencing deleted accessors (e.g. `COOKBOOK.md`) | CONFIRMED |
 
 ## Findings
 
@@ -52,10 +52,10 @@
 None.
 
 ### WARNING
-1. `COOKBOOK.md:667` File Navigation Map still lists `crates/domain/src/context.rs` as containing "Identity types + `ExecutionContext` trait" — the trait was deleted in TASK-008 (this batch). Not covered by any task in `tasks.md`, and outside the literal grep scope of the ADDED requirement scenario (scoped to `crates/` Rust source only), but it's real documentation drift. Batch 1's COOKBOOK.md fix addressed a different stale example (a `tenant_id()` call), not this navigation-map row.
+None. The COOKBOOK.md File Navigation Map row for `crates/domain/src/context.rs` (flagged below at report-writing time) was fixed within the same PR2 batch — commit `648aa59` includes "docs(cookbook): drop deleted `ExecutionContext` trait from file map." Confirmed clean: `grep -n "ExecutionContext" COOKBOOK.md` returns zero matches.
 
 ### SUGGESTION
-1. Update the COOKBOOK.md File Navigation Map row for `crates/domain/src/context.rs` to drop the `ExecutionContext` mention before archive, or explicitly accept it as residual debt.
+None outstanding.
 
 ## Diff stat (develop..HEAD, batch 2 only)
 
@@ -67,4 +67,4 @@ Matches the tasks.md Review Workload Forecast's ~695-line estimate for Phase 3 (
 
 ## Next recommended
 
-`sdd-archive`, after deciding whether to fix the COOKBOOK.md WARNING first or accept it as residual debt.
+`sdd-archive`.
