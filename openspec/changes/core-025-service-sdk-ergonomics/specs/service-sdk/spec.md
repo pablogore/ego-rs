@@ -18,6 +18,11 @@ Scope: CORE-025 F-01, F-02, F-03, F-09. Wires the existing `ServiceRegistry`/`Re
 - WHEN `.with_service::<HelloServiceTag>(another_inner)` is called again
 - THEN `Err(RegistryError::DuplicateService)` is returned and the originally registered instance remains the one resolvable later
 
+#### Scenario: Registration and resolution can never disagree on version
+- GIVEN `with_service::<Tag>` derives its version exclusively from `<Tag as ServiceContract>::version()`, and `resolve::<Tag>()` queries the registry with that exact same `Tag::version()` call
+- WHEN a caller registers and later resolves the same `Tag`
+- THEN there is no code path through this API where the version used to register differs from the version used to resolve — a caller cannot supply a mismatched version, because neither `with_service` nor `resolve` accepts one; version mismatch is only reachable through the lower-level `ServiceRegistry` API this wrapper does not expose
+
 ### Requirement: Canonical Service Resolution Yields the Concrete Generated Proxy
 
 `Runtime` MUST provide `resolve::<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>` where `Tag: Resolvable`. The returned value MUST be the concrete macro-generated `{Trait}Ref` — never a trait object, and callers MUST NOT need to downcast it. Resolving a tag with no registration for it MUST return `Err(RuntimeError::ServiceNotFound)`. The `{Trait}Ref` produced by `resolve` MUST be identical in construction and guard behavior to the one produced by the hand-rolled `{Trait}Ref::new(inner, chain, weak)` path — same interceptor chain, same weak runtime handle, same generated `create_proxy` body — so the operation guard order (authorize → `enforce_tenant` → interceptor chain → operation body), as fixed by the existing "Explicit Context in Proxy Dispatch" requirement and CORE-015's "Marker Execution Order Is Fixed" requirement (AC-8.2), and the tenant-enforcement invariants INV-003 and FR-002/FR-009 in this spec, apply unchanged and are not bypassable through `resolve`.
@@ -55,6 +60,11 @@ Scope: CORE-025 F-01, F-02, F-03, F-09. Wires the existing `ServiceRegistry`/`Re
 - GIVEN a `RuntimeBuilder` with `.with_injectable::<MyService>()` recorded but a required adapter missing
 - WHEN `.build()` (not `.try_build()`) is called
 - THEN a `Runtime` is returned with no error — `with_injectable` bookkeeping has no effect on `build()`, matching the existing "RuntimeBuilder::build() Behavior Is Unchanged" requirement
+
+#### Scenario: Multiple missing dependencies report only the first, in registration order
+- GIVEN `RuntimeBuilder::new().with_injectable::<ServiceA>().with_injectable::<ServiceB>()` where both `ServiceA` and `ServiceB` depend on adapters that were never registered
+- WHEN `.try_build()` is called
+- THEN `Err(RuntimeError::DependencyNotFound { .. })` is returned naming `ServiceA`'s missing dependency only — validators run in the exact order `with_injectable` was called, not an unordered or hash-based order, and reporting every missing dependency at once is explicitly out of scope for this requirement (deferred)
 
 ### Requirement: Diagnosable Dependency Error
 
