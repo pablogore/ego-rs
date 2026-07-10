@@ -6,7 +6,7 @@ use ego_security_sdk::principal::SubjectId;
 ///
 /// All code within the `crate::runtime` module is considered trusted
 /// infrastructure and can call `new()` directly. The documented public
-/// entry point is [`RuntimeInner::issue_cross_tenant_permit`].
+/// entry point is [`crate::runtime::RuntimeInner::issue_cross_tenant_permit`].
 ///
 /// # Guarantee
 ///
@@ -33,7 +33,7 @@ use ego_security_sdk::principal::SubjectId;
 /// authorizes `tenant-c` — `destination` travels with every clone.
 ///
 /// The real authorization check happens once, at issuance time, inside
-/// [`RuntimeInner::issue_cross_tenant_permit`] (AD-008/FR-005/FR-006), not at
+/// [`crate::runtime::RuntimeInner::issue_cross_tenant_permit`] (AD-008/FR-005/FR-006), not at
 /// use time.
 #[derive(Debug, Clone)]
 pub struct CrossTenantPermit {
@@ -46,7 +46,7 @@ impl CrossTenantPermit {
     /// Visible to all code within the `crate::runtime` module, including its
     /// sibling submodules. Callers outside `crate::runtime` cannot call this
     /// directly — the only production caller is
-    /// [`RuntimeInner::issue_cross_tenant_permit`], which runs the
+    /// [`crate::runtime::RuntimeInner::issue_cross_tenant_permit`], which runs the
     /// `AuthorizationProvider` capability check first (AD-008).
     // Used only in tests until a real production caller adopts cross-tenant
     // issuance (this framework-stage codebase has no application services yet).

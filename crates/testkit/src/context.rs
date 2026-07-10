@@ -128,8 +128,8 @@ mod tests {
     fn independently_built_contexts_do_not_leak_state() {
         let a = TestContextBuilder::new().tenant("acme").build();
         let b = TestContextBuilder::new().tenant("contoso").build();
-        assert_eq!(a.tenant_id.as_deref(), Some("acme"));
-        assert_eq!(b.tenant_id.as_deref(), Some("contoso"));
+        assert_eq!(a.tenant_hint(), Some("acme"));
+        assert_eq!(b.tenant_hint(), Some("contoso"));
     }
 
     #[test]

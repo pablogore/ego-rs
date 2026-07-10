@@ -443,7 +443,7 @@ impl TenantResolver {
 
 `RuntimeInner::enforce_tenant` gathers `facts` from `ServiceContext` (`ctx.security()`,
 `ctx.tenant_hint()`, `ctx.cross_tenant_grant()`) and calls `resolve` once per
-tenant-scoped operation. **AD-013 (Fact Establishment vs. Policy Evaluation)** governs
+tenant-scoped operation. **AD-014 (Fact Establishment vs. Policy Evaluation)** governs
 this seam: `TenantResolver::resolve` is a Policy Evaluator — it derives its decision
 exclusively from the closed, immutable `facts` it was handed, and never itself fetches,
 queries, or authorizes anything during evaluation. Establishing a cross-tenant grant is
@@ -626,13 +626,13 @@ call fails with `SecurityError::CapabilityNotEnabled`.
 
 A Principal holding the `"tenant:cross-tenant-access"` capability, confirmed via
 `AuthorizationProvider`, MUST be able to obtain a `CrossTenantPermit` and successfully
-execute a cross-tenant operation using it. Per **AD-013**, this is wired as Fact
+execute a cross-tenant operation using it. Per **AD-014**, this is wired as Fact
 Establishment feeding Policy Evaluation, not as a callback performed during resolution:
 
 1. `RuntimeInner::issue_cross_tenant_permit` mints a `CrossTenantPermit { destination, issued_to }`
    only on an `Allow` decision (FR-005).
 2. `ServiceContext::with_cross_tenant_access(&permit)` attaches it, storing a
-   `CrossTenantGrant` (`crates/service-sdk/src/runtime/tenant.rs`) — an AD-013
+   `CrossTenantGrant` (`crates/service-sdk/src/runtime/tenant.rs`) — an AD-014
    Established Fact — scoped to exactly the permit's `destination`. A permit issued for
    `tenant-b` can never authorize a grant for `tenant-c`.
 3. `RuntimeInner::enforce_tenant` gathers `EstablishedTenantFacts` (`ctx.security()`,
@@ -642,7 +642,7 @@ Establishment feeding Policy Evaluation, not as a callback performed during reso
    tenant AND a `CrossTenantGrant` is present whose `destination` exactly matches the
    (trimmed) hint, resolution succeeds with `CanonicalTenant::scoped(grant.destination().clone())`
    instead of a hard `TenantMismatch`. `resolve` never fetches, checks, or re-derives
-   the grant itself — it only reads the Established Fact it was handed (AD-013). A
+   the grant itself — it only reads the Established Fact it was handed (AD-014). A
    grant scoped to a different destination than the hint still produces
    `TenantMismatch`; an unused grant (hint absent or agreeing) has no effect.
 

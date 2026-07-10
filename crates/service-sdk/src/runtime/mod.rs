@@ -15,7 +15,7 @@ pub use permit::CrossTenantPermit;
 pub use resolvable::{Resolvable, ResolvableContainer};
 pub use runtime_builder::{RuntimeError, RuntimeInner};
 pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
-// Crate-internal only (AD-013 Established Fact type) — `crate::context`
+// Crate-internal only (AD-014 Established Fact type) — `crate::context`
 // needs `CrossTenantGrant` to expose `ServiceContext::cross_tenant_grant`,
 // which is not part of this crate's external API. `EstablishedTenantFacts`
 // stays a `crate::runtime`-internal detail: every caller that needs it

@@ -1,6 +1,6 @@
 //! Canonical tenant model and resolution seam (CORE-008A).
 //!
-//! `TenantResolver::resolve` is the sole Policy Evaluator (AD-013) for tenant
+//! `TenantResolver::resolve` is the sole Policy Evaluator (AD-014) for tenant
 //! outcome, wired into `RuntimeInner::enforce_tenant`, which
 //! `#[tenant_scoped]`-generated operations call fallibly (AD-009). Unmarked
 //! operations never call `enforce_tenant` at all (AD-007) — the enforcement
@@ -82,7 +82,7 @@ impl CanonicalTenant {
     }
 }
 
-/// An Established Fact (AD-013): proof that the authenticated principal has
+/// An Established Fact (AD-014): proof that the authenticated principal has
 /// already been authorized, upstream of policy evaluation, to operate
 /// against `destination`. Constructed only from an already-granted
 /// [`crate::context::ServiceContext`] state (via
@@ -108,9 +108,9 @@ impl CrossTenantGrant {
 }
 
 /// The closed, immutable set of facts `TenantResolver::resolve` evaluates
-/// (AD-013). Bundling these into one named value — rather than a growing
+/// (AD-014). Bundling these into one named value — rather than a growing
 /// parameter list — makes the Fact Establishment / Policy Evaluation
-/// boundary visible in the type system: this is exactly what AD-013 calls
+/// boundary visible in the type system: this is exactly what AD-014 calls
 /// "a closed, immutable set of Established Facts." Scoped to exactly what
 /// exists today; do not add speculative fields for not-yet-designed policy
 /// dimensions (delegation, impersonation, hierarchy, ...) ahead of need.
@@ -160,10 +160,10 @@ impl TenantResolver {
     }
 
     /// The single resolution algorithm mandated by D2 (AD-001), extended per
-    /// AD-013 to also evaluate an Established cross-tenant Fact, if one is
+    /// AD-014 to also evaluate an Established cross-tenant Fact, if one is
     /// present in `facts`. Transport-neutral inputs only; consumes exactly
     /// the closed fact set `facts` already carries — never fetches, checks,
-    /// or establishes anything itself (AD-013: Policy Evaluation, not Fact
+    /// or establishes anything itself (AD-014: Policy Evaluation, not Fact
     /// Establishment).
     ///
     /// Branch order matters: (a) is checked before (b)/(c) — a
@@ -199,7 +199,7 @@ impl TenantResolver {
                     if let Some(hint) = hint {
                         // (c) Authenticated, hint present, non-blank, and disagrees.
                         if !hint.is_empty() && hint != expected {
-                            // (c') AD-013/FR-006: an Established cross-tenant grant
+                            // (c') AD-014/FR-006: an Established cross-tenant grant
                             // scoped to exactly this hint's destination lets the
                             // disagreement resolve to the granted tenant instead of
                             // a hard error. The grant's TenantId was already
@@ -394,7 +394,7 @@ mod tests {
         assert_tenant_mismatch(result, "tenant-a", "tenant-b");
     }
 
-    // Branch (c') — AD-013/FR-006: authenticated, hint disagrees, but an
+    // Branch (c') — AD-014/FR-006: authenticated, hint disagrees, but an
     // Established grant scoped to exactly that hint's destination lets the
     // disagreement resolve to the granted tenant instead of erroring. This is
     // FR-006's positive acceptance scenario.
