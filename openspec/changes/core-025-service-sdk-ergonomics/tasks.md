@@ -139,7 +139,7 @@ Depends on Phase 1 (needs the struct-variant `RuntimeError::DependencyNotFound`
 to construct) AND Phase 2 (needs `DepKey`'s name field to read). This is the
 sequencing constraint the proposal names explicitly.
 
-### TASK-009: Add the defaulted `Injectable::validate()` method
+### TASK-009: [x] Add the defaulted `Injectable::validate()` method
 - File: `crates/service-sdk/src/di/mod.rs` (trait at lines 87-99).
 - Add, per design.md's exact code:
   ```rust
@@ -156,7 +156,7 @@ sequencing constraint the proposal names explicitly.
 - A generic default — zero per-service codegen. `build()` (line 96-98) is untouched.
 - Depends on: TASK-010 must exist for this to compile (or land together) — sequence them as one commit.
 
-### TASK-010: `RuntimeInner::check_dependency(&DepKey) -> Result<(), RuntimeError>`
+### TASK-010: [x] `RuntimeInner::check_dependency(&DepKey) -> Result<(), RuntimeError>`
 - File: `crates/service-sdk/src/runtime/runtime_builder.rs` (new `impl RuntimeInner` method; `RuntimeInner` and `DependencyTable` share this module, so the method can read `self.resolved.{adapters,configs,projections}` directly).
 - Per-kind `contains_key` against the resolved tables: `DepKey::Adapter(id, name)` → `self.resolved.adapters.contains_key(id)` (name only feeds the error); same for `Config`/`Projection`. **`DepKey::Entity(..)` arm MUST return `Err(RuntimeError::DependencyNotFound { type_name: name, service_name: None })` unconditionally** — no entity table exists, so this is a fail-safe default, not a bug.
 - `service_name` stays `None` here; TASK-015 rewrites it to `Some(type_name::<S>())` on the way out of `try_build`.
@@ -170,12 +170,12 @@ sequencing constraint the proposal names explicitly.
 
 Independent of Phases 1-3; can run in parallel. Must land before Phase 5.
 
-### TASK-011: Add `type Service` to the `Resolvable` trait
+### TASK-011: [x] Add `type Service` to the `Resolvable` trait
 - File: `crates/service-sdk/src/runtime/resolvable.rs` (trait at lines 44-57).
 - Add `type Service: ?Sized + Send + Sync + 'static;` alongside the existing `type Proxy: Send + Sync;`.
 - Satisfies: service-sdk spec's implicit contract for `with_service::<Tag>(Arc<Tag::Service>)` (next phase).
 
-### TASK-012: Emit `type Service = dyn #trait_name;` in the generated impl
+### TASK-012: [x] Emit `type Service = dyn #trait_name;` in the generated impl
 - File: `crates/service-sdk-macros/src/lib.rs` (generated `impl ego_service_sdk::runtime::Resolvable for #tag_name` at lines 471-484).
 - Add `type Service = dyn #trait_name;` beside `type Proxy = #ref_name;`.
 - Acceptance: `cargo test -p ego-service-sdk --test golden_codegen` stays green (the snapshotted `descriptor()` output is unaffected — `type Service` is not part of `ServiceDescriptor`); `cargo test -p ego-service-sdk --test proxy_codegen` (a compile+run test) stays green.

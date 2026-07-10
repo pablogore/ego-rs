@@ -91,6 +91,23 @@ pub trait Injectable: Send + Sync {
     where
         Self: Sized;
 
+    /// Presence-only dependency check. Constructs nothing. The default is
+    /// fully generic over `dependencies()` — zero per-service codegen.
+    ///
+    /// Used by `RuntimeBuilder::try_build()` (fail-fast bootstrap, AD-3 /
+    /// OQ-2) to detect a missing adapter/config/projection before
+    /// constructing anything, as opposed to `build()` which only discovers a
+    /// missing dependency by trying to resolve it.
+    fn validate(rt: &crate::runtime::RuntimeInner) -> Result<(), crate::runtime::RuntimeError>
+    where
+        Self: Sized,
+    {
+        for dep in Self::dependencies() {
+            rt.check_dependency(&dep)?;
+        }
+        Ok(())
+    }
+
     /// Constructs an instance by resolving dependencies from the runtime.
     /// Returns `RuntimeError::DependencyNotFound` while resolvers are not yet wired.
     fn build(rt: &crate::runtime::RuntimeInner) -> Result<Self, crate::runtime::RuntimeError>

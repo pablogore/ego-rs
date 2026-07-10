@@ -45,6 +45,13 @@ pub trait Resolvable: ServiceContract {
     /// The proxy type returned by `Runtime::resolve`.
     type Proxy: Send + Sync;
 
+    /// The trait object this tag fronts — the type link `with_service::<Tag>`
+    /// needs to name the `Arc<Tag::Service>` it accepts. This is the only
+    /// job of this associated type; it is not a general service descriptor
+    /// (see design.md's scope note — further metadata belongs on
+    /// `ServiceContract`, not here).
+    type Service: ?Sized + Send + Sync + 'static;
+
     /// Creates a typed proxy from a raw registry entry.
     ///
     /// The `inner` must have been stored as `Arc<ResolvableContainer<dyn Trait>>`
