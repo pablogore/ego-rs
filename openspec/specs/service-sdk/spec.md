@@ -822,16 +822,17 @@ scenarios ("Tenant enforcement behavior preserved") for the acceptance contract.
 
 On the authenticated path, the service-visible tenant MUST be derived per FR-002, not
 independently settable by arbitrary code holding a `ServiceContext`. `ServiceContext.tenant_id`
-remains a `pub` field (the ingress hint, per AD-011) but mutating it after resolution has
-already run has no effect on enforcement: `resolved_tenant` is a separate private field,
-written only by the `pub(crate)` `set_resolved_tenant`, whose sole caller is
-`RuntimeInner::enforce_tenant`.
+is a private field (the ingress hint, per AD-011), settable only through
+`ServiceContext::with_tenant_id()` and readable only through `tenant_hint()` — no public API
+can mutate it after construction. `resolved_tenant` is a separate private field, written only
+by the `pub(crate)` `set_resolved_tenant`, whose sole caller is `RuntimeInner::enforce_tenant`.
 
-#### Scenario: Direct tenant mutation cannot override the derived, authenticated tenant
+#### Scenario: No public API can override the derived, authenticated tenant
 
 - GIVEN a `ServiceContext` whose `canonical_tenant()` was already resolved to `"tenant-a"` (derived from `Principal.tenant_id`)
-- WHEN code sets `ctx.tenant_id = Some("tenant-b".into())` directly
-- THEN `ctx.canonical_tenant()` still returns `"tenant-a"` — the mutated hint field is never read again for an already-resolved operation
+- WHEN external code attempts to mutate the ingress hint or the resolved tenant directly
+- THEN compilation fails — both `tenant_id` and `resolved_tenant` are private fields with no public setter that reaches them post-construction
+- AND `ctx.canonical_tenant()` still returns `"tenant-a"` for any code that only holds a shared reference
 
 ---
 

@@ -101,6 +101,25 @@ No data, wire, or persistence impact in either direction.
 
 ---
 
+## Known, Out-of-Scope Side Effect: `tenant_id` Visibility Drift
+
+`specs/service-sdk/spec.md`'s archived delta (this change's own frozen copy) contains a
+scenario asserting `ServiceContext.tenant_id` "remains a `pub` field" and directly sets
+`ctx.tenant_id = Some(...)`. That was accurate when CORE-008B was scoped and implemented —
+this change's proposal explicitly listed the field's visibility as **out of scope**,
+touching only the deprecated *accessor methods*.
+
+The field was subsequently privatized by an unrelated, later follow-up (CORE-008A
+closure fix, PR #151), after CORE-008B's delta spec had already been written. The
+archived delta is left unedited as the historical record of what this change actually
+scoped and verified — rewriting it now would misrepresent history the same way
+CORE-008A's archive-report addendum warns against. The **living spec**
+(`openspec/specs/service-sdk/spec.md`, FR-010) has been updated to reflect the current,
+post-#151 contract: both `tenant_id` and `resolved_tenant` are private, with no public
+mutator reaching either after construction.
+
+---
+
 ## SDD Cycle Closure
 
 **Proposal**: ✅ Origin, scope, Accessor Selection Rule, decisions resolved up front
