@@ -248,10 +248,7 @@ impl Runtime {
             .inner
             .registry
             .resolve_raw::<Tag>(&VersionConstraint::Exact(<Tag as ServiceContract>::version()))
-            .map_err(|err| match err {
-                RegistryError::ServiceNotFound => RuntimeError::ServiceNotFound,
-                _ => RuntimeError::ServiceNotFound,
-            })?;
+            .map_err(|_| RuntimeError::ServiceNotFound)?;
         Tag::create_proxy(raw, self.inner.interceptor_chain.clone(), Arc::downgrade(&self.inner))
     }
 

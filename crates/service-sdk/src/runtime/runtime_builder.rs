@@ -114,14 +114,11 @@ fn dependency_not_found<T: 'static>() -> RuntimeError {
 /// | resolved DI instances   | `resolved` (DependencyTable) |
 /// | tenant enforcement      | `enforce_tenant()` method   |
 ///
-/// The `RuntimeBuilder` (TASK-013) will construct this struct with
-/// registered instances. Until then, the resolve methods return
-/// `DependencyNotFound`.
+/// The `RuntimeBuilder` constructs this struct with registered instances;
+/// `registry` and `interceptor_chain` are read by `Runtime::resolve` and
+/// written by `RuntimeBuilder::with_service` (CORE-025).
 pub struct RuntimeInner {
-    // Populated by RuntimeBuilder (TASK-013); not yet read within this crate.
-    #[allow(dead_code)]
     pub(crate) registry: ServiceRegistry,
-    #[allow(dead_code)]
     pub(crate) interceptor_chain: Arc<InterceptorChain>,
     /// Optional security providers (authn + authz) installed via RuntimeBuilder.
     pub(crate) security_providers:
