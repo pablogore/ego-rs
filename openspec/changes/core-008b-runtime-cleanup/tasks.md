@@ -87,7 +87,7 @@ TASK-008 and TASK-009 are independent of each other (different crates) and
 of Phases 1-2/4; both depend on TASK-007.
 
 ### TASK-007: Re-verify zero callers before deleting
-- Run `rg "ExecutionContext" crates/ --type rust` across the full workspace.
+- Run `rg "ExecutionContext" crates/ --type rust` (Rust source only, workspace-wide under `crates/`).
 - A full-workspace grep already came back clean during proposal review (2026-07-09); this is a re-check immediately before deletion, per the proposal's stated risk mitigation.
 - Acceptance: matches are limited to the 4 known files (`crates/domain/src/context.rs`, `crates/domain/src/lib.rs`, `crates/runtime/src/context.rs`, `crates/runtime/src/lib.rs`). Any other match blocks TASK-008/009 until investigated.
 
@@ -136,7 +136,7 @@ Independent of Phases 1-3; can run in parallel with everything above.
 - Run `cargo test --workspace` — all tests pass, zero `#[deprecated]` warnings for `tenant_id()`/`has_tenant()`.
 - Re-run the three acceptance greps workspace-wide:
   - `rg "\.tenant_id\(\)|\.has_tenant\(\)" crates/` → zero matches (only the `pub tenant_id: Option<String>` field and `tenant_hint()` reader survive).
-  - `rg "ExecutionContext" crates/ --type rust` → zero matches.
+  - `rg "ExecutionContext" crates/ --type rust` → zero Rust-source references (scoped to `crates/`; the historical note TASK-011 adds to `openspec/specs/service-sdk/spec.md` is expected and intentionally outside this sweep).
   - `rg "TaskLocal|ambient" docs/architecture.md` → zero matches describing `ServiceContext` propagation.
 - Depends on: all prior tasks (TASK-001–011).
 - Acceptance: matches proposal's Success Criteria checklist verbatim.

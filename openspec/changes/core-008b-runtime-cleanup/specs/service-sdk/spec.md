@@ -38,8 +38,9 @@ That type is deleted by this change and no longer exists.)
 
 ### Requirement: Tenant Access MUST Match the Pipeline Stage
 
-Tenant access is a convention, not a compiler-enforced restriction: any code reading
-tenant state MUST select between exactly two accessors, by pipeline stage:
+Tenant access is a convention, not a compiler-enforced restriction: tenant reads MUST
+use either `tenant_hint()` or `canonical_tenant()`, and presence checks use
+`has_tenant_hint()`, selected by pipeline stage:
 
 | What the code exercises | Correct accessor |
 |---|---|
