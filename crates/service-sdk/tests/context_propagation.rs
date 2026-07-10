@@ -16,7 +16,7 @@ async fn test_service_context_explicit_propagation() {
 
     // Explicit passing — no scope, no ambient read
     let ctx2 = ctx.clone();
-    assert_eq!(ctx2.tenant_id(), Some("tenant-123"));
+    assert_eq!(ctx2.tenant_hint(), Some("tenant-123"));
     assert_eq!(ctx2.correlation_id(), Some("correlation-456"));
     assert_eq!(ctx2.trace_id(), Some("trace-789"));
 }
@@ -27,7 +27,7 @@ async fn test_spawned_task_receives_context_explicitly() {
     let ctx_clone = ctx.clone();
 
     // Explicitly capture context via ownership transfer into spawned task
-    let result = tokio::spawn(async move { ctx_clone.tenant_id().map(|s| s.to_owned()) })
+    let result = tokio::spawn(async move { ctx_clone.tenant_hint().map(|s| s.to_owned()) })
         .await
         .unwrap();
 

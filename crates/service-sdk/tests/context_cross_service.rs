@@ -15,7 +15,7 @@ async fn test_context_cross_service_explicit() {
     // Simulate service boundary: clone and pass explicitly
     async fn service_b(ctx: ServiceContext) -> (Option<String>, Option<String>) {
         (
-            ctx.tenant_id().map(|s| s.to_owned()),
+            ctx.tenant_hint().map(|s| s.to_owned()),
             ctx.correlation_id().map(|s| s.to_owned()),
         )
     }
@@ -29,7 +29,7 @@ async fn test_context_cross_service_explicit() {
 async fn test_context_cross_service_multi_tenant() {
     // Verify each service call gets the correct context independently
     async fn service_b(ctx: ServiceContext) -> Option<String> {
-        ctx.tenant_id().map(|s| s.to_owned())
+        ctx.tenant_hint().map(|s| s.to_owned())
     }
 
     let ctx_a = ServiceContext::new().with_tenant_id("tenant-alpha");
