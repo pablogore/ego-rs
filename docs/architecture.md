@@ -86,7 +86,7 @@ Future candidates: `ego-telemetry-sdk`, `ego-config-sdk`, `ego-logging-sdk`.
 - **ego-infrastructure/persistence/postgres/** — production PostgreSQL adapter
 - **ego-service-sdk/contract/** — ServiceContract trait, ServiceDescriptor, OperationDescriptor, ContractVersion
 - **ego-service-sdk/registry/** — ServiceRegistry, RegistryEntry, ServiceBundle, registry errors
-- **ego-service-sdk/context/** — ServiceContext (TaskLocal-scoped), tenant isolation
+- **ego-service-sdk/context/** — ServiceContext (explicit propagation), tenant isolation
 - **ego-service-sdk/interceptor/** — Interceptor trait, InterceptorChain, built-in interceptors
 - **ego-service-sdk/reference/** — ServiceRef<T> typed invocation handles
 - **ego-service-sdk/implementation/** — Service trait, ServiceFactory
@@ -115,7 +115,7 @@ Future candidates: `ego-telemetry-sdk`, `ego-config-sdk`, `ego-logging-sdk`.
 - `ego-application` SHOULD remain runtime-neutral but MAY depend on runtime traits for use case orchestration
 - `ego-service-sdk` MUST NOT depend on any transport framework (HTTP, gRPC, WebSocket) — SC-007
 - `ego-service-sdk-macros` MUST depend only on `syn`, `quote`, `proc-macro2` — no runtime dependencies
-- ServiceContext propagates via `tokio::task::TaskLocal` — EntityRef reads context transparently without cross-crate coupling
+- `ServiceContext` is passed explicitly (owned/cloned/parameter-passed) to every call site that needs it — no ambient/TaskLocal read, consistent with the `2026-06-22-remove-ambient-service-context` invariant (INV-001: "There is exactly one mechanism for a component to access a `ServiceContext`: it was given one explicitly")
 - Dependency direction is enforced by `layers.toml` and verified by `scripts/verify-layers.sh`
 - Cross-cutting SDKs MUST NOT appear as dependencies of `ego-domain` — domain contracts stay runtime and capability neutral
 - Cross-cutting SDKs MAY be depended on by any layer; this is NOT a layering violation
