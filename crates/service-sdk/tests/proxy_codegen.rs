@@ -214,7 +214,7 @@ async fn context_propagates_via_explicit_param() {
     #[async_trait]
     impl PaymentService for ContextCapturingService {
         async fn charge(&self, ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {
-            *self.captured_tenant.lock().unwrap() = ctx.tenant_id.clone();
+            *self.captured_tenant.lock().unwrap() = ctx.tenant_hint().map(str::to_string);
             Ok("charged".to_string())
         }
         async fn refund(&self, _ctx: ServiceContext, _amount: u64) -> Result<String, ServiceError> {

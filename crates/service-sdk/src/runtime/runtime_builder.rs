@@ -272,7 +272,7 @@ impl RuntimeInner {
     /// call (`service-sdk-macros`); unmarked operations never call this at
     /// all (AD-007).
     ///
-    /// Gathers the closed set of Established Facts (AD-013) from `ctx` —
+    /// Gathers the closed set of Established Facts (AD-014) from `ctx` —
     /// the authenticated `SecurityContext`, the caller-supplied hint, and any
     /// already-established cross-tenant grant — and hands them to
     /// `TenantResolver::resolve` as a single value. This function only
@@ -679,7 +679,7 @@ mod tests {
     // permit is minted end to end on an `Allow` decision. This covers
     // issuance only — see `enforce_tenant_succeeds_for_authorized_cross_tenant_grant`
     // below for the full issued → attached → consumed → operation-succeeds
-    // flow FR-006 actually requires (AD-013).
+    // flow FR-006 actually requires (AD-014).
     #[tokio::test]
     async fn issue_cross_tenant_permit_allowed_yields_destination_scoped_permit() {
         let rt = RuntimeInner::for_test_with_authz(Arc::new(AllowCrossTenant));
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(permit.destination(), &destination);
     }
 
-    // FR-006 end-to-end acceptance scenario (AD-013): a Principal authenticated
+    // FR-006 end-to-end acceptance scenario (AD-014): a Principal authenticated
     // on tenant-a, holding a validly-issued CrossTenantPermit for tenant-b,
     // invokes enforce_tenant with a hint of tenant-b — and it succeeds, not
     // rejected as a tenant violation. This is the test the original CORE-008A

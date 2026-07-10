@@ -73,6 +73,12 @@ All merge gates passed; all phases green.
 - [x] TASK-026: Test service `TenantContractService` with `#[tenant_scoped]` operation implementation
 - [x] TASK-027: FR-002/003/004 scenarios (Principal-derived, mismatch, neither authenticated nor internal)
 - [x] TASK-028: FR-005/006 scenarios (permit denial, authorized cross-tenant)
+  - Completed in two parts: the permit-denial scenario and the FR-005 test
+    scaffolding landed at original archive (2026-07-08); FR-006's actual
+    cross-tenant-grant consumption in `TenantResolver::resolve()` was only
+    wired up by the follow-up PR #143 ("FR-006 cross tenant grant"),
+    merged 2026-07-09, commit `ffbfbdd`. See `archive-report.md` for the
+    full timeline.
 - [x] TASK-029: FR-007 structural test (transport-independent runtime)
 - [x] TASK-030: FR-008 scenario (single canonical tenant convergence)
 - [x] TASK-031: FR-009/010/014 scenarios (fallible enforcement, no parallel authority, immutability)

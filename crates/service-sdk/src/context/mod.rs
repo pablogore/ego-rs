@@ -50,9 +50,19 @@ use crate::runtime::{CanonicalTenant, CrossTenantGrant, CrossTenantPermit};
 pub struct ServiceContext {
     /// A caller-supplied tenant hint — a non-authoritative ingress value only
     /// (CORE-008A AD-011). It is a resolver *input*, never the enforced tenant;
-    /// read it via [`ServiceContext::tenant_hint`]. The authoritative value,
-    /// once resolved, is [`ServiceContext::canonical_tenant`].
-    pub tenant_id: Option<String>,
+    /// read it via [`ServiceContext::tenant_hint`], write it via
+    /// [`ServiceContext::with_tenant_id`]. The authoritative value, once
+    /// resolved, is [`ServiceContext::canonical_tenant`].
+    ///
+    /// Private (CORE-008A closure fix): a workspace-wide audit found no
+    /// external caller constructing a `ServiceContext` via struct-literal
+    /// `tenant_id` assignment (all callers use `with_tenant_id`), and only
+    /// two external direct-field reads, both trivially served by
+    /// `tenant_hint()`. Keeping this field accessible only through the
+    /// accessor/builder pair closes the exact trap `tenant_hint`'s own doc
+    /// comment warns about — reaching for the raw field and mistaking the
+    /// hint for the enforced tenant.
+    tenant_id: Option<String>,
     /// The correlation ID.
     pub correlation_id: Option<String>,
     /// The trace ID.
@@ -64,7 +74,7 @@ pub struct ServiceContext {
     /// The additional context.
     pub additional_context: HashMap<String, String>,
     /// The destination tenant this context is authorized to cross into, if
-    /// any (CORE-008A AD-008/TASK-019), held as the AD-013 Established Fact
+    /// any (CORE-008A AD-008/TASK-019), held as the AD-014 Established Fact
     /// [`TenantResolver::resolve`] consumes. Set only via
     /// [`ServiceContext::with_cross_tenant_access`], scoped to the
     /// [`CrossTenantPermit`]'s own destination — a permit issued for
@@ -181,8 +191,9 @@ impl ServiceContext {
     /// Marks the context as permitted for cross-tenant access into the
     /// permit's own destination (CORE-008A AD-008/TASK-019).
     ///
-    /// Requires a [`CrossTenantPermit`] issued by [`RuntimeInner::issue_cross_tenant_permit`].
-    /// Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
+    /// Requires a [`CrossTenantPermit`] issued through the runtime's authorized
+    /// cross-tenant permit issuance path (`RuntimeInner::issue_cross_tenant_permit`,
+    /// crate-internal). Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
     /// fallback exists. The permit is borrowed (not consumed) so one issued permit can
     /// authorize multiple context grants, but the grant recorded here is scoped to
     /// exactly the destination the permit was authorized for — see
@@ -288,7 +299,7 @@ impl ServiceContext {
     }
 
     /// Retrieves the already-established cross-tenant grant, if any, as an
-    /// AD-013 Established Fact ready for `TenantResolver::resolve` to
+    /// AD-014 Established Fact ready for `TenantResolver::resolve` to
     /// consume. `RuntimeInner::enforce_tenant` calls this alongside
     /// [`ServiceContext::security`]/[`ServiceContext::tenant_hint`] to
     /// gather the closed fact set before evaluation — this accessor does
