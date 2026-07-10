@@ -18,6 +18,12 @@ ego-domain = { path = "../domain" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
+# CORE-025 TASK-020: the acceptance walkthrough's TestKit scenario needs
+# ego-testkit, which itself depends on ego-service-sdk normally. This is a
+# dev-dependency-only cycle (allowed by Cargo — dev-deps are excluded from
+# the normal dependency graph), used solely to build/run this crate's own
+# integration tests, not the library itself.
+ego-testkit = { path = "../testkit" }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 mockall = "0.12"
