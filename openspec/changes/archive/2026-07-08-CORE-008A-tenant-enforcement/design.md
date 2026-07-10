@@ -247,7 +247,387 @@ boundary, not an oversight.
 
 Satisfies: **FR-008**.
 
-### AD-013 — Fact Establishment vs. Policy Evaluation
+### AD-007 — Tenant-scoped classification: opt-in `#[tenant_scoped]` at the macro (Open Question 7, D1)
+
+**Decision.** An `#[operation]` is classified tenant-scoped by an **explicit opt-in
+attribute** the proc-macro reads at expansion time, alongside the existing
+`#[operation]` / `#[authorize]` handling (`SdkAttr::detect`,
+`service-sdk-macros/src/lib.rs:16`):
+
+```rust
+#[operation]
+#[tenant_scoped]                 // <-- marks this op fail-closed
+async fn transfer(&self, ctx: ServiceContext, req: TransferReq) -> Result<..> { .. }
+```
+
+For a marked operation the macro emits the **fallible** enforcement call (AD-009,
+`?`); for an unmarked operation it preserves today's behavior (no tenant
+enforcement — the valid tenant-less system/single-tenant mode of D1).
+
+| Option | Tradeoff | Verdict |
+|--------|----------|---------|
+| **Opt-in `#[tenant_scoped]` attribute** | Per-operation (D1 wants operation-level, not global); reuses the existing attribute-detection machinery; unmarked ops keep working, so existing examples/tests stay green (mitigates the High-likelihood "no-op → fail-closed breaks everything" risk) | **CHOSEN** |
+| Infer from "tenant present in request" | Not fail-closed: absence would silently skip enforcement — the exact hole FR-001/FR-009 close | Rejected |
+| Global `RuntimeBuilder` execution mode only | Too coarse; D1 is explicitly operation-level | Rejected (mode still exists for the internal-path knob — AD-012 — but does not classify individual ops) |
+| Opt-out (all ops tenant-scoped unless marked `#[system]`) | Secure-by-default, but breaks EVERY existing operation at once — collides head-on with the proposal's High breakage risk and D1's first-class tenant-less mode | Rejected for this change |
+
+**Honest security tradeoff (called out, not hidden):** opt-in means a forgotten
+marker leaves an operation unenforced — the classic fail-open hole of an opt-in
+security model.
+
+**Required automated mitigation (in scope for THIS change).** Because a silently
+unenforced operation is a real security regression, the opt-in model MUST ship with
+an **automated technical detection** as part of CORE-008A's own scope — not a
+manual review checklist and not an indefinitely deferred follow-up. The concrete
+form of that detection (a compiler lint / proc-macro diagnostic, a CI validation
+step, a workspace-wide verification pass, or an equivalent automated mechanism that
+flags operations which look tenant-scoped but carry no `#[tenant_scoped]` marker) is
+left to tasks.md/apply to design and build; this AD fixes only the non-negotiable
+requirement that SOME automated detection exists and runs in CI before this change
+is considered complete. A human checklist is explicitly rejected as the mitigation.
+
+**Detector limitations (explicit, not hidden).** The automated detection required
+above is intentionally **best-effort, not exhaustive**. It works by recognizing
+tenant-related identifiers referenced directly in an operation's body; an operation
+that touches tenant-scoped data through an indirect path (for example, a repository
+or projection call that filters by tenant internally without the operation itself
+naming a tenant identifier) can produce a false negative the detector cannot see.
+This is an **accepted tradeoff during the migration window**, not an oversight —
+closing every indirect path would require whole-program data-flow analysis, which is
+out of scope for this change. The long-term architectural direction that actually
+closes this residual gap is the secure-by-default flip already recorded below, not a
+progressively stronger heuristic.
+
+**The detector is not part of the security model (explicit, to prevent future
+confusion).** Enforcement is `TenantResolver` + `#[tenant_scoped]` + fail-closed
+(AD-001/AD-007/AD-009) — that triad is what actually rejects a request. The
+automated detector is a **migration aid**, not a fourth enforcement mechanism: it
+only catches operations that were plausibly meant to carry `#[tenant_scoped]` but
+don't yet, so the opt-in migration doesn't quietly stall. A detector false negative
+does not weaken enforcement for any operation that already carries the marker; a
+detector false positive does not grant or deny access either. Nothing about the
+runtime's fail-closed guarantee depends on the detector running, passing, or even
+existing — it exists purely to reduce how many markers get forgotten, and must
+never be read as a substitute for `#[tenant_scoped]` itself. **Passing the detector
+MUST NOT be interpreted as proving an operation is correctly classified** — it only
+means no *recognized* tenant-identifier pattern was found unmarked; it is not a
+security audit and must never be cited as one.
+
+**Transitional nature of this decision (explicit).** The opt-in classification is a
+**migration-era strategy, not necessarily the framework's permanent end-state.** It
+was chosen to keep the first slice migration-safe under D1 (unmarked ops keep
+working). The **default classification behavior may be revisited once migration is
+complete** — specifically, the upgrade path is to flip to secure-by-default
+(`#[system]`/opt-out, so operations are tenant-scoped unless explicitly excused)
+after the ecosystem has adopted markers. That flip is a scoped follow-up change (it
+is a default-behavior change, distinct from the automated detection required above,
+which lands now). Recording it here keeps the transitional intent from being read as
+a permanent design commitment.
+
+Satisfies: **FR-001**.
+
+### AD-008 — `CrossTenantPermit` becomes destination-scoped and authorization-gated; `Copy` is dropped (Open Question 8, D3)
+
+**Decision.** Two coupled changes to `crates/service-sdk/src/runtime/permit.rs`
+and its issuer:
+
+1. **Authorized issuance (required by FR-005).** `issue_cross_tenant_permit`
+   becomes **fallible and async** and runs an `AuthorizationProvider` capability
+   check before minting:
+
+   ```rust
+   pub(crate) async fn issue_cross_tenant_permit(
+       &self,
+       ctx: &ServiceContext,
+       destination: TenantId,
+   ) -> Result<CrossTenantPermit, SecurityError>;
+   ```
+
+   It resolves the `Principal` from `ctx.security`, builds an `AccessRequest` for the
+   explicit cross-tenant capability (e.g. `Resource { kind: "tenant", id: dest }`,
+   `Action("cross-tenant-access")`), and calls the existing `authorize_in_context`
+   seam. A `Deny` → `SecurityError::CrossTenantDenied` (AD-010). Resource/action
+   authorization alone never yields a permit (FR-005).
+
+2. **Destination scoping (answer to Q8).** The permit carries the tenant it was
+   authorized for and drops `Copy`:
+
+   ```rust
+   #[derive(Debug, Clone)]           // Copy removed — was flagged pending in permit.rs:21-29
+   pub struct CrossTenantPermit { destination: TenantId, issued_to: SubjectId }
+   ```
+
+   A permit authorizing access to `tenant-b` cannot be reused to reach `tenant-c`
+   (closes the privilege-escalation reuse hole — security skill Rule 4). **Not**
+   added: time-window or purpose scoping (YAGNI — no requirement, no expiry/audit
+   infrastructure in scope; noted as future hardening).
+
+Dropping `Copy` is safe: `with_cross_tenant_access(&CrossTenantPermit)` borrows the
+permit, and the existing `clone_preserves_cross_tenant_flag` test clones the
+`ServiceContext`, not the permit.
+
+**Conceptual boundary (explicit): a permit authorizes, it does not re-identify.**
+Holding a `CrossTenantPermit` for `destination` grants the caller's already-resolved
+`CanonicalTenant` permission to reach into `destination`'s data — it does **not**
+change, replace, or override the caller's own authenticated tenant. `ctx.canonical_tenant()`
+(AD-011) still reports the Principal-derived tenant throughout; the permit is
+additional, separately-checked authority layered on top of it, never a substitute
+for it. This keeps "who the caller is" (AD-002/AD-011) and "what the caller may
+additionally reach" (this AD) as two distinct, non-overlapping concerns.
+
+**Breaking-signature migration note.** Changing `issue_cross_tenant_permit` from
+today's synchronous, zero-argument, infallible signature to an **async, fallible,
+destination-scoped** one is a breaking API change: every existing call site must be
+migrated (add `.await`, propagate/handle the `Result`, and supply the new `ctx` +
+`destination` arguments). This design fixes only the target contract and the
+architectural fact that no caller may any longer mint a permit without an
+`AuthorizationProvider` capability check. **Enumerating and migrating each concrete
+call site is tasks.md's responsibility** — the audit already indicates current
+issuers are effectively test-only, but the exhaustive call-site inventory (and its
+per-site migration steps) belongs to the task breakdown, not here.
+
+Satisfies: **FR-005, FR-006**.
+
+### AD-009 — Enforcement becomes fallible; the macro emits `?` before the body (FR-009, FR-013)
+
+**Decision.** Change the signature and the generated call:
+
+```rust
+// runtime_builder.rs  (was: `fn enforce_tenant(&self, _ctx: &ServiceContext) {}`)
+pub fn enforce_tenant(&self, ctx: &mut ServiceContext) -> Result<(), SecurityError>;
+```
+
+`ctx` is `&mut` because `enforce_tenant` is the sole writer of `ctx`'s
+resolver-derived tenant value on success (AD-011) — an immutable reference
+cannot satisfy `set_resolved_tenant(&mut self, ..)`, and no AD introduces
+interior mutability for that field.
+
+Internally `enforce_tenant` builds the resolver inputs from `ctx`
+(`security = ctx.security()`, `supplied = ctx.tenant_hint()`), calls
+`TenantResolver::resolve`, and on success stashes the `CanonicalTenant` for the
+operation (AD-011). On failure it returns the error.
+
+The macro's `enforce_tenant_block` (`lib.rs:296-300`) changes, **for
+`#[tenant_scoped]` operations only**, from best-effort:
+
+```rust
+if let Some(rt) = self.runtime.upgrade() { rt.enforce_tenant(&ctx); }   // today
+```
+
+to fallible, placed before the inner call so the **body is never entered on
+failure** (FR-009):
+
+```rust
+let rt = self.runtime.upgrade().ok_or(SecurityError::MissingContext)?;
+rt.enforce_tenant(&mut ctx)?;   // aborts before inner_ref.method(..); writes ctx.resolved_tenant on success
+```
+
+Unmarked operations keep the current best-effort no-fail path. This makes
+`openspec/specs/service-sdk/spec.md:76`'s `self.enforce_tenant(&ctx)?` and INV-003
+true statements (FR-013).
+
+Satisfies: **FR-009, FR-013**.
+
+### AD-010 — Error taxonomy: extend `SecurityError` minimally; reuse `MissingContext` (Open Question, FR-012)
+
+**Decision.** FR-012 requires three *distinguishable* conditions, not a single
+enum. Home them on `SecurityError` (`crates/security-sdk/src/error/mod.rs`) — the
+type the enforcement path already returns and the macro already maps through:
+
+| Condition (FR) | Variant | New? |
+|---|---|---|
+| Caller tenant ≠ Principal tenant (FR-002) | `SecurityError::TenantMismatch { expected, actual }` | **Add** |
+| Neither authenticated nor internal-permitted (FR-004) | `SecurityError::MissingContext` | **Reuse** (exists) |
+| Unauthorized cross-tenant (FR-005) | `SecurityError::CrossTenantDenied { reason }` | **Add** |
+
+Only two new variants — `MissingContext` already covers FR-004 (spec allows
+`MissingAuthentication` OR `MissingContext`), and a dedicated `CrossTenantDenied`
+keeps the cross-tenant denial distinguishable from a plain resource/action
+`AuthorizationDenied`.
+
+**Tenant-ID exposure boundary (`Debug` vs `Display` vs external).** The
+`{ expected, actual }` tenant identifiers on `TenantMismatch` are the sensitive
+part. The design fixes exactly where they may and may not appear:
+
+- **`Display` (and any user-/wire-/log-facing rendering): MUST redact.** No raw
+  tenant identifier appears in `Display`, in error responses returned to callers,
+  or in structured log fields intended for external sinks (security skill Rule 3 —
+  do not log private claims). The programmatic fields stay for `match`-based
+  handling (NFR-003), but reading them for output is a deliberate act, not a
+  side effect of formatting.
+- **`Debug`: MAY contain the raw identifiers, for local diagnostics only.** Because
+  `#[derive(Debug)]` would print `expected`/`actual` verbatim and many logging
+  paths use `{:?}`, `Debug` is treated as an internal-diagnostics channel, NOT a
+  safe external surface. Any log line that could reach an external sink MUST format
+  the error via `Display`, never `{:?}`. (If a hand-written `Debug` is cheaper to
+  reason about than this discipline, tasks.md may redact in `Debug` too — the
+  invariant is "no tenant ID crosses an external boundary," not the specific
+  formatter.)
+- **External-facing responses: never carry either identifier** — a caller learns
+  only that a mismatch occurred, not which tenants were involved (avoids
+  cross-tenant enumeration).
+
+This closes an accidental-leakage vector the bare "`Display` redacts" note left
+implicit.
+
+**Error-conversion model (clarification, no new mechanism).** Tenant enforcement
+returns `SecurityError`, exactly as `#[authorize]` already does today. Service
+operations convert it into their own error type through the **existing**
+`From<SecurityError>` model the macro already generates for `#[authorize]`
+(`<#err_ty as From<SecurityError>>::from(..)`, `service-sdk-macros/src/lib.rs:243-276`).
+CORE-008A introduces no new error-conversion mechanism, no new trait, and no
+parallel path alongside this one — `enforce_tenant`'s `?` relies on the same
+`From<SecurityError>` bound already required of every `#[operation]`'s error type.
+
+Satisfies: **FR-012** (and NFR-003).
+
+### AD-011 — `ServiceContext` shape: demote `tenant_id` to a hint, add a resolver-only `resolved_tenant` (FR-002, FR-010, FR-011, FR-014)
+
+**Decision.** Minimal, migration-safe change to
+`crates/service-sdk/src/context/mod.rs`:
+
+- **Keep** `pub tenant_id: Option<String>` (avoid breaking every construction site
+  — the proposal's High-likelihood risk). Redocument it as a **non-authoritative
+  ingress hint**: it is a resolver *input* only. Per FR-010, a mutation that
+  disagrees with the Principal is never authoritative for enforcement — satisfied
+  because enforcement reads the canonical value below, not this field.
+- **Add** a resolver-only-writable, publicly-readable field:
+
+  ```rust
+  resolved_tenant: Option<CanonicalTenant>,     // set ONLY via pub(crate) setter
+  pub fn canonical_tenant(&self) -> Option<&CanonicalTenant> { self.resolved_tenant.as_ref() }
+  ```
+
+  **Naming note (internal vs. public):** `resolved_tenant` is the private field —
+  internal storage, never referenced outside this module. `canonical_tenant()` is
+  the public accessor that reads it — the name every caller outside `context/mod.rs`
+  should use. The two names are not synonyms for two different values; they are the
+  storage/API pair for the same one authoritative value, matching the existing
+  private-field/public-accessor pattern already used elsewhere in this struct.
+
+  There is **no public setter**; `enforce_tenant` (AD-009) is the only writer
+  (`pub(crate)` within service-sdk). This gives the authenticated path its
+  automatic derivation (FR-002: no manual `with_tenant_id` needed — the resolver
+  fills `resolved_tenant` from `Principal.tenant_id`), guarantees a canonical value
+  is present at execution start (FR-011), and — having no public mutator — is
+  immutable for the operation's duration (FR-014). Cloning a `ServiceContext`
+  carries `resolved_tenant`; downstream code can neither overwrite it nor forge one
+  (AD-003/AD-004).
+
+**Accessor naming — canonical vs. legacy hint (transition strategy).** The
+existing public getters `tenant_id()` and `has_tenant()`
+(`crates/service-sdk/src/context/mod.rs:252-266`) today return the raw
+`tenant_id` field — i.e. the ingress hint, *not* the authoritative value. Leaving
+them under those obvious names is a trap: a service author reaching for
+`ctx.tenant_id()` would read the hint and believe it is the enforced tenant. The
+design resolves this with an explicit, unambiguous naming split:
+
+| Accessor | Meaning after this change | Status |
+|---|---|---|
+| `canonical_tenant()` (new, AD-011) | The authoritative, resolver-produced `CanonicalTenant` — the ONLY value enforcement and cross-tenant checks read | **Canonical.** The name every service author should reach for. |
+| `tenant_hint()` / `has_tenant_hint()` (new names for the hint) | The non-authoritative ingress hint (the old `tenant_id` field) | **Hint accessor.** Honest name; safe to read as "what the caller *asked for*, before validation". |
+| `tenant_id()` / `has_tenant()` (existing names) | Same value as the hint accessors | **Legacy, deprecated.** Retained only to avoid breaking existing call sites during migration; documented as deprecated and slated for removal. |
+
+**Transition rule:** `tenant_id()`/`has_tenant()` are marked deprecated (with a
+doc note pointing readers to `canonical_tenant()` for the enforced value and to
+`tenant_hint()` for the raw ingress value) at the moment this change lands. Their
+**removal is a scoped follow-up** — deferred only because deleting them now would
+force a churn of every current caller, which belongs to the migration sequencing
+(tasks.md enumerates those callers), not to this design. The name that means "the
+tenant this operation is enforced against" is `canonical_tenant()`, unambiguously
+and permanently; the deprecated names never regain authoritative meaning. This
+leaves zero ambiguity about which accessor returns which value.
+
+**`SecurityContext` does not change** — a deliberate non-decision. It already
+carries `Principal.tenant_id` (`principal: Principal`, non-optional,
+`context/mod.rs:21`), which AD-006 designates the authoritative input. Adding a
+tenant field to `SecurityContext` would create a *fifth* representation, the
+opposite of FR-008.
+
+Satisfies: **FR-002, FR-010, FR-011, FR-014**.
+
+### AD-012 — `RuntimeBuilder` registers a tenant ENFORCEMENT mode, not a resolver plugin (FR-003, FR-011)
+
+**Decision.** Because the resolver is concrete (AD-001), the builder registers
+configuration, not a `dyn`. Add one method to `RuntimeBuilder`
+(`crates/service-sdk/src/runtime/builder.rs`), consistent with `with_security` /
+`with_logger`:
+
+```rust
+pub enum TenantEnforcementMode {
+    /// Default. Only authenticated principals resolve a tenant (FR-002).
+    /// Unauthenticated tenant-scoped calls fail closed with MissingContext (FR-004).
+    AuthenticatedOnly,
+    /// Additionally permit an explicit system/internal caller-supplied tenant (FR-003).
+    AllowSystemInternal,
+}
+
+impl RuntimeBuilder { pub fn with_tenant_enforcement_mode(self, mode: TenantEnforcementMode) -> Self; }
+```
+
+The mode flows into `RuntimeInner` and is the "runtime explicitly permits that
+mode" knob FR-003 requires. Default `AuthenticatedOnly` gives FR-004 its
+fail-closed default (neither authenticated nor internal-permitted → error). The
+runtime constructs its `TenantResolver` from this mode; no `Arc<dyn TenantResolver>`
+is registered because there is nothing pluggable to register.
+
+**`Runtime::for_test()` default (explicit, not left to tasks to infer):**
+`for_test()` uses `TenantEnforcementMode::AuthenticatedOnly`, the same default as
+`RuntimeBuilder::build()` — there is no separate, more permissive default for
+tests. A test that needs `AllowSystemInternal` calls
+`with_tenant_enforcement_mode(TenantEnforcementMode::AllowSystemInternal)`
+explicitly, same as production code would.
+
+**Naming disambiguation (mandatory — collision with CORE-016).** The term "tenant
+mode" is ALREADY reserved in this codebase for a genuinely different concept: the
+`RuntimeBuilder` docstring (`crates/service-sdk/src/runtime/builder.rs:18-25`)
+states that the persistence-side tenant mode (`single_tenant_mode` / `tenant_id`,
+CORE-016) belongs to `persistent_entity::EntityRuntimeBuilder`, not to this
+builder. That is a **persistence/storage** knob; this AD's concept is an
+**enforcement/resolution** knob. To keep two unrelated concepts from sharing one
+name, the enforcement-side type is named `TenantEnforcementMode` and its builder
+method `with_tenant_enforcement_mode(...)` — deliberately distinct from the
+persistence `single_tenant_mode`/`tenant_id` configuration. The
+`builder.rs:18-25` docstring is updated at apply time to note both: persistence
+tenant mode lives on `EntityRuntimeBuilder`; enforcement mode
+(`TenantEnforcementMode`) is set here via `with_tenant_enforcement_mode`. No
+identifier and no prose in this change reuses the bare phrase "tenant mode" for the
+enforcement concept.
+
+**Configuration immutability (clarification, no new mechanism).**
+`TenantEnforcementMode` is selected once, during `RuntimeBuilder` construction,
+exactly like `with_security`/`with_logger`. Once `build()` produces `RuntimeInner`,
+the mode is fixed for that runtime's lifetime — there is no setter to change it
+afterward. Changing enforcement policy means constructing a new `Runtime` with a
+different `with_tenant_enforcement_mode(..)` call, not mutating an existing one.
+This follows the same immutable-after-construction pattern `RuntimeBuilder`'s other
+configuration already has; it introduces no new mechanism.
+
+Satisfies: **FR-003, FR-011**.
+
+### AD-013 — Transport-independent Tenant Resolution (D4-mandated AD)
+
+**Decision.** The runtime and service-operation layer consume an
+already-resolved, already-validated `CanonicalTenant` and reference **no**
+transport-specific type (no HTTP header, no gRPC metadata, no
+extraction logic) — FR-007. Each **future** transport adapter (HTTP/axum,
+gRPC/tonic) will implement its **own** extractor that:
+
+1. extracts the credential and turns it into a `SecurityContext` via the existing
+   `AuthenticationProvider`, and
+2. extracts any raw tenant hint (e.g. `x-tenant` header / gRPC metadata),
+
+then hands both to the **same** concrete `TenantResolver::resolve` (AD-001). All
+extractors converge on that one contract; the resolver's fixed D2 policy is applied
+identically regardless of transport.
+
+**No transport code is implemented in this change** — the transport layer barely
+exists (axum declared-unused, no `tonic` in the workspace). This AD fixes the
+convergence rule so future adapters cannot re-fragment tenant resolution.
+
+Satisfies: **FR-007, Non-Goals**.
+
+### AD-014 — Fact Establishment vs. Policy Evaluation
 
 **Decision.** Components responsible for policy evaluation MUST derive their
 decision exclusively from a closed, immutable set of Established Facts. They
@@ -306,11 +686,14 @@ the resulting grant) must reach `TenantResolver` as an Established Fact,
 already established by the authorization subsystem before policy evaluation
 begins — never as a callback performed during resolution.
 
-**Status.** This AD defines the architectural seam for closing the FR-006
-gap (`CrossTenantPermit` issuance exists; consumption in the enforcement
-path does not — confirmed by direct verification, not yet implemented). It
-does not itself satisfy FR-006; the implementation that wires the
-cross-tenant grant into `TenantResolver::resolve()` as an Established Fact
-is a separate, still-pending change.
+**Status.** This AD defines the architectural seam used to close the FR-006
+integration gap. Cross-tenant authorization is established before policy
+evaluation and reaches `TenantResolver::resolve()` as an Established Fact
+through `EstablishedTenantFacts`.
 
-(See tasks.md for implementation-specific Notes and Phase descriptions, and see proposal.md/spec.md for full architectural decisions AD-007 through AD-012.)
+The enforcement-path integration was completed in PR #143 by wiring the
+issued cross-tenant grant into `TenantResolver::resolve()`. This
+implementation does not change the decision defined above; it applies the
+Fact Establishment → Policy Evaluation separation described by this AD.
+
+(See tasks.md for implementation-specific Notes and Phase descriptions. Architectural decisions AD-001 through AD-014 are defined above, in this document.)
