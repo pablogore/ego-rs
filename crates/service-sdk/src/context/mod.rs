@@ -191,8 +191,9 @@ impl ServiceContext {
     /// Marks the context as permitted for cross-tenant access into the
     /// permit's own destination (CORE-008A AD-008/TASK-019).
     ///
-    /// Requires a [`CrossTenantPermit`] issued by [`crate::runtime::RuntimeInner::issue_cross_tenant_permit`].
-    /// Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
+    /// Requires a [`CrossTenantPermit`] issued through the runtime's authorized
+    /// cross-tenant permit issuance path (`RuntimeInner::issue_cross_tenant_permit`,
+    /// crate-internal). Callers without a valid `&CrossTenantPermit` receive a compile error — no runtime
     /// fallback exists. The permit is borrowed (not consumed) so one issued permit can
     /// authorize multiple context grants, but the grant recorded here is scoped to
     /// exactly the destination the permit was authorized for — see
