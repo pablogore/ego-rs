@@ -12,6 +12,17 @@ behavior, not a deletion-heavy slice — every implementation task is preceded
 by (or paired with) the failing test for its spec scenario. Do not write the
 implementation before the test is red.
 
+**Snapshot discipline (applies to every task touching `golden_codegen.rs`,
+e.g. TASK-008, TASK-012):** do not run `cargo insta review`/`INSTA_UPDATE=1`
+or otherwise accept a regenerated snapshot until `proxy_codegen.rs` (the
+compile+run test of generated code) and the rest of the workspace's
+compile-time tests are green first. A snapshot accepted too early can paper
+over a real codegen regression — the failure looks like "snapshot mismatch,
+approve the new one" instead of "the generated code is actually wrong."
+Sequence: get the code compiling and the non-snapshot tests passing, only
+then regenerate and manually review the snapshot diff line by line before
+approving it.
+
 **Ground-truth verification performed during breakdown** (grounding notes,
 not tasks):
 - `di/mod.rs`: `DepKey` at lines 76-85; `Injectable` trait at 87-99;
