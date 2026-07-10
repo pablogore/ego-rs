@@ -86,12 +86,12 @@ the 2 legacy-alias tests below plus the method definitions themselves.
 TASK-008 and TASK-009 are independent of each other (different crates) and
 of Phases 1-2/4; both depend on TASK-007.
 
-### TASK-007: Re-verify zero callers before deleting
+### TASK-007: Re-verify zero callers before deleting [x]
 - Run `rg "ExecutionContext" crates/ --type rust` (Rust source only, workspace-wide under `crates/`).
 - A full-workspace grep already came back clean during proposal review (2026-07-09); this is a re-check immediately before deletion, per the proposal's stated risk mitigation.
 - Acceptance: matches are limited to the 4 known files (`crates/domain/src/context.rs`, `crates/domain/src/lib.rs`, `crates/runtime/src/context.rs`, `crates/runtime/src/lib.rs`). Any other match blocks TASK-008/009 until investigated.
 
-### TASK-008: Remove `ExecutionContext`/`DomainExecutionContext` from `crates/domain`
+### TASK-008: Remove `ExecutionContext`/`DomainExecutionContext` from `crates/domain` [x]
 - File: `crates/domain/src/context.rs` — **partial-file edit, not a file deletion** (see boundary note above). Remove:
   - The `ExecutionContext` trait section (comment header + trait, lines `74-91`)
   - The `DomainExecutionContext` struct + its inherent `impl` + `impl ExecutionContext for DomainExecutionContext` + `impl<P> From<ExecutionEnvelope<P>> for DomainExecutionContext` (lines `93-171`)
@@ -101,7 +101,7 @@ of Phases 1-2/4; both depend on TASK-007.
 - Depends on: TASK-007.
 - Acceptance: `cargo build -p ego-domain` and `cargo test -p ego-domain` succeed; retained identity-type tests (e.g. `test_tenant_id_valid`, `test_aggregate_id_valid`) still pass; `rg "ExecutionContext" crates/domain --type rust` returns zero matches.
 
-### TASK-009: Delete `RuntimeExecutionContext` from `crates/runtime`
+### TASK-009: Delete `RuntimeExecutionContext` from `crates/runtime` [x]
 - File: `crates/runtime/src/context.rs` — delete the entire file (contains only `RuntimeExecutionContext` and its tests; no shared identity types live here).
 - File: `crates/runtime/src/lib.rs` — remove the `pub mod context;` declaration + its doc comment (line `39-40`) and `pub use context::RuntimeExecutionContext;` (line `53`).
 - Depends on: TASK-007.
@@ -119,7 +119,7 @@ Independent of Phases 1-3; can run in parallel with everything above.
 - Line `118`: `ServiceContext propagates via `tokio::task::TaskLocal` — EntityRef reads context transparently without cross-crate coupling` → rewrite to state the current model: `ServiceContext` is passed explicitly (owned/cloned/parameter-passed) to every call site that needs it — no ambient/TaskLocal read, consistent with the `2026-06-22-remove-ambient-service-context` invariant (INV-001: "There is exactly one mechanism for a component to access a `ServiceContext`: it was given one explicitly").
 - Acceptance: `rg "TaskLocal|ambient" docs/architecture.md` returns zero matches describing `ServiceContext` propagation (per spec's "Architecture doc contains no ambient-propagation claim" scenario).
 
-### TASK-011: Reword the living spec's `ExecutionContext` reference
+### TASK-011: Reword the living spec's `ExecutionContext` reference [x]
 - File: `openspec/specs/service-sdk/spec.md` (the **living** spec — distinct from this change's own delta merge in `specs/service-sdk/spec.md` under this change directory)
 - Lines `693-694`, inside FR-008 ("Exactly One Canonical In-Runtime Tenant Representation"): the sentence currently reads `...\`Principal.tenant_id\`, \`ServiceContext.tenant_id\` (the ingress hint), domain \`ExecutionContext\`/\`TenantId\`, and \`ClaimSet::tenant()\` are ingress/legacy carriers only...` — drop "domain `ExecutionContext`/`TenantId`," so the sentence reads `...\`Principal.tenant_id\`, \`ServiceContext.tenant_id\` (the ingress hint), and \`ClaimSet::tenant()\` are ingress/legacy carriers only...` (matches this change's own delta's MODIFIED requirement wording exactly).
 - Append a parenthetical note after the requirement paragraph, matching the delta: `(Previously: also listed domain \`ExecutionContext\` among ingress/legacy tenant carriers. That type is deleted by this change and no longer exists.)`
@@ -131,7 +131,7 @@ Independent of Phases 1-3; can run in parallel with everything above.
 
 ## Phase 5 — Workspace-wide verification
 
-### TASK-012: Full workspace build, test, and grep sweep
+### TASK-012: Full workspace build, test, and grep sweep [x]
 - Run `cargo build --workspace` — zero errors.
 - Run `cargo test --workspace` — all tests pass, zero `#[deprecated]` warnings for `tenant_id()`/`has_tenant()`.
 - Run `cargo doc --workspace --no-deps` — zero errors/broken doctest references to the deleted APIs (public-API deletions can break doctests or rustdoc intra-doc links even when `cargo build`/`cargo test` stay green).
