@@ -62,7 +62,7 @@ Atomic: changing the variant shape breaks every construction and `matches!`
 site immediately. All four tasks in this phase must land together in one
 compiling commit — there is no safe intermediate state.
 
-### TASK-001: `RuntimeError::DependencyNotFound { type_name, service_name }` + `Display` + `Error`
+### TASK-001: [x] `RuntimeError::DependencyNotFound { type_name, service_name }` + `Display` + `Error`
 - File: `crates/service-sdk/src/runtime/runtime_builder.rs` (enum at lines 396-403).
 - Change `DependencyNotFound` from a unit variant to
   `DependencyNotFound { type_name: &'static str, service_name: Option<&'static str> }`.
@@ -71,18 +71,18 @@ compiling commit — there is no safe intermediate state.
 - Satisfies: service-sdk spec "Diagnosable Dependency Error" requirement, both scenarios.
 - Test-first: add a test asserting `RuntimeError::DependencyNotFound { type_name: "X", service_name: Some("Y") }` formats naming both, and a test using it as `&dyn std::error::Error` (boxed via `?` into `Box<dyn Error>`) before finishing the impl.
 
-### TASK-002: Update the three `DependencyTable` construction sites
+### TASK-002: [x] Update the three `DependencyTable` construction sites
 - File: `crates/service-sdk/src/runtime/runtime_builder.rs`, `DependencyTable::resolve_projection` (line 76), `resolve_adapter` (line 84), `resolve_config` (line 92) — **three sites, not two**; `resolve_projection` is easy to miss since projections are always empty from `with_registrations`, but the method still exists and must compile.
 - Each `.ok_or(RuntimeError::DependencyNotFound)` becomes
   `.ok_or_else(|| RuntimeError::DependencyNotFound { type_name: std::any::type_name::<T>(), service_name: None })` (substitute `A`/`C` for the adapter/config arms).
 - Depends on: TASK-001 (variant must exist first).
 
-### TASK-003: Fix every `matches!(.., DependencyNotFound)` call site
+### TASK-003: [x] Fix every `matches!(.., DependencyNotFound)` call site
 - Files/lines: `runtime/builder.rs:422,429` (test module); `runtime/runtime_builder.rs` tests at lines 430, 438, 445, 452, 510, 522, 534, 556-558 (7 assertions across `runtime_inner_default_creates_empty` and the `resolve_*_returns_not_found_for_*`/`concurrent_resolution_succeeds` tests); `testkit/src/fixtures.rs:255,331`.
 - Each becomes `matches!(result, Err(RuntimeError::DependencyNotFound { .. }))`.
 - Depends on: TASK-001.
 
-### TASK-004: Re-point `create_proxy`'s downcast-failure arm to `ServiceNotFound`
+### TASK-004: [x] Re-point `create_proxy`'s downcast-failure arm to `ServiceNotFound`
 - File: `crates/service-sdk-macros/src/lib.rs:481` — `.map_err(|_| ego_service_sdk::runtime::RuntimeError::DependencyNotFound)?` becomes `.map_err(|_| ego_service_sdk::runtime::RuntimeError::ServiceNotFound)?`. A failed downcast is a resolution failure, not a missing dependency (AD-4 rationale).
 - Must land together with TASK-001 — this call site would otherwise fail to compile the moment `DependencyNotFound` gains required fields.
 - Acceptance: `cargo test -p ego-service-sdk --test proxy_codegen` and `--test golden_codegen` stay green; the descriptor snapshot is unaffected by this change (only the `Debug`-derived `DepKey` snapshots are touched, and only in Phase 2).
@@ -98,22 +98,22 @@ Independent of Phase 1 (different enum), but touches two of the same files
 back-to-back to avoid stacking merge risk, not because either strictly
 requires the other.
 
-### TASK-005: Add the type-name field to all 4 `DepKey` variants
+### TASK-005: [x] Add the type-name field to all 4 `DepKey` variants
 - File: `crates/service-sdk/src/di/mod.rs` (enum at lines 76-85).
 - `Entity(TypeId)` → `Entity(TypeId, &'static str)`; same for `Projection`, `Adapter`, `Config`.
 - Test-first: update `di_primitives_are_recognizable` (lines 106-120) to construct all 4 variants with a name argument (e.g. `DepKey::Entity(TypeId::of::<()>(), "()")`) BEFORE the enum shape change — confirm it fails to compile, then land the enum change.
 
-### TASK-006: Update macro `classify_field_type` (3 codegen arms)
+### TASK-006: [x] Update macro `classify_field_type` (3 codegen arms)
 - File: `crates/service-sdk-macros/src/lib.rs:596-631` (confirmed exact — function starts at line 596).
 - At each of the 3 arms (`ProjectionRef`/`AdapterRef`/`ConfigValue`), add `std::any::type_name::<#inner_ty>()` as the second constructor argument alongside the existing `TypeId::of::<#inner_ty>()`. `Entity` is not macro-generated (no field type maps to it today) — no fourth arm needed here, only the enum variant itself (TASK-005) needs the field for API completeness.
 - Depends on: TASK-005 (variant shape must exist first).
 
-### TASK-007: Fix remaining `DepKey` construction/match sites
+### TASK-007: [x] Fix remaining `DepKey` construction/match sites
 - `testkit/src/fixtures.rs:205` — `DepKey::Config(std::any::TypeId::of::<u32>())` → `DepKey::Config(std::any::TypeId::of::<u32>(), "u32")`.
 - `service-sdk/tests/proxy_codegen.rs:254-255` — **both** arms need updating: `matches!(d, DepKey::Projection(_))` → `matches!(d, DepKey::Projection(_, _))`, `matches!(d, DepKey::Adapter(_))` → `matches!(d, DepKey::Adapter(_, _))`.
 - Depends on: TASK-005.
 
-### TASK-008: Regenerate and normalize the golden snapshots
+### TASK-008: [x] Regenerate and normalize the golden snapshots
 - File: `crates/service-sdk/tests/golden_codegen.rs`.
 - Extend the `insta::with_settings!` filter (currently at lines 116-121, and identically at 151-156) to also normalize `type_name`'s output to its trailing path segment (compiler-version-sensitive full paths would otherwise flake across toolchains) — e.g. add a filter pattern reducing `"some::module::path::TypeName"` to `"TypeName"` in the snapshotted string.
 - Regenerate **both** affected snapshots: `golden_struct_dependencies_mixed` (line 109 — the one design.md's fallout named) AND `golden_struct_dependencies_single_projection` (line 148 — the one this task breakdown additionally found; same filter block, same `DepKey::Projection` shape change). `golden_struct_dependencies_empty` (line 134) is unaffected (empty vec).
