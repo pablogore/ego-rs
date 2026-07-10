@@ -531,6 +531,21 @@ mod tests {
     }
 
     #[test]
+    fn tenant_hint_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert_eq!(ctx.tenant_hint(), None);
+        assert!(!ctx.has_tenant_hint());
+    }
+
+    #[test]
+    fn has_tenant_hint_reflects_hint_presence() {
+        assert!(!ServiceContext::new().has_tenant_hint());
+        assert!(ServiceContext::new()
+            .with_tenant_id("tenant-x")
+            .has_tenant_hint());
+    }
+
+    #[test]
     fn set_resolved_tenant_makes_canonical_tenant_available() {
         use crate::runtime::{RuntimeInner, TenantEnforcementMode};
 
