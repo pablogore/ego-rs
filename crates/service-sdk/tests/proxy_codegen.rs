@@ -9,15 +9,21 @@ use ego_service_sdk::di::{AdapterRef, DepKey, Injectable, ProjectionRef};
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::interceptor::{Interceptor, InterceptorChain};
-use ego_service_sdk::runtime::{Resolvable, RuntimeBuilder, RuntimeError};
+use ego_service_sdk::runtime::{Resolvable, Runtime, RuntimeBuilder, RuntimeError, RuntimeInner};
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Shared fixture: an empty `Runtime` for tests that only need proxy/DI wiring.
-fn test_runtime() -> ego_service_sdk::runtime::Runtime {
+fn test_runtime() -> Runtime {
     RuntimeBuilder::new().build()
+}
+
+/// Shared fixture: a fresh interceptor chain plus a weak handle to `rt`, the
+/// two extra arguments every hand-rolled `{Trait}Ref::new(...)` call needs.
+fn test_chain_and_weak(rt: &Runtime) -> (Arc<InterceptorChain>, Weak<RuntimeInner>) {
+    (Arc::new(InterceptorChain::new()), Arc::downgrade(rt.inner()))
 }
 
 // ---------------------------------------------------------------------------
@@ -73,9 +79,8 @@ fn service_on_trait_generates_tag_and_ref() {
     }
 
     let inner: Arc<dyn OrderService> = Arc::new(NoopOrderService);
-    let chain = Arc::new(InterceptorChain::new());
     let rt = test_runtime();
-    let runtime_weak = Arc::downgrade(rt.inner());
+    let (chain, runtime_weak) = test_chain_and_weak(&rt);
 
     // Must compile: OrderServiceRef::new(inner, chain, runtime_weak)
     let _ref_obj = OrderServiceRef::new(inner, chain, runtime_weak);
@@ -87,9 +92,8 @@ fn create_proxy_returns_service_not_found_for_wrong_shaped_arc() {
     // an unrelated concrete type must fail the downcast and surface ServiceNotFound,
     // not panic.
     let wrong_shaped: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42i32);
-    let chain = Arc::new(InterceptorChain::new());
     let rt = test_runtime();
-    let runtime_weak = Arc::downgrade(rt.inner());
+    let (chain, runtime_weak) = test_chain_and_weak(&rt);
 
     let result = OrderServiceTag::create_proxy(wrong_shaped, chain, runtime_weak);
 
@@ -222,9 +226,8 @@ async fn context_propagates_via_explicit_param() {
         captured_tenant: std::sync::Mutex::new(None),
     });
     let inner: Arc<dyn PaymentService> = capturing.clone();
-    let chain = Arc::new(InterceptorChain::new());
     let rt = test_runtime();
-    let runtime_weak = Arc::downgrade(rt.inner());
+    let (chain, runtime_weak) = test_chain_and_weak(&rt);
     let proxy = PaymentServiceRef::new(inner, chain, runtime_weak);
 
     let ctx = ServiceContext::new().with_tenant_id("tenant-abc");

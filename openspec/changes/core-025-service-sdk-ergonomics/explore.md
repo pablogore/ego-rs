@@ -19,7 +19,7 @@ Separately, the DI path (`Injectable`/`AdapterRef`/`ConfigValue`) is real, macro
 
 ---
 
-## A. Recorrido actual (current developer journey)
+## A. Current Developer Journey
 
 ### A.1 — Minimal service, zero dependencies
 
@@ -139,7 +139,7 @@ For the trait-proxy/enforcement path (A.3), TestKit has **no equivalent at all**
 
 ---
 
-## B. Fricciones encontradas
+## B. Friction Points Found
 
 | ID | Severity | Category | Evidence | Impact | Root cause | Possible direction |
 |---|---|---|---|---|---|---|
@@ -157,7 +157,7 @@ For the trait-proxy/enforcement path (A.3), TestKit has **no equivalent at all**
 
 ---
 
-## C. Presupuesto de complejidad (measured, current state)
+## C. Complexity Budget (measured, current state)
 
 | Metric | Minimal service (no deps) | Service with DI (adapter + config) | Security/tenant-scoped service |
 |---|---|---|---|
@@ -174,7 +174,7 @@ No target numbers are proposed here — per the audit's own constraint, targets 
 
 ---
 
-## D. Comparación interna (existing ergonomic patterns to emulate)
+## D. Internal Comparables (existing ergonomic patterns to emulate)
 
 1. **`ServiceTestFixture`/`FixtureBuilder`** (`crates/testkit/src/fixtures.rs`) — the strongest model in the codebase. `::new()` needs zero configuration and is immediately usable; `.builder()` lets a caller override exactly one knob while everything else keeps a sane default; `.service::<S: Injectable>()` drives the *same* production `Injectable::build` path — proven by a hand-rolled-vs-macro comparison test, not just claimed. This is what "hard to misuse, easy to get right" looks like here.
 2. **`RuntimeBuilder`** (`crates/service-sdk/src/runtime/builder.rs`) — a standard consuming builder: `::new()` needs no arguments, every `.with_*()` is optional, `.build()` is documented to always succeed for the pieces it currently validates. Good shape; the ergonomics gap is what it's missing (F-01/F-02), not its existing shape.

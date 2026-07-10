@@ -115,8 +115,8 @@ struct GoldenInjectableService {
 /// and keeps only the last one. This also normalizes generic parameters
 /// (e.g. `"alloc::vec::Vec<crate_x::Foo>"` -> `"Vec<Foo>"`), since a nested
 /// generic argument is itself a path the same pattern independently matches.
-fn dep_key_snapshot_filters() -> Vec<(&'static str, &'static str)> {
-    vec![
+fn dep_key_snapshot_filters() -> [(&'static str, &'static str); 3] {
+    [
         (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
         (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
         (r"(?:[\w]+::)+([\w]+)", "$1"),

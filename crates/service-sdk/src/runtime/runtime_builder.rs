@@ -516,6 +516,18 @@ mod tests {
 
     // -- Incorrect type downcast --------------------------------------------
 
+    /// Asserts `result` is `Err(DependencyNotFound { type_name: expected, .. })`,
+    /// panicking with the actual value otherwise.
+    fn assert_dependency_not_found_named<T>(result: Result<T, RuntimeError>, expected: &str) {
+        match result {
+            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
+                assert_eq!(type_name, expected);
+            }
+            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
+            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
+        }
+    }
+
     #[test]
     fn resolve_projection_returns_not_found_for_wrong_type() {
         let mut rt = RuntimeInner::for_test();
@@ -526,13 +538,7 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_projection::<MyProjection>();
-        match result {
-            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
-                assert_eq!(type_name, std::any::type_name::<MyProjection>());
-            }
-            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
-            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
-        }
+        assert_dependency_not_found_named(result, std::any::type_name::<MyProjection>());
     }
 
     #[test]
@@ -544,13 +550,7 @@ mod tests {
             .insert(TypeId::of::<String>(), instance);
 
         let result = rt.resolve_adapter::<MyProjection>();
-        match result {
-            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
-                assert_eq!(type_name, std::any::type_name::<MyProjection>());
-            }
-            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
-            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
-        }
+        assert_dependency_not_found_named(result, std::any::type_name::<MyProjection>());
     }
 
     #[test]
@@ -562,13 +562,7 @@ mod tests {
             .insert(TypeId::of::<MyProjection>(), instance);
 
         let result = rt.resolve_config::<String>();
-        match result {
-            Err(RuntimeError::DependencyNotFound { type_name, .. }) => {
-                assert_eq!(type_name, std::any::type_name::<String>());
-            }
-            Err(other) => panic!("expected DependencyNotFound, got {other:?}"),
-            Ok(_) => panic!("expected DependencyNotFound, got Ok"),
-        }
+        assert_dependency_not_found_named(result, std::any::type_name::<String>());
     }
 
     // -- Concurrent resolution -----------------------------------------------

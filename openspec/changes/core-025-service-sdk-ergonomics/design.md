@@ -178,6 +178,8 @@ Grounding facts (verified in code, not assumed):
 **Rejected:** `.with_service(Arc<Impl>)` / `.register(Impl)` (needs a second macro or unstable `Unsize`); explicit-version parameter (redundant with the macro descriptor for the single-version ergonomic path).
 **Cost:** one additive associated type (`type Service`) on the generated `Resolvable` impl — a macro codegen change (see above).
 
+**Why `with_service` diverges from `with_adapter`/`with_config`/`with_logger`'s last-write-wins:** a duplicate adapter or config registration is a legitimate reconfiguration (e.g. a test overriding a fixture's default) — silent and cheap to reason about. A duplicate service registration under the same `Tag` is almost always a caller bug (the same tag registered twice through some composition mistake), and silencing it would hide which implementation ended up behind a proxy the caller believes they know. That is why `with_service` surfaces the duplicate-detection `ServiceRegistry::register` already implements instead of mimicking its siblings' silent `insert`.
+
 ### AD-3 — F-02 fail-fast by a dedicated `Injectable::validate()` presence check at `try_build()` (not by trial-constructing `build()`)
 **Decision:** Add a **defaulted, generic** method to `Injectable`:
 ```rust

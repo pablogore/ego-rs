@@ -2,7 +2,7 @@
 
 Reduce the accidental cost of the Service SDK developer journey (define → contract → dependencies → build → register → typed reference → invoke → test → configure → understand errors). No new capabilities, no runtime redesign. Evidence base: `explore.md` (Phase 1 Ergonomics Audit, this folder) — cited throughout, not re-derived.
 
-## Problema verificado
+## Verified Problem
 
 Three audit findings, all evidence-backed (explore.md, Section B):
 
@@ -12,7 +12,7 @@ Three audit findings, all evidence-backed (explore.md, Section B):
 
 This is not "streamline a working baseline" — the audit's core reframe is that the intended path was **built but never wired**; the fix is completion of an existing designed mechanism, not invention (explore.md, Executive Summary and Section D).
 
-## Evidencia del repositorio
+## Repository Evidence
 
 All citations from explore.md:
 
@@ -27,11 +27,11 @@ All citations from explore.md:
 | TestKit "forward compatibility with a future public resolve" | `crates/testkit/src/fixtures.rs:82-83` |
 | `ServiceFactory` has zero impls repo-wide | `implementation.rs:56-63` (F-04) |
 
-## Experiencia actual
+## Current Experience
 
 From explore.md Section A: a developer defines a trait with `#[service]`/`#[operation]`, implements it, then — because no registration API works — hand-assembles `RuntimeBuilder::new().build()`, `Arc::downgrade(rt.inner())`, an empty `InterceptorChain`, and `{Trait}Ref::new(inner, chain, weak)`. This ceremony is duplicated ≥4 times across test files (F-06). TestKit has no helper for enforcement-wrapped trait proxies (F-07). A forgotten dependency fails late with an error naming nothing. The documented path (`ServiceRegistry`/`Resolvable`) does not compile if attempted.
 
-## Experiencia objetivo
+## Target Experience
 
 Outcomes, not API shapes (shape is Design's job — OQ-1):
 
@@ -43,7 +43,7 @@ Outcomes, not API shapes (shape is Design's job — OQ-1):
 
 The exact registration/resolution API shape — method names, signatures, what gets registered, how versioning interacts with `ContractVersion` — is **explicitly deferred to design.md per OQ-1** (explore.md, Open Questions). Every mention here means "a canonical registration/resolution API", nothing more specific.
 
-## Alcance
+## Scope
 
 | Finding | In this slice? | Rationale |
 |---|---|---|
@@ -57,7 +57,7 @@ The exact registration/resolution API shape — method names, signatures, what g
 | F-08 aggregate missing-dep errors | **Deferred** | F-02 (build validation) + F-03 (diagnostic `Display`) already change observable behavior twice; "report every missing dep at once" is a distinct improvement, not required to make F-02/F-03 useful. Own follow-up (CORE-025b or micro-change) so this slice answers only "is there a canonical path?" and "are errors useful?" — not also "how do we aggregate multiple errors?" |
 | F-10 file naming | **Deferred** | Cosmetic, mention only (audit's own call) |
 
-### Escenarios que spec/tasks deben cubrir (detail in spec.md, not here)
+### Scenarios spec/tasks Must Cover (detail in spec.md, not here)
 
 1. Minimal service (no deps) — defined, built, registered, invoked, tested.
 2. Service with dependencies (adapter + typed config, same existing DI mechanism).
@@ -65,7 +65,7 @@ The exact registration/resolution API shape — method names, signatures, what g
 4. TestKit — service built through the same canonical path as production, no parallel wiring.
 5. Protected service — the ergonomic improvement must not bypass `ServiceContext`, authorization, tenant enforcement, interceptors, or contract registration.
 
-### Principios obligatorios (how scope honors each)
+### Mandatory Principles (how scope honors each)
 
 1. **Explicit Rust over hidden magic** — registration and resolution are explicit calls; nothing auto-discovers services.
 2. **Compile-time errors where possible** — typed tags/refs stay compile-checked; where compile-time is impossible in principle (F-11), fail at `build()`.
@@ -80,11 +80,11 @@ The exact registration/resolution API shape — method names, signatures, what g
 11. **Preserve observability/diagnosability** — F-03 strictly improves it; guard ordering and interceptors untouched.
 12. **Idiomatic Rust** — consuming-builder shape already in the codebase (`RuntimeBuilder`, `FixtureBuilder`) is the model; no framework mimicry.
 
-## Fuera de alcance
+## Out of Scope
 
 No full Application Builder. No CLI. No scaffolding. No HTTP/gRPC/GraphQL transports. No scheduler work. No observability-platform work. No hot reload. No plugin system. No new runtime capabilities. This change is Service SDK ergonomics only. Plus the deferred findings above (F-04, F-05, F-10).
 
-## Capacidades afectadas
+## Affected Capabilities
 
 ### New Capabilities
 - None — this completes existing `service-sdk` capability surface.
@@ -104,7 +104,7 @@ No full Application Builder. No CLI. No scaffolding. No HTTP/gRPC/GraphQL transp
 | `examples/` | New minimal end-to-end example (F-09) |
 | `COOKBOOK.md` | Later, separate change (F-05 deferred) |
 
-## Riesgos
+## Risks
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
@@ -113,7 +113,7 @@ No full Application Builder. No CLI. No scaffolding. No HTTP/gRPC/GraphQL transp
 | Ergonomic path accidentally bypasses enforcement | Low | Scenario 5 as acceptance gate; resolution reuses the generated proxy verbatim |
 | Slice exceeds review budget | Med | Tasks phase forecasts; F-04/F-05/F-08/F-10 already carved out |
 
-## Compatibilidad
+## Compatibility
 
 Existing hand-rolled `{Trait}Ref::new(inner, chain, weak)` construction keeps working — this change is additive, not a replacement, unless design.md decides otherwise with explicit justification. **The canonical path changes; the low-level `::new()` constructor remains supported as an escape hatch for advanced integrations and tests, unless explicitly deprecated in a future change with its own justification.** This is a deliberate, standing commitment, not an oversight to be "cleaned up" later just because a canonical path now exists — a future contributor citing "we have `resolve()` now" is not sufficient grounds on its own to remove `::new()`. Existing `with_adapter`/`with_config`/security/tenant builder knobs unchanged.
 
@@ -121,7 +121,7 @@ Existing hand-rolled `{Trait}Ref::new(inner, chain, weak)` construction keeps wo
 
 Straightforward: the surface is additive. Revert the change commits; hand-rolled construction (today's only working path) is untouched and remains the fallback. The one behavioral change — `build()` failing fast on missing deps — only triggers for services registered through the new API, so reverting removes both together.
 
-## Criterios medibles de éxito
+## Measurable Success Criteria
 
 Against explore.md Section C baseline (minimal / DI / security columns):
 
