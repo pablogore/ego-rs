@@ -117,6 +117,10 @@ fn golden_struct_dependencies_mixed() {
         filters => vec![
             (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
             (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
+            // `std::any::type_name` returns a fully-qualified, compiler-version-sensitive
+            // path (e.g. crate/module prefixes can shift across toolchains). Normalize to
+            // the trailing path segment so the snapshot stays stable.
+            (r#""(?:[\w]+::)+([\w]+)""#, "\"$1\""),
         ],
     }, {
         insta::assert_debug_snapshot!("struct_dependencies_mixed", deps);
@@ -152,6 +156,10 @@ fn golden_struct_dependencies_single_projection() {
         filters => vec![
             (r"TypeId\(\{[^}]*\}\)", "TypeId(<opaque>)"),
             (r"TypeId\([^)]*\)", "TypeId(<opaque>)"),
+            // `std::any::type_name` returns a fully-qualified, compiler-version-sensitive
+            // path (e.g. crate/module prefixes can shift across toolchains). Normalize to
+            // the trailing path segment so the snapshot stays stable.
+            (r#""(?:[\w]+::)+([\w]+)""#, "\"$1\""),
         ],
     }, {
         insta::assert_debug_snapshot!("struct_dependencies_single_projection", deps);

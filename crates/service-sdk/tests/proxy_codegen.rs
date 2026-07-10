@@ -251,8 +251,8 @@ fn service_on_struct_detects_fields() {
         "dependencies() must return 2 items (ProjectionRef + AdapterRef), not 3"
     );
 
-    let has_projection = deps.iter().any(|d| matches!(d, DepKey::Projection(_)));
-    let has_adapter = deps.iter().any(|d| matches!(d, DepKey::Adapter(_)));
+    let has_projection = deps.iter().any(|d| matches!(d, DepKey::Projection(_, _)));
+    let has_adapter = deps.iter().any(|d| matches!(d, DepKey::Adapter(_, _)));
 
     assert!(
         has_projection,

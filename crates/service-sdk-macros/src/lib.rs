@@ -603,21 +603,24 @@ fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
                         "ProjectionRef" => {
                             return Some(quote! {
                                 ego_service_sdk::di::DepKey::Projection(
-                                    std::any::TypeId::of::<#inner_ty>()
+                                    std::any::TypeId::of::<#inner_ty>(),
+                                    std::any::type_name::<#inner_ty>()
                                 )
                             });
                         }
                         "AdapterRef" => {
                             return Some(quote! {
                                 ego_service_sdk::di::DepKey::Adapter(
-                                    std::any::TypeId::of::<#inner_ty>()
+                                    std::any::TypeId::of::<#inner_ty>(),
+                                    std::any::type_name::<#inner_ty>()
                                 )
                             });
                         }
                         "ConfigValue" => {
                             return Some(quote! {
                                 ego_service_sdk::di::DepKey::Config(
-                                    std::any::TypeId::of::<#inner_ty>()
+                                    std::any::TypeId::of::<#inner_ty>(),
+                                    std::any::type_name::<#inner_ty>()
                                 )
                             });
                         }

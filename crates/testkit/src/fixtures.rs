@@ -202,7 +202,7 @@ mod tests {
 
     impl Injectable for HandRolledService {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Config(std::any::TypeId::of::<u32>())]
+            vec![DepKey::Config(std::any::TypeId::of::<u32>(), "u32")]
         }
 
         fn build(rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, RuntimeError> {
