@@ -573,4 +573,22 @@ mod tests {
 
         assert!(ctx.canonical_tenant().is_some());
     }
+
+    // FR-010: with_tenant_id() only ever writes tenant_id, never
+    // resolved_tenant — replacing the ingress hint on an owned,
+    // already-resolved context cannot override the canonical tenant.
+    #[test]
+    fn replacing_the_ingress_hint_after_resolution_does_not_change_canonical_tenant() {
+        use crate::runtime::{RuntimeInner, TenantEnforcementMode};
+
+        let rt = RuntimeInner::for_test_with_mode(TenantEnforcementMode::AllowSystemInternal);
+        let mut ctx = ServiceContext::new().with_tenant_id("tenant-a");
+        rt.enforce_tenant(&mut ctx).expect("resolves to tenant-a");
+        let resolved_before = ctx.canonical_tenant().cloned();
+
+        let ctx = ctx.with_tenant_id("tenant-b");
+
+        assert_eq!(ctx.tenant_hint(), Some("tenant-b"));
+        assert_eq!(ctx.canonical_tenant().cloned(), resolved_before);
+    }
 }
