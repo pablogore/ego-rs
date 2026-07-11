@@ -8,12 +8,49 @@
 //! itself compile as a separate test binary, but a `mod.rs` inside a
 //! subdirectory does not — each consumer opts in with `mod common;`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ego_domain::context::TenantId;
+use ego_domain::{Level, Observability, SemanticEvent};
 use ego_security_sdk::context::SecurityContext;
 use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};
 use ego_service_sdk::context::ServiceContext;
+
+/// Test double capturing every [`SemanticEvent`] passed to `trace()`
+/// (CORE-012A). Shared across this crate's integration-test binaries —
+/// `tests/*.rs` files cannot see the crate's own internal
+/// `#[cfg(test)] mod test_support`, so this is a separate, deliberately
+/// near-identical copy for the `tests/` compilation unit.
+#[derive(Default)]
+#[allow(dead_code)] // not every consumer of this module uses this fixture
+pub struct RecordingObservability {
+    pub events: Mutex<Vec<SemanticEvent>>,
+}
+
+#[allow(dead_code)]
+impl RecordingObservability {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the recorded `denial_kind` metadata values, in call order.
+    pub fn denial_kinds(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.metadata.get("denial_kind").cloned())
+            .collect()
+    }
+}
+
+impl Observability for RecordingObservability {
+    fn trace(&self, event: SemanticEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+    fn metric(&self, _name: &str, _value: f64) {}
+    fn log(&self, _level: Level, _message: &str) {}
+}
 
 /// An authenticated `ServiceContext` for a fixed test principal ("alice"),
 /// with `tenant` as the Principal's tenant claim (`None` for no claim).

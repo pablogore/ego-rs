@@ -282,12 +282,28 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
                             // #[authorize] requires authentication. A missing SecurityContext
                             // is a request-level failure, not a disabled-security bypass.
+                            //
+                            // CORE-012A: the weak handle is upgraded *before* the
+                            // MissingContext check (not after, as before this change)
+                            // purely so a MissingContext denial can be recorded through
+                            // it. This does NOT change existing error precedence:
+                            // upgrading a dropped Weak just yields None here (it never
+                            // errors), so MissingContext is still returned before
+                            // ProviderError below when both conditions hold.
+                            let __rt_opt = self.runtime.upgrade();
                             let __sec_ctx = #ctx_ident.security().ok_or_else(|| {
+                                if let Some(__rt) = __rt_opt.as_ref() {
+                                    __rt.record_security_denial(
+                                        stringify!(#trait_name),
+                                        stringify!(#method_name),
+                                        ego_service_sdk::runtime::SecurityDenialKind::MissingContext,
+                                    );
+                                }
                                 <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
                                     ego_service_sdk::security::SecurityError::MissingContext
                                 )
                             })?;
-                            let __rt = self.runtime.upgrade().ok_or_else(|| {
+                            let __rt = __rt_opt.ok_or_else(|| {
                                 <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(
                                     ego_service_sdk::security::SecurityError::ProviderError(
                                         "authorization provider unavailable: runtime dropped".into()
@@ -309,7 +325,16 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                                 __provider.as_ref(),
                             )
                             .await
-                            .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
+                            .map_err(|e| {
+                                if let Some(kind) = ego_service_sdk::runtime::SecurityDenialKind::from_security_error(&e) {
+                                    __rt.record_security_denial(
+                                        stringify!(#trait_name),
+                                        stringify!(#method_name),
+                                        kind,
+                                    );
+                                }
+                                <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(e)
+                            })?;
                         }
                     } else {
                         let err = syn::Error::new(
@@ -355,7 +380,16 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                             })?;
                             __tenant_rt
                                 .enforce_tenant(&mut #ctx_param)
-                                .map_err(<#err_ty as From<ego_service_sdk::security::SecurityError>>::from)?;
+                                .map_err(|e| {
+                                    if let Some(kind) = ego_service_sdk::runtime::SecurityDenialKind::from_security_error(&e) {
+                                        __tenant_rt.record_security_denial(
+                                            stringify!(#trait_name),
+                                            stringify!(#method_name),
+                                            kind,
+                                        );
+                                    }
+                                    <#err_ty as From<ego_service_sdk::security::SecurityError>>::from(e)
+                                })?;
                         },
                         None => {
                             let err = syn::Error::new(

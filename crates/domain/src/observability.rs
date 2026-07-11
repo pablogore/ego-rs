@@ -162,6 +162,19 @@ impl Level {
 /// Observability calls MUST NOT alter runtime state or behavior. They are
 /// side-effect observers only.
 ///
+/// # Non-blocking
+///
+/// Implementations MUST NOT perform blocking operations (synchronous I/O,
+/// network calls, lock contention under load) inside any method on this
+/// trait. Callers on security- and request-critical paths (CORE-012A) invoke
+/// these methods synchronously and do not isolate or bound their execution
+/// time. Every method is expected to execute in bounded, effectively O(1)
+/// time; an implementation with expensive work to do MUST enqueue it and
+/// hand off to its own asynchronous/background processing — the same
+/// discipline `tracing`, `slog`, and `log4rs` subscribers follow. An
+/// implementor that blocks here is a contract violation by that
+/// implementor, not a gap the caller is responsible for working around.
+///
 /// # Deterministic
 ///
 /// The trait itself is stateless. Determinism is ensured by the data
@@ -171,6 +184,9 @@ pub trait Observability: Send + Sync {
     ///
     /// Semantic events carry structured metadata (correlation_id, actor_id,
     /// lifecycle_state) enabling deterministic tracing and replay.
+    ///
+    /// Called synchronously on security-denial paths (CORE-012A) with no
+    /// blocking isolation — see the trait's "Non-blocking" contract above.
     fn trace(&self, event: SemanticEvent);
 
     /// Record a metric value.
