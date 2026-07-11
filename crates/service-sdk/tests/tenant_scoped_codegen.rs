@@ -22,6 +22,9 @@ use ego_service_sdk_macros::service;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod common;
+use common::{authenticated_ctx_with_hint, RecordingObservability};
+
 #[derive(Debug)]
 pub struct TenantTestError(String);
 
@@ -85,9 +88,22 @@ impl MixedTenantService for RecordingService {
 /// rather than via genuine tenant resolution — a false-positive this helper
 /// avoids by handing ownership back to the test.
 fn make_proxy(service: Arc<RecordingService>) -> (Runtime, MixedTenantServiceRef) {
+    make_proxy_with_observability(service, None)
+}
+
+/// Same as `make_proxy`, plus an optional `Observability` implementor
+/// (CORE-012A) — extends the shared fixture instead of duplicating it.
+fn make_proxy_with_observability(
+    service: Arc<RecordingService>,
+    observability: Option<Arc<dyn ego_domain::Observability>>,
+) -> (Runtime, MixedTenantServiceRef) {
     let inner: Arc<dyn MixedTenantService> = service;
     let chain = Arc::new(InterceptorChain::new());
-    let rt = RuntimeBuilder::new().build();
+    let mut builder = RuntimeBuilder::new();
+    if let Some(obs) = observability {
+        builder = builder.with_observability(obs);
+    }
+    let rt = builder.build();
     let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = MixedTenantServiceRef::new(inner, chain, runtime_weak);
     (rt, proxy)
@@ -96,7 +112,8 @@ fn make_proxy(service: Arc<RecordingService>) -> (Runtime, MixedTenantServiceRef
 #[tokio::test]
 async fn tenant_scoped_op_fails_closed_and_never_enters_body_without_resolvable_tenant() {
     let service = Arc::new(RecordingService::default());
-    let (_rt, proxy) = make_proxy(service.clone());
+    let observability = Arc::new(RecordingObservability::new());
+    let (_rt, proxy) = make_proxy_with_observability(service.clone(), Some(observability.clone()));
 
     // No security attached -> unresolvable under the default AuthenticatedOnly mode.
     let ctx = ServiceContext::new();
@@ -110,6 +127,39 @@ async fn tenant_scoped_op_fails_closed_and_never_enters_body_without_resolvable_
     assert!(
         !service.scoped_body_ran.load(Ordering::SeqCst),
         "tenant-scoped op's body must never execute when enforcement fails (FR-009)"
+    );
+
+    // CORE-012A: exactly one MissingContext event (site: enforce_tenant map_err, lib.rs:357-358).
+    assert_eq!(
+        observability.denial_kinds(),
+        vec!["MissingContext".to_string()],
+        "expected exactly one MissingContext event"
+    );
+}
+
+/// CORE-012A TASK-008: `#[tenant_scoped]` alone, hard mismatch between the
+/// authenticated principal's tenant and a caller-supplied hint (no covering
+/// grant) — must record exactly one `TenantMismatch` event.
+#[tokio::test]
+async fn tenant_scoped_op_records_tenant_mismatch_event_on_hard_mismatch() {
+    let service = Arc::new(RecordingService::default());
+    let observability = Arc::new(RecordingObservability::new());
+    let (_rt, proxy) = make_proxy_with_observability(service.clone(), Some(observability.clone()));
+
+    // Hint disagrees with the principal's tenant, and no cross-tenant grant covers it.
+    let ctx = authenticated_ctx_with_hint(Some("tenant-a"), Some("tenant-b"));
+
+    let result = proxy.scoped_op(ctx).await;
+
+    assert!(result.is_err(), "expected TenantMismatch to fail closed");
+    assert!(
+        !service.scoped_body_ran.load(Ordering::SeqCst),
+        "body must never execute on a hard tenant mismatch"
+    );
+    assert_eq!(
+        observability.denial_kinds(),
+        vec!["TenantMismatch".to_string()],
+        "expected exactly one TenantMismatch event"
     );
 }
 

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ego_domain::context::TenantId;
+use ego_domain::{Observability, SemanticEvent};
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
 use ego_security_sdk::error::SecurityError;
@@ -100,6 +101,66 @@ fn dependency_not_found<T: 'static>() -> RuntimeError {
 }
 
 // ---------------------------------------------------------------------------
+// Security denial observability (CORE-012A)
+// ---------------------------------------------------------------------------
+
+/// The three macro-guard denial outcomes reachable and instrumented by this
+/// change (design.md AD-1). Fieldless by design (AD-3) — the guard remains
+/// solely responsible for deciding *what* happened and constructing the
+/// `SecurityError` it independently returns via `?`; `RuntimeInner` receives
+/// only the tag it needs to emit an observability event, never a copy of
+/// sensitive detail. `CrossTenantDenied` is deliberately absent — no
+/// macro-reachable call path can produce it today (spec requirement 5).
+#[derive(Debug, Clone, Copy)]
+pub enum SecurityDenialKind {
+    /// No `SecurityContext` was attached (`#[authorize]`'s `ctx.security()`
+    /// check, or `enforce_tenant`'s unresolvable-context arm).
+    MissingContext,
+    /// `enforce_tenant` resolved a hard mismatch between the authenticated
+    /// tenant and a caller-supplied hint, with no covering grant.
+    TenantMismatch,
+    /// The configured `AuthorizationProvider` denied the request.
+    AuthorizationDenied,
+}
+
+impl SecurityDenialKind {
+    /// Maps a `SecurityError` produced at a macro guard call site to the
+    /// denial kind it represents, or `None` if `err` isn't one of the three
+    /// reachable, in-scope denial outcomes (design.md AD-1) — e.g.
+    /// `ProviderError`/`CapabilityNotEnabled` (infra failures) or any other
+    /// `SecurityError` variant this change doesn't instrument. Centralizes
+    /// the mapping as ordinary, unit-testable Rust so both macro call sites
+    /// (`service-sdk-macros/src/lib.rs`) share one classification instead of
+    /// duplicating `match` arms inside `quote!{}` token trees.
+    pub fn from_security_error(err: &SecurityError) -> Option<Self> {
+        match err {
+            SecurityError::MissingContext => Some(Self::MissingContext),
+            SecurityError::TenantMismatch { .. } => Some(Self::TenantMismatch),
+            SecurityError::AuthorizationDenied { .. } => Some(Self::AuthorizationDenied),
+            _ => None,
+        }
+    }
+}
+
+/// Redacted, `Display`-safe label (design.md AD-3) — there is no field to
+/// leak because `SecurityDenialKind` itself carries none; full diagnostic
+/// detail (`expected`/`actual`/`reason`) stays exclusively on the
+/// `SecurityError` value the guard independently returns, whose own `Debug`
+/// impl (AD-010) already retains it. Byte-identical to the derived `Debug`
+/// output, spelled out explicitly so this contract doesn't silently change if
+/// a future variant gets fields.
+impl std::fmt::Display for SecurityDenialKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            SecurityDenialKind::MissingContext => "MissingContext",
+            SecurityDenialKind::TenantMismatch => "TenantMismatch",
+            SecurityDenialKind::AuthorizationDenied => "AuthorizationDenied",
+        };
+        write!(f, "{label}")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared runtime state
 // ---------------------------------------------------------------------------
 
@@ -131,6 +192,12 @@ pub struct RuntimeInner {
     tenant_resolver: TenantResolver,
     /// The logger constructed by the host and registered via `RuntimeBuilder::with_logger`.
     logger: Option<Arc<KITLogger>>,
+    /// Observability sink for macro-guard security denials (CORE-012A AD-2).
+    /// `None` by default — behaviorally identical to `NoopObservability`
+    /// discarding events, keeping `ego-service-sdk` free of an
+    /// `ego-infrastructure` dependency edge. Set via
+    /// `RuntimeBuilder::with_observability(..)`.
+    observability: Option<Arc<dyn Observability>>,
     /// Infrastructure teardown stack, drained in reverse construction order on shutdown.
     ///
     /// `RuntimeInner` is always shared via `Arc` (generated proxies hold
@@ -174,6 +241,7 @@ impl RuntimeInner {
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
+        observability: Option<Arc<dyn Observability>>,
     ) -> Self {
         Self {
             registry,
@@ -183,6 +251,7 @@ impl RuntimeInner {
             logger,
             teardown,
             tenant_resolver,
+            observability,
         }
     }
 
@@ -261,6 +330,53 @@ impl RuntimeInner {
     #[doc(hidden)]
     pub fn authorization_provider(&self) -> Option<&Arc<dyn AuthorizationProvider>> {
         self.security_providers.as_ref().map(|(_, authz)| authz)
+    }
+
+    /// Records exactly one denial event for a macro-guard outcome (CORE-012A
+    /// design.md AD-1, spec "Reachable Macro-Guard Denials Are Recorded" +
+    /// "Minimum Recorded Event Contract"). A silent no-op when no
+    /// `Observability` implementor is configured (AD-2 default `None`).
+    ///
+    /// Calls the configured implementor's `trace()` synchronously, with no
+    /// blocking isolation — relies entirely on the `Observability` trait's
+    /// own "Non-blocking" contract (`ego_domain::Observability`). A panicking
+    /// implementor is isolated via `catch_unwind` below; a *blocking* one is
+    /// not this method's concern to defend against (code-review 4R
+    /// resilience finding, accepted: fixing that here would require making
+    /// this method async and restructuring macro-generated control flow —
+    /// out of proportion to a contract violation by the implementor).
+    ///
+    /// # Accessibility contract (macro-visibility)
+    ///
+    /// This method is `pub` solely to satisfy Rust's visibility rules for
+    /// code generated by the `ego-service-sdk-macros` proc-macro crate —
+    /// same contract as [`Self::authorization_provider`] above. Application
+    /// code MUST NOT call this directly; `#[doc(hidden)]` hides it from
+    /// rustdoc.
+    #[doc(hidden)]
+    pub fn record_security_denial(
+        &self,
+        service: &'static str,
+        operation: &'static str,
+        kind: SecurityDenialKind,
+    ) {
+        let Some(obs) = &self.observability else {
+            return;
+        };
+        // ponytail: HashMap<String,String> allocation for 3 fixed keys is forced by
+        // SemanticEvent::metadata's pre-existing type (crates/domain); a lower-allocation
+        // shape would mean changing that shared domain-wide type, out of this change's
+        // scope. Accepted technical debt — revisit only if it shows up in a real profile.
+        let mut metadata = HashMap::new();
+        metadata.insert("denial_kind".to_string(), kind.to_string());
+        metadata.insert("service".to_string(), service.to_string());
+        metadata.insert("operation".to_string(), operation.to_string());
+        let event = SemanticEvent::new("security.denial", "", "", "Denied", "", metadata)
+            .expect("event_name is a fixed non-empty literal");
+        // A caller-supplied `Observability` implementor is untrusted, same as
+        // `AuthorizationProvider` (security-sdk/authorization/mod.rs) — a panicking
+        // sink must not turn a clean security-denial `Err` return into an unwind.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obs.trace(event)));
     }
 
     /// Resolves and enforces the canonical tenant for this call (CORE-008A
@@ -375,6 +491,25 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
+            None,
+        )
+    }
+
+    /// Test fixture variant with an `Observability` implementor configured
+    /// (CORE-012A TASK-003) — `for_test()`'s sibling helper for tests that
+    /// need to assert on recorded denial events, mirroring
+    /// `for_test_with_authz`'s pattern.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_observability(obs: Arc<dyn Observability>) -> Self {
+        Self::new_with_logger(
+            ServiceRegistry::new(),
+            Arc::new(InterceptorChain::new()),
+            None,
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            None,
+            Mutex::new(TeardownStack::new()),
+            TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            Some(obs),
         )
     }
 
@@ -394,6 +529,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
         )
     }
 }
@@ -918,6 +1054,58 @@ mod tests {
         assert!(err.to_string().contains('X'));
     }
 
+    // -- CORE-012A Phase 1 (TASK-001/002): SecurityDenialKind Display --
+
+    #[test]
+    fn security_denial_kind_display_yields_only_the_kind_label() {
+        assert_eq!(SecurityDenialKind::MissingContext.to_string(), "MissingContext");
+        assert_eq!(SecurityDenialKind::TenantMismatch.to_string(), "TenantMismatch");
+        assert_eq!(SecurityDenialKind::AuthorizationDenied.to_string(), "AuthorizationDenied");
+    }
+
+    // -- CORE-012A Phase 2 (TASK-003/004/005): record_security_denial helper --
+
+    use crate::test_support::RecordingObservability;
+
+    #[test]
+    fn record_security_denial_emits_one_event_with_required_fields() {
+        let obs = Arc::new(RecordingObservability::new());
+        let rt = RuntimeInner::for_test_with_observability(obs.clone());
+
+        rt.record_security_denial("Svc", "op", SecurityDenialKind::AuthorizationDenied);
+
+        let events = obs.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one recorded event");
+        let event = &events[0];
+        assert_eq!(
+            event.metadata.get("denial_kind").map(String::as_str),
+            Some("AuthorizationDenied")
+        );
+        assert_eq!(event.metadata.get("service").map(String::as_str), Some("Svc"));
+        assert_eq!(event.metadata.get("operation").map(String::as_str), Some("op"));
+    }
+
+    #[test]
+    fn record_security_denial_is_a_silent_no_op_without_observability() {
+        // observability: None (AD-2 default) — for_test() already yields this.
+        let rt = RuntimeInner::for_test();
+
+        // Must not panic; there is no sink to assert on, which is the point.
+        rt.record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    #[test]
+    fn record_security_denial_isolates_a_panicking_observability_sink() {
+        // RESIL-001 (CORE-012A 4R review): a caller-supplied Observability
+        // implementor is untrusted, same as AuthorizationProvider. A panic
+        // inside trace() must not unwind through the security-denial path.
+        use crate::test_support::PanickingObservability;
+
+        let rt = RuntimeInner::for_test_with_observability(Arc::new(PanickingObservability));
+
+        rt.record_security_denial("Svc", "op", SecurityDenialKind::AuthorizationDenied);
+    }
+
     #[test]
     fn authorization_provider_returns_arc_when_providers_set() {
         use ego_security_sdk::authentication::AuthenticationProvider;
@@ -963,6 +1151,7 @@ mod tests {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
         );
 
         let result = rt.authorization_provider();

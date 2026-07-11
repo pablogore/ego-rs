@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use ego_domain::Observability;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
@@ -49,6 +50,10 @@ pub struct RuntimeBuilder {
     /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
     /// Read only by `try_build()`; has no effect on `build()` (AD-3).
     validators: Vec<ValidatorEntry>,
+    /// Observability sink for macro-guard security denials (CORE-012A
+    /// AD-2). Default `None` — behaviorally identical to today, before this
+    /// change existed.
+    observability: Option<Arc<dyn Observability>>,
 }
 
 impl RuntimeBuilder {
@@ -64,6 +69,7 @@ impl RuntimeBuilder {
             configs: HashMap::new(),
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             validators: Vec::new(),
+            observability: None,
         }
     }
 
@@ -150,6 +156,15 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an `Observability` implementor to receive macro-guard
+    /// security-denial events (CORE-012A). When never called, the runtime
+    /// defaults to `None` (AD-2) — recording is a silent no-op and behavior
+    /// is byte-for-byte identical to before this change existed.
+    pub fn with_observability(mut self, obs: Arc<dyn Observability>) -> Self {
+        self.observability = Some(obs);
+        self
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
     /// Always succeeds — security and the logger are both optional. By the
@@ -173,6 +188,7 @@ impl RuntimeBuilder {
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
+                self.observability,
             )),
         }
     }
@@ -599,6 +615,37 @@ mod tests {
             }
             other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
         }
+    }
+
+    // -- CORE-012A Phase 3 (TASK-006/007): with_observability wiring --------
+
+    use crate::runtime::runtime_builder::SecurityDenialKind;
+    use crate::test_support::RecordingObservability;
+
+    #[test]
+    fn with_observability_wiring_reaches_runtime_inner() {
+        let obs = Arc::new(RecordingObservability::new());
+        let rt = RuntimeBuilder::new().with_observability(obs.clone()).build();
+
+        rt.inner()
+            .record_security_denial("Svc", "op", SecurityDenialKind::AuthorizationDenied);
+
+        assert_eq!(
+            obs.events.lock().unwrap().len(),
+            1,
+            "with_observability must wire the supplied implementor through to RuntimeInner"
+        );
+    }
+
+    #[test]
+    fn build_without_with_observability_preserves_existing_behavior() {
+        // Default (AD-2): observability is None. Existing allowed/denied guard
+        // behavior (authorization_integration.rs, tenant_scoped_codegen.rs —
+        // neither calls with_observability) is unaffected by this change;
+        // this test proves the None-path plumbing itself never panics.
+        let rt = RuntimeBuilder::new().build();
+        rt.inner()
+            .record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
     }
 
     #[test]

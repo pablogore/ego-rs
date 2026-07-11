@@ -13,7 +13,7 @@ pub use error::RuntimeInfraError;
 pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{Resolvable, ResolvableContainer};
-pub use runtime_builder::{RuntimeError, RuntimeInner};
+pub use runtime_builder::{RuntimeError, RuntimeInner, SecurityDenialKind};
 pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
 // Crate-internal only (AD-014 Established Fact type) — `crate::context`
 // needs `CrossTenantGrant` to expose `ServiceContext::cross_tenant_grant`,
