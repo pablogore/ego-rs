@@ -821,18 +821,21 @@ scenarios ("Tenant enforcement behavior preserved") for the acceptance contract.
 ### Requirement: ServiceContext Is Not a Parallel Writable Tenant Authority (FR-010)
 
 On the authenticated path, the service-visible tenant MUST be derived per FR-002, not
-independently settable by arbitrary code holding a `ServiceContext`. `ServiceContext.tenant_id`
-is a private field (the ingress hint, per AD-011), settable only through
-`ServiceContext::with_tenant_id()` and readable only through `tenant_hint()` — no public API
-can mutate it after construction. `resolved_tenant` is a separate private field, written only
-by the `pub(crate)` `set_resolved_tenant`, whose sole caller is `RuntimeInner::enforce_tenant`.
+independently selected by arbitrary code holding a `ServiceContext`. `ServiceContext.tenant_id`
+is a private ingress-hint field, writable only through the consuming builder
+`ServiceContext::with_tenant_id()` and readable through `tenant_hint()`. `resolved_tenant` is
+a separate private field, written only by the `pub(crate)` `set_resolved_tenant`, whose sole
+caller is `RuntimeInner::enforce_tenant`. Replacing the ingress hint on an owned context via
+`with_tenant_id()` — including after resolution has already run — MUST NOT replace or modify
+the canonical tenant: `with_tenant_id()` only ever writes `tenant_id`, never `resolved_tenant`.
 
-#### Scenario: No public API can override the derived, authenticated tenant
+#### Scenario: Replacing the ingress hint cannot override the canonical tenant
 
-- GIVEN a `ServiceContext` whose `canonical_tenant()` was already resolved to `"tenant-a"` (derived from `Principal.tenant_id`)
-- WHEN external code attempts to mutate the ingress hint or the resolved tenant directly
-- THEN compilation fails — both `tenant_id` and `resolved_tenant` are private fields with no public setter that reaches them post-construction
-- AND `ctx.canonical_tenant()` still returns `"tenant-a"` for any code that only holds a shared reference
+- GIVEN an owned `ServiceContext` whose `canonical_tenant()` resolved to `"tenant-a"`
+- WHEN external code calls `ctx.with_tenant_id("tenant-b")`
+- THEN `tenant_hint()` returns `"tenant-b"`
+- AND `canonical_tenant()` still returns `"tenant-a"`
+- AND no public API can write `resolved_tenant` directly
 
 ---
 
