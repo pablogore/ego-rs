@@ -25,6 +25,8 @@ pub enum SecurityDenialKind {
 
 Fieldless by design (see AD-3) — no `expected`/`actual`/`reason` payload.
 
+**Addendum (code-review fix):** the `SecurityError → SecurityDenialKind` mapping used at both macro call sites is centralized as `SecurityDenialKind::from_security_error(err: &SecurityError) -> Option<Self>` on `runtime_builder.rs`, rather than duplicating an inline `match &e { .. }` inside each `quote!{}` block. Both call sites call `if let Some(kind) = SecurityDenialKind::from_security_error(&e) { ... }` — one shared, unit-testable classification instead of two hand-written copies inside proc-macro token trees.
+
 **Rejected:**
 - inline `observability().trace(..)` in codegen (Approach 1 — untestable generated code, double-log risk).
 - `&SecurityError` as the parameter type (earlier draft of this AD) — `service-sdk` already depends on `ego-security-sdk` (Cargo.toml:16), so this is not a new crate-dependency edge, but `SecurityError` has 9 variants and only 3 are valid denial kinds for this spec; a helper typed `&SecurityError` compiles for `ProviderError`/`InvalidCredential`/etc. too, silently allowing calls that violate the spec's 3-kind contract.
@@ -37,13 +39,14 @@ Fieldless by design (see AD-3) — no `expected`/`actual`/`reason` payload.
 **Rationale:** `ego-service-sdk` depends on `ego-domain` but **not** `ego-infrastructure` (Cargo.toml:17). Defaulting to the infra type would add a new service-sdk→infrastructure crate edge (a layering inversion) **that explore.md did not flag**. `None`⇒no-op is byte-for-byte identical to Noop discarding events, exactly mirrors the requested `authorization_provider()` Option pattern, keeps infra unchanged, and leaves `NoopObservability` the sole concrete implementor (callers may still pass it explicitly). Deviates from the proposal's literal "default to NoopObservability" wording; behaviorally equivalent.
 
 ### AD-3 — Redaction via `Display` label only; no shadow copy of raw detail
-**Choice:** `RecordedDenial<'a>(&'a SecurityDenialKind)` newtype in runtime_builder.rs. Hand-written `Display` emits **only the kind label** (`"MissingContext"`/`"TenantMismatch"`/`"AuthorizationDenied"`). `SecurityDenialKind` (AD-1) is fieldless, so there is no raw tenant id / denial reason anywhere in this new type to redact or retain — the redaction guarantee reduces to "the label is all there is."
+**Choice:** `impl std::fmt::Display for SecurityDenialKind` directly in runtime_builder.rs (no wrapper type). Emits **only the kind label** (`"MissingContext"`/`"TenantMismatch"`/`"AuthorizationDenied"`). `SecurityDenialKind` (AD-1) is fieldless, so there is no raw tenant id / denial reason anywhere in this type to redact or retain — the redaction guarantee reduces to "the label is all there is."
 
 Full diagnostic detail (raw `expected`/`actual`/`reason`) is **not duplicated into this path at all**. It remains available exactly where it already lived before this change: in the `SecurityError` value the guard independently constructs and returns to the caller via `?`, whose own `Debug` impl (pre-existing, AD-010, CORE-008A) already retains it. Spec requirement 3's "Debug retains raw identifiers" scenario is satisfied by that pre-existing value, not by anything this change introduces (see the revised spec scenario).
 **Rejected:**
 - using `SecurityError`'s own `Display` for the recorded label — `AuthorizationDenied`'s is `"authorization denied: {reason}"` and **leaks the reason** (error/mod.rs:24); `TenantMismatch`/`CrossTenantDenied` are already redacted but the type is non-uniform. Hence the hand-written label-only `Display` above.
-- a field-carrying `SecurityDenialKind` whose `Debug` duplicates `expected`/`actual`/`reason` (earlier draft) — reviewed: nothing in the observability flow reads that `Debug` output (`RecordedDenial`'s `Display`, the only thing embedded in the event, never interpolates fields regardless of whether they exist), and the original `SecurityError` already provides the same diagnostic guarantee independently. Cloning `String`s solely to duplicate an already-available capability is cost without payoff.
-**Rationale:** the fieldless kind means correctness here can't regress by construction (no field to accidentally leak into `Display`), and this change avoids introducing a second, redundant carrier of sensitive data it doesn't need.
+- a field-carrying `SecurityDenialKind` whose `Debug` duplicates `expected`/`actual`/`reason` (earlier draft) — reviewed: nothing in the observability flow reads that `Debug` output (`SecurityDenialKind`'s `Display`, the only thing embedded in the event, never interpolates fields regardless of whether they exist), and the original `SecurityError` already provides the same diagnostic guarantee independently. Cloning `String`s solely to duplicate an already-available capability is cost without payoff.
+- a separate `RecordedDenial<'a>(&'a SecurityDenialKind)` newtype wrapping `SecurityDenialKind` to carry the `Display` impl (earlier draft, implemented then removed during code review) — since the kind is fieldless there is nothing left for a wrapper to redact; `impl Display for SecurityDenialKind` directly does the same job with one fewer type and no dedicated wrapper test.
+**Rationale:** the fieldless kind means correctness here can't regress by construction (no field to accidentally leak into `Display`), and this change avoids introducing a second, redundant carrier of sensitive data — or a redundant wrapper type — it doesn't need.
 
 **Event name stability (non-normative note):** `event_name` is fixed at `"security.denial"` for every current and future denial kind — new denial kinds (e.g. a future `CrossTenantDenied` instrumentation) MUST differentiate solely via the `denial_kind` metadata field, never by forking into per-kind event names (`security.tenant_denial`, `security.authorization_denial`, etc.), which would silently break event-name-keyed aggregation/dashboards.
 
@@ -53,13 +56,13 @@ Full diagnostic detail (raw `expected`/`actual`/`reason`) is **not duplicated in
                                                                           ├─► __rt.record_security_denial(TRAIT, METHOD, kind)
     #[tenant_scoped] guard ──(denied: TenantMismatch)─────────────────────┘        │
       (only reached if authorize passed → at most one call)                        ▼
-                                              RecordedDenial(&kind).Display → metadata["denial_kind"]
+                                              kind.to_string() [Display] → metadata["denial_kind"]
                                               SemanticEvent{ event_name:"security.denial", metadata } → observability?.trace()
 
 ## Event construction (minimum contract → `SemanticEvent`)
 
 Helper builds `SemanticEvent::new("security.denial", "", "", "Denied", "", metadata)` where
-`metadata = { "denial_kind": RecordedDenial(&kind).to_string(), "service": service, "operation": operation }`.
+`metadata = { "denial_kind": kind.to_string(), "service": service, "operation": operation }`.
 The 3 required fields (denial_kind, service, operation) live in `metadata`; `event_name` is the
 stable non-empty label the fail-closed constructor requires. `correlation_id`/`actor_id`/`timestamp`
 stay empty and `tenant` is absent — all optional per spec (a real clock/correlation source is out of scope).
@@ -76,8 +79,8 @@ authorize passes, it recorded nothing and only the tenant block can record (one 
 | Site | Denial | Change |
 |---|---|---|
 | authorize `ctx.security()` missing (~285) | `MissingContext` | `.ok_or_else(..)?` → `match`; on `None`, `if let Some(__rt)=upgrade() { __rt.record_security_denial(stringify!(#trait_name), stringify!(#method_name), SecurityDenialKind::MissingContext) }` then return |
-| `authorize_in_context(..)` fail (~312) | `AuthorizationDenied` only (verified: `authorize_in_context` returns `Result<(), SecurityError>` — `e` may also be `CapabilityNotEnabled`/`ProviderError`, which are infra failures, not denials) | `map_err(\|e\| { if matches!(e, SecurityError::AuthorizationDenied { .. }) { __rt.record_security_denial(TRAIT, METHOD, SecurityDenialKind::AuthorizationDenied); } <#err_ty>::from(e) })?` (reuse already-upgraded `__rt`; records only on the `AuthorizationDenied` arm, silently skips the infra-failure arms per the exclusion below; no field extraction needed — `SecurityDenialKind` is fieldless) |
-| `enforce_tenant(..)` fail (~357-358) | `TenantMismatch` **or** `MissingContext` (verified: `enforce_tenant` → `tenant_resolver.resolve(..)` returns `Err(SecurityError::MissingContext)` for an unresolvable/unauthenticated context, `Err(SecurityError::TenantMismatch{expected,actual})` for a hard mismatch — both spec-in-scope kinds surface from this one `?` site) | `map_err(\|e\| { match &e { SecurityError::TenantMismatch { .. } => __tenant_rt.record_security_denial(TRAIT, METHOD, SecurityDenialKind::TenantMismatch), SecurityError::MissingContext => __tenant_rt.record_security_denial(TRAIT, METHOD, SecurityDenialKind::MissingContext), _ => {} } <#err_ty>::from(e) })?` |
+| `authorize_in_context(..)` fail (~312) | `AuthorizationDenied` only (verified: `authorize_in_context` returns `Result<(), SecurityError>` — `e` may also be `CapabilityNotEnabled`/`ProviderError`, which are infra failures, not denials) | `map_err(\|e\| { if let Some(kind) = SecurityDenialKind::from_security_error(&e) { __rt.record_security_denial(TRAIT, METHOD, kind); } <#err_ty>::from(e) })?` (reuse already-upgraded `__rt`; the centralized `from_security_error` mapping — code-review fix — returns `None` for the infra-failure arms per the exclusion below, so nothing is recorded for those) |
+| `enforce_tenant(..)` fail (~357-358) | `TenantMismatch` **or** `MissingContext` (verified: `enforce_tenant` → `tenant_resolver.resolve(..)` returns `Err(SecurityError::MissingContext)` for an unresolvable/unauthenticated context, `Err(SecurityError::TenantMismatch{expected,actual})` for a hard mismatch — both spec-in-scope kinds surface from this one `?` site) | `map_err(\|e\| { if let Some(kind) = SecurityDenialKind::from_security_error(&e) { __tenant_rt.record_security_denial(TRAIT, METHOD, kind); } <#err_ty>::from(e) })?` — same centralized mapping as the row above, shared by both call sites instead of two independent inline `match` blocks |
 
 **Note — a second, distinct `MissingContext` site exists and is deliberately excluded**: `self.runtime.upgrade().ok_or_else(MissingContext)` at lib.rs:351-355 (both guard blocks have this pattern) fires when the weak `Runtime` handle itself is dropped — an infra/lifecycle failure reusing the `MissingContext` variant for convenience, not an actual "no security context was supplied" denial. Treat this the same as `ProviderError`/`CapabilityNotEnabled` below: excluded from instrumentation. Only the `ctx.security().ok_or_else(MissingContext)` site (line 285, row 1 above) and the `enforce_tenant` `map_err` site (row 3 above) represent the spec's genuine `MissingContext` denial.
 
@@ -90,7 +93,7 @@ spec denial kinds — left uninstrumented. `CrossTenantDenied` unreachable — u
 
 | File | Action | Description |
 |---|---|---|
-| `crates/service-sdk/src/runtime/runtime_builder.rs` | Modify | `observability` field, `SecurityDenialKind` enum, helper, `RecordedDenial` newtype + tests |
+| `crates/service-sdk/src/runtime/runtime_builder.rs` | Modify | `observability` field, `SecurityDenialKind` enum + `Display` impl, `SecurityDenialKind::from_security_error` mapping, `record_security_denial` helper + tests |
 | `crates/service-sdk/src/runtime/builder.rs` | Modify | `observability` field + `with_observability(..)`; pass into `new_with_logger` |
 | `crates/service-sdk-macros/src/lib.rs` | Modify | recording calls at 2 guard call sites (one matches 2 outcomes) in guard error paths |
 
@@ -104,6 +107,9 @@ pub enum SecurityDenialKind {
     TenantMismatch,
     AuthorizationDenied,
 }
+impl SecurityDenialKind {
+    pub fn from_security_error(err: &SecurityError) -> Option<Self>;
+}
 pub fn record_security_denial(&self, service: &'static str, operation: &'static str, kind: SecurityDenialKind);
 // RuntimeBuilder
 pub fn with_observability(self, obs: Arc<dyn ego_domain::Observability>) -> Self;
@@ -113,7 +119,7 @@ pub fn with_observability(self, obs: Arc<dyn ego_domain::Observability>) -> Self
 
 | Layer | What | Approach |
 |---|---|---|
-| Unit | `RecordedDenial` redaction (req 3, event-side) | `Display` yields only the kind label for each of the 3 variants, never any field-derived text (there are no fields to leak) |
+| Unit | `SecurityDenialKind` `Display` redaction (req 3, event-side) | `Display` yields only the kind label for each of the 3 variants, never any field-derived text (there are no fields to leak) |
 | Unit | `SecurityError`'s existing `Debug` (req 3, diagnostic-side) | pre-existing AD-010 test coverage already asserts raw `tenant_id`/`reason` appear in `Debug` — no new test needed, cited as already-satisfied |
 | Unit | helper (reqs 1,2) | call directly with each `SecurityDenialKind` variant; assert one event, 3 fields present |
 | Integration | guard wiring (reqs 1,5) | `#[service]` trait w/ both attrs + `RecordingObservability` test double; assert exactly one event per denied call, allowed=none |

@@ -53,7 +53,7 @@ Recorded denial event data MUST NOT expose raw tenant identifiers or denial-reas
 
 ### Requirement: Runtime Accepts an Observability Implementor, Default Behavior Unchanged
 
-`RuntimeBuilder` MUST expose `with_observability(...)` allowing callers to supply an `Observability` implementor at build time. When it is not called, the runtime MUST default to `NoopObservability`, and behavior for allowed and denied invocations MUST be byte-for-byte identical to the runtime's behavior before this change.
+`RuntimeBuilder` MUST expose `with_observability(...)` allowing callers to supply an `Observability` implementor at build time. When it is not called, the runtime MUST keep no observability sink configured (`None`); denial recording MUST behave as a silent no-op, with return values, errors, guard ordering, and panic behavior identical to the runtime's behavior before this change.
 
 #### Scenario: Supplying an Observability implementor is accepted at build time
 - GIVEN a `RuntimeBuilder` configured with `.with_observability(some_implementor)`
@@ -63,7 +63,7 @@ Recorded denial event data MUST NOT expose raw tenant identifiers or denial-reas
 #### Scenario: Omitting with_observability preserves today's behavior exactly
 - GIVEN a `RuntimeBuilder` on which `.with_observability(...)` is never called
 - WHEN the runtime is built and any guarded operation (allowed or denied) is invoked
-- THEN behavior is identical to before this change — same return values, same errors, no new panics — with `NoopObservability` in effect
+- THEN behavior is identical to before this change — same return values, same errors, no new panics — with no sink configured, so denial recording is a silent no-op
 
 ### Requirement: CrossTenantDenied Remains Uninstrumented By Design
 
