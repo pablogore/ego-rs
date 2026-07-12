@@ -1,39 +1,147 @@
 # ego-rs Architecture
 
-## Overview
+ego-rs is a **hexagonal, actor-oriented, deterministic** backend framework written in Rust. It provides the primitives to build distributed, event-sourced, replayable backend systems: domain contracts own behavior, infrastructure owns adapters, and everything above domain composes through explicit ports — no ambient state, no implicit I/O.
 
-ego-rs is a **hexagonal, actor-oriented, deterministic** backend framework written in Rust. It provides the primitives to build distributed, event-sourced, and replayable backend systems.
+This is the single architecture reference for the workspace. It replaces the former split between a runtime-focused `ARCHITECTURE.md` and an engineering-focused `docs/architecture.md` — the two overlapped and had each drifted from the code in different ways; this version is verified against the current `Cargo.toml` files, `layers.toml`, and `openspec/` directory structure.
 
-## Layer Architecture
+## Principles
 
-```mermaid
-flowchart TD
-    transport["transport<br/>HTTP, gRPC handlers<br/>Depends on: application, domain"]
-    application["application<br/>Command handlers, query handlers, use cases<br/>Depends on: domain"]
-    domain["domain<br/>Actor trait, Command, Event, Query, ActorId<br/>Depends on: nothing internal"]
-    infrastructure["infrastructure<br/>In-memory adapters, persistence, observability<br/>Depends on: application, domain"]
+- **Hexagonal** — domain owns contracts; infrastructure owns adapters; application orchestrates use cases; transport owns protocol handlers.
+- **Actor-oriented** — the actor (`Actor` trait) and the entity (`PersistentEntity`) are the central behavioral abstractions; each processes one message/command at a time.
+- **CQRS + Event Sourcing** — commands mutate state, events record transitions (append-only), queries read without mutating.
+- **Deterministic** — given identical inputs, runtime state, logical time, and context, the observable outcome MUST be identical. Randomness, wall-clock time, and external I/O are injected through explicit ports, never implicit behavior.
+- **Immutable by default** — domain data structures are immutable values; changes produce new commands/events/state instances, never in-place mutation.
+- **Fail-closed** — ambiguous states produce rejection, never silent continuation.
 
-    transport --> application
-    transport --> domain
-    application --> domain
-    infrastructure --> application
-    infrastructure --> domain
+---
+
+## Layer & Crate Map
+
+The workspace has **16 crates + 1 example app** (root `Cargo.toml`, `[workspace] members`):
+
+```
+domain, application, infrastructure, persistence, transport, runtime, runtime-tokio,
+event-adapter, persistent-entity, ego-scheduler, service-sdk, service-sdk-macros,
+security-sdk, security-jwt, security-apikey, testkit
++ examples/reference-app
 ```
 
-## Dependency Rules (enforced by `layers.toml` + `scripts/verify-layers.sh`)
+There is **no `runtime-slice` crate** anywhere in the workspace — an old `layers.toml` entry references it, but it is a dead config line, not a crate that ever existed here.
 
-| Layer | May depend on |
-|-------|--------------|
-| `ego-domain` | nothing internal |
-| `ego-application` | `ego-domain` |
-| `ego-infrastructure` | `ego-application`, `ego-domain` |
-| `ego-transport` | `ego-application`, `ego-domain` |
+### Dependency graph (verified against each crate's `[dependencies]`)
 
-Forbidden:
-- `domain → application|infrastructure|transport`
-- `application → infrastructure|transport`
-- `infrastructure → transport`
-- `transport → infrastructure`
+```mermaid
+flowchart LR
+    domain["ego-domain<br/>(no internal deps)"]
+
+    application["ego-application"] --> domain
+    persistence["ego-persistence"] --> domain
+    infrastructure["ego-infrastructure"] --> application
+    infrastructure --> persistence
+    infrastructure --> domain
+
+    runtime["ego-runtime"] --> domain
+    runtime_tokio["ego-runtime-tokio"] --> runtime
+    event_adapter["ego-event-adapter"] --> domain
+    persistent_entity["persistent-entity"] --> domain
+    scheduler["ego-scheduler"] --> domain
+
+    security_sdk["ego-security-sdk<br/>(cross-cutting)"] --> domain
+    security_jwt["security-jwt"] --> security_sdk
+    security_jwt --> domain
+    security_apikey["security-apikey"] --> security_sdk
+    security_apikey --> domain
+
+    service_sdk["ego-service-sdk"] --> domain
+    service_sdk --> security_sdk
+    macros["ego-service-sdk-macros<br/>(proc-macro)"] -.->|dev-dep only| service_sdk
+
+    testkit["ego-testkit"] --> domain
+    testkit --> security_sdk
+    testkit --> service_sdk
+
+    transport["ego-transport"] --> domain
+    transport --> application
+    transport --> service_sdk
+    transport --> security_sdk
+
+    classDef crosscutting fill:#f0f4ff,stroke:#6366f1
+    class security_sdk crosscutting
+```
+
+Dev-only edges not drawn as solid lines above (real, but excluded from the production dependency graph — Cargo keeps `[dev-dependencies]` out of the normal build graph, so these are not layering violations): `ego-service-sdk` and `ego-testkit` both pull in `ego-service-sdk-macros` as a dev-dependency for their own test/example builds; `ego-transport` pulls in `security-jwt` and `ego-service-sdk-macros` as dev-dependencies for its own tests only. `examples/reference-app` depends normally on all of `ego-domain`, `ego-infrastructure`, `ego-runtime`, `persistent-entity`, `security-jwt`, `ego-security-sdk`, `ego-scheduler`, `ego-persistence`, `ego-service-sdk`, `ego-service-sdk-macros`, `ego-transport` (plus `ego-testkit` as a dev-dependency for its own tests) — it is the one place all layers legitimately compose together.
+
+### Crate boundaries & responsibilities
+
+Directory names and package names differ for several crates — always check `[package] name`, not the directory:
+
+| Directory | Package | Depends on (production) | Responsibility |
+|---|---|---|---|
+| `crates/domain` | `ego-domain` | nothing internal | Core contracts: `Actor`, `Command`, `DomainEvent`, `Query`, `Effect`, identity types, persistence SPIs, CQRS read-side traits |
+| `crates/application` | `ego-application` | `ego-domain` | Use-case orchestration (command/query handlers) |
+| `crates/persistence` | `ego-persistence` | `ego-domain` | Persistence-layer support types |
+| `crates/infrastructure` | `ego-infrastructure` | `ego-application`, `ego-persistence`, `ego-domain` | Concrete adapters over application + persistence |
+| `crates/transport` | `ego-transport` | `ego-domain`, `ego-application`, `ego-service-sdk`, `ego-security-sdk` | HTTP transport: `AppState`, JWT extraction, error mapping, `serve()` |
+| `crates/runtime` | `ego-runtime` | `ego-domain` | Platform-agnostic `Runtime` trait, `EffectInterpreter`, CQRS read-side engine |
+| `crates/runtime-tokio` | `ego-runtime-tokio` | `ego-runtime` | The real Tokio-backed `Runtime` implementation |
+| `crates/event-adapter` | `ego-event-adapter` | `ego-domain` | Event adapter support over domain |
+| `crates/persistent-entity` | `persistent-entity` (no `ego-` prefix) | `ego-domain` | Event-sourced actor-per-entity execution — see [Persistent Entity Runtime](#persistent-entity-runtime-core-006) below |
+| `crates/ego-scheduler` | `ego-scheduler` | `ego-domain` | Pure 6-stage actor-activation scheduling pipeline |
+| `crates/service-sdk` | `ego-service-sdk` | `ego-domain`, `ego-security-sdk` | Service contracts, registry, DI, interceptors, `ServiceContext` — the primary framework for building services |
+| `crates/service-sdk-macros` | `ego-service-sdk-macros` | external only (`syn`, `quote`, `proc-macro2`) | `#[service]`, `#[operation]`, `#[authorize]`, `#[tenant_scoped]` proc-macros |
+| `crates/security-sdk` | `ego-security-sdk` | `ego-domain` | **Cross-cutting.** `SecurityContext`, `AuthenticationProvider`, `AuthorizationProvider`, `BearerExtractor` |
+| `crates/security-jwt` | `security-jwt` (no `ego-` prefix) | `ego-domain`, `ego-security-sdk` | JWT authentication providers (HS256/RS256/ES256, OIDC, multi-issuer, introspection) |
+| `crates/security-apikey` | `security-apikey` (no `ego-` prefix) | `ego-domain`, `ego-security-sdk` | API-key authentication provider |
+| `crates/testkit` | `ego-testkit` | `ego-domain`, `ego-security-sdk`, `ego-service-sdk` | Shared, reusable test doubles/fixtures for building services against the SDK |
+| `examples/reference-app` | `reference-app` | all of the above | CORE-018 production-shaped reference service — the fullest real illustration of how everything composes |
+
+### Cross-cutting SDKs
+
+A cross-cutting SDK is a leaf in the dependency graph: other crates depend on it, and it depends on nothing but `ego-domain` and third-party crates — never on `ego-application`, `ego-infrastructure`, or `ego-transport`.
+
+Checked each candidate against its real `Cargo.toml`:
+
+- **`ego-security-sdk`** — depends only on `ego-domain` + third-party (`async-trait`, `thiserror`, `serde`); consumed by `security-jwt`, `security-apikey`, `ego-service-sdk`, `ego-testkit`, `ego-transport`, and `reference-app`. Genuinely cross-cutting — the only crate that qualifies.
+- **`security-jwt` / `security-apikey`** — not cross-cutting. Each depends on `ego-security-sdk` itself and is classified as `infrastructure` in `layers.toml` (concrete auth-provider adapters, not shared leaf capabilities).
+- **`ego-testkit`** — not cross-cutting. It depends *upward* on `ego-service-sdk`, and every consumer pulls it in only as a `[dev-dependencies]` test-support crate, not a production dependency.
+- **`ego-service-sdk`** — not cross-cutting despite being widely depended on. It is a framework layer in its own right (registry, DI, interceptors) that other crates build services on top of, not a leaf utility.
+
+### Layer enforcement reality
+
+`layers.toml` exists at the repo root and documents intended layer assignments, but it is a **documented-but-unenforced convention**:
+
+- It covers only 9 of the 16 crates (missing `ego-persistence`, `ego-event-adapter`, `persistent-entity`, `ego-service-sdk`, `ego-service-sdk-macros`, `ego-security-sdk`, `security-apikey`, `ego-testkit`).
+- It contains a dead entry, `"runtime-slice" = "domain"`, for a crate that does not exist in the workspace.
+- Its own header comment says rules are "enforced by `scripts/verify-layers.sh`" — that script **does not exist** anywhere in the repo (confirmed: `scripts/` holds `detect-integration-tests.sh`, `detect-missing-docs.sh`, `detect-mock-only-tests.sh`, `detect-test-smells.sh`, `detect-violations.sh`, `validate-constitution.sh`, `verify-constitution-mapping.sh`, `verify-coverage.sh` — no `verify-layers.sh`).
+- Neither `.github/workflows/claude-code-review.yml` nor `.github/workflows/claude.yml` (the only two CI workflows in the repo) reference `layers.toml` or layer verification in any form.
+
+Treat `layers.toml` as a design intent, not a build gate. The dependency graph above is the current, real source of truth; nothing today would stop a new crate from violating it.
+
+---
+
+## Design Preferences
+
+- **Concrete first** — prefer a concrete implementation over an abstraction. Extract abstractions only when a second use case emerges.
+- **Abstractions require evidence** — every abstraction cites which specific requirement or constraint justifies it.
+- **Patch over rewrite** — extend existing modules; create new ones only when existing structure cannot accommodate the change without violating layering.
+- **Avoid duplication (Rule of Two)** — don't generalize from a single example; extract shared code only once a second, verified use case exists.
+- **Explicit file ownership** — each crate module has a documented responsibility; new code goes in the crate/module that owns that concern.
+- **No infrastructure in domain** — database types, network types, runtime types, and serialization frameworks never appear in domain contracts (verified: `ego-domain`'s only dependencies are `serde`, `serde_json`, `thiserror`, `chrono`, `async-trait`).
+
+---
+
+## Runtime & Dependency Rules
+
+- `ego-domain`'s core write-side contracts (`Actor`, `Command`, `DomainEvent`, `Query`) are synchronous — no `async fn`, no Tokio.
+- `ego-domain`'s `read_side/` module (the CQRS read-side engine, 17 traits) *does* use `async fn` via the `async-trait` crate, for I/O-shaped read-store SPIs (`ProjectionHandler`, `ReadModelStore`, dedup/offset stores, etc.). This is an async **trait signature**, not a runtime dependency: `tokio` itself appears only in `ego-domain`'s `[dev-dependencies]`, for its own test suite. No concrete async executor is required to implement or call these traits.
+- `ego-infrastructure` and `ego-runtime-tokio` own the concrete async runtime integration (Tokio).
+- `ego-service-sdk` MUST NOT depend on any transport framework (HTTP, gRPC, WebSocket) — verified: no `axum`/`tonic`/similar in its `Cargo.toml`.
+- `ego-service-sdk-macros` depends only on `syn`, `quote`, `proc-macro2` — verified, no runtime dependencies.
+- `ServiceContext` is propagated explicitly between components — no ambient/`TaskLocal` read. This was an explicit invariant of the `2026-06-22-remove-ambient-service-context` change: "there is exactly one mechanism for a component to access a `ServiceContext` — it was given one explicitly."
+- Cross-cutting SDKs (`ego-security-sdk`) MUST NOT appear as dependencies of `ego-domain` — verified true today.
+- Dependency direction is documented by `layers.toml` and the graph above; it is **not** enforced by CI (see [Layer enforcement reality](#layer-enforcement-reality)).
+
+---
 
 ## Core Concepts
 
@@ -75,28 +183,11 @@ All framework primitives are deterministic by default. Randomness, wall-clock ti
 
 All domain data structures are immutable values. Changes produce new commands, events, or state instances — never in-place mutation. Event stores are append-only. Read-side projections derive from immutable event streams.
 
-**Authority:** `.speckit/constitution.md` §8 — "Immutability By Default" and "Functional Programming". These rules are defined and enforced by the Constitution, not duplicated here.
-
 ### Fail-Closed
 
 Ambiguous states produce rejection, never silent continuation. Unknown inputs, undefined transitions, and partial failures are explicit errors.
 
-## Crate Layout
-
-```
-ego-rs/
-├── crates/
-│   ├── domain/        # ego-domain: core contracts
-│   ├── application/   # ego-application: handlers
-│   ├── infrastructure/ # ego-infrastructure: adapters
-│   ├── transport/     # ego-transport: HTTP/gRPC
-│   └── runtime/       # ego-runtime: actor execution (CORE-003, not yet created)
-├── core/
-│   └── runtime-slice/ # runtime-slice: deterministic execution types
-├── contracts/         # Protobuf contracts (Buf)
-├── openspec/          # Specs, changes, proposals
-└── scripts/           # Verification scripts
-```
+---
 
 ## Persistent Entity Runtime (CORE-006)
 
@@ -250,11 +341,11 @@ stateDiagram-v2
 | Passivation is irreversible | PASSIVATING → ACTIVE forbidden (FR-008) |
 | Events never rolled back | Append-only event store (FR-026) |
 | Snapshots are pure optimization | Event stream always authoritative (FR-012) |
-| CAS forbidden | `parking_lot::Mutex` for the registry map, not atomic CAS loops (§5 constitution) |
+| CAS forbidden | `parking_lot::Mutex` for the registry map, not atomic CAS loops |
 
 **Reference**: Full activation ordering specification at `openspec/changes/archive/2026-06-22-persistent-entity-runtime/activation-ordering/`.
 
-### Crate Layout
+### Crate Layout — `persistent-entity`
 
 ```
 crates/persistent-entity/
@@ -279,19 +370,69 @@ crates/persistent-entity/
     └── testing.rs            # In-memory backends
 ```
 
-## Implementation Roadmap
+---
 
-| ID | Name | Status |
-|----|------|--------|
-| CORE-001 | Deterministic Runtime Slice | In progress |
-| CORE-002 | Actor Primitive (domain) | Spec complete, not implemented |
-| CORE-003 | Runtime Actor Execution | Pending |
-| CORE-004 | Persistence SPI | Pending |
-| CORE-005 | Observability SPI | Pending |
-| CORE-006 | Persistent Entity Runtime | **Design complete** (spec + activation ordering) |
-| CORE-007 | Cluster Model | Archived (deferred, post-MVP) |
-| CORE-010 | SDK + Developer API | Deferred |
-| CORE-011 | Examples | Deferred |
+## Repository Layout
+
+```
+ego-rs/
+├── crates/
+│   ├── domain/                # ego-domain
+│   ├── application/           # ego-application
+│   ├── persistence/           # ego-persistence
+│   ├── infrastructure/        # ego-infrastructure
+│   ├── transport/             # ego-transport
+│   ├── runtime/               # ego-runtime
+│   ├── runtime-tokio/         # ego-runtime-tokio
+│   ├── event-adapter/         # ego-event-adapter
+│   ├── persistent-entity/     # persistent-entity
+│   ├── ego-scheduler/         # ego-scheduler
+│   ├── service-sdk/           # ego-service-sdk
+│   ├── service-sdk-macros/    # ego-service-sdk-macros
+│   ├── security-sdk/          # ego-security-sdk (cross-cutting)
+│   ├── security-jwt/          # security-jwt
+│   ├── security-apikey/       # security-apikey
+│   └── testkit/               # ego-testkit
+├── examples/
+│   └── reference-app/         # reference-app (CORE-018)
+├── contracts/                  # Protobuf/Buf scaffolding — exists, not yet active:
+│                                #   buf.yaml / buf.work.yaml / buf.gen.yaml plus
+│                                #   core/v1, user/v1 module dirs with only a buf.yaml
+│                                #   each (no .proto files yet); the `ego-rs-contracts`
+│                                #   crate its README describes is not a workspace member
+├── openspec/
+│   ├── changes/                # in-flight and archived change folders (see Governance below)
+│   └── specs/                  # living, per-domain specs — the current source of truth
+├── scripts/                    # detect-*.sh / validate-constitution.sh / verify-*.sh (no verify-layers.sh)
+├── docs/                       # remaining docs (constitution-mapping.md, etc.)
+└── layers.toml                 # documented, unenforced layer intent (see above)
+```
+
+---
+
+## Governance & Spec Workflow
+
+The former Spec Kit workflow (`spec → clarify → design → review → tasks → implement → review → archive`, with `.speckit/constitution.md` as its cited authority) is defunct. `.speckit/constitution.md` does not exist anywhere in the repo except inside one archived change folder's historical text. The real, current governance sources are **this file** and **`openspec/specs/`** (living per-domain specs, kept up to date by the change lifecycle below).
+
+Real change folders (e.g. `openspec/changes/archive/2026-07-11-core-025-service-sdk-ergonomics/`) show the actual artifact set — `explore.md`, `proposal.md`, `design.md`, `tasks.md`, a per-domain `specs/` delta, `verify-report.md`, `archive-report.md`, `state.yaml` — not the old `spec.md`/`plan.md`/`tasks.md`/`research.md`/`quickstart.md` naming.
+
+```mermaid
+flowchart LR
+    Idea["Exploration"] --> Proposal["proposal.md<br/>intent, scope"]
+    Proposal --> Design["design.md<br/>architecture decisions"]
+    Design --> Spec["spec.md (delta)<br/>requirements"]
+    Spec --> Tasks["tasks.md<br/>ordered work items"]
+    Tasks --> Apply["Apply<br/>source code"]
+    Apply --> Verify["verify-report.md<br/>against spec/design/tasks"]
+    Verify -->|pass| Archive["archive-report.md:<br/>merge delta into openspec/specs/*"]
+```
+
+- A change proposal MUST NOT prescribe implementation details before design.
+- `design.md` cites the relevant spec/proposal section for each decision.
+- `tasks.md` items reference the design decisions they implement.
+- On archive, the change's delta spec is merged into the living `openspec/specs/{domain}/spec.md`, and the change folder moves under `openspec/changes/archive/`.
+
+---
 
 ## Key Principles
 

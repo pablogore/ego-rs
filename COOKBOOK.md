@@ -141,7 +141,7 @@ Note the `ego-service-sdk` ↔ `ego-testkit` relationship is **not a real cycle*
 
 ### Layer Rules (`layers.toml`)
 
-`layers.toml` exists at the repo root and is a **documented-but-unenforced convention** — `scripts/verify-layers.sh` (referenced in its own header comment, and in `ARCHITECTURE.md`, `docs/architecture.md`, `PRD.md`) **does not exist**, and no test/CI/xtask reads `layers.toml` at all. Treat it as a design intent, not a build gate.
+`layers.toml` exists at the repo root and is a **documented-but-unenforced convention** — `scripts/verify-layers.sh` (referenced in its own header comment, and in `ARCHITECTURE.md` and `PRD.md`) **does not exist**, and no test/CI/xtask reads `layers.toml` at all. Treat it as a design intent, not a build gate.
 
 It also only covers 9 of the 16 crates:
 
@@ -173,7 +173,7 @@ flowchart LR
     end
 ```
 
-`docs/architecture.md` (section B) is the more current/complete crate-boundary reference — it documents `ego-service-sdk` and `ego-security-sdk` as **cross-cutting** crates that other layers may depend on, which is consistent with the real dependency graph above (e.g. `ego-transport` depends directly on both).
+`ARCHITECTURE.md`'s "Crate Boundaries" section is the more current/complete crate-boundary reference — it documents `ego-security-sdk` as a **cross-cutting** crate that other layers may depend on, consistent with the real dependency graph above (e.g. `ego-transport` depends directly on it).
 
 ### Crate Responsibilities
 
@@ -1071,15 +1071,15 @@ cargo test -p ego-domain
 
 ## 📐 Conventions & Rules
 
-`.speckit/constitution.md` **does not exist** (confirmed absent everywhere except one archived change folder, `openspec/changes/archive/2026-06-22-service-sdk-speckit/`) — despite still being cited as living authority in `ARCHITECTURE.md:78` and `docs/architecture.md:158`. Those are dead references; the real, current governance sources are **`docs/architecture.md`** (engineering conventions, "Complements `ARCHITECTURE.md`") and **`openspec/specs/`** (living per-domain specs, updated by the change lifecycle below). `CONTRIBUTING.md` also exists at the repo root.
+`.speckit/constitution.md` **does not exist** (confirmed absent everywhere except one archived change folder) — despite still being cited as living authority in some historical text. That's a dead reference; the real, current governance sources are **`ARCHITECTURE.md`** (root — engineering conventions and runtime architecture, unified into a single doc; `docs/architecture.md` no longer exists, its content was merged in) and **`openspec/specs/`** (living per-domain specs, updated by the change lifecycle below). `CONTRIBUTING.md` also exists at the repo root.
 
-### Architecture Rules (`docs/architecture.md`)
+### Architecture Rules (`ARCHITECTURE.md`)
 
 | Rule | Description |
 |------|-------------|
-| Domain-neutral | `ego-domain` has zero async/runtime dependencies |
-| Cross-cutting SDKs | `ego-service-sdk` and `ego-security-sdk` are cross-cutting — other layers may depend on them directly |
-| Layer enforcement (documented, not enforced) | `layers.toml` states intended dependency direction; `scripts/verify-layers.sh` does not exist, so nothing currently checks it in CI |
+| Domain-neutral (nuanced) | `ego-domain`'s core write-side contracts (`Actor`/`Command`/`DomainEvent`/`Query`) are synchronous; its `read_side/` module uses `async fn` via `async-trait` for I/O-shaped SPIs, but has zero runtime (`tokio`) dependency in production |
+| Cross-cutting SDKs | Only `ego-security-sdk` genuinely qualifies (a dependency leaf other layers may depend on directly) |
+| Layer enforcement (documented, not enforced) | `layers.toml` states intended dependency direction for 9 of 16 crates; `scripts/verify-layers.sh` does not exist, so nothing currently checks it in CI |
 | Patch over rewrite | Extend existing modules before creating new ones |
 | Concrete first | Prefer concrete over abstraction; extract only when a 2nd use case emerges — "abstractions require evidence" |
 | Avoid duplication | "Rule of Two" — don't generalize from a single example |
@@ -1264,10 +1264,9 @@ Note: `crates/service-sdk/src/testing.rs` and `crates/service-sdk/src/reference.
 
 | File | Contents |
 |------|----------|
-| `ARCHITECTURE.md` | Runtime architecture — **stale in places**: its Crate Layout section predates most of the workspace, and its Implementation Roadmap table stops at CORE-011 |
-| `docs/architecture.md` | Engineering conventions — the more current crate-boundary reference |
+| `ARCHITECTURE.md` | Unified runtime + engineering architecture reference (root) — `docs/architecture.md` no longer exists, its content was merged in here |
 | `layers.toml` | Documented-but-unenforced layer intent (see [Architecture Map](#-architecture-map)) |
-| `AGENTS.md` | Skills index — points to `PRD.md` and `docs/architecture.md` as canonical sources |
+| `AGENTS.md` | Skills index — points to `PRD.md` and `ARCHITECTURE.md` as canonical sources |
 | `CONTRIBUTING.md` | Contribution guidelines |
 | `openspec/specs/` | Living per-domain specs |
 | `openspec/changes/` | Change lifecycle folders (proposal/design/spec/tasks/archive-report) |
@@ -1303,4 +1302,4 @@ cargo fmt --all
 
 ---
 
-> **Next:** Read [`docs/architecture.md`](./docs/architecture.md) and [`openspec/specs/`](./openspec/specs/) for the current, real governance rules — `.speckit/constitution.md` no longer exists.
+> **Next:** Read [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`openspec/specs/`](./openspec/specs/) for the current, real governance rules — `.speckit/constitution.md` no longer exists.
