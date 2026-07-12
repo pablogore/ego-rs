@@ -15,22 +15,69 @@ A hexagonal, actor-oriented, deterministic backend framework for Rust.
 
 | Crate | Layer | Description |
 |-------|-------|-------------|
-| `ego-domain` | Domain | Core contracts: Actor, Command, Event, Query |
-| `ego-application` | Application | Command/Query handlers, ports |
-| `ego-infrastructure` | Infrastructure | Adapters (in-memory, persistence) |
-| `ego-transport` | Transport | HTTP/gRPC endpoint wiring |
-| `runtime-slice` | Runtime (core) | Deterministic execution types |
+| `ego-domain` | Domain | Core contracts: commands, queries, events, actors, persistence — zero dependency on infrastructure/transport/runtime |
+| `ego-application` | Application | Command/query handlers orchestrating domain logic through hexagonal ports |
+| `ego-infrastructure` | Infrastructure | Adapters (in-memory, read-side store) implementing domain ports |
+| `ego-persistence` | Infrastructure | PostgreSQL persistence backend |
+| `ego-transport` | Transport | HTTP mechanism layer (app state, security extractor, error mapper, server bootstrap) — concrete routes live in the application, not here |
+| `ego-runtime` | Runtime | Platform abstraction for executing actors; the `Runtime` trait plus the read-side (CQRS) tag scheduler |
+| `ego-runtime-tokio` | Runtime | Tokio-backed `Runtime` implementation (`TokioRuntime`, `TokioRuntimeBuilder`) |
+| `ego-event-adapter` | Runtime | Converts between protobuf events, CloudEvents, and EventStore format |
+| `persistent-entity` | Runtime | Event-sourced entity runtime and SDK (Command/Event/State, `EntityRuntimeBuilder`) |
+| `ego-scheduler` | Runtime | Actor mailbox scheduling and event bus (dispatch, backpressure, gap detection) |
+| `ego-service-sdk` | Service SDK | `RuntimeBuilder`/`Runtime`, service registry, DI, interceptors — the public surface most applications build on |
+| `ego-service-sdk-macros` | Service SDK | Proc-macros: `#[service]`, `#[operation]`, `#[authorize]`, `#[tenant_scoped]` |
+| `ego-security-sdk` | Security | Transport- and provider-agnostic security primitives (`SecurityContext`, `AuthenticationProvider`, `AuthorizationProvider`) |
+| `security-jwt` | Security | JWT authentication providers (HS256/RS256/ES256) |
+| `security-apikey` | Security | API key authentication provider |
+| `ego-testkit` | Testing | Reusable test fixtures for building on ego-rs services |
 
 ## Quick Start
 
-```rust
-use ego_domain::actor::Actor;
+Define a service contract with the real macros, register it, resolve it, invoke it — no hidden state, no manual proxy wiring:
 
-struct MyActor;
-impl Actor for MyActor {
-    type Message = String;
+```rust
+use std::sync::Arc;
+use ego_service_sdk::context::ServiceContext;
+use ego_service_sdk::error::ServiceError;
+use ego_service_sdk::runtime::RuntimeBuilder;
+use ego_service_sdk_macros::{operation, service};
+
+#[service(version = "1.0.0")]
+pub trait HelloService {
+    #[operation]
+    async fn greet(&self, ctx: ServiceContext, name: String) -> Result<String, ServiceError>;
+}
+
+pub struct HelloServiceImpl;
+
+#[async_trait::async_trait]
+impl HelloService for HelloServiceImpl {
+    async fn greet(&self, _ctx: ServiceContext, name: String) -> Result<String, ServiceError> {
+        Ok(format!("hello, {name}"))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let rt = RuntimeBuilder::new()
+        .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)
+        .expect("registration succeeds")
+        .build();
+
+    let hello = rt.resolve::<HelloServiceTag>().expect("registered tag resolves");
+    let out = hello.greet(ServiceContext::new(), "world".into()).await.unwrap();
+    println!("{out}"); // hello, world
 }
 ```
+
+See `crates/service-sdk/examples/hello_service.rs` for the full runnable version.
+
+## Reference Service
+
+[`examples/reference-app`](./examples/reference-app) is the production reference service (CORE-018) — a dogfooding milestone that builds a real capability (tenant-scoped user registration) using only ego-rs's public APIs: Runtime/Service SDK, config, logging, JWT security, tenant enforcement, the CQRS read-side engine, and TestKit, wired together end-to-end behind a real HTTP server with Swagger docs. See [its README](./examples/reference-app/README.md) to run it.
+
+## Documentation
 
 See [COOKBOOK.md](./COOKBOOK.md) for usage recipes and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
