@@ -90,7 +90,7 @@ impl Injectable for ConfiguredGreeter {
 
 impl ConfiguredGreeter {
     fn greet(&self, name: &str) -> String {
-        format!("{}: hello {name} (retry limit {})", (*self.adapter).0, *self.limit)
+        format!("{}: hello {name} (retry limit {})", self.adapter.0, *self.limit)
     }
 }
 
@@ -235,9 +235,16 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
         .resolve::<ProtectedGreeterTag>()
         .expect("registered tenant-scoped tag resolves");
     let result = protected.greet(ServiceContext::new()).await;
-    assert!(
-        result.is_err(),
-        "tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant — \
-         resolution introduces no alternate, relaxed code path"
-    );
+    match result {
+        Err(e) => assert_eq!(
+            e.message(),
+            SecurityError::MissingContext.to_string(),
+            "tenant-scoped op resolved via `resolve` must fail closed with the same \
+             SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports — \
+             resolution introduces no alternate, relaxed code path"
+        ),
+        Ok(_) => panic!(
+            "tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant"
+        ),
+    }
 }

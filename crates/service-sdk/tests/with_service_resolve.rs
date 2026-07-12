@@ -165,8 +165,13 @@ async fn tenant_scoped_operation_resolved_via_resolve_still_fails_closed() {
     // introduces no alternate, relaxed code path.
     let result = proxy.greet(ServiceContext::new()).await;
 
-    assert!(
-        result.is_err(),
-        "tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant"
-    );
+    match result {
+        Err(e) => assert_eq!(
+            e.message(),
+            SecurityError::MissingContext.to_string(),
+            "tenant-scoped op resolved via `resolve` must fail closed with the same \
+             SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports"
+        ),
+        Ok(_) => panic!("tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant"),
+    }
 }
