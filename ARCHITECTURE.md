@@ -139,7 +139,7 @@ flowchart TB
     end
 
     PE -->|implements| REF
-    ER -->|entity_ref() lookup-or-spawn| REG
+    ER -->|entity_ref lookup-or-spawn| REG
     REG -->|spawns| EA
     EA -->|writes| MB
     MB -->|lifecycle state| LS
@@ -149,7 +149,7 @@ flowchart TB
     PF --> EP
     EA -->|concurrency slot| SCH
     ERB -.->|builds| ER
-    ER -->|entity_ref()| REF
+    ER -->|entity_ref| REF
 
     style Application fill:#e1f5fe,stroke:#01579b
     style Runtime fill:#f3e5f5,stroke:#7b1fa2
