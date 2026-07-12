@@ -2,7 +2,7 @@
 
 **Archived**: 2026-07-11  
 **Change**: Service SDK Developer Ergonomics (CORE-025)  
-**Status**: COMPLETE — All 22 tasks delivered, 946 tests passing, verify-report PASS WITH WARNINGS (0 CRITICAL, 2 acceptable out-of-scope warnings)
+**Status**: COMPLETE — All 22 tasks delivered, 946 tests passing, verify-report PASS WITH WARNINGS (0 CRITICAL; 1 accepted structural scenario, plus pre-existing clippy/doc debt unrelated to this change — see Warnings below)
 
 ---
 
@@ -36,9 +36,10 @@ CORE-025 successfully completed the wiring of existing-but-dormant `ServiceRegis
 - 15/16 scenarios fully compliant (93.75%)
 - 1/16 scenario PARTIAL — "Registration and resolution can never disagree on version" accepted as a structural guarantee (neither `with_service` nor `resolve` accepts a version param), not a dedicated runtime test
 
-**Warnings (both explicitly accepted, out-of-scope):**
-1. Pre-existing `clippy::collapsible_match` lint in `crates/service-sdk-macros/src/lib.rs:677` — unrelated debt left untouched per CORE-021 closure convention (no inline pre-existing debt fixes)
-2. Version-agreement scenario — accepted as API-shape guarantee, no dedicated test needed
+**Warnings (all explicitly accepted, out-of-scope):**
+1. Version-agreement scenario — "Registration and resolution can never disagree on version" accepted as an API-shape guarantee, no dedicated test needed.
+2. `cargo clippy -p ego-service-sdk --all-targets` (plain): 4 pre-existing warnings, 0 new — `clippy::collapsible_match` in `crates/service-sdk-macros/src/lib.rs:677` (CORE-012A, unrelated), `clippy::derivable_impls` in `config_provider.rs:46` (unrelated), `clippy::too_many_arguments` in `runtime_builder.rs:234` (CORE-012A's `new_with_logger`, unrelated), `clippy::bool_assert_comparison` in `tenant_enforcement_contract.rs:157` (unrelated test file). Left untouched per CORE-021 closure convention (no inline pre-existing debt fixes).
+3. `cargo doc --workspace --no-deps`: 1 pre-existing warning — unresolved intra-doc link in `runtime/builder.rs:32` (predates CORE-025 by 2 days, commit `3c0c057`), unrelated.
 
 ---
 

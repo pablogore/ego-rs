@@ -100,13 +100,18 @@ impl ConfiguredGreeter {
 
 /// Domain error with `From<SecurityError>` — required for `#[tenant_scoped]`
 /// codegen's fallible `enforce_tenant(..)?` call site (mirrors
-/// `with_service_resolve.rs::TenantHelloError`).
+/// `with_service_resolve.rs::TenantHelloError`). Preserves the originating
+/// `SecurityError` variant (not just its `Display` text) so tests can
+/// assert on the actual cause, not a string a different error could
+/// coincidentally also produce.
 #[derive(Debug)]
-pub struct TenantGreeterError(String);
+pub enum TenantGreeterError {
+    Security(SecurityError),
+}
 
 impl From<SecurityError> for TenantGreeterError {
     fn from(e: SecurityError) -> Self {
-        TenantGreeterError(e.to_string())
+        Self::Security(e)
     }
 }
 
@@ -118,7 +123,9 @@ impl ServiceErrorTrait for TenantGreeterError {
         ErrorCategory::Business
     }
     fn message(&self) -> String {
-        self.0.clone()
+        match self {
+            Self::Security(e) => e.to_string(),
+        }
     }
 }
 
@@ -235,16 +242,10 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
         .resolve::<ProtectedGreeterTag>()
         .expect("registered tenant-scoped tag resolves");
     let result = protected.greet(ServiceContext::new()).await;
-    match result {
-        Err(e) => assert_eq!(
-            e.message(),
-            SecurityError::MissingContext.to_string(),
-            "tenant-scoped op resolved via `resolve` must fail closed with the same \
-             SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports — \
-             resolution introduces no alternate, relaxed code path"
-        ),
-        Ok(_) => panic!(
-            "tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant"
-        ),
-    }
+    assert!(
+        matches!(result, Err(TenantGreeterError::Security(SecurityError::MissingContext))),
+        "tenant-scoped op resolved via `resolve` must fail closed with the same \
+         SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports — \
+         resolution introduces no alternate, relaxed code path; got {result:?}"
+    );
 }

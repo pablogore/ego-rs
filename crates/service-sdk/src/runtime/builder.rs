@@ -38,6 +38,12 @@ type ValidatorEntry = (&'static str, fn(&RuntimeInner) -> Result<(), RuntimeErro
 /// the enforcement-side [`TenantEnforcementMode`] configured here via
 /// [`RuntimeBuilder::with_tenant_enforcement_mode`]. Neither this builder nor
 /// its docs reuse the bare phrase "tenant mode" for the enforcement concept.
+///
+/// `Clone` (every field is: `ServiceRegistry` derives it; the rest are
+/// `Arc`/`Copy`/`Vec<Copy>`) — added so a caller can snapshot a builder
+/// before a fallible operation (e.g. `with_service`, which consumes `self`
+/// and drops it on `Err`) and still observe the pre-call state afterward.
+#[derive(Clone)]
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
     interceptor_chain: Arc<InterceptorChain>,
