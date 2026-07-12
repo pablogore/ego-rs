@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use ego_domain::Observability;
@@ -288,6 +289,68 @@ impl Runtime {
             .expect("teardown mutex poisoned")
             .drain()
     }
+
+    /// Registers an async teardown hook (Finding 6), run by
+    /// [`Runtime::shutdown_async`] before the existing sync `shutdown()`
+    /// drains the logger/security teardown stack. Hooks run in registration
+    /// order — e.g. a read-side scheduler's stop-and-drain, registered
+    /// first, always completes before the next hook or the sync stack runs.
+    ///
+    /// The hook's `Result` is not decorative (post-review Finding F-02): a
+    /// hook that fails to drain (e.g. its spawned task panicked) must be
+    /// distinguishable from one that drained cleanly, so callers of
+    /// [`Runtime::shutdown_async`] can tell "shutdown finished" apart from
+    /// "shutdown finished, but something didn't drain."
+    ///
+    /// Purely additive: a `Runtime` that never calls this has an empty hook
+    /// list, and `shutdown()` behaves exactly as before this method existed.
+    /// Registered post-build (via `&self`, not on `RuntimeBuilder`) because
+    /// the real motivating case — a spawned read-side scheduler's `stop()`
+    /// future — is itself only constructible after the `Runtime` is already
+    /// built.
+    pub fn register_async_teardown<F>(&self, hook: F)
+    where
+        F: Future<Output = Result<(), RuntimeInfraError>> + Send + 'static,
+    {
+        self.inner
+            .async_teardown
+            .lock()
+            .expect("async teardown mutex poisoned")
+            .push(Box::pin(hook));
+    }
+
+    /// Additive async counterpart to [`Runtime::shutdown`] (Finding 6).
+    ///
+    /// Awaits every hook registered via [`Runtime::register_async_teardown`]
+    /// in registration order — ALL of them, even after one fails, so one
+    /// broken subsystem's teardown never prevents another's from running —
+    /// then calls the existing sync `shutdown()` regardless, to avoid
+    /// leaking logger/security resources even when a hook failed. Returns
+    /// the FIRST hook error if any hook failed, else whatever `shutdown()`
+    /// returns. Existing callers of the sync `shutdown()` are completely
+    /// unaffected — this method only adds a new opt-in entry point.
+    pub async fn shutdown_async(&self) -> Result<(), RuntimeInfraError> {
+        let hooks = std::mem::take(
+            &mut *self
+                .inner
+                .async_teardown
+                .lock()
+                .expect("async teardown mutex poisoned"),
+        );
+        let mut first_hook_err = None;
+        for hook in hooks {
+            if let Err(e) = hook.await {
+                if first_hook_err.is_none() {
+                    first_hook_err = Some(e);
+                }
+            }
+        }
+        let sync_result = self.shutdown();
+        match first_hook_err {
+            Some(e) => Err(e),
+            None => sync_result,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +370,7 @@ mod tests {
     use kitlogger::KITLogger;
 
     use super::{Runtime, RuntimeBuilder};
-    use crate::runtime::RuntimeError;
+    use crate::runtime::{RuntimeError, RuntimeInfraError};
 
     struct StubAuthn;
 
@@ -718,6 +781,105 @@ mod tests {
         let rt = RuntimeBuilder::new().build();
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    // -- Finding 6 (post-CORE-018 review): async teardown hooks -------------
+    //
+    // Additive: registers async hooks (e.g. a read-side scheduler's stop())
+    // to run, in order, before the existing sync teardown stack drains —
+    // without making the existing sync `shutdown()` async.
+
+    use kitlogger_log_domain::Severity;
+
+    #[tokio::test]
+    async fn shutdown_async_runs_hooks_in_registration_order_before_sync_stack_drains() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order_a = order.clone();
+        let order_b = order.clone();
+
+        rt.register_async_teardown(async move {
+            order_a.lock().unwrap().push("first");
+            Ok(())
+        });
+        rt.register_async_teardown(async move {
+            order_b.lock().unwrap().push("second");
+            Ok(())
+        });
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(*order.lock().unwrap(), vec!["first", "second"]);
+        // The sync (logger) teardown stack was also drained by shutdown_async.
+        assert!(logger.log(Severity::Info, "after-shutdown").is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_with_no_registered_hooks_still_drains_sync_stack() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+        assert!(logger.log(Severity::Info, "after-shutdown").is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_is_idempotent() {
+        let rt = RuntimeBuilder::new().build();
+        assert!(rt.shutdown_async().await.is_ok());
+        assert!(rt.shutdown_async().await.is_ok());
+    }
+
+    /// Post-review Finding F-02: a hook that fails to drain must make
+    /// `shutdown_async` report failure, not silently succeed as if nothing
+    /// went wrong — while still draining the sync (logger) stack, so a
+    /// failed subsystem never leaks unrelated infrastructure.
+    #[tokio::test]
+    async fn shutdown_async_surfaces_a_failing_hook_but_still_drains_the_sync_stack() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        rt.register_async_teardown(async move {
+            Err(RuntimeInfraError::Teardown {
+                reason: "simulated read-side scheduler task failure".to_string(),
+            })
+        });
+
+        let result = rt.shutdown_async().await;
+        assert!(result.is_err(), "a failing hook must surface as an Err, not a silent Ok(())");
+
+        // The sync stack drained regardless of the hook's failure — no
+        // resource leak just because one subsystem's teardown failed.
+        assert!(logger.log(Severity::Info, "after-shutdown").is_err());
+    }
+
+    /// Only the FIRST hook's error is surfaced, but every hook still runs —
+    /// a second, later hook's own teardown must not be skipped just because
+    /// an earlier one failed.
+    #[tokio::test]
+    async fn shutdown_async_runs_every_hook_even_after_an_earlier_one_fails() {
+        let rt = RuntimeBuilder::new().build();
+        let second_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_ran_for_closure = second_ran.clone();
+
+        rt.register_async_teardown(async move {
+            Err(RuntimeInfraError::Teardown {
+                reason: "first hook fails".to_string(),
+            })
+        });
+        rt.register_async_teardown(async move {
+            second_ran_for_closure.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+
+        let result = rt.shutdown_async().await;
+        assert!(result.is_err(), "the first hook's error must still surface");
+        assert!(
+            second_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the second hook must still have run despite the first hook's failure"
+        );
     }
 
     #[test]

@@ -6,13 +6,34 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+axum = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 kit-config = { git = "https://github.com/pablogore/kit-config.git", branch = "master" }
 serde_json = "1"
 ego-domain = { path = "../../crates/domain" }
+ego-infrastructure = { path = "../../crates/infrastructure" }
+ego-runtime = { path = "../../crates/runtime" }
 persistent-entity = { path = "../../crates/persistent-entity" }
 security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
 ego-scheduler = { path = "../../crates/ego-scheduler" }
 ego-persistence = { path = "../../crates/persistence" }
 ego-service-sdk = { path = "../../crates/service-sdk" }
+ego-service-sdk-macros = { path = "../../crates/service-sdk-macros" }
 ego-transport = { path = "../../crates/transport" }
+kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+# Needed by src/bin/server.rs (a real bin target, not a test/example — dev-deps
+# aren't available to it): #[tokio::main] + TcpListener + signal::ctrl_c.
+tokio = { version = "1", features = ["full"] }
+utoipa = { version = "5.5.0", features = ["axum_extras"] }
+# Pinned to the 8.x line: utoipa-swagger-ui's "axum" feature switched its
+# transitive axum dependency to 0.8 starting at 9.0.0, which conflicts with
+# this crate's axum = "0.7". 8.1.0 is the newest release still on axum 0.7.
+utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+jsonwebtoken = "9"
+ego-testkit = { path = "../../crates/testkit" }

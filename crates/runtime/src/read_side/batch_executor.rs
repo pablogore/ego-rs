@@ -51,8 +51,8 @@ where
         // Acquire backpressure permit
         let _permit = self.backpressure.acquire().await?;
 
-        // Execute the session
-        session.execute(None).await?;
+        // Execute the session (reads the persisted offset internally).
+        session.execute().await?;
 
         Ok(())
     }

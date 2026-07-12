@@ -1,0 +1,244 @@
+//! `RegisterUser` — the guarded, dual-write service operation (design.md
+//! AD-4, AD-5, AD-7).
+//!
+//! Registered/resolved via the CORE-025 canonical trait-proxy path
+//! (`RuntimeBuilder::with_service` / `Runtime::resolve`), not `Injectable`
+//! (AD-7: the Injectable-XOR-resolvable-proxy constraint).
+//!
+//! Orchestrates two independent `EntityRuntime`s (AD-4 — one per aggregate,
+//! no shared event enum): ensures the `TenantOrganization` first (idempotent),
+//! then registers the `User` (AD-5's org-first non-atomic dual write). On a
+//! `User`-write failure after the `TenantOrganization` write already
+//! succeeded, this returns `Err` and leaves the org persisted — no
+//! compensating delete, no saga (documented, not hidden).
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ego_domain::{DomainEvent, Observability, SemanticEvent};
+use ego_security_sdk::SecurityError;
+use ego_service_sdk::context::ServiceContext;
+use ego_service_sdk::error::category::ErrorCategory;
+use ego_service_sdk::error::ServiceErrorTrait;
+#[allow(unused_imports)]
+use ego_service_sdk_macros::{authorize, operation, service, tenant_scoped};
+use persistent_entity::command_context::CommandContext;
+use persistent_entity::entity_ref::EntityRef;
+use persistent_entity::error::EntityError;
+use persistent_entity::persistent_entity::CommandResult;
+use persistent_entity::runtime::EntityRuntime;
+use serde::{Deserialize, Serialize};
+
+use crate::domain::tenant_org::{OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity};
+use crate::domain::user::{UserCommand, UserEntity, UserRegistered, UserState};
+use crate::read_side::ReadSideSink;
+
+/// Input to `RegisterUser::register`. Also the OpenAPI request body schema
+/// for `POST /register` (`ports::http`) — one struct serving both roles;
+/// see `ports::http`'s module doc for why this isn't split into a separate
+/// DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct RegisterInput {
+    pub user_id: String,
+    pub email: String,
+    pub tenant_id: String,
+    pub org_name: String,
+}
+
+/// Output of a successful registration. Also the OpenAPI response body
+/// schema for `POST /register`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct RegisterOutput {
+    pub user_id: String,
+    pub tenant_id: String,
+}
+
+/// `RegisterUser`'s error type — required by `#[authorize]`/`#[tenant_scoped]`
+/// to carry `From<SecurityError>` for guard denials, plus the dual write's
+/// own `EntityError` outcomes (AD-5's non-atomic partial failure).
+#[derive(Debug)]
+pub enum RegisterUserError {
+    /// A guard (`#[authorize]`/`#[tenant_scoped]`) denied the call. Carries
+    /// the original `SecurityError` (not a stringified copy) so transport
+    /// can map it to the correct status code (401/403/500) via
+    /// `ego_transport`'s existing granular `From<SecurityError> for
+    /// TransportError`, instead of collapsing every denial into 403.
+    Security(SecurityError),
+    /// A `TenantOrganization` or `User` entity write failed.
+    EntityWrite(String),
+}
+
+impl std::fmt::Display for RegisterUserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterUserError::Security(e) => write!(f, "security error: {e}"),
+            RegisterUserError::EntityWrite(m) => write!(f, "entity write error: {m}"),
+        }
+    }
+}
+
+impl From<SecurityError> for RegisterUserError {
+    fn from(e: SecurityError) -> Self {
+        RegisterUserError::Security(e)
+    }
+}
+
+impl From<EntityError> for RegisterUserError {
+    fn from(e: EntityError) -> Self {
+        RegisterUserError::EntityWrite(e.to_string())
+    }
+}
+
+impl ServiceErrorTrait for RegisterUserError {
+    fn code(&self) -> &str {
+        match self {
+            RegisterUserError::Security(_) => "REGISTER_USER_SECURITY_ERROR",
+            RegisterUserError::EntityWrite(_) => "REGISTER_USER_ENTITY_WRITE_ERROR",
+        }
+    }
+
+    fn category(&self) -> ErrorCategory {
+        match self {
+            RegisterUserError::Security(_) => ErrorCategory::Authorization,
+            RegisterUserError::EntityWrite(_) => ErrorCategory::System,
+        }
+    }
+
+    fn message(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// Registers a `User` within a `TenantOrganization` (design.md's reference
+/// journey). Guarded by both `#[authorize]` and `#[tenant_scoped]` — either
+/// denial prevents any entity write (reference-service spec: "Unauthorized
+/// principal denied", "Cross-tenant request denied").
+#[service(version = "1.0.0")]
+pub trait RegisterUser {
+    #[operation]
+    #[authorize(context = ctx, permission = "user:register")]
+    #[tenant_scoped]
+    async fn register(&self, ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError>;
+}
+
+/// The concrete implementation (AD-4: two independent `EntityRuntime`s).
+pub struct RegisterUserImpl {
+    org_runtime: Arc<EntityRuntime<OrganizationEnsured>>,
+    user_runtime: Arc<EntityRuntime<UserRegistered>>,
+    observability: Option<Arc<dyn Observability>>,
+    /// Bridges real emitted domain events into the `UsersByTenant` read-side
+    /// projection (new capability, layered on CORE-005's engine — see
+    /// `crate::read_side`). `None` by default so every existing
+    /// `RegisterUserImpl::new(...)` call site keeps compiling unchanged;
+    /// `build_runtime` wires a real sink via `with_read_side_sink`.
+    read_side_sink: Option<ReadSideSink>,
+}
+
+impl RegisterUserImpl {
+    pub fn new(
+        org_runtime: Arc<EntityRuntime<OrganizationEnsured>>,
+        user_runtime: Arc<EntityRuntime<UserRegistered>>,
+        observability: Option<Arc<dyn Observability>>,
+    ) -> Self {
+        Self {
+            org_runtime,
+            user_runtime,
+            observability,
+            read_side_sink: None,
+        }
+    }
+
+    /// Wires a `ReadSideSink` so successful writes also feed the
+    /// `UsersByTenant` read-side projection.
+    pub fn with_read_side_sink(mut self, sink: ReadSideSink) -> Self {
+        self.read_side_sink = Some(sink);
+        self
+    }
+
+    /// Records a business-outcome event (CORE-012A). Guard denials are
+    /// already recorded for free by `RuntimeBuilder::with_observability`'s
+    /// macro-guard wiring — only the two outcomes reached from inside this
+    /// method's own body (success, partial-failure) need an explicit call.
+    fn record(&self, event_name: &str, actor_id: &str, lifecycle_state: &str) {
+        if let Some(obs) = &self.observability {
+            if let Ok(event) =
+                SemanticEvent::without_metadata(event_name, actor_id, actor_id, lifecycle_state, Utc::now().to_rfc3339())
+            {
+                obs.trace(event);
+            }
+        }
+    }
+
+    /// Feeds real emitted domain events into the read-side sink (a no-op
+    /// when none is wired). Only called for `CommandResult::Events` — the
+    /// `NoEvents` (idempotent no-op) case has nothing new to project.
+    fn publish_read_side<E: DomainEvent>(&self, tenant_id: &str, events: &[E]) {
+        if let Some(sink) = &self.read_side_sink {
+            for event in events {
+                sink.record(tenant_id, event.aggregate_id(), event.event_type(), event.payload().clone(), *event.occurred_at());
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl RegisterUser for RegisterUserImpl {
+    async fn register(&self, _ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError> {
+        // AD-5: ensure the org FIRST (idempotent) — a User must never
+        // reference a missing org.
+        let org_ref = self.org_runtime.entity_ref::<TenantOrgCommand, TenantOrgState>(
+            "tenant_organization",
+            input.tenant_id.clone(),
+            Arc::new(TenantOrganizationEntity::new()),
+        )?;
+        let org_result: CommandResult<OrganizationEnsured, TenantOrgState> = org_ref
+            .send_command(
+                TenantOrgCommand::Ensure {
+                    org_id: input.tenant_id.clone(),
+                    name: input.org_name.clone(),
+                },
+                CommandContext::new("tenant_organization".to_string()),
+            )
+            .await?;
+        if let CommandResult::Events { events, .. } = &org_result {
+            self.publish_read_side(&input.tenant_id, events);
+        }
+
+        // Then register the User. On failure here, the org write above is
+        // NOT rolled back (AD-5: no saga, no compensation — the org is left
+        // as a benign, idempotently-reusable orphan).
+        let user_ref = self.user_runtime.entity_ref::<UserCommand, UserState>(
+            "user",
+            input.user_id.clone(),
+            Arc::new(UserEntity::new()),
+        )?;
+        let user_result: Result<CommandResult<UserRegistered, UserState>, EntityError> = user_ref
+            .send_command(
+                UserCommand::Register {
+                    user_id: input.user_id.clone(),
+                    email: input.email.clone(),
+                    tenant_id: input.tenant_id.clone(),
+                },
+                CommandContext::new("user".to_string()),
+            )
+            .await;
+
+        match user_result {
+            Ok(result) => {
+                if let CommandResult::Events { events, .. } = &result {
+                    self.publish_read_side(&input.tenant_id, events);
+                }
+                self.record("register_user.success", &input.user_id, "completed");
+                Ok(RegisterOutput {
+                    user_id: input.user_id,
+                    tenant_id: input.tenant_id,
+                })
+            }
+            Err(e) => {
+                self.record("register_user.partial_failure", &input.user_id, "user_write_failed");
+                Err(RegisterUserError::from(e))
+            }
+        }
+    }
+}
