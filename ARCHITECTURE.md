@@ -212,21 +212,20 @@ sequenceDiagram
 
 ### Five-State Lifecycle Machine
 
-```
-                ┌──────────────────────────────┐
-                │                              ▼
-          ┌──────────┐    ┌───────────┐    ┌───────┐    ┌───────────┐
-          │PASSIVATED│◄───│PASSIVATING│◄───│ ACTIVE│◄───│ RECOVERING│
-          └────┬─────┘    └───────────┘    └───────┘    └─────┬─────┘
-               │                                               │
-               └───────────────────────────────────────────────┘
-                          (command reactivates)
+```mermaid
+stateDiagram-v2
+    [*] --> Recovering: command arrives
 
-          ┌───────┐
-          │ FAILED│  ← from any state (irrecoverable error)
-          └───┬───┘
-              │
-              └── on-demand recovery or restart → RECOVERING
+    Recovering --> Active: recovery complete
+    Active --> Passivating: idle timeout / passivation
+    Passivating --> Passivated: final snapshot stored
+    Passivated --> Recovering: command reactivates
+
+    Recovering --> Failed: irrecoverable error
+    Active --> Failed: irrecoverable error
+    Passivating --> Failed: irrecoverable error
+    Passivated --> Failed: irrecoverable error
+    Failed --> Recovering: on-demand recovery or restart
 ```
 
 | State | In Registry (map entry)? | Counted by `active_count()`? | Commands |
