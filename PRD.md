@@ -193,7 +193,6 @@ A version of ego-rs is ready for broader adoption when:
 
 ## 11. References
 
-- [`docs/architecture.md`](docs/architecture.md) — engineering architecture, crate boundaries, design preferences
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — engineering & runtime architecture, crate boundaries, design preferences
 - [`docs/constitution-mapping.md`](docs/constitution-mapping.md) — constitutional rules and enforcement mechanisms
 - [`openspec/specs/`](openspec/specs/) — canonical specifications per domain
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — runtime architecture overview

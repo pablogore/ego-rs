@@ -7,7 +7,7 @@ Naming convention: `ego-rs-*` skills are repo-specific workflow skills. Unprefix
 ## Project Context
 
 - **Product**: [`PRD.md`](PRD.md) — vision, principles, architecture, roadmap
-- **Engineering architecture**: [`docs/architecture.md`](docs/architecture.md)
+- **Engineering architecture**: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - **Canonical specs**: [`openspec/specs/`](openspec/specs/)
 
 ## How to Use

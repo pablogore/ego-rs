@@ -884,13 +884,13 @@ picking the right accessor per call site.
 
 ### Requirement: Architecture Documentation Describes the Explicit-Propagation Model Only
 
-`docs/architecture.md` MUST NOT describe `ServiceContext` as TaskLocal-scoped or as
+`ARCHITECTURE.md` MUST NOT describe `ServiceContext` as TaskLocal-scoped or as
 propagating via ambient/task-local state.
 
 #### Scenario: Architecture doc contains no ambient-propagation claim
 
-- GIVEN `docs/architecture.md` after this change
-- WHEN searched with `rg "TaskLocal|ambient" docs/architecture.md`
+- GIVEN `ARCHITECTURE.md` after this change
+- WHEN searched with `rg "TaskLocal|ambient" ARCHITECTURE.md`
 - THEN zero matches describe `ServiceContext` propagation
 
 ---
