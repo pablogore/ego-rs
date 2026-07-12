@@ -50,10 +50,12 @@ pub(crate) fn tenant_tag(tenant_id: &str) -> EventTag {
 }
 
 /// Bookkeeping-only scope passed to `OffsetStore`/`DedupStore`. CORE-005
-/// keys those per `(projection_id, tag, tenant)`, but this projection fans
-/// every tenant's events into one tag stream and separates tenants inside
-/// the handler instead (via `EventStreamElement::tenant_id`) — a single
-/// constant scope is correct for offset/dedup bookkeeping here.
+/// keys those per `(projection_id, tag, tenant)`, and tenants are already
+/// isolated at the store level via `tenant_tag` (one tag stream per
+/// tenant, not a single shared stream) — so this constant is just the
+/// third component of that composite key, not a claim that tenants share
+/// bookkeeping state. A fixed value is correct here specifically because
+/// `tag` already varies per tenant; this string never needs to.
 const BOOKKEEPING_SCOPE: &str = "all-tenants";
 
 /// Poll interval for the background scheduler loop. `TagSchedulerImpl`
@@ -160,8 +162,16 @@ pub struct ReadSideRuntime {
 }
 
 impl ReadSideRuntime {
-    pub async fn stop(self) {
+    /// Post-review Finding F-02: the spawned task's `JoinError` (panic or
+    /// abort) is no longer discarded — a scheduler that failed to drain
+    /// must be distinguishable from one that drained cleanly, so
+    /// `Runtime::shutdown_async` (which awaits this as a registered async
+    /// teardown hook) can actually report the failure instead of printing
+    /// "shutdown complete" regardless.
+    pub async fn stop(self) -> Result<(), ego_service_sdk::RuntimeInfraError> {
         let _ = self.stop_tx.send(true);
-        let _ = self.task.await;
+        self.task.await.map_err(|join_err| ego_service_sdk::RuntimeInfraError::Teardown {
+            reason: format!("read-side scheduler task failed to drain: {join_err}"),
+        })
     }
 }

@@ -22,6 +22,12 @@
 //! Ordering still matters (now enforced, not hand-sequenced): the read-side
 //! hook must finish before the sync stack drains, or the logger could
 //! flush/close while the scheduler is still mid-batch.
+//!
+//! Post-review Finding F-02: `ReadSideRuntime::stop()` now returns
+//! `Result<(), RuntimeInfraError>` instead of `()` — if the scheduler task
+//! panicked or was aborted, `shutdown_async()`'s `?` below propagates that
+//! failure and "shutdown complete" is never printed, instead of silently
+//! reporting success for a shutdown that didn't actually drain.
 
 use std::sync::Arc;
 

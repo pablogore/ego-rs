@@ -202,5 +202,5 @@ async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
     assert_eq!(view["org_name"], "Acme");
     assert_eq!(view["users"][0]["user_id"], "user-1");
 
-    read_side.stop().await;
+    let _ = read_side.stop().await;
 }

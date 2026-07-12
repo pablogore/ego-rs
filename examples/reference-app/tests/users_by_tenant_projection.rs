@@ -65,7 +65,7 @@ async fn projection_populates_from_real_registration_events_not_a_hand_built_rea
     let runtime = handles.spawn();
 
     wait_until(|| !query.view("tenant-a").users.is_empty(), Duration::from_secs(2)).await;
-    runtime.stop().await;
+    let _ = runtime.stop().await;
 
     let view = query.view("tenant-a");
     assert_eq!(view.org_name.as_deref(), Some("Acme"));
@@ -85,7 +85,7 @@ async fn query_returns_only_what_was_registered_for_that_tenant() {
     let runtime = handles.spawn();
 
     wait_until(|| !query.view("tenant-a").users.is_empty() && !query.view("tenant-b").users.is_empty(), Duration::from_secs(2)).await;
-    runtime.stop().await;
+    let _ = runtime.stop().await;
 
     let tenant_a = query.view("tenant-a");
     assert_eq!(tenant_a.org_name.as_deref(), Some("Acme"));
@@ -142,7 +142,7 @@ async fn projection_catches_up_past_the_first_poll_batch() {
     let runtime = handles.spawn();
 
     wait_until(|| query.view("tenant-a").users.len() == 25, Duration::from_secs(5)).await;
-    runtime.stop().await;
+    let _ = runtime.stop().await;
 
     assert_eq!(query.view("tenant-a").users.len(), 25);
 }

@@ -180,7 +180,20 @@ where
 
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {}
-                    _ = stop_signal.changed() => {}
+                    changed = stop_signal.changed() => {
+                        match changed {
+                            // Value changed to `true`: stop now.
+                            Ok(()) if *stop_signal.borrow() => break,
+                            // Value changed to something other than `true`: keep polling.
+                            Ok(()) => {}
+                            // Every `Sender` was dropped — no stop signal can ever
+                            // arrive again. Treat disconnection as an implicit stop
+                            // request; otherwise `changed()` on a closed channel
+                            // resolves immediately forever, turning this into an
+                            // unbounded busy loop that never respects `interval`.
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
         })
@@ -397,5 +410,54 @@ mod tests {
             1,
             "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
         );
+    }
+
+    /// Post-review Finding F-01: dropping every `watch::Sender` without ever
+    /// sending `true` must stop the loop, not spin it unbounded. Before the
+    /// fix, `stop_signal.changed()`'s `Result` was discarded in the
+    /// `select!`, so a closed channel (which makes `changed()` resolve
+    /// immediately with `Err` forever) bypassed `sleep(interval)` on every
+    /// iteration — an unthrottled busy loop that never terminates on its own.
+    #[tokio::test]
+    async fn run_until_stopped_terminates_when_stop_sender_is_dropped_without_sending() {
+        let provider = CountingProvider::default();
+        let provider_for_closure = provider.clone();
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let handle = scheduler.run_until_stopped(
+            move || {
+                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            },
+            Duration::from_millis(5),
+            stop_rx,
+            "proj".to_string(),
+            "all-tenants".to_string(),
+            CountingHandler { handled: handled.clone() },
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+            NoopProgressReporter,
+            |_e| {},
+        );
+
+        // Drop the sender WITHOUT sending `true` — the disconnection itself,
+        // not an explicit stop value, must be what ends the loop.
+        drop(stop_tx);
+
+        tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("run_until_stopped must terminate when the stop channel is dropped, not spin forever")
+            .expect("task joins cleanly");
+
+        // Non-vacuousness guard: if the fix regressed to a busy loop, the
+        // task above would never have returned within the timeout at all —
+        // this assertion only runs on the success path, but keeps the
+        // provider handle alive so a future refactor can't silently drop it
+        // and weaken the test to "did the JoinHandle exist".
+        assert!(provider.calls() >= 1, "the loop must have run at least once before stopping");
     }
 }

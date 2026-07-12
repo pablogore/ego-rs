@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_domain::context::TenantId;
 use ego_domain::{Observability, SemanticEvent};
+use crate::runtime::error::RuntimeInfraError;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
 use ego_security_sdk::error::SecurityError;
@@ -180,6 +181,11 @@ impl std::fmt::Display for SecurityDenialKind {
 /// The `RuntimeBuilder` constructs this struct with registered instances;
 /// `registry` and `interceptor_chain` are read by `Runtime::resolve` and
 /// written by `RuntimeBuilder::with_service` (CORE-025).
+/// A single registered async teardown hook (Finding 6/F-02) — a pinned,
+/// boxed, fallible future. Named to keep `RuntimeInner`'s field declaration
+/// under clippy's `type_complexity` threshold.
+type AsyncTeardownHook = Pin<Box<dyn Future<Output = Result<(), RuntimeInfraError>> + Send>>;
+
 pub struct RuntimeInner {
     pub(crate) registry: ServiceRegistry,
     pub(crate) interceptor_chain: Arc<InterceptorChain>,
@@ -210,8 +216,10 @@ pub struct RuntimeInner {
     /// `Runtime::register_async_teardown`, run in registration order by
     /// `Runtime::shutdown_async` before the sync `teardown` stack above
     /// drains. Always empty for callers who never register a hook — the
-    /// existing sync `shutdown()` path is completely unaffected.
-    pub(super) async_teardown: Mutex<Vec<Pin<Box<dyn Future<Output = ()> + Send>>>>,
+    /// existing sync `shutdown()` path is completely unaffected. Fallible
+    /// (post-review Finding F-02): a hook's failure to drain must be
+    /// distinguishable from a clean drain, not silently treated as success.
+    pub(super) async_teardown: Mutex<Vec<AsyncTeardownHook>>,
 }
 
 impl std::fmt::Debug for RuntimeInner {

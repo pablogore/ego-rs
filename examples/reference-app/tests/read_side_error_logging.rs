@@ -31,7 +31,7 @@ async fn poll_loop_logs_errors_instead_of_silently_swallowing_them() {
 
     // One poll tick (50ms interval) is enough to hit the failure at least once.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    runtime.stop().await;
+    let _ = runtime.stop().await;
 
     let records = capturing.records();
     assert!(
