@@ -115,7 +115,7 @@ No full Application Builder. No CLI. No scaffolding. No HTTP/gRPC/GraphQL transp
 
 ## Compatibility
 
-Existing hand-rolled `{Trait}Ref::new(inner, chain, weak)` construction keeps working — this change is additive, not a replacement, unless design.md decides otherwise with explicit justification. **The canonical path changes; the low-level `::new()` constructor remains supported as an escape hatch for advanced integrations and tests, unless explicitly deprecated in a future change with its own justification.** This is a deliberate, standing commitment, not an oversight to be "cleaned up" later just because a canonical path now exists — a future contributor citing "we have `resolve()` now" is not sufficient grounds on its own to remove `::new()`. Existing `with_adapter`/`with_config`/security/tenant builder knobs unchanged.
+Existing hand-rolled `{Trait}Ref::new(inner, chain, weak)` construction keeps working — this change is additive, not a replacement, unless design.md decides otherwise with explicit justification. **The canonical path changes; the low-level `::new()` constructor remains supported as an escape hatch for advanced integrations and tests, unless explicitly deprecated in a future change with its own justification.** This is a deliberate, standing commitment, not an oversight to be "cleaned up" later just because a canonical path now exists — a future contributor citing "we have `resolve()` now" is not sufficient grounds to remove `::new()`. Existing `with_adapter`/`with_config`/security/tenant builder knobs unchanged.
 
 ## Rollback
 

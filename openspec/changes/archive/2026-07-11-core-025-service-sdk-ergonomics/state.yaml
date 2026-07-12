@@ -1,0 +1,93 @@
+change_id: CORE-025
+title: Service SDK Developer Ergonomics
+status: archived
+archived_at: 2026-07-11
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: complete
+    artifact: explore.md
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: complete
+  verify:
+    status: pass_with_warnings
+    artifact: verify-report.md
+  archive:
+    status: complete
+    artifact: archive-report.md
+
+# Test and verification results (final, at archive time)
+verification:
+  test_status: passed
+  test_count: 946
+  critical_findings: 0
+  warnings: 2
+  suggestions: 0
+  clippy_status: clean (scoped to ego-service-sdk)
+  last_verified_at: 2026-07-11
+  re_verified: true
+  re_verification_note: >
+    First verify pass FAILED on 1 CRITICAL: the "multiple missing dependencies
+    report only the first, in registration order" spec.md scenario had zero
+    covering test. Fixed via sdd-apply (new registration-order test, confirmed
+    non-vacuous by sabotage-and-revert), plus two WARNING-level assertion
+    tightenings (SecurityError variant instead of is_err()-only) and a clippy
+    fix (explicit_auto_deref). Re-verify passed with 2 WARNINGs explicitly
+    accepted as out-of-scope (see release_verification note below).
+
+# Final release verification — accepted on scoped merits
+release_verification:
+  decision: accepted_scoped
+  scoped_checks:
+    cargo_test_workspace: pass (946/946)
+    cargo_build_workspace: pass
+    cargo_clippy_ego_service_sdk_all_targets: pass (no CORE-025-introduced warnings)
+    cargo_doc_workspace_no_deps: pass (no new warnings)
+  accepted_warnings:
+    - "Registration/resolution version-agreement scenario: accepted as a structural
+       API-shape guarantee (neither with_service nor resolve takes a version param),
+       not exercised by a dedicated runtime test."
+    - "Pre-existing clippy::collapsible_match in crates/service-sdk-macros/src/lib.rs:677,
+       predating CORE-025 by ~2 weeks. Left untouched per the CORE-021 closure
+       convention: don't fix unrelated pre-existing debt inline, track it separately."
+  note: >
+    CORE-025 passes every check in its own scope. The two accepted warnings are
+    pre-existing/structural and out of this change's scope, per explicit decision
+    following the same scoped-acceptance pattern established at CORE-021's closure.
+
+# Change scope
+artifacts:
+  files_modified:
+    - crates/service-sdk/src/runtime/builder.rs
+    - crates/service-sdk/src/runtime/runtime_builder.rs
+    - crates/service-sdk/src/di/mod.rs
+    - crates/service-sdk/src/resolvable.rs
+    - crates/service-sdk-macros/src/lib.rs
+    - crates/testkit/src/fixtures.rs
+    - crates/service-sdk/tests/with_service_resolve.rs
+    - crates/service-sdk/tests/service_sdk_ergonomics_acceptance.rs
+    - crates/service-sdk/tests/proxy_codegen.rs
+  files_created:
+    - crates/service-sdk/examples/hello_service.rs
+    - crates/service-sdk/tests/service_sdk_ergonomics_acceptance.rs
+  specs_merged:
+    - openspec/specs/service-sdk/spec.md
+    - openspec/specs/testkit/spec.md
+
+notes: |
+  CORE-025 wired the existing ServiceRegistry/Resolvable/Injectable machinery
+  into the public RuntimeBuilder/Runtime surface: with_service, resolve,
+  with_injectable, try_build. Fully backward-compatible — the hand-rolled
+  {Trait}Ref::new escape hatch is untouched. Verify found and closed 1 CRITICAL
+  gap (untested registration-order guarantee) before archive. Two structural/
+  unrelated WARNINGs accepted per CORE-021's scoped-acceptance precedent.

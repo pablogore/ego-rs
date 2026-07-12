@@ -211,8 +211,9 @@ Depends on Phase 1 (struct-variant error) and Phase 3 (`validate()`/`check_depen
 - File: `crates/service-sdk/src/runtime/builder.rs`.
 - `with_injectable` records `S::validate` as a monomorphic `fn(&RuntimeInner) -> Result<(), RuntimeError>` (e.g. push into a `Vec<(&'static str, fn(&RuntimeInner) -> Result<(), RuntimeError>)>` pairing the fn pointer with `type_name::<S>()`).
 - `try_build()` calls the existing infallible `build()` (line 124, **unchanged**), then runs every recorded validator against `rt.inner()`, returning the **first** failure with `service_name` rewritten to `Some(type_name::<S>())` (F-08's "report every missing dep" is explicitly deferred — first-failure semantics are correct for this slice). `Injectable::build` is never invoked during validation.
-- Satisfies: service-sdk spec "Fail-Fast Dependency Validation at try_build()" requirement, all 3 scenarios.
-- Test-first: write all 3 scenarios (missing adapter caught at `try_build()`; all deps present succeeds identically to `build()`; `build()` itself remains infallible and untouched by `with_injectable` bookkeeping) before implementing.
+- Satisfies: service-sdk spec "Fail-Fast Dependency Validation at try_build()" requirement, all 4 scenarios.
+- Test-first: write all 4 scenarios (missing adapter caught at `try_build()`; all deps present succeeds identically to `build()`; `build()` itself remains infallible and untouched by `with_injectable` bookkeeping; multiple missing dependencies report only the first, in registration order) before implementing.
+- Post-hoc note (added at re-verify): the 4th scenario's test — `try_build_reports_only_the_first_registered_service_when_multiple_are_missing_dependencies` — was added in a remediation pass after the first `sdd-verify` flagged it as untested; it was missing from this task's original scope description below.
 - Depends on: TASK-001, TASK-009, TASK-010.
 
 ### TASK-016: [x] Regression check — CORE-018b's "`RuntimeBuilder::build()` Behavior Is Unchanged" tests

@@ -58,23 +58,40 @@ fn first_registration_for_a_tag_succeeds() {
     assert!(result.is_ok(), "first registration for a fresh tag must succeed");
 }
 
-#[test]
-fn duplicate_registration_is_rejected_not_silently_replaced() {
+#[tokio::test]
+async fn duplicate_registration_is_rejected_and_the_original_remains_resolvable() {
     let first: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
     let second: Arc<dyn HelloService> = Arc::new(OtherHelloServiceImpl);
 
-    // The registry's own `register` (verified at that layer in
-    // `registry.rs::register_rejects_duplicate`) early-returns before
-    // pushing, so a rejected duplicate never overwrites the original entry.
-    let result = RuntimeBuilder::new()
+    let after_first = RuntimeBuilder::new()
         .with_service::<HelloServiceTag>(first)
-        .expect("first registration must succeed")
-        .with_service::<HelloServiceTag>(second);
+        .expect("first registration must succeed");
 
+    // `with_service` consumes `self` and drops it on `Err` — clone before
+    // the risky call so the pre-duplicate-attempt state survives to prove
+    // the spec's second guarantee below, not just the first.
+    let snapshot_before_duplicate = after_first.clone();
+
+    let result = after_first.with_service::<HelloServiceTag>(second);
     assert!(
         matches!(result, Err(RegistryError::DuplicateService { .. })),
         "second registration under the same tag must be rejected, not silently replace the original"
     );
+
+    // The registry's own `register` (verified at that layer in
+    // `registry.rs::register_rejects_duplicate`) early-returns before
+    // pushing, so the rejected duplicate never touched `snapshot_before_duplicate`'s
+    // registry — build it and prove the ORIGINAL registration still resolves
+    // and invokes correctly, not just that the registry was left unmutated in theory.
+    let rt = snapshot_before_duplicate.build();
+    let proxy = rt
+        .resolve::<HelloServiceTag>()
+        .expect("the originally registered instance must remain resolvable after a rejected duplicate");
+    let out = proxy
+        .greet(ServiceContext::new(), "world".to_string())
+        .await
+        .expect("the original instance must still be invokable, not the rejected duplicate");
+    assert_eq!(out, "hello, world", "must be HelloServiceImpl's output, not OtherHelloServiceImpl's \"other\"");
 }
 
 // ---------------------------------------------------------------------------
@@ -108,14 +125,18 @@ fn unregistered_tag_resolves_to_service_not_found_not_a_panic() {
 }
 
 /// Domain error with `From<SecurityError>` — required for `#[tenant_scoped]`
-/// codegen's fallible `enforce_tenant(..)?` call site (mirrors
-/// `tenant_scoped_codegen.rs::TenantTestError`).
+/// codegen's fallible `enforce_tenant(..)?` call site. Preserves the
+/// originating `SecurityError` variant (not just its `Display` text) so
+/// tests can assert on the actual cause, not a string a different error
+/// could coincidentally also produce.
 #[derive(Debug)]
-pub struct TenantHelloError(String);
+pub enum TenantHelloError {
+    Security(SecurityError),
+}
 
 impl From<SecurityError> for TenantHelloError {
     fn from(e: SecurityError) -> Self {
-        TenantHelloError(e.to_string())
+        Self::Security(e)
     }
 }
 
@@ -127,7 +148,9 @@ impl ServiceErrorTrait for TenantHelloError {
         ErrorCategory::Business
     }
     fn message(&self) -> String {
-        self.0.clone()
+        match self {
+            Self::Security(e) => e.to_string(),
+        }
     }
 }
 
@@ -166,7 +189,9 @@ async fn tenant_scoped_operation_resolved_via_resolve_still_fails_closed() {
     let result = proxy.greet(ServiceContext::new()).await;
 
     assert!(
-        result.is_err(),
-        "tenant-scoped op resolved via `resolve` must fail closed without a resolvable tenant"
+        matches!(result, Err(TenantHelloError::Security(SecurityError::MissingContext))),
+        "tenant-scoped op resolved via `resolve` must fail closed with the same \
+         SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports, \
+         got {result:?}"
     );
 }

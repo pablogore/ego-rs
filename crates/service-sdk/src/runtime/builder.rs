@@ -38,6 +38,12 @@ type ValidatorEntry = (&'static str, fn(&RuntimeInner) -> Result<(), RuntimeErro
 /// the enforcement-side [`TenantEnforcementMode`] configured here via
 /// [`RuntimeBuilder::with_tenant_enforcement_mode`]. Neither this builder nor
 /// its docs reuse the bare phrase "tenant mode" for the enforcement concept.
+///
+/// `Clone` (every field is: `ServiceRegistry` derives it; the rest are
+/// `Arc`/`Copy`/`Vec<Copy>`) — added so a caller can snapshot a builder
+/// before a fallible operation (e.g. `with_service`, which consumes `self`
+/// and drops it on `Err`) and still observe the pre-call state afterward.
+#[derive(Clone)]
 pub struct RuntimeBuilder {
     registry: ServiceRegistry,
     interceptor_chain: Arc<InterceptorChain>,
@@ -577,7 +583,7 @@ mod tests {
 
     use std::any::TypeId;
 
-    use crate::di::{AdapterRef, DepKey, Injectable};
+    use crate::di::{AdapterRef, ConfigValue, DepKey, Injectable};
     use crate::runtime::RuntimeInner;
 
     struct NeedsAdapter {
@@ -614,6 +620,72 @@ mod tests {
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
             }
             other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+        }
+    }
+
+    /// A second `Injectable` fixture with a *different* missing-dependency
+    /// kind (config, not adapter) — needed so the "first-of-multiple, in
+    /// registration order" guarantee can be distinguished from "always
+    /// reports whichever kind happens to be checked first."
+    struct NeedsConfig {
+        #[allow(dead_code)]
+        limit: ConfigValue<u32>,
+    }
+
+    impl Injectable for NeedsConfig {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Config(TypeId::of::<u32>(), std::any::type_name::<u32>())]
+        }
+
+        fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(Self { limit: rt.resolve_config::<u32>()? })
+        }
+    }
+
+    /// Spec scenario: "Multiple missing dependencies report only the first,
+    /// in registration order" (Fail-Fast Dependency Validation requirement,
+    /// AD-3). Registers two `Injectable` services, both with a genuinely
+    /// missing dependency, and asserts the reported error names only the
+    /// FIRST-registered one — then flips the registration order and confirms
+    /// the reported service flips too, proving this is driven by
+    /// registration order (the `Vec` + linear scan in `try_build`), not by
+    /// coincidence or dependency kind.
+    #[test]
+    fn try_build_reports_only_the_first_registered_service_when_multiple_are_missing_dependencies() {
+        let err = match RuntimeBuilder::new()
+            .with_injectable::<NeedsAdapter>()
+            .with_injectable::<NeedsConfig>()
+            .try_build()
+        {
+            Err(e) => e,
+            Ok(_) => panic!("try_build must fail when multiple recorded dependencies are missing"),
+        };
+        match err {
+            RuntimeError::DependencyNotFound { type_name, service_name } => {
+                assert_eq!(type_name, std::any::type_name::<StubAdapter>());
+                assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
+            }
+            other => panic!(
+                "expected DependencyNotFound naming the first-registered NeedsAdapter, got {other:?}"
+            ),
+        }
+
+        let err = match RuntimeBuilder::new()
+            .with_injectable::<NeedsConfig>()
+            .with_injectable::<NeedsAdapter>()
+            .try_build()
+        {
+            Err(e) => e,
+            Ok(_) => panic!("try_build must fail when multiple recorded dependencies are missing"),
+        };
+        match err {
+            RuntimeError::DependencyNotFound { type_name, service_name } => {
+                assert_eq!(type_name, std::any::type_name::<u32>());
+                assert_eq!(service_name, Some(std::any::type_name::<NeedsConfig>()));
+            }
+            other => panic!(
+                "expected DependencyNotFound naming the first-registered NeedsConfig, got {other:?}"
+            ),
         }
     }
 
