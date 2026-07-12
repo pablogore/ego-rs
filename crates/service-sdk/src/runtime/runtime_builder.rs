@@ -13,6 +13,8 @@
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use ego_domain::context::TenantId;
@@ -204,6 +206,12 @@ pub struct RuntimeInner {
     /// `Weak<RuntimeInner>`), so `Runtime::shutdown(&self)` needs interior
     /// mutability to drain it.
     pub(super) teardown: Mutex<TeardownStack>,
+    /// Additive (Finding 6): async teardown hooks registered post-build via
+    /// `Runtime::register_async_teardown`, run in registration order by
+    /// `Runtime::shutdown_async` before the sync `teardown` stack above
+    /// drains. Always empty for callers who never register a hook — the
+    /// existing sync `shutdown()` path is completely unaffected.
+    pub(super) async_teardown: Mutex<Vec<Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -250,6 +258,7 @@ impl RuntimeInner {
             resolved,
             logger,
             teardown,
+            async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
             observability,
         }

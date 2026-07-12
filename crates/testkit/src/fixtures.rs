@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ego_domain::Observability;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use ego_security_sdk::context::SecurityContext;
@@ -165,6 +166,17 @@ impl FixtureBuilder {
     /// `ScriptedAuthorizationProvider::allow_all()`).
     pub fn authorization(mut self, authz: Arc<dyn AuthorizationProvider>) -> Self {
         self.authorization = authz;
+        self
+    }
+
+    /// Registers an `Observability` sink (CORE-012A) on the fixture's
+    /// internal `RuntimeBuilder` — a thin pass-through to the identical
+    /// production `RuntimeBuilder::with_observability` (ground-truth
+    /// addition for CORE-018 Phase 8: no fixture-level observability
+    /// wiring existed before this, mirroring `with_service`'s existing
+    /// pass-through style). Default: no observability sink.
+    pub fn with_observability(mut self, obs: Arc<dyn Observability>) -> Self {
+        self.runtime_builder = self.runtime_builder.with_observability(obs);
         self
     }
 

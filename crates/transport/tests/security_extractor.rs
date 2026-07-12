@@ -1,0 +1,98 @@
+//! TASK-007 (RED): integration test for `AuthenticatedContext`'s
+//! `FromRequestParts` impl, wired to a real `Hs256AuthenticationProvider`
+//! (reused from `security-jwt`, not reinvented).
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::extract::FromRequestParts;
+use axum::http::Request;
+use ego_domain::auth::SystemClock;
+use ego_security_sdk::AuthenticationProvider;
+use ego_service_sdk::runtime::RuntimeBuilder;
+use ego_transport::state::AppState;
+use ego_transport::security::AuthenticatedContext;
+use security_jwt::{
+    Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, LocalKeyResolver,
+    VerificationKey,
+};
+
+/// NIST SP 800-107 minimum HMAC secret length is 32 bytes.
+fn secret() -> Vec<u8> {
+    b"integration-test-secret-32-bytes!".to_vec()
+}
+
+fn make_state() -> AppState {
+    let resolver = Arc::new(LocalKeyResolver::new(
+        JwtAlgorithm::Hs256,
+        VerificationKey::Hmac(secret()),
+    ));
+    let provider: Arc<dyn AuthenticationProvider> = Arc::new(Hs256AuthenticationProvider::new(
+        JwtProviderConfig::default(),
+        resolver,
+        Arc::new(SystemClock),
+    ));
+    let rt = Arc::new(RuntimeBuilder::new().build());
+    AppState::new(rt, provider)
+}
+
+fn make_token(sub: &str, tenant_id: Option<&str>) -> String {
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let mut claims = serde_json::json!({ "sub": sub, "exp": exp });
+    if let Some(t) = tenant_id {
+        claims["tenant_id"] = serde_json::json!(t);
+    }
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(&secret()),
+    )
+    .unwrap()
+}
+
+fn parts_with_authorization(value: Option<&str>) -> axum::http::request::Parts {
+    let mut builder = Request::builder().method("POST").uri("/register");
+    if let Some(v) = value {
+        builder = builder.header("authorization", v);
+    }
+    let (parts, ()) = builder.body(()).unwrap().into_parts();
+    parts
+}
+
+#[tokio::test]
+async fn missing_authorization_header_is_rejected_before_handler_runs() {
+    let state = make_state();
+    let mut parts = parts_with_authorization(None);
+    let result = AuthenticatedContext::from_request_parts(&mut parts, &state).await;
+    assert!(result.is_err(), "missing credentials must be rejected");
+}
+
+#[tokio::test]
+async fn malformed_bearer_header_is_rejected() {
+    let state = make_state();
+    let mut parts = parts_with_authorization(Some("Bearer  double-space-token"));
+    let result = AuthenticatedContext::from_request_parts(&mut parts, &state).await;
+    assert!(result.is_err(), "malformed Bearer header must be rejected");
+}
+
+#[tokio::test]
+async fn valid_jwt_produces_security_context_with_matching_claims() {
+    let state = make_state();
+    let token = make_token("user-42", Some("tenant-9"));
+    let header_value = format!("Bearer {token}");
+    let mut parts = parts_with_authorization(Some(&header_value));
+
+    let AuthenticatedContext(ctx) = AuthenticatedContext::from_request_parts(&mut parts, &state)
+        .await
+        .expect("valid token must authenticate");
+
+    assert_eq!(ctx.principal().subject_id.as_str(), "user-42");
+    assert_eq!(
+        ctx.principal().tenant_id.as_ref().map(|t| t.as_str()),
+        Some("tenant-9")
+    );
+}

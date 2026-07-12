@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use ego_domain::Observability;
@@ -281,6 +282,50 @@ impl Runtime {
             .lock()
             .expect("teardown mutex poisoned")
             .drain()
+    }
+
+    /// Registers an async teardown hook (Finding 6), run by
+    /// [`Runtime::shutdown_async`] before the existing sync `shutdown()`
+    /// drains the logger/security teardown stack. Hooks run in registration
+    /// order — e.g. a read-side scheduler's stop-and-drain, registered
+    /// first, always completes before the next hook or the sync stack runs.
+    ///
+    /// Purely additive: a `Runtime` that never calls this has an empty hook
+    /// list, and `shutdown()` behaves exactly as before this method existed.
+    /// Registered post-build (via `&self`, not on `RuntimeBuilder`) because
+    /// the real motivating case — a spawned read-side scheduler's `stop()`
+    /// future — is itself only constructible after the `Runtime` is already
+    /// built.
+    pub fn register_async_teardown<F>(&self, hook: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.inner
+            .async_teardown
+            .lock()
+            .expect("async teardown mutex poisoned")
+            .push(Box::pin(hook));
+    }
+
+    /// Additive async counterpart to [`Runtime::shutdown`] (Finding 6).
+    ///
+    /// Awaits every hook registered via [`Runtime::register_async_teardown`]
+    /// in registration order, then calls the existing sync `shutdown()`
+    /// unchanged to drain the logger/security teardown stack. Existing
+    /// callers of the sync `shutdown()` are completely unaffected — this
+    /// method only adds a new opt-in entry point.
+    pub async fn shutdown_async(&self) -> Result<(), RuntimeInfraError> {
+        let hooks = std::mem::take(
+            &mut *self
+                .inner
+                .async_teardown
+                .lock()
+                .expect("async teardown mutex poisoned"),
+        );
+        for hook in hooks {
+            hook.await;
+        }
+        self.shutdown()
     }
 }
 
@@ -646,6 +691,53 @@ mod tests {
         let rt = RuntimeBuilder::new().build();
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    // -- Finding 6 (post-CORE-018 review): async teardown hooks -------------
+    //
+    // Additive: registers async hooks (e.g. a read-side scheduler's stop())
+    // to run, in order, before the existing sync teardown stack drains —
+    // without making the existing sync `shutdown()` async.
+
+    use kitlogger_log_domain::Severity;
+
+    #[tokio::test]
+    async fn shutdown_async_runs_hooks_in_registration_order_before_sync_stack_drains() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order_a = order.clone();
+        let order_b = order.clone();
+
+        rt.register_async_teardown(async move {
+            order_a.lock().unwrap().push("first");
+        });
+        rt.register_async_teardown(async move {
+            order_b.lock().unwrap().push("second");
+        });
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(*order.lock().unwrap(), vec!["first", "second"]);
+        // The sync (logger) teardown stack was also drained by shutdown_async.
+        assert!(logger.log(Severity::Info, "after-shutdown").is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_with_no_registered_hooks_still_drains_sync_stack() {
+        let logger = initialized_logger();
+        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+        assert!(logger.log(Severity::Info, "after-shutdown").is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_is_idempotent() {
+        let rt = RuntimeBuilder::new().build();
+        assert!(rt.shutdown_async().await.is_ok());
+        assert!(rt.shutdown_async().await.is_ok());
     }
 
     #[test]

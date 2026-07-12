@@ -75,18 +75,30 @@ where
         }
     }
 
-    /// Executes one batch: fetch, dedup, handle, commit.
+    /// Executes one batch: read the persisted offset, fetch, dedup, handle,
+    /// commit.
+    ///
+    /// The persisted offset is read internally on every call — the caller
+    /// never passes one in — so a batch always resumes from where the last
+    /// successful commit left off instead of always re-fetching from the
+    /// start of the tag stream. Without this, once a tag stream accumulates
+    /// more than `batch_size` events, every poll would keep re-fetching the
+    /// same first batch (all already deduped) and the projection would
+    /// stall forever short of the full stream.
     ///
     /// Returns the new offset after the batch, or an error.
     /// Returns `Ok(None)` if no events were available.
-    pub async fn execute(
-        &self,
-        last_offset: Option<&Offset>,
-    ) -> Result<Option<Offset>, ProjectionError> {
+    pub async fn execute(&self) -> Result<Option<Offset>, ProjectionError> {
+        let last_offset = self
+            .offset_store
+            .read_offset(&self.projection_id, &self.tag, &self.tenant)
+            .await
+            .map_err(|e| ProjectionError::transient(format!("read offset failed: {}", e)))?;
+
         // Phase 1: Fetch events
         let events = self
             .read_store
-            .fetch(&self.tag, last_offset, self.config.batch_size)
+            .fetch(&self.tag, last_offset.as_ref(), self.config.batch_size)
             .await
             .map_err(|e| ProjectionError::transient(format!("fetch failed: {}", e)))?;
 

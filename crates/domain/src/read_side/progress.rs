@@ -47,7 +47,10 @@ pub trait ProgressReporter: Send + Sync {
 
 /// A no-op implementation of `ProgressReporter`.
 ///
-/// Use this when no observability is needed.
+/// Use this when no observability is needed. `Clone`/`Copy` because
+/// `TagScheduler::start_projection` takes its reporter by value on every
+/// poll (`impl ProgressReporter + Clone`) — trivial for a zero-sized type.
+#[derive(Clone, Copy)]
 pub struct NoopProgressReporter;
 
 #[async_trait::async_trait]
