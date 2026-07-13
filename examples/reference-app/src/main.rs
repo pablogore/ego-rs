@@ -33,13 +33,13 @@ use std::sync::Arc;
 
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig};
+use reference_app::{build_runtime, AppConfig, BuiltRuntime};
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
-    let (rt, authn, read_side_handles) = build_runtime(&config)?;
+    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } = build_runtime(&config)?;
     let rt = Arc::new(rt);
 
     let query = read_side_handles.query.clone();
