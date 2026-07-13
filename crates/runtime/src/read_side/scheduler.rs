@@ -200,6 +200,79 @@ where
     }
 }
 
+/// Handle to a projection poll loop spawned via
+/// [`TagSchedulerImpl::spawn_projection`].
+///
+/// Bundles the `JoinHandle` `run_until_stopped` returns together with the
+/// `watch` stop-signal sender `spawn_projection` creates on the caller's
+/// behalf, so a caller gets one ready-to-use handle instead of wiring the
+/// channel itself (CORE-026 Phase 3 — the batteries-included read-side
+/// constructor).
+pub struct ReadSideProjectionHandle {
+    stop_tx: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ReadSideProjectionHandle {
+    /// Signals the loop to stop, then awaits the in-flight batch to drain
+    /// before returning. Surfaces (does not swallow) a `JoinError` — the
+    /// explicit callback to CORE-018's Finding F-02, where a spawned
+    /// scheduler task's panic used to vanish silently.
+    pub async fn stop(self) -> Result<(), tokio::task::JoinError> {
+        let _ = self.stop_tx.send(true);
+        self.task.await
+    }
+}
+
+impl<E> TagSchedulerImpl<E>
+where
+    E: Clone + Send + Sync + 'static,
+{
+    /// Batteries-included constructor for a projection poll loop: creates the
+    /// `watch` stop channel internally and spawns `run_until_stopped`,
+    /// returning a single [`ReadSideProjectionHandle`] instead of requiring
+    /// the caller to wire the stop channel and keep the `JoinHandle` around
+    /// itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_projection<F, H, S, D, O, R>(
+        self,
+        tag_provider: F,
+        interval: Duration,
+        projection_id: String,
+        tenant: String,
+        handler: H,
+        read_store: S,
+        dedup_store: D,
+        offset_store: O,
+        reporter: R,
+        on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
+    ) -> ReadSideProjectionHandle
+    where
+        F: Fn() -> Vec<EventTag> + Send + Sync + 'static,
+        H: Handler<E> + Clone + Send + Sync + 'static,
+        S: ReadSideStore<E> + Send + Sync + Clone + 'static,
+        D: DedupStore + Send + Sync + Clone + 'static,
+        O: OffsetStore + Send + Sync + Clone + 'static,
+        R: ProgressReporter + Clone + Send + Sync + 'static,
+    {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let task = self.run_until_stopped(
+            tag_provider,
+            interval,
+            stop_rx,
+            projection_id,
+            tenant,
+            handler,
+            read_store,
+            dedup_store,
+            offset_store,
+            reporter,
+            on_error,
+        );
+        ReadSideProjectionHandle { stop_tx, task }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +532,131 @@ mod tests {
         // provider handle alive so a future refactor can't silently drop it
         // and weaken the test to "did the JoinHandle exist".
         assert!(provider.calls() >= 1, "the loop must have run at least once before stopping");
+    }
+
+    /// Handler that always panics — used to prove `spawn_projection`'s
+    /// `stop()` surfaces a `JoinError` instead of swallowing it (CORE-018
+    /// Finding F-02's own lesson applied to the new batteries-included
+    /// constructor).
+    #[derive(Clone)]
+    struct PanickingHandler;
+
+    #[async_trait]
+    impl Handler<serde_json::Value> for PanickingHandler {
+        async fn handle(
+            &self,
+            _events: &[EventStreamElement<serde_json::Value>],
+        ) -> Result<(), ego_domain::read_side::error::ProjectionError> {
+            panic!("deliberate handler panic for spawn_projection JoinError test");
+        }
+    }
+
+    /// CORE-026 Phase 3 (a): `spawn_projection` creates the stop channel
+    /// internally (no caller-managed `watch` pair) and still calls
+    /// `tag_provider` fresh every iteration, mirroring
+    /// `run_until_stopped_calls_tag_provider_fresh_each_iteration_and_stops_gracefully`
+    /// but through the batteries-included constructor.
+    #[tokio::test]
+    async fn spawn_projection_calls_tag_provider_fresh_each_iteration_and_stops_gracefully() {
+        let provider = CountingProvider::default();
+        let provider_for_closure = provider.clone();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let handle = scheduler.spawn_projection(
+            move || {
+                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            },
+            Duration::from_millis(5),
+            "proj".to_string(),
+            "all-tenants".to_string(),
+            CountingHandler { handled: handled.clone() },
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+            NoopProgressReporter,
+            |_e| {},
+        );
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        handle.stop().await.expect("task joins cleanly");
+
+        assert!(
+            provider.calls() >= 3,
+            "expected several fresh tag_provider calls across multiple poll iterations, got {}",
+            provider.calls()
+        );
+    }
+
+    /// CORE-026 Phase 3 (b): mirrors
+    /// `run_until_stopped_drains_in_flight_batch_before_returning` — `stop()`
+    /// must await the in-flight (slow) batch to completion before resolving,
+    /// not abort it.
+    #[tokio::test]
+    async fn spawn_projection_stop_drains_in_flight_batch_before_returning() {
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let handle = scheduler.spawn_projection(
+            || vec![EventTag::new("tenant-a")],
+            Duration::from_millis(5),
+            "proj".to_string(),
+            "all-tenants".to_string(),
+            CountingHandler { handled: handled.clone() },
+            FakeStore { fetch_delay: Duration::from_millis(60) },
+            FakeDedup,
+            FakeOffset,
+            NoopProgressReporter,
+            |_e| {},
+        );
+
+        // Send stop while the first (slow) fetch is still in flight.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let start = std::time::Instant::now();
+        handle.stop().await.expect("task joins cleanly");
+
+        assert!(
+            start.elapsed() >= Duration::from_millis(45),
+            "expected the in-flight slow fetch to be awaited to completion, returned too fast: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            handled.load(Ordering::SeqCst),
+            1,
+            "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
+        );
+    }
+
+    /// CORE-026 Phase 3 (c) — the explicit F-02 callback: a handler panic
+    /// (surfacing as the spawned task's `JoinError`) must come back out of
+    /// `stop()`'s `Result`, not be silently discarded the way the original
+    /// hand-rolled `read_side/mod.rs` used to discard poll failures.
+    #[tokio::test]
+    async fn spawn_projection_stop_surfaces_join_error_instead_of_swallowing_it() {
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+
+        let handle = scheduler.spawn_projection(
+            || vec![EventTag::new("tenant-a")],
+            Duration::from_millis(5),
+            "proj".to_string(),
+            "all-tenants".to_string(),
+            PanickingHandler,
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+            NoopProgressReporter,
+            |_e| {},
+        );
+
+        // Give the loop time to actually hit the panic before we stop it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let result = handle.stop().await;
+        assert!(
+            result.as_ref().is_err_and(|e| e.is_panic()),
+            "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
+        );
     }
 }

@@ -6,3 +6,5 @@
 pub mod backpressure;
 pub mod batch_executor;
 pub mod scheduler;
+
+pub use scheduler::ReadSideProjectionHandle;
