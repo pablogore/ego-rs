@@ -110,9 +110,29 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
     /// Apply all fields from a [`RuntimeConfig`] at once.
     ///
     /// Convenience for callers that obtain a typed config from kit-config:
-    /// ```ignore
-    /// let value: serde_json::Value = loader.get("persistent_entity")?;
-    /// let builder = EntityRuntimeBuilder::default().with_config(serde_json::from_value(value)?);
+    ///
+    /// ```
+    /// use persistent_entity::builder::EntityRuntimeBuilder;
+    /// use persistent_entity::TestEvent;
+    /// use serde_json::json;
+    ///
+    /// // Simulates a `serde_json::Value` obtained from
+    /// // `kit_config::ConfigLoader::get("persistent_entity")`.
+    /// let value = json!({
+    ///     "mailbox_capacity": 500,
+    ///     "concurrency_budget": 50,
+    ///     "passivation_timeout_secs": 60,
+    ///     "single_tenant_mode": false,
+    ///     "tenant_id": "tenant-a"
+    /// });
+    ///
+    /// let config = serde_json::from_value(value).unwrap();
+    /// let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+    ///     .with_config(config)
+    ///     .build();
+    ///
+    /// assert_eq!(runtime.config.mailbox_capacity, 500);
+    /// assert_eq!(runtime.config.tenant_id, "tenant-a");
     /// ```
     pub fn with_config(self, config: RuntimeConfig) -> Self {
         self.mailbox_capacity(config.mailbox_capacity)
