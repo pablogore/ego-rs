@@ -228,8 +228,7 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
 
     let mut builder = RuntimeBuilder::new()
         .with_security(authn.clone(), authz)
-        .with_service::<RegisterUserTag>(register_user)
-        .map_err(|e| e.to_string())?;
+        .with_service::<RegisterUserTag>(register_user)?;
     if let Some(logger) = logger {
         builder = builder.with_logger(logger);
     }

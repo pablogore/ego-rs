@@ -41,6 +41,8 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
+impl std::error::Error for RegistryError {}
+
 /// A type-keyed registry that holds live service implementations.
 ///
 /// Keys are `TypeId` of a generated zero-sized tag type (e.g. `OrderServiceTag`).
@@ -283,5 +285,28 @@ mod tests {
         let result3 =
             registry2.resolve_raw::<OrderServiceTag>(&VersionConstraint::range("^3").unwrap());
         assert!(matches!(result3, Err(RegistryError::ServiceNotFound)));
+    }
+
+    /// TASK-001 — `RegistryError` propagates as a typed variant through `?`
+    /// into `Box<dyn std::error::Error>` (requires `impl Error for RegistryError`;
+    /// the blanket `From<E: Error + 'static> for Box<dyn Error>` needs it).
+    #[test]
+    fn duplicate_service_survives_boxed_dyn_error_propagation() {
+        fn register_twice() -> Result<(), Box<dyn std::error::Error>> {
+            let mut registry = ServiceRegistry::new();
+            let v1 = ContractVersion::new(1, 0, 0);
+            registry.register::<OrderServiceTag>(v1.clone(), make_arc())?;
+            registry.register::<OrderServiceTag>(v1, make_arc())?;
+            Ok(())
+        }
+
+        let err = register_twice().expect_err("second register must fail");
+        let registry_err = err
+            .downcast_ref::<RegistryError>()
+            .expect("boxed error must downcast back to RegistryError");
+        assert!(matches!(
+            registry_err,
+            RegistryError::DuplicateService { .. }
+        ));
     }
 }
