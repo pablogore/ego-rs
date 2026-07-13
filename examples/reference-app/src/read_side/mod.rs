@@ -109,10 +109,11 @@ impl ReadSideHandles {
     }
 
     /// Spawns the background polling loop that drives CORE-005's real
-    /// `TagSchedulerImpl` via the framework's own batteries-included
-    /// `TagSchedulerImpl::spawn_projection` constructor (CORE-026 Phase 3 —
-    /// this module no longer wires the stop channel or the poll-loop wrapper
-    /// itself). Must be called from inside a running Tokio runtime.
+    /// `TagSchedulerImpl` via the framework's own
+    /// `TagSchedulerImpl::spawn_projection` spawn/stop lifecycle wrapper
+    /// (CORE-026 Phase 3 — this module no longer wires the stop channel or
+    /// the poll-loop wrapper itself). Must be called from inside a running
+    /// Tokio runtime.
     pub fn spawn(self) -> ReadSideRuntime {
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
         let store = self.store;

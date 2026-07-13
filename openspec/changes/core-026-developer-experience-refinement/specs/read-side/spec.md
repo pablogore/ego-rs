@@ -128,7 +128,7 @@ the caller as an error rather than discarding it silently.
 obtain the same spawned poller it would otherwise hand-wire around
 `run_until_stopped`, without needing application-specific escape hatches
 beyond supplying its dedup store, offset store, tag-discovery closure,
-handler, event store, poll interval, and (optionally) an error callback.
+handler, event store, poll interval, progress reporter, and error callback.
 
 #### Scenario: An application's hand-wired spawn/stop glue migrates to `spawn_projection`
 

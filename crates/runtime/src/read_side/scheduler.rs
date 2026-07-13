@@ -206,8 +206,8 @@ where
 /// Bundles the `JoinHandle` `run_until_stopped` returns together with the
 /// `watch` stop-signal sender `spawn_projection` creates on the caller's
 /// behalf, so a caller gets one ready-to-use handle instead of wiring the
-/// channel itself (CORE-026 Phase 3 — the batteries-included read-side
-/// constructor).
+/// channel itself (CORE-026 Phase 3 — the spawn/stop lifecycle convenience
+/// wrapper).
 pub struct ReadSideProjectionHandle {
     stop_tx: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -228,11 +228,12 @@ impl<E> TagSchedulerImpl<E>
 where
     E: Clone + Send + Sync + 'static,
 {
-    /// Batteries-included constructor for a projection poll loop: creates the
-    /// `watch` stop channel internally and spawns `run_until_stopped`,
-    /// returning a single [`ReadSideProjectionHandle`] instead of requiring
-    /// the caller to wire the stop channel and keep the `JoinHandle` around
-    /// itself.
+    /// Spawn/stop lifecycle convenience wrapper for a projection poll loop:
+    /// creates the `watch` stop channel internally and spawns
+    /// `run_until_stopped`, returning a single [`ReadSideProjectionHandle`]
+    /// instead of requiring the caller to wire the stop channel and keep the
+    /// `JoinHandle` around itself. The caller still supplies its own dedup
+    /// store, offset store, tag-discovery closure, and handler.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_projection<F, H, S, D, O, R>(
         self,
@@ -536,8 +537,8 @@ mod tests {
 
     /// Handler that always panics — used to prove `spawn_projection`'s
     /// `stop()` surfaces a `JoinError` instead of swallowing it (CORE-018
-    /// Finding F-02's own lesson applied to the new batteries-included
-    /// constructor).
+    /// Finding F-02's own lesson applied to the new spawn/stop lifecycle
+    /// wrapper).
     #[derive(Clone)]
     struct PanickingHandler;
 
@@ -555,7 +556,7 @@ mod tests {
     /// internally (no caller-managed `watch` pair) and still calls
     /// `tag_provider` fresh every iteration, mirroring
     /// `run_until_stopped_calls_tag_provider_fresh_each_iteration_and_stops_gracefully`
-    /// but through the batteries-included constructor.
+    /// but through the spawn/stop lifecycle wrapper.
     #[tokio::test]
     async fn spawn_projection_calls_tag_provider_fresh_each_iteration_and_stops_gracefully() {
         let provider = CountingProvider::default();
