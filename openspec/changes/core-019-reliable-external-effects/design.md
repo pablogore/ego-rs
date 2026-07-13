@@ -414,6 +414,366 @@ outcome versus a generic command error. PR3 MUST NOT collapse the two into one
 generic `Err` variant. The exact enum/type shape is deliberately left to PR3's
 design; this AD only fixes the constraint so it cannot be silently skipped.
 
+**PR3 review follow-up (3 BLOCKERs + 3 non-blocking observations, `acceptor.rs`/
+`actor.rs`).** A review of PR3's diff found the following, all fixed in the
+same PR:
+
+1. **F-01 (BLOCKER): the spawned `Deferred`-mode runner task had no
+   ownership/`JoinHandle`** — `RuntimeEffectAcceptor::new` used to
+   `tokio::spawn` the runner internally and discard the handle, so nothing
+   could ever await the runner actually finishing, distinguish a clean finish
+   from a panic, or block teardown until draining was truly done. Fixed:
+   `EffectRuntimeHandle` (`acceptor.rs`) now owns both the `watch::Sender<bool>`
+   shutdown signal AND the spawned task's `JoinHandle<()>`.
+   `EffectRuntimeHandle::shutdown_and_wait(deadline)` signals shutdown, then
+   awaits the task within `deadline`, returning `EffectRuntimeShutdownError`
+   (`Timeout` / `RunnerPanicked` / `RunnerCancelled`) when it does not finish
+   cleanly. `Inline` mode never spawns a task, so its handle's `runner_task` is
+   `None` and `shutdown_and_wait` resolves immediately after signalling.
+2. **F-02 (BLOCKER): acceptance retry didn't observe shutdown/deadline** — the
+   bounded `TemporarilyUnavailable` retry loop (`accept_into_store`) used to
+   `sleep(backoff)` with no cancellation awareness at all, violating AD-9's
+   shutdown-interaction requirement. Fixed: both the `state.accept(...)` call
+   itself and the backoff sleep are raced via `tokio::select!` against the
+   SAME shutdown signal `EffectRuntimeHandle` shares with the spawned runner
+   (`self.shutdown_rx`, a `watch::Receiver<bool>` field on
+   `RuntimeEffectAcceptor`) — a retry mid-backoff resolves promptly to
+   `EffectAcceptanceError::RetriesExhausted` instead of sleeping past the
+   drain deadline. Implementation note: racing directly against
+   `watch::Receiver::wait_for` inside `tokio::select!` made the whole
+   `#[async_trait]` future `!Send` (its `Ref` guard isn't `Send`); a small
+   `wait_for_shutdown` helper built from `borrow()` (never held across an
+   `.await`) + `changed()` (no guard in its `Output`) avoids that without
+   pulling in a new dependency.
+3. **F-03 (BLOCKER): described effects were silently dropped when no acceptor
+   was configured** — the actor's `if let Some(acceptor) = &self.effect_acceptor
+   { .. }` used to fall through to a plain successful reply when the field was
+   `None`, discarding any described effects with zero signal to the caller.
+   Fixed: a missing acceptor with ≥1 described effect now maps to
+   `EffectAcceptanceError::Permanent` and routes through the same
+   `CommandResult::EffectsAcceptanceFailed` reply the `Some` branch's failure
+   path already used — fail closed, never silently discarded. The commit
+   itself is unaffected either way (AD-9: commit is always final).
+4. **Observation: renamed `CommandResult::EventsAcceptanceFailed` →
+   `CommandResult::EffectsAcceptanceFailed`** (`persistent_entity.rs`) — the
+   old name read like "committing events failed," which is not what it means.
+   Updated every match site in `persistent-entity` and the one exhaustive
+   match in `examples/reference-app/tests/register_user_partial_failure.rs`.
+5. **Observation: split `RuntimeEffectAcceptor::new`'s spawn out of
+   construction.** `new` used to `tokio::spawn` the `Deferred` drain loop
+   internally, which panics outside a Tokio runtime context. `new` now only
+   constructs (stashing the `Deferred` queue receiver in a
+   `std::sync::Mutex<Option<EffectQueueReceiver>>` it never touches itself);
+   `start(&self) -> EffectRuntimeHandle` is the one place that calls
+   `tokio::spawn`, taking the stashed receiver and returning the F-01 handle.
+   `Inline` mode's `start()` is a no-op returning a handle whose
+   `runner_task` is `None`.
+6. **Observation: `EffectAcceptanceError` gained partial-acceptance context.**
+   `RetriesExhausted`/`Permanent` are now struct variants carrying `message`,
+   `failed_at_index`, and `failed_idempotency_key`. Since `EffectAcceptor::accept`
+   processes a batch strictly sequentially and returns on the first failure,
+   `failed_at_index` doubles as both "which effect in the batch failed" and
+   "how many of the batch's effects were already durably accepted before it" —
+   no separate counter field needed.
+
+**PR3 round 2 review follow-up (2 more BLOCKERs, `acceptor.rs`).** A second
+review of the same lifecycle/shutdown design found:
+
+1. **F-01 (BLOCKER): `shutdown_and_wait`'s timeout branch dropped the
+   `JoinHandle` instead of aborting it.** Dropping a `tokio::task::JoinHandle`
+   only detaches from the underlying task — it does NOT cancel/abort it. The
+   round-1 fix gave `EffectRuntimeHandle` real ownership of the `JoinHandle`
+   specifically so shutdown could be awaited, but the timeout arm still threw
+   that ownership away on the ground that time was up, silently leaving the
+   runner task executing in the background forever, defeating the whole
+   point of owning it. Fixed: `shutdown_and_wait` now takes `runner_task` by
+   mutable reference across `tokio::time::timeout_at`, and on timeout calls
+   `runner_task.abort()` then awaits it once more (draining the resulting
+   cancellation) before returning `Timeout` — the caller's `Timeout` now
+   means the runner has genuinely stopped, not merely that it was let go of.
+2. **F-02 (BLOCKER): "shutdown has started" was conflated with "the drain
+   deadline has elapsed."** The single shutdown `watch<bool>` used to flip to
+   `true` at the very start of `shutdown_and_wait(deadline)`, and
+   `accept_into_store`'s retry loop (both the `state.accept` call and the
+   backoff sleep) raced against that SAME signal — cancelling any acceptance
+   already in progress the instant shutdown merely *began*, no matter how
+   generous the caller's `deadline` actually was. This violated AD-9's
+   graceful-shutdown intent: acceptance work in flight should be allowed to
+   continue naturally during the drain window and only be cancelled once the
+   deadline is genuinely hit. Separately, `queue.send` (the `Deferred`/
+   `Inline` enqueue step) raced against nothing at all — not even the old
+   conflated signal — so it could never be cancelled during shutdown. Fixed:
+   a second, distinct signal — `deadline_rx`/`deadline_tx`
+   (`watch::Sender<Option<tokio::time::Instant>>` on `RuntimeEffectAcceptor`/
+   `EffectRuntimeHandle`) — now carries the actual *deadline instant*: `None`
+   while no shutdown is in progress, set to `Some(Instant::now() + deadline)`
+   exactly once, when `shutdown_and_wait(deadline)` begins. A new
+   `wait_for_deadline` helper resolves only once that instant is reached
+   (`sleep_until`), never merely on the `None` → `Some` transition.
+   `accept_into_store`'s retry loop/backoff sleep, and the new
+   `send_to_queue` helper (factored out of `accept_one` so both `Deferred`
+   and `Inline` mode's `queue.send` are now covered too), race against
+   `deadline_rx`/`wait_for_deadline` instead of the plain shutdown bool. The
+   original `shutdown_rx`/`shutdown_tx` `watch<bool>` is unchanged and keeps
+   its own, genuinely separate job: telling the spawned `Deferred` runner's
+   own drain loop to stop admitting new work immediately, which is safe to do
+   right away and was never the part of the design F-02 was about.
+
+**PR3 round 3 review follow-up (2 more BLOCKERs, lifecycle authority fragmented
+across `EffectRuntimeHandle`/`RuntimeEffectAcceptor`/`DeliveryRunner`,
+`acceptor.rs`/`runner.rs`).** A third review found the previous two rounds had
+unified the *deadline* signal but not the *lifecycle authority* itself — two
+more gaps where child-task/child-call ownership crossed a struct boundary
+nothing actually drained:
+
+1. **F-01 (BLOCKER): aborting the outer `runner_task` did not guarantee its
+   own child tasks were gone.** `shutdown_and_wait`'s timeout path aborted the
+   OUTER spawned `run()` task, but `DeliveryRunner` spawns its OWN per-effect
+   dispatch tasks (tracked in its `tasks: Mutex<JoinSet<()>>`) and in-flight
+   executor calls (tracked in `executor_aborts: Mutex<Vec<AbortHandle>>`) —
+   both owned by the `DeliveryRunner` struct itself, not scoped to `run()`'s
+   future. `run_inner`'s own existing drain-on-shutdown logic
+   (`Self::drain_tasks`, PR2 rounds 3-4) is what actually aborts/drains those,
+   but only runs if `run_inner`'s own loop reaches its end-of-loop step —
+   which an externally-aborted outer task never does. Fixed: a new
+   `DeliveryRunner::shutdown_and_drain(deadline_instant)` method — callable
+   directly on `&self`/`Arc<Self>`, independent of `run()`'s own task —
+   converts the instant to a remaining duration and calls the SAME
+   `drain_tasks` `run_inner` already uses (one drain implementation, two entry
+   points, per the constraint to avoid duplicating slightly-different drain
+   logic). `EffectRuntimeHandle` now also holds the shared `Arc<DeliveryRunner>`
+   so `shutdown_and_wait` can call `shutdown_and_drain` directly as the
+   authoritative cleanup step, in addition to (not instead of) still
+   awaiting/aborting the outer `runner_task` as a backstop.
+2. **F-02 (BLOCKER): shutdown did not close acceptance admission, and
+   `shutdown_and_wait` did not wait for in-flight `accept()` calls.** Two
+   distinct gaps: (a) `accept()` never checked any lifecycle signal at entry —
+   a brand-new call could start after shutdown had already begun, with
+   nothing rejecting it outright; (b) `shutdown_and_wait` only ever awaited
+   the runner task, with no way to know about or wait for an `accept()` call
+   already running inside `accept_into_store`/`send_to_queue` — reproducible
+   even in `Inline` mode, where there is no runner task at all to (accidentally)
+   cover for this. Fixed: a new `LifecycleGate` (`acceptor.rs`), shared via
+   `Arc` between `RuntimeEffectAcceptor` and `EffectRuntimeHandle`, holding
+   `LifecycleState::{Running, Draining { deadline }, Closed}` plus an
+   in-flight call counter (`AtomicU64`) and a `tokio::sync::Notify` fired when
+   the counter reaches zero. `accept()` now calls `lifecycle.enter()` at
+   entry, before minting anything: `Err` (already `Draining`/`Closed`) returns
+   immediately with `EffectAcceptanceError::Permanent` — no store call, no
+   enqueue — routed through the same post-commit-acceptance-failure shape
+   F-03 (round 1) already established for a missing acceptor. `Ok` returns an
+   RAII `InFlightGuard` held for the whole batch, so an early `?` return
+   mid-loop can never leak the in-flight count. `shutdown_and_wait` now runs
+   one coherent sequence: signal shutdown + publish the deadline instant (as
+   before) → `lifecycle.begin_draining(deadline_instant)` (closes admission
+   immediately) → `lifecycle.wait_until_drained()` (blocks until in-flight
+   calls finish naturally or the SAME deadline instant elapses — the existing
+   `deadline_rx`-raced retry/enqueue loops are exactly what makes those calls
+   actually finish) → `runner.shutdown_and_drain` (F-01's fix) → await/abort
+   the outer `runner_task` → `lifecycle.close()`. `enter()`/`begin_draining`
+   share one `std::sync::Mutex<LifecycleState>`, so the admit-vs-reject
+   decision can never race the transition to `Draining`.
+
+Both fixes close the same class of gap: lifecycle authority previously lived
+partly on `EffectRuntimeHandle` (the deadline/shutdown signals), partly on
+`RuntimeEffectAcceptor` (admission), and partly on `DeliveryRunner` (child
+tasks) — with nothing tying all three together into one sequence. After this
+round, `EffectRuntimeHandle::shutdown_and_wait` is the single entry point that
+drives all three in the same, deadline-bounded order.
+
+**PR3 round 4 review follow-up (3 more BLOCKERs: shutdown/drain sequencing and
+a lost-wakeup primitive, `acceptor.rs`/`runner.rs`).** A fourth review found
+the previous round's unification still had an ordering bug, a genuine
+concurrency gap, and a race-prone primitive underneath it:
+
+1. **F-01 (BLOCKER): `shutdown_and_wait` told the runner to stop consuming
+   BEFORE draining in-flight acceptances, not after.** Round 3 unified the
+   sequence, but `shutdown.send(true)` still fired FIRST — before
+   `lifecycle.begin_draining`/`wait_until_drained` even ran — so
+   `DeliveryRunner::run_inner` could abandon its receive loop while an
+   `accept()` call already mid-persistence/backoff was still in flight. Once
+   that call finally reached `queue.send`, the runner had already stopped
+   consuming: the effect was durably accepted and successfully enqueued
+   (`queue.send` itself doesn't fail just because nothing is draining it) yet
+   never actually dispatched — `accept()` returned `Ok` for an effect now
+   silently stuck. Fixed: the sequence is reordered so admission closes and
+   every already-admitted acceptance finishes enqueueing (or is cut short by
+   the deadline) BEFORE `shutdown.send(true)` is ever sent — the runner is
+   now guaranteed to still be consuming for as long as any admitted
+   acceptance could still be enqueueing. RED test (`acceptor.rs`):
+   `late_enqueue_after_shutdown_begins_is_still_consumed_by_the_deferred_runner`
+   (a gated store call released well after `shutdown_and_wait` begins must
+   still reach the registered executor, not fail with "queue closed").
+2. **F-02 (BLOCKER): two independent callers could race for the same
+   `tasks` `JoinSet` mutex during drain, with no bound on the lock
+   acquisition itself.** `run_inner`'s own end-of-loop drain step and an
+   externally-invoked `DeliveryRunner::shutdown_and_drain` call (from
+   `shutdown_and_wait`) were two entirely separate callers of the same drain
+   logic — whichever reached `self.tasks.lock().await` first held it for its
+   own deadline (`run_inner`'s own internal deadline, independent of whatever
+   a `shutdown_and_wait` caller actually asked for), and the other blocked on
+   that SAME mutex with no bound of its own at all, so a short caller-supplied
+   deadline could silently balloon to however long the other drain took.
+   Fixed: `DeliveryRunner` gained single-flight leader-election coordination
+   (`drain_claimed: StdMutex<bool>` + `drain_done_tx/rx: watch<bool>`) —
+   whichever call reaches `coordinated_drain` first becomes the sole leader
+   that actually locks `tasks` and performs the drain; every other (follower)
+   call only waits for `drain_done` to fire, bounded by ITS OWN deadline,
+   never the leader's. As defense-in-depth, the mutex acquisition itself is
+   now also bounded (`tokio::time::timeout` around `self.tasks.lock()`) so an
+   unanticipated stuck lock can't silently blow through a deadline either.
+   Both `drain_tasks` (`run_inner`'s own entry point) and `shutdown_and_drain`
+   (the external entry point) now delegate to this same coordination — one
+   drain implementation, one leader per shutdown. RED test (`runner.rs`):
+   `external_shutdown_and_drain_is_bounded_by_its_own_deadline_even_while_run_inners_own_internal_drain_is_in_progress`
+   (drives both real entry points concurrently — `run_inner`'s own 3s
+   internal drain against a hanging executor, and a directly-invoked 150ms
+   external `shutdown_and_drain` — the external call must return near its own
+   150ms bound, not block ~3s).
+3. **F-03 (BLOCKER): `LifecycleGate`'s `Notify`-based drain signal had a
+   lost-wakeup window.** `wait_until_drained` read `in_flight == 0`? no, then
+   constructed/polled `self.drained.notified()`; `InFlightGuard::drop`
+   decrementing to zero called `self.gate.drained.notify_waiters()` —
+   but `notify_waiters()` only wakes waiters ALREADY registered at the exact
+   moment it's called; unlike a state-carrying primitive, it stores nothing
+   for a later `.notified()` call. A guard's drop landing in the narrow
+   window between the read and the `.notified()` registration would lose the
+   wakeup entirely, burning the whole deadline despite the count already
+   being genuinely zero. Fixed: replaced the `AtomicU64` + `Notify` pair with
+   a single `watch::Sender<u64>`/`Receiver<u64>` — `InFlightGuard::drop` and
+   `enter()` use `send_modify` to decrement/increment; `wait_until_drained`
+   loops on `*rx.borrow() == 0` / `rx.changed()`. `watch::Receiver` always
+   reflects the latest sent value regardless of exactly when it's
+   borrowed/polled relative to the send, so there is no equivalent
+   lost-wakeup window. RED/GREEN evidence (`acceptor.rs`): the true
+   integration-level race (a handful of CPU instructions with no intervening
+   yield point) proved empirically unreproducible via realistic scheduling
+   even across 25,000+ trials (plain `tokio::spawn`, a pre-spun
+   busy-waiting `std::thread`, and single-`yield_now` alignment on a
+   current-thread runtime all converged to zero reproductions — a
+   cooperatively-scheduled task's synchronous check-then-register prefix
+   always completes before any other task/thread gets a chance to run).
+   `lost_wakeup_pattern_is_reproduced_with_a_widened_race_window` instead
+   validates the exact `Notify`-vs-`watch` contract difference using an
+   artificially widened window (a `tokio::time::sleep` inserted purely to
+   make the race land reliably): the `Notify`-based shape loses the wakeup
+   50/50 times under that widening, the `watch`-based shape (mirroring
+   `LifecycleGate`'s fix) loses it 0/50 times.
+   `wait_until_drained_does_not_lose_the_last_guards_wakeup_under_concurrent_drop`
+   remains as a best-effort integration-level regression/stress check against
+   the real, fixed `LifecycleGate`.
+
+**PR3 round 5 review follow-up (1 more BLOCKER, plus a minor defensive
+addition; `acceptor.rs`/`runner.rs`).** A fifth review found round 4's
+leader/follower drain coordination was itself unsafe in the real shutdown
+path:
+
+1. **F-01 (BLOCKER): the drain follower could abort the drain leader
+   mid-cleanup, since the leader ran inside the very task the follower
+   aborted on timeout.** `run_inner` runs INSIDE the task `EffectRuntimeHandle`
+   holds as `runner_task`. If `run_inner` observed shutdown and reached
+   `coordinated_drain` first, it became the LEADER using its own (longer,
+   production `SHUTDOWN_DRAIN_DEADLINE`) internal deadline — all executing
+   inside `runner_task`. Meanwhile an external `shutdown_and_wait` call
+   (with a caller-supplied, possibly much SHORTER deadline) became the
+   FOLLOWER, bounded only by its own deadline. Once that shorter deadline
+   elapsed without `drain_done` firing (because the leader's own, longer
+   drain hadn't finished), `shutdown_and_wait` proceeded to
+   `runner_task.abort()` on its now-elapsed timeout — but that outer task
+   WAS the leader, still mid `drain_tasks_locked`, having not yet aborted
+   the hung executor attempt it was cleaning up. The leader's cleanup was
+   abandoned mid-flight, leaving the hung executor task (owned by
+   `DeliveryRunner`'s own fields, not the aborted `runner_task`) running
+   forever — the exact "background work survives shutdown" class of bug the
+   whole `EffectRuntimeHandle` redesign was meant to eliminate. The round 4
+   test only proved the follower itself returned within its own deadline; it
+   never drove the real `EffectRuntimeHandle::shutdown_and_wait` path (with
+   its own `runner_task.abort()` on timeout) at all, so it could not catch
+   this.
+   Fixed ("Option A", the maintainer's explicit recommendation): the
+   leader/follower election is removed entirely. `run_inner` no longer
+   drains anything of its own — on shutdown it only stops consuming new work
+   and returns quickly. `DeliveryRunner::shutdown_and_drain`, called SOLELY
+   by `EffectRuntimeHandle::shutdown_and_wait`, is now the ONE cleanup
+   authority (aborting executor attempts, draining the tracked `JoinSet`).
+   With exactly one caller, `drain_claimed`/`drain_done_tx`/`drain_done_rx`
+   and `coordinated_drain` are deleted outright — there is nothing left to
+   race. `shutdown_and_wait`'s sequence is reordered accordingly: publish
+   deadline → `begin_draining` → `wait_until_drained` → `shutdown.send(true)`
+   → await/abort the outer `runner_task` (now cheap, since it no longer
+   drains) → `runner.shutdown_and_drain` as the sole cleanup step → close the
+   lifecycle. The caller's deadline is honestly split: awaiting `runner_task`
+   is bounded by at most half of whatever remains, so a slow-to-return
+   `runner_task` can never silently consume the entire budget and leave
+   nothing for the actual drain; the drain step still gets the full
+   remainder of the ORIGINAL deadline. RED test (`acceptor.rs`, driving the
+   REAL `shutdown_and_wait`/`shutdown_and_drain`/`run()` path end-to-end, not
+   a synthetic harness):
+   `shutdown_and_wait_stops_a_hung_executor_task_even_when_run_inner_would_have_raced_it_for_drain_leadership`.
+2. **Minor defensive addition:** `drain_tasks_locked`'s branch where it can't
+   acquire the `tasks` mutex before its deadline used to just log a warning
+   and abandon cleanup entirely for whatever it couldn't reach. Now that
+   external drain is the sole authority (removing the concurrent-caller
+   scenario that made lock contention likely in the first place), this
+   branch should be nearly unreachable in practice — but it now still aborts
+   whatever `AbortHandle`s are tracked in `executor_aborts` via a
+   non-blocking `try_lock` on that separate mutex (which doesn't require the
+   contended `tasks` lock), instead of leaving them running.
+
+**PR3 round 6 review follow-up (1 BLOCKER, plus 2 doc-only fixes;
+`acceptor.rs`/`runner.rs`/`effect_acceptor.rs`).** The drain architecture
+itself (single external drain authority, no leader/follower — round 5 above)
+was confirmed correct; a sixth review found the final `Result`
+`shutdown_and_wait` returns was still dishonest about it:
+
+1. **F-01 (BLOCKER): `shutdown_and_wait`'s final `Result` came only from
+   awaiting the outer `runner_task`, never from the drain step itself.**
+   `DeliveryRunner::shutdown_and_drain` returned `()`, so its outcome was
+   discarded entirely — `Ok(())` even when the deadline had already elapsed
+   going into the drain, or cleanup had to force-abort a dispatch task/
+   executor attempt. Two concrete cases: in `Inline` mode there is no
+   `runner_task` at all, so the result was unconditionally `Ok(())` even if
+   the inline-executing acceptance itself was blocked on a hung executor that
+   `shutdown_and_drain` had to forcibly abort; in `Deferred` mode the receive
+   loop can exit (and `runner_task` finish `Ok`) quickly while the subsequent
+   child-task drain still exhausts the deadline and force-aborts executors.
+   Fixed: `drain_tasks_locked`/`shutdown_and_drain` now return `bool` (`true`
+   = drained naturally within the deadline; `false` = the deadline had
+   already elapsed entering the drain, the `tasks` lock itself timed out, or
+   any dispatch task/executor attempt had to be forced out) instead of `()`.
+   `shutdown_and_wait` folds this into the final `Result`: `Ok(())` only when
+   the runner task finished cleanly AND the drain reports a natural, on-time
+   finish; `Err(EffectRuntimeShutdownError::Timeout)` otherwise (reusing the
+   existing variant — a richer per-cause enum was judged unnecessary for this
+   fix). A related gap closed in the same pass: `Inline` mode's `drain_one`
+   runs synchronously on the caller's own task, never through
+   `spawn_tracked`, so `tasks` stays empty and the existing timeout-based
+   "did we have to force anything" check could never fire on its own for a
+   hung Inline executor. `drain_tasks_locked` now also checks whether
+   `deadline_instant` had already elapsed on entry, independent of whether
+   `tasks` itself timed out, and routes through the same forced-abort branch
+   either way — so a hung Inline-mode executor (tracked only in
+   `executor_aborts`) is both actually aborted and correctly reported as a
+   non-clean drain. RED tests (`acceptor.rs`):
+   `shutdown_and_wait_returns_timeout_when_an_inline_executor_hangs_past_the_deadline`
+   (Inline mode) and
+   `shutdown_and_wait_returns_timeout_when_the_runner_task_exits_cleanly_but_a_child_executor_hangs`
+   (Deferred mode, outer runner task finishes `Ok` while a child dispatch task
+   is force-aborted during the subsequent drain).
+2. **Doc-only fix:** confirmed no code comment in `runner.rs`/`acceptor.rs`
+   describes leader/follower drain coordination as the CURRENT architecture —
+   every remaining mention (including this document's own round 4/5 entries
+   above) already correctly frames it as removed history. No change needed
+   there beyond this note.
+3. **Doc-only fix:** `EffectAcceptor::accept`'s doc comment (here and in
+   `crates/persistent-entity/src/effect_acceptor.rs`) said "never refused
+   outright at intake", which read as contradicting the admission-gating
+   added in round 3 (a NEW `accept()` call arriving after shutdown/draining
+   has begun IS rejected immediately). Reworded to distinguish the two cases
+   explicitly: a NORMAL in-progress effect is never refused mid-flight once
+   admitted, but a NEW call arriving after draining has begun is rejected
+   immediately at intake — see §4's updated contract below.
+
 ## 4. Public Contracts (Rust)
 
 ```rust
@@ -425,13 +785,17 @@ pub trait EffectAcceptor: Send + Sync {
     /// (via `EffectStateStore::accept(AcceptedEffect { .. })`) before awaiting
     /// queue capacity (backpressure, §9) and enqueuing it.
     ///
-    /// Never refused outright at intake (there is no "your effect list is
-    /// rejected" path), but MAY ultimately fail: a transient store error is
-    /// retried under a bounded policy and, if that policy is exhausted (or the
-    /// store error is non-retryable), returns `Err(EffectAcceptanceError)`.
-    /// That error NEVER implies the already-committed event was rolled back —
-    /// commit is final; it means the effect could not be durably-enough
-    /// registered and may be lost to the post-commit dual-write gap (AD-9).
+    /// A NORMAL in-progress effect, once admitted, is never refused outright
+    /// mid-flight (there is no "your effect list is rejected" path once
+    /// `accept` has actually started processing it), but MAY still ultimately
+    /// fail: a transient store error is retried under a bounded policy and, if
+    /// that policy is exhausted (or the store error is non-retryable), returns
+    /// `Err(EffectAcceptanceError)`. That error NEVER implies the
+    /// already-committed event was rolled back — commit is final; it means
+    /// the effect could not be durably-enough registered and may be lost to
+    /// the post-commit dual-write gap (AD-9). Distinct case: a NEW `accept()`
+    /// call arriving after shutdown/draining has already begun IS rejected
+    /// immediately at intake, before touching the store at all (`LifecycleGate`).
     async fn accept(
         &self,
         tenant: &TenantId,
@@ -443,17 +807,23 @@ pub trait EffectAcceptor: Send + Sync {
 /// port in `persistent-entity`, so it does NOT reference runtime's
 /// `EffectStoreError`; the `RuntimeEffectAcceptor` impl maps the underlying
 /// `EffectStoreError` into these variants after the bounded retry.
+/// (PR3 review, observation 6: both variants carry partial-acceptance
+/// context — `failed_at_index` doubles as both "which effect in this
+/// `accept` batch failed" and "how many were already durably accepted
+/// before it," since `accept` is strictly sequential and stops at the first
+/// failure.)
 pub enum EffectAcceptanceError {
     /// The one retryable store error (`TemporarilyUnavailable`) survived the
-    /// bounded acceptance retry policy. Commit is final; the effect may be
-    /// lost to the post-commit dual-write gap.
-    RetriesExhausted(String),
+    /// bounded acceptance retry policy — or a shutdown deadline interrupted
+    /// an in-progress retry (AD-9's shutdown interaction). Commit is final;
+    /// the effect may be lost to the post-commit dual-write gap.
+    RetriesExhausted { message: String, failed_at_index: usize, failed_idempotency_key: IdempotencyKey },
     /// A permanent store failure — `Backend`, `InvalidTransition`, `NotFound`,
     /// or a `Conflict` from `accept` (a permanent invariant or data conflict,
     /// e.g. an `EffectId` collision — not necessarily a dedup-scope/fingerprint
     /// mismatch) — surfaced without retry. Same commit-is-final, no-rollback
     /// semantics.
-    Permanent(String),
+    Permanent { message: String, failed_at_index: usize, failed_idempotency_key: IdempotencyKey },
 }
 
 // crates/runtime/src/effects/executor.rs

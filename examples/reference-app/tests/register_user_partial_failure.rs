@@ -88,5 +88,13 @@ async fn user_write_failure_leaves_org_persisted_as_a_benign_reusable_orphan() {
                  idempotently-reusable orphan AD-5 claims"
             );
         }
+        // CORE-019 (not yet wired in this example, PR5 scope): this handler
+        // never describes external effects, so this variant is unreachable
+        // here — kept exhaustive rather than a wildcard so a future
+        // regression that starts describing effects doesn't silently fall
+        // through unnoticed.
+        CommandResult::EffectsAcceptanceFailed { .. } => {
+            panic!("this handler never describes external effects — unreachable");
+        }
     }
 }
