@@ -19,9 +19,17 @@ unrelated specs.
 
 The runtime MUST accept a command's produced external effects only after the
 atomic commit for that command's events has succeeded, and before the
-command's reply is returned to the caller. Acceptance of an already-committed
-effect MUST NOT be refused; a saturated acceptance path MUST delay the reply,
-never the commit, which has already completed.
+command's *successful* reply is returned to the caller. Acceptance MUST NOT be
+refused outright at intake — there is no synchronous "your effect list is
+invalid, rejected" path — and a saturated acceptance path MUST delay the
+reply, never the commit, which has already completed. Recording an accepted
+effect MAY nonetheless ultimately fail: a transient `EffectStateStore` error
+MUST be retried under a bounded, configurable retry policy, and only if that
+policy is exhausted (or the store error is non-retryable) does the caller
+receive an explicit post-commit acceptance error. Such a failure MUST NOT roll
+back the already-committed event; it means the command succeeded but at least
+one described effect could not be durably-enough registered and may be lost to
+the post-commit dual-write gap.
 
 #### Scenario: Effects accepted only after commit succeeds
 
@@ -36,6 +44,15 @@ never the commit, which has already completed.
 - WHEN an already-committed command attempts to hand off its effects
 - THEN the commit remains complete and unaffected; only the reply is delayed
   until acceptance succeeds
+
+#### Scenario: Transient acceptance failure is retried, then surfaced explicitly
+
+- GIVEN an already-committed command whose effects are being accepted
+- AND the `EffectStateStore` returns a transient error on every attempt
+- WHEN the bounded acceptance retry policy is exhausted
+- THEN the caller receives an explicit post-commit acceptance error, the
+  committed event is NOT rolled back, and the error is not read as the command
+  having failed
 
 ### Requirement: Runtime-Minted Effect Identity
 

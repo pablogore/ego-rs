@@ -81,9 +81,9 @@ Chain strategy: stacked-to-main
 
 ## Phase 5: Acceptor Port
 
-- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity, never refuses
-- [ ] 5.2 GREEN: `EffectAcceptor` trait (`crates/persistent-entity/src/effect_acceptor.rs`)
-- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs)
+- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity; never refused at intake, but returns `Err(EffectAcceptanceError)` when a transient `EffectStateStore::accept` error survives the bounded retry policy, and never rolls back the committed event (AD-9)
+- [ ] 5.2 GREEN: `EffectAcceptor` trait returning `Result<(), EffectAcceptanceError>` + the `EffectAcceptanceError` type (`crates/persistent-entity/src/effect_acceptor.rs`)
+- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs) — bounded retry of transient store errors via the AD-5 `RetryPolicy`, mapping `EffectStoreError` into `EffectAcceptanceError` on exhaustion (AD-9)
 
 ## Phase 6: Delivery Runner
 
@@ -111,10 +111,23 @@ Chain strategy: stacked-to-main
 - [ ] 8.3 RED: actor calls `external_effects`+`accept` after commit, before reply; backpressure delays reply not commit
 - [ ] 8.4 GREEN: optional `effect_acceptor` field + post-persist call after `publisher.publish` (actor.rs:294)
 
+> **Acceptance-failure propagation (AD-9)**: `accept` returns
+> `Result<(), EffectAcceptanceError>`; the actor MUST propagate that error
+> through to the command's reply path in place of a success reply. It is a
+> post-commit error that does NOT mean the command failed or the event was
+> rolled back — commit is final. Docs-only note; this phase is not yet
+> implemented.
+
 ## Phase 9: Lifecycle Wiring (`service-sdk`)
 
 - [ ] 9.1 RED: zero cost when no executor registered; shutdown drains within deadline, in-flight→`Cancelled`→pending, `drain_incomplete` on remainder
 - [ ] 9.2 GREEN: `register_effect_executor` + `DeliveryConfig` option, conditional runner spawn, `register_async_teardown` drain hook (builder.rs)
+
+> **Shutdown vs. acceptance retry (AD-9)**: a bounded acceptance retry in
+> progress during graceful shutdown MUST respect the same drain deadline as
+> the rest of the lifecycle and time out into the same "acceptance ultimately
+> failed" (`EffectAcceptanceError`) path, never block shutdown indefinitely.
+> Docs-only note; not yet implemented.
 
 ## Phase 10: Tenant Isolation & Transport-Agnosticism
 

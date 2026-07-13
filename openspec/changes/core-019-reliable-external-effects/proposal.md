@@ -227,9 +227,13 @@ Honest distinctions this proposal commits to documenting verbatim in the spec:
 
 - The domain *describes* effects — always true after CORE-019.
 - The runtime *attempts* them with retries — true after CORE-019.
-- Effects *survive a crash* — **false with the shipped in-memory store**;
-  true only with a future durable store. A crash between commit and dispatch
-  loses the effect. We never claim otherwise.
+- Effects *survive a crash* — **false with the shipped in-memory store**.
+  Accepted effects survive a crash when stored in a durable
+  `EffectStateStore`; effects not yet accepted remain exposed to the
+  post-commit dual-write gap. That gap includes any effect where the crash
+  falls between the atomic commit and `EffectStateStore::accept` succeeding —
+  a durable store narrows the window but does not close it. We never claim
+  otherwise.
 - Logical deduplication — true within the store's window and process
   lifetime; end-to-end only when the destination honors the key.
 
@@ -313,10 +317,15 @@ cannot keep:
   any order (nothing downstream needs or specifies ordering) — not global,
   per-aggregate, per-destination, per-commit acceptance, or execution order
   (execution is concurrent).
-- Concurrency is bounded (configurable). Acceptance of committed effects can
-  never be refused (the commit already happened), so the bounded queue
-  exerts **backpressure upstream**: acceptance awaits capacity, slowing
-  command throughput rather than dropping effects.
+- Concurrency is bounded (configurable). Acceptance of committed effects is
+  never refused *outright at intake* (the commit already happened — there is
+  no synchronous "effect list rejected" path), so the bounded queue exerts
+  **backpressure upstream**: acceptance awaits capacity, slowing command
+  throughput rather than dropping effects. Recording an accepted effect MAY
+  still fail after a bounded retry of a transient store error, in which case
+  the caller receives an explicit post-commit `EffectAcceptanceError` — the
+  committed event is never rolled back (commit and acceptance are separate
+  concerns; Design AD-9).
 - **Exact commit/backpressure boundary** (verified against
   `crates/persistent-entity/src/actor.rs:194-304`): the atomic commit is
   `persist_events` (`actor.rs:221-229`) and is **complete when it returns
@@ -327,7 +336,11 @@ cannot keep:
   committed effect always eventually enters the queue. Because the actor
   processes commands serially, this is the upstream backpressure. This
   preserves the `effect.rs:3-7` invariant verbatim: effects are dispatched
-  only after the atomic commit succeeds.
+  only after the atomic commit succeeds. Acceptance itself can also fail after
+  a bounded retry of a transient store error; when it does, the actor
+  propagates an explicit post-commit `EffectAcceptanceError` on the command's
+  reply path instead of a success reply, and still never rolls back the
+  committed event (Design AD-9).
 
 ## 10. Runtime Lifecycle Integration (CORE-017)
 
@@ -538,7 +551,7 @@ is a clean commit-range revert with no data migration (in-memory store only).
 
 | # | Question | Answer |
 |---|----------|--------|
-| 1 | Do effects survive a process crash? | No, with the shipped in-memory store. Yes only with a future durable `EffectStateStore`; the port is shaped for it. |
+| 1 | Do effects survive a process crash? | No, with the shipped in-memory store. With a future durable `EffectStateStore`, only effects already accepted (recorded in the store) before the crash survive; effects not yet accepted — including any where the crash falls between commit and `EffectStateStore::accept` succeeding — stay exposed to the post-commit dual-write gap. The port is shaped for durability but does not close that gap. |
 | 2 | Delivery guarantee? | At-least-once attempted delivery within store lifetime/durability + idempotency-key propagation; logical once-only when the destination cooperates; at-most-once across crashes with the default store. |
 | 3 | Who stores delivery state? | The runtime-owned, separable public delivery ports — `EffectStateStore`/`EffectDedupStore` (§3), fed by the internal `EffectQueue` wake-up mechanism; one in-memory composite ships. |
 | 4 | What does idempotency really mean? | Scoped-key `(tenant, effect_type, key)` dedup within the store's window, single-flight per key, key forwarded to executors; end-to-end only if the destination honors it. |
