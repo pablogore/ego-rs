@@ -24,7 +24,7 @@ existing dependency shape decides placement — no new crate earns its keep.
 | File | Action | Contents |
 |------|--------|----------|
 | `crates/runtime/src/effects/mod.rs` | Create | Subsystem root, re-exports |
-| `crates/runtime/src/effects/store.rs` | Create | `EffectStateStore`, `EffectDedupStore` traits, `EffectState`, `EffectStoreError` |
+| `crates/runtime/src/effects/store.rs` | Create | `EffectStateStore` + `EffectDedupStore` traits; `EffectState`, `TerminalReason`, `EffectStoreError`; public DTOs `EffectId`, `Timestamp`, `AcceptedEffect`, `StoredEffect`, `DedupScope`, `DedupOutcome`; crate-private `EffectEnvelope`; `InMemoryEffectStore` composite |
 | `crates/runtime/src/effects/executor.rs` | Create | `ExternalEffectExecutor`, `AttemptOutcome`, `EffectContext` |
 | `crates/runtime/src/effects/registry.rs` | Create | `ExecutorRegistry` (HashMap keyed by `effect_type`), duplicate fail-closed |
 | `crates/runtime/src/effects/queue.rs` | Create | Internal `EffectQueue` (bounded `mpsc` wrapper) — **not public** |
@@ -50,8 +50,8 @@ to evolve.
 
 | Category | Meaning | Types / modules this design introduces |
 |----------|---------|------------------------------------------|
-| **Public SPI** | Traits external code implements or depends on | `EffectStateStore`, `EffectDedupStore`, `ExternalEffectExecutor`; plus the `EffectAcceptor` port trait in `persistent-entity` |
-| **Internal runtime** | Exists and is used across the subsystem, but is not a public extension point | `EffectQueue` (bounded `mpsc` + `watch` wake-up), `DeliveryRunner`, `ExecutorRegistry`, `RuntimeEffectAcceptor` (the port impl) |
+| **Public SPI** | Traits external code implements or depends on, plus the public DTOs their signatures use | `EffectStateStore`, `EffectDedupStore`, `ExternalEffectExecutor`, `ExecutorRegistry`, `DuplicateEffectType` (all `pub use`-exported from `effects::mod`); the public DTOs `AcceptedEffect`, `StoredEffect`, `Timestamp`, `EffectStoreError`, `EffectId`, `TerminalReason`, `DedupScope`, `DedupOutcome`; plus the `EffectAcceptor` port trait in `persistent-entity` |
+| **Internal runtime** | Exists and is used across the subsystem, but is not a public extension point | `EffectQueue` (bounded `mpsc` + `watch` wake-up), `DeliveryRunner`, `RuntimeEffectAcceptor` (the port impl) |
 | **Private helper** | Implementation detail, not exposed even within the crate's public module tree; free to change | `EffectEnvelope` (metadata wrapper — permanently private, see §4), internal state-transition helpers in `store.rs` |
 
 ## 3. Architecture Decisions
@@ -65,6 +65,8 @@ to evolve.
 | AD-5 Backoff defaults | Ship the read-side precedent as **runtime default constants**, explicitly **not** spec-normative numbers: `DEFAULT_MAX_ATTEMPTS: u32 = 3`, `DEFAULT_BASE_BACKOFF = Duration::from_millis(100)`, `DEFAULT_MAX_BACKOFF = Duration::from_secs(10)`, exponential + full jitter | Retune for external calls; pin the numbers in the spec | The spec's *behavioral* contract (retry with backoff, capped, jittered) is what is normative; these specific values are just this implementation's chosen defaults, overridable per-`effect_type`/per-adapter. The only in-repo retry precedent (`read_side/error.rs:9`) gives ops familiarity. Cap = 3 retries (4 attempts total). |
 | AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. Retryable effects re-enter via `tokio::time::sleep` then re-`send`. |
 | AD-7 Bookkeeping-failure semantics | On post-success bookkeeping failure (`mark_succeeded`/`commit_success`), bounded-retry the idempotent write; if it still fails, keep the effect `in-flight`/`retryable` and re-dispatch rather than losing it | Swallow the error and mark succeeded anyway; treat the bookkeeping failure as terminal | Preserves the at-least-once guarantee (§7): re-dispatch is safe because idempotency-key propagation is mandatory, so a cooperating destination collapses the duplicate. Consequence: a rare double-attempt on the destination, never a silent loss or a false-terminal. Failure-window detail in §6.5. |
+| AD-8 Single-consumer claim invariant | Exactly one `DeliveryRunner` instance calls `claim_due` at a time in this slice; `claim_due` is deliberately **non-atomic** — it returns due effects without transitioning their state (a claimant that intends to dispatch still calls `mark_in_flight`) | Make `claim_due` atomically claim (transition to `InFlight` with compare-and-swap / lease-timeout semantics) | Distributed/multi-consumer coordination (leasing, cross-node claims) is out of scope per the proposal's non-goals (§4). Non-atomic `claim_due` is safe **only because** a single runner consumes it. Atomic claiming would add compare-and-swap semantics and lease timeouts with no current driver; deferred until a real multi-consumer need materializes. |
+| AD-9 Acceptance-failure policy | `EffectAcceptor::accept` returns `Result<(), EffectAcceptanceError>`. The committed event is **never** rolled back because acceptance fails (commit and acceptance are separate concerns; commit success is final and unconditional). The caller's *successful* reply is withheld until acceptance of that command's effects completes. Only `EffectStateStore::accept`'s `TemporarilyUnavailable` error is retryable under the AD-5 `RetryPolicy`; every other store error is permanent and surfaces immediately as a post-commit `EffectAcceptanceError` (full mapping in the classification table below). If the retryable error survives the policy, the caller likewise receives an explicit post-commit `EffectAcceptanceError`. | Roll back the commit on acceptance failure; swallow the failure and reply success anyway; block shutdown until acceptance eventually succeeds | Extends the existing "backpressure delays the reply, never the commit" rule (§9) to also cover acceptance *failure*, not just queue-capacity waiting. Honest by construction: the error means "your command succeeded and its event is committed, but we could not durably-enough register at least one of its described effects, and it may be lost to the post-commit dual-write gap" — not that the command failed. Reuses the AD-5 `RetryPolicy` shape rather than a second policy type: acceptance retries the same class of transient store write, so a distinct tuning surface would be speculative. |
 
 **Why the spec leaves the numbers open while the design pins them (AD-5):** the
 spec states a *behavioral* contract; this design is **one valid implementation**
@@ -74,15 +76,100 @@ spec-normative requirement. A durable adapter or a per-`effect_type` override
 may choose different values without violating the spec, which is precisely why
 the spec does not pin exact numbers.
 
+**Acceptance-failure policy (AD-9) in plain terms:** the whole CORE-019 effort
+optimizes for honesty about what survives, so acceptance is honest too. A
+command's event commits atomically and irrevocably; recording that command's
+effects into the `EffectStateStore` happens *after* that commit and can hit a
+store error. Only a genuinely transient store error is retried under the AD-5
+`RetryPolicy` (same bounded-attempt + jittered-backoff shape, not a new policy
+type). If the retryable error is exhausted, or the store error is permanent,
+the caller's reply carries an explicit `EffectAcceptanceError`. This does
+**not** mean the command failed or the event was rolled back — the event is
+committed for good. It means exactly one thing: at least one described effect
+could not be durably-enough registered and may be lost to the post-commit
+dual-write gap (§7 Model B). The successful reply is only ever sent once
+acceptance completes.
+
+**AD-9 store-error classification (for `EffectStateStore::accept`).** Which
+`EffectStoreError` variants the acceptor retries versus surfaces immediately is
+pinned to the *already-shipped* `EffectStoreError` contract
+(`crates/runtime/src/effects/store.rs`), not re-invented here:
+
+| `EffectStoreError` variant | Acceptance classification |
+|----------------------------|---------------------------|
+| `TemporarilyUnavailable` | **Retryable** under the AD-5 `RetryPolicy` — the backend is reachable but momentarily unable to serve (pool exhausted, timeout, lock contention). The retry loop applies only here. |
+| `Backend` | **Permanent** — a general/permanent backend failure (corruption, serialization failure, schema mismatch). NOT automatically retried; surfaces immediately as the post-commit `EffectAcceptanceError`. |
+| `InvalidTransition` | **Permanent** — a logic error, not retried. |
+| `NotFound` | **Permanent** — a logic error, not retried. |
+| `Conflict` (from `accept` specifically) | **Permanent / invariant violation** — `Conflict` from `accept` is treated as a permanent invariant or data conflict (e.g. an `EffectId` collision or another persistence-level conflict — not necessarily the dedup-scope/fingerprint mismatch that `EffectDedupStore::reserve` reports), unless a concrete recoverable optimistic-concurrency case is specified. NOT retried automatically. (This classification is scoped to `accept`; the generic `Conflict` doc on `EffectStoreError` leaves retryability to the call site, and other call sites may classify it differently.) |
+
+Only `TemporarilyUnavailable` drives the retry loop; every other variant is a
+permanent acceptance failure that surfaces at once.
+
+**Shutdown interaction (AD-9).** A bounded acceptance retry that is still in
+flight during graceful shutdown/draining does not retry indefinitely. It
+respects the same drain deadline as the rest of the lifecycle (§8): when the
+deadline passes it stops retrying and times out into the same "acceptance
+ultimately failed" (`EffectAcceptanceError`) path, rather than blocking
+shutdown forever. Actor and lifecycle wiring are PR3/PR4/PR5 scope (still
+unbuilt), so this is a contract-level decision now, not an implementation.
+
+**REQUIRED constraint on the future command-result/reply type (PR3 actor
+wiring, AD-9).** A post-commit `EffectAcceptanceError` means "your command
+succeeded and its event is committed, but at least one described effect could
+not be durably-enough registered" — it is *not* a command failure. If PR3
+collapses this into a single generic `Result<CommandReply, Error>` where any
+`Err` is indistinguishable from a real command failure, a caller will treat it
+as command failure and likely retry, causing a **second commit / duplicate
+command execution** of an already-committed command. Therefore the future
+command-result/reply type PR3 introduces MUST expose an unambiguous distinction
+between "command not committed" (a real failure, safe to retry) and "command
+committed but effects not fully accepted" (commit is final, MUST NOT be retried
+as a command) — conceptually something like a `CommittedButEffectsUnaccepted`
+outcome versus a generic command error. PR3 MUST NOT collapse the two into one
+generic `Err` variant. The exact enum/type shape is deliberately left to PR3's
+design; this AD only fixes the constraint so it cannot be silently skipped.
+
 ## 4. Public Contracts (Rust)
 
 ```rust
 // crates/persistent-entity/src/effect_acceptor.rs
 #[async_trait]
 pub trait EffectAcceptor: Send + Sync {
-    /// Post-commit acceptance. Awaits queue capacity (backpressure, §9);
-    /// never refuses. Mints the effect id and attaches `tenant` internally.
-    async fn accept(&self, tenant: &TenantId, effects: Vec<ExternalEffectDescription>);
+    /// Post-commit acceptance. Mints the effect id, attaches `tenant`, and
+    /// records the effect as `Pending` in the configured `EffectStateStore`
+    /// (via `EffectStateStore::accept(AcceptedEffect { .. })`) before awaiting
+    /// queue capacity (backpressure, §9) and enqueuing it.
+    ///
+    /// Never refused outright at intake (there is no "your effect list is
+    /// rejected" path), but MAY ultimately fail: a transient store error is
+    /// retried under a bounded policy and, if that policy is exhausted (or the
+    /// store error is non-retryable), returns `Err(EffectAcceptanceError)`.
+    /// That error NEVER implies the already-committed event was rolled back —
+    /// commit is final; it means the effect could not be durably-enough
+    /// registered and may be lost to the post-commit dual-write gap (AD-9).
+    async fn accept(
+        &self,
+        tenant: &TenantId,
+        effects: Vec<ExternalEffectDescription>,
+    ) -> Result<(), EffectAcceptanceError>;
+}
+
+/// Layer-neutral acceptance-failure classification (AD-9). Lives beside the
+/// port in `persistent-entity`, so it does NOT reference runtime's
+/// `EffectStoreError`; the `RuntimeEffectAcceptor` impl maps the underlying
+/// `EffectStoreError` into these variants after the bounded retry.
+pub enum EffectAcceptanceError {
+    /// The one retryable store error (`TemporarilyUnavailable`) survived the
+    /// bounded acceptance retry policy. Commit is final; the effect may be
+    /// lost to the post-commit dual-write gap.
+    RetriesExhausted(String),
+    /// A permanent store failure — `Backend`, `InvalidTransition`, `NotFound`,
+    /// or a `Conflict` from `accept` (a permanent invariant or data conflict,
+    /// e.g. an `EffectId` collision — not necessarily a dedup-scope/fingerprint
+    /// mismatch) — surfaced without retry. Same commit-is-final, no-rollback
+    /// semantics.
+    Permanent(String),
 }
 
 // crates/runtime/src/effects/executor.rs
@@ -197,6 +284,8 @@ constraint that ties a durable implementation to living inside
          │              external_effects(cmd,state,events,ctx) ◄───┘
          ▼
     RuntimeEffectAcceptor.accept(tenant, effects)   ── mint id + attach tenant
+         │   EffectStateStore::accept(AcceptedEffect{..})  ── record Pending in
+         │                                                     the configured store
          │   send().await  ◄── BACKPRESSURE (delays REPLY, never commit)
          ▼
     [ bounded mpsc EffectQueue ]  ──recv().await──►  DeliveryRunner
@@ -206,6 +295,13 @@ constraint that ties a durable implementation to living inside
          └──── RetryableFailure ◄── ExternalEffectExecutor.execute(effect, ctx)
                                           │ Success ─► commit_success + mark_succeeded
                                           │ Terminal/Missing/Invalid ─► mark_terminal + signal
+
+For slice 1 the acceptor records the effect in whatever `EffectStateStore` is
+configured **at acceptance time, before the queue ever sees it**. With the
+in-memory store this ordering offers no crash protection (the store is lost on
+crash, §8), but the accept-then-enqueue sequencing is real and matters for a
+future durable store, whose `claim_due`/`recover_in_flight` — not queue replay
+— become the source of truth for pending work.
 
 ## 6. Open-Question Resolutions
 
@@ -219,7 +315,7 @@ constraint that ties a durable implementation to living inside
 4. **One executor / N types** → builder sugar
    `register_effect_executor(["s3.put","s3.delete"], Arc::new(exec))` iterates
    the keys and inserts the same `Arc` clone per key; duplicate key →
-   `RegistryError::DuplicateEffectType` surfaced at `.build()` (fail-closed, §11).
+   `DuplicateEffectType::AlreadyRegistered` surfaced at `.build()` (fail-closed, §11).
 5. **Executor succeeds, state-update fails** → **accepted at-least-once stance**,
    promoted to a first-class decision in **AD-7**.
    `mark_succeeded`/`commit_success` are retried a bounded number of times

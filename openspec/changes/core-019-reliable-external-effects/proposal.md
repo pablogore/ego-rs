@@ -10,7 +10,7 @@
 | Date | 2026-07-12 |
 | Parent | — (roadmap successor in the CORE-014 sequence: `openspec/changes/archive/2026-06-25-CORE-014-authorization-providers/proposal.md:95`) |
 | Related | CORE-019A (External Data Providers, proposed follow-up — see §Relationship) |
-| Enables | Durable `EffectDeliveryStore` implementations (future amendment, e.g. Postgres outbox); CORE-019A vocabulary separation |
+| Enables | Durable `EffectStateStore` implementations (future amendment, e.g. Postgres outbox); CORE-019A vocabulary separation |
 | Status | PROPOSING |
 
 ## 1. Motivation
@@ -67,9 +67,10 @@ coupling the domain to HTTP, brokers, databases, or e-mail.
 A write-side **effect delivery subsystem** with four cooperating contracts:
 
 1. **Acceptance seam** — the runtime accepts a commit's
-   `Vec<ExternalEffectDescription>` only after (or transactionally with) the
-   successful atomic commit, and gives the persistent-entity path a
-   backward-compatible way to describe effects at all (today it cannot).
+   `Vec<ExternalEffectDescription>` only after the successful atomic commit
+   (post-commit, best-effort; **not** inside the commit transaction — see §7),
+   and gives the persistent-entity path a backward-compatible way to describe
+   effects at all (today it cannot).
 2. **Delivery contracts (two public ports + one internal mechanism)** — the
    delivery-state responsibility is split at the design level into:
    - **`EffectStateStore`** (public port) — the pending → in-flight →
@@ -98,7 +99,7 @@ A write-side **effect delivery subsystem** with four cooperating contracts:
    however it wants; the public contract surface is only the two store ports.
 
    A single struct MAY implement both public traits — slice 1 ships one
-   in-memory composite (`EffectDeliveryStore` remains its working name) — but
+   in-memory composite (`InMemoryEffectStore`) — but
    the contracts MUST be separable so a future durable (outbox)
    implementation can satisfy them independently and enlist in the same unit
    of work as `persist_events`. **Caveat**: the composite is a slice-1
@@ -123,9 +124,10 @@ A write-side **effect delivery subsystem** with four cooperating contracts:
 - Domain-compatible way for persistent-entity handlers to describe external
   effects (exact API shape is a design concern; existing handlers keep
   compiling unchanged).
-- Post-commit acceptance seam positioned inside the commit unit boundary so a
-  future durable store can be transactional.
-- `EffectDeliveryStore` port + in-memory implementation.
+- Post-commit acceptance seam (runs after `persist_events` returns success,
+  **not** inside its transaction — §7/§9); best-effort, so a future durable
+  store built on it inherits the dual-write gap rather than closing it.
+- `EffectStateStore` port + in-memory implementation.
 - `ExternalEffectExecutor` port + explicit registry keyed by `effect_type`,
   wired through `RuntimeBuilder`.
 - Retry policy (exponential backoff + jitter, attempt caps, per-effect-type
@@ -172,7 +174,7 @@ A write-side **effect delivery subsystem** with four cooperating contracts:
 | Layer | Owns | Never does |
 |-------|------|------------|
 | Domain | Describes effects (`ExternalEffectDescription`); carries the idempotency key | External I/O; delivery state; protocol knowledge |
-| Runtime | Accepts effects post-commit; delivery state via `EffectDeliveryStore`; retry/backoff/dedup policy; lifecycle, draining, telemetry | Interpreting `effect_type`/`destination` semantics; protocol I/O |
+| Runtime | Accepts effects post-commit; delivery state via `EffectStateStore`; retry/backoff/dedup policy; lifecycle, draining, telemetry | Interpreting `effect_type`/`destination` semantics; protocol I/O |
 | Executor (adapter) | One protocol; executes one attempt; classifies protocol errors as retryable/terminal; may declare the destination honors idempotency keys | Retry loops, backoff, dedup, persistence, tenant minting |
 | Application | Registers executors and policies; defines concrete effect types; chooses the delivery store | Bypassing the registry; calling executors directly from handlers |
 
@@ -193,9 +195,9 @@ design preference.
 
 | Model | Verdict |
 |-------|---------|
-| A. Post-commit in-memory dispatch + in-process retry | **Shipped in CORE-019** as the default `EffectDeliveryStore` |
-| B. Persistent outbox in the commit transaction | **Enabled, not shipped**: the acceptance seam sits inside the commit unit boundary so a durable store can enlist transactionally; the dual-write problem is thereby solvable later without reshaping domain or executor contracts |
-| C. One contract permitting both | **Chosen shape**: the separable delivery contracts (§3) abstract A now and B later |
+| A. Post-commit in-memory dispatch + in-process retry | **Shipped in CORE-019** as the default `InMemoryEffectStore` |
+| B. Persistent outbox in the commit transaction | **Not shipped, and not enabled "for free"**: the acceptance seam is **post-commit** — acceptance runs after `persist_events` returns success (§9, and Design AD-1), never inside its transaction. A durable store built on this seam therefore **inherits the dual-write gap**: a crash between the commit and the durable-store write loses the effect description — the same failure mode as today's in-memory slice, only with a smaller window. Closing that gap (true transactional enlistment) would require moving acceptance *inside* the persistence transaction, which is an explicit non-goal here and a future redesign, not something this architecture already provides |
+| C. One contract permitting both | **Chosen shape**: the separable delivery contracts (§3) let a durable `EffectStateStore` replace the in-memory one later (durability), independently of whether acceptance is ever moved inside the commit transaction (transactional enlistment, per B) |
 
 ### Wake-up model
 
@@ -225,16 +227,20 @@ Honest distinctions this proposal commits to documenting verbatim in the spec:
 
 - The domain *describes* effects — always true after CORE-019.
 - The runtime *attempts* them with retries — true after CORE-019.
-- Effects *survive a crash* — **false with the shipped in-memory store**;
-  true only with a future durable store. A crash between commit and dispatch
-  loses the effect. We never claim otherwise.
+- Effects *survive a crash* — **false with the shipped in-memory store**.
+  Accepted effects survive a crash when stored in a durable
+  `EffectStateStore`; effects not yet accepted remain exposed to the
+  post-commit dual-write gap. That gap includes any effect where the crash
+  falls between the atomic commit and `EffectStateStore::accept` succeeding —
+  a durable store narrows the window but does not close it. We never claim
+  otherwise.
 - Logical deduplication — true within the store's window and process
   lifetime; end-to-end only when the destination honors the key.
 
 ### Delivery guarantee
 
 **At-least-once attempted delivery within the lifetime and durability of the
-registered `EffectDeliveryStore`**, plus mandatory idempotency-key
+registered `EffectStateStore`**, plus mandatory idempotency-key
 propagation to executors. With a cooperating destination this composes to a
 logical once-only outcome. With the default in-memory store, the cross-crash
 guarantee degrades to at-most-once, and the spec/API docs must say so. The
@@ -291,7 +297,7 @@ breaker to a later amendment.
   before dedup/state bookkeeping begins and associates with the scoped
   idempotency key from the first store interaction.
 - Port naming: dedup is owned by the `EffectDedupStore` contract (§3);
-  `EffectDeliveryStore` names the slice-1 in-memory composite implementing
+  `InMemoryEffectStore` names the slice-1 in-memory composite implementing
   both public delivery contracts (`EffectQueue` is internal, §3), not a
   single monolithic port. Rejected
   umbrella names: `IdempotencyStore` (dedup is only one job),
@@ -305,14 +311,21 @@ The current API carries no ordering key beyond per-commit `Vec` order and an
 opaque `destination: String`, so CORE-019 invents no order guarantee it
 cannot keep:
 
-- **Guaranteed**: acceptance order within one commit is preserved in the
-  store; single-flight per scoped idempotency key.
-- **Not guaranteed**: global order, per-aggregate order, per-destination
-  order, or even execution order within one commit (execution is concurrent).
-- Concurrency is bounded (configurable). Acceptance of committed effects can
-  never be refused (the commit already happened), so the bounded queue
-  exerts **backpressure upstream**: acceptance awaits capacity, slowing
-  command throughput rather than dropping effects.
+- **Guaranteed**: single-flight per scoped idempotency key.
+- **No ordering guarantee**: effects carry no ordering contract. Each accepted
+  effect is delivered independently, and the store MAY return due effects in
+  any order (nothing downstream needs or specifies ordering) — not global,
+  per-aggregate, per-destination, per-commit acceptance, or execution order
+  (execution is concurrent).
+- Concurrency is bounded (configurable). Acceptance of committed effects is
+  never refused *outright at intake* (the commit already happened — there is
+  no synchronous "effect list rejected" path), so the bounded queue exerts
+  **backpressure upstream**: acceptance awaits capacity, slowing command
+  throughput rather than dropping effects. Recording an accepted effect MAY
+  still fail after a bounded retry of a transient store error, in which case
+  the caller receives an explicit post-commit `EffectAcceptanceError` — the
+  committed event is never rolled back (commit and acceptance are separate
+  concerns; Design AD-9).
 - **Exact commit/backpressure boundary** (verified against
   `crates/persistent-entity/src/actor.rs:194-304`): the atomic commit is
   `persist_events` (`actor.rs:221-229`) and is **complete when it returns
@@ -323,7 +336,11 @@ cannot keep:
   committed effect always eventually enters the queue. Because the actor
   processes commands serially, this is the upstream backpressure. This
   preserves the `effect.rs:3-7` invariant verbatim: effects are dispatched
-  only after the atomic commit succeeds.
+  only after the atomic commit succeeds. Acceptance itself can also fail after
+  a bounded retry of a transient store error; when it does, the actor
+  propagates an explicit post-commit `EffectAcceptanceError` on the command's
+  reply path instead of a success reply, and still never rolls back the
+  committed event (Design AD-9).
 
 ## 10. Runtime Lifecycle Integration (CORE-017)
 
@@ -495,7 +512,7 @@ Payloads (`payload: Vec<u8>`) are never logged or exported by default.
 |------|------------|------------|
 | "Reliable" read as crash-durable while only in-memory ships | High | Guarantee labeled per store in every doc/spec; §7 wording is normative |
 | Persistent-entity handler API extension breaks compat | Med | Additive opt-in mechanism; compile-unchanged is a success criterion |
-| Acceptance seam placed where a durable store cannot be transactional | Med | Seam sits inside the commit unit boundary; validated in design against `PersistenceFacade::persist_events` |
+| Durable store built on the post-commit seam mistaken for transactional (dual-write gap assumed closed) | Med | Seam is explicitly post-commit/best-effort (§7 Model B, §9); docs state a durable store inherits the dual-write gap with a smaller window, and that true transactional enlistment is a separate future redesign, not provided here |
 | Backpressure at acceptance throttles command throughput | Med | Bounded queue sizing configurable; queue-depth/oldest-age signals |
 | Scope creep toward brokers/outbox/breaker | Med | Non-goals §4; breaker deferred with extension point |
 | Spec-phase load: capability spec never existed | Med | §5 names the new spec explicitly for sdd-spec |
@@ -534,14 +551,14 @@ is a clean commit-range revert with no data migration (in-memory store only).
 
 | # | Question | Answer |
 |---|----------|--------|
-| 1 | Do effects survive a process crash? | No, with the shipped in-memory store. Yes only with a future durable `EffectDeliveryStore`; the port is shaped for it. |
+| 1 | Do effects survive a process crash? | No, with the shipped in-memory store. With a future durable `EffectStateStore`, only effects already accepted (recorded in the store) before the crash survive; effects not yet accepted — including any where the crash falls between commit and `EffectStateStore::accept` succeeding — stay exposed to the post-commit dual-write gap. The port is shaped for durability but does not close that gap. |
 | 2 | Delivery guarantee? | At-least-once attempted delivery within store lifetime/durability + idempotency-key propagation; logical once-only when the destination cooperates; at-most-once across crashes with the default store. |
 | 3 | Who stores delivery state? | The runtime-owned, separable public delivery ports — `EffectStateStore`/`EffectDedupStore` (§3), fed by the internal `EffectQueue` wake-up mechanism; one in-memory composite ships. |
 | 4 | What does idempotency really mean? | Scoped-key `(tenant, effect_type, key)` dedup within the store's window, single-flight per key, key forwarded to executors; end-to-end only if the destination honors it. |
 | 5 | No adapter registered? | Terminal failure + loud signal — fail-closed, never dropped silently. |
 | 6 | During shutdown? | No new acceptance; drain until deadline; in-flight cancelled back to pending; `drain_incomplete` signal for remainder. |
 | 7 | Who decides retryable? | Executor classifies protocol errors; runtime classifies timeout/panic/missing-executor/invalid and computes backoff. |
-| 8 | Guaranteed order? | Only per-commit acceptance order in the store and single-flight per key. No global/aggregate/destination/execution order. |
+| 8 | Guaranteed order? | None across effects — single-flight per scoped key only. The store MAY return due effects in any order; no global, per-aggregate, per-destination, per-commit acceptance, or execution order. |
 | 9 | Does the runtime know protocols? | No. `effect_type` is an opaque registry key; protocols live in `ExternalEffectExecutor` implementations. |
 | 10 | What remains for CORE-019A? | Read-side External Data Providers — related, sequenced after CORE-019, no technical dependency, not designed here. |
 | 11 | Who mints the effect id, and when? | The runtime, at acceptance time — immediately after the atomic commit succeeds, before the effect enters the queue/store (§8). |
@@ -549,24 +566,30 @@ is a clean commit-range revert with no data migration (in-memory store only).
 
 ## 22. Open Questions
 
-1. Should the acceptance seam live in the `EffectInterpreter` `ExternalEffects`
+1. ~~Should the acceptance seam live in the `EffectInterpreter` `ExternalEffects`
    arm (activating the dormant trait) or directly in the actor's post-persist
    sequence (`actor.rs:230-301`)? Both satisfy this proposal; the tradeoff
-   (trait activation vs. one fewer indirection) is a design-phase decision.
-2. Default backoff/attempt-cap numbers: adopt the read-side precedent
+   (trait activation vs. one fewer indirection) is a design-phase decision.~~
+   **Resolved in Design AD-1** (post-persist seam).
+2. ~~Default backoff/attempt-cap numbers: adopt the read-side precedent
    (3 retries, 100ms base, 10s max) verbatim or retune for external calls?
-   Needs a product/ops preference; proposal defaults to the precedent.
-3. Should CORE-019 also route the existing fire-and-forget
+   Needs a product/ops preference; proposal defaults to the precedent.~~
+   **Resolved in Design AD-5** (runtime default constants, not spec-normative).
+3. ~~Should CORE-019 also route the existing fire-and-forget
    `EventPublisher.publish` (`actor.rs:294`) through the new delivery
    subsystem, or is that a separate hardening change? Proposal keeps it out
    of scope to bound size, but the inconsistency (two post-commit channels,
-   one unreliable) should be acknowledged on the roadmap.
-4. Can one executor support multiple `effect_type`s? Likely direction:
+   one unreliable) should be acknowledged on the roadmap.~~
+   **Deferred — see Design §6.3** (EventPublisher migration out of scope for
+   this slice).
+4. ~~Can one executor support multiple `effect_type`s? Likely direction:
    **yes** — the registry is keyed by `effect_type` and nothing in §11
    prevents registering the same executor instance under several keys (e.g.
    an S3-family executor handling both `s3.put` and `s3.delete`). Whether
    the registration API sugars this or the application simply registers the
-   same instance twice is a design-phase detail.
+   same instance twice is a design-phase detail.~~
+   **Resolved in Design §6.4** (registry keyed by `effect_type`, one executor
+   may register multiple keys).
 5. ~~What happens if an executor reports success but the runtime's own
    state-update fails?~~ **Resolved in Design AD-7** (bookkeeping failures
    preserve at-least-once semantics via idempotent bounded retry of

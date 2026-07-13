@@ -67,6 +67,13 @@ Chain strategy: stacked-to-main
 - [ ] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
 - [ ] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
 
+> **Timestamp conversion (F-02)**: backoff math produces a `Duration`, but
+> `EffectStateStore::mark_retryable` takes `next_at: Timestamp`, which currently
+> exposes no arithmetic helper. Whoever implements this phase should decide then
+> whether `Timestamp` needs a `checked_add(Duration)`-style helper or whether
+> call sites do the conversion inline — flagged so it is not silently
+> rediscovered in Phase 6.
+
 ## Phase 4: Internal Queue (not public)
 
 - [ ] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
@@ -74,14 +81,23 @@ Chain strategy: stacked-to-main
 
 ## Phase 5: Acceptor Port
 
-- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity, never refuses
-- [ ] 5.2 GREEN: `EffectAcceptor` trait (`crates/persistent-entity/src/effect_acceptor.rs`)
-- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs)
+- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity; never refused at intake, but returns `Err(EffectAcceptanceError)` when the one retryable `EffectStateStore::accept` error (`TemporarilyUnavailable`) survives the bounded retry policy, or immediately when the store error is permanent, and never rolls back the committed event (AD-9)
+- [ ] 5.2 GREEN: `EffectAcceptor` trait returning `Result<(), EffectAcceptanceError>` + the `EffectAcceptanceError` type (`crates/persistent-entity/src/effect_acceptor.rs`)
+- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs) — bounded retry via the AD-5 `RetryPolicy` of retryable store errors only (`TemporarilyUnavailable`); every other `EffectStoreError` variant (`Backend`, `InvalidTransition`, `NotFound`, and `Conflict` from `accept`) is permanent and maps immediately to `EffectAcceptanceError` without retry (AD-9 classification table)
 
 ## Phase 6: Delivery Runner
 
 - [ ] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
 - [ ] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
+
+> **Single-consumer invariant (design.md AD-8)**: this slice instantiates
+> exactly **one** `DeliveryRunner`; `claim_due` is deliberately non-atomic and
+> is safe only because a single runner consumes it. The runner must be a
+> singleton — do not spawn more than one instance.
+> **Timestamp conversion (F-02)**: the backoff `Duration` computed here must be
+> turned into a `Timestamp` for `mark_retryable`'s `next_at` (see the Phase 3
+> note); decide between a `Timestamp` helper and inline conversion when
+> implementing.
 
 ## Phase 7: ImmediateDeliveryPolicy
 
@@ -95,10 +111,36 @@ Chain strategy: stacked-to-main
 - [ ] 8.3 RED: actor calls `external_effects`+`accept` after commit, before reply; backpressure delays reply not commit
 - [ ] 8.4 GREEN: optional `effect_acceptor` field + post-persist call after `publisher.publish` (actor.rs:294)
 
+> **Acceptance-failure propagation (AD-9)**: `accept` returns
+> `Result<(), EffectAcceptanceError>`; the actor MUST propagate that error
+> through to the command's reply path in place of a success reply. It is a
+> post-commit error that does NOT mean the command failed or the event was
+> rolled back — commit is final. Docs-only note; this phase is not yet
+> implemented.
+>
+> **REQUIRED — unambiguous post-commit reply variant (AD-9)**: the
+> command-result/reply type this phase introduces MUST expose an unambiguous
+> distinction between "command not committed" (a real failure, safe to retry)
+> and "command committed but effects not fully accepted" (commit is final, MUST
+> NOT be retried as a command) — conceptually something like a
+> `CommittedButEffectsUnaccepted` outcome versus a generic command error. It
+> MUST NOT collapse a post-commit `EffectAcceptanceError` into a single generic
+> `Err` variant indistinguishable from a real command failure, because a caller
+> would then treat it as failure and retry, causing a second commit / duplicate
+> command execution of an already-committed command. The exact enum/type shape
+> is left to this phase's design; this note only fixes the constraint so it
+> cannot be silently skipped.
+
 ## Phase 9: Lifecycle Wiring (`service-sdk`)
 
 - [ ] 9.1 RED: zero cost when no executor registered; shutdown drains within deadline, in-flight→`Cancelled`→pending, `drain_incomplete` on remainder
 - [ ] 9.2 GREEN: `register_effect_executor` + `DeliveryConfig` option, conditional runner spawn, `register_async_teardown` drain hook (builder.rs)
+
+> **Shutdown vs. acceptance retry (AD-9)**: a bounded acceptance retry in
+> progress during graceful shutdown MUST respect the same drain deadline as
+> the rest of the lifecycle and time out into the same "acceptance ultimately
+> failed" (`EffectAcceptanceError`) path, never block shutdown indefinitely.
+> Docs-only note; not yet implemented.
 
 ## Phase 10: Tenant Isolation & Transport-Agnosticism
 

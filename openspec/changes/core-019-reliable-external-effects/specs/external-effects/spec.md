@@ -19,9 +19,17 @@ unrelated specs.
 
 The runtime MUST accept a command's produced external effects only after the
 atomic commit for that command's events has succeeded, and before the
-command's reply is returned to the caller. Acceptance of an already-committed
-effect MUST NOT be refused; a saturated acceptance path MUST delay the reply,
-never the commit, which has already completed.
+command's *successful* reply is returned to the caller. Acceptance MUST NOT be
+refused outright at intake — there is no synchronous "your effect list is
+invalid, rejected" path — and a saturated acceptance path MUST delay the
+reply, never the commit, which has already completed. Recording an accepted
+effect MAY nonetheless ultimately fail: a transient `EffectStateStore` error
+MUST be retried under a bounded, configurable retry policy, and only if that
+policy is exhausted (or the store error is non-retryable) does the caller
+receive an explicit post-commit acceptance error. Such a failure MUST NOT roll
+back the already-committed event; it means the command succeeded but at least
+one described effect could not be durably-enough registered and may be lost to
+the post-commit dual-write gap.
 
 #### Scenario: Effects accepted only after commit succeeds
 
@@ -36,6 +44,15 @@ never the commit, which has already completed.
 - WHEN an already-committed command attempts to hand off its effects
 - THEN the commit remains complete and unaffected; only the reply is delayed
   until acceptance succeeds
+
+#### Scenario: Transient acceptance failure is retried, then surfaced explicitly
+
+- GIVEN an already-committed command whose effects are being accepted
+- AND the `EffectStateStore` returns a transient error on every attempt
+- WHEN the bounded acceptance retry policy is exhausted
+- THEN the caller receives an explicit post-commit acceptance error, the
+  committed event is NOT rolled back, and the error is not read as the command
+  having failed
 
 ### Requirement: Runtime-Minted Effect Identity
 
@@ -56,8 +73,10 @@ stay unchanged; the identifier lives only in runtime-owned delivery metadata.
 Delivery-state ownership MUST be exposed as exactly two public ports:
 `EffectStateStore` (pending → in-flight → succeeded | retryable-failed |
 terminal-failed state and retry bookkeeping) and `EffectDedupStore` (scoped
-idempotency dedup). The in-process admission/wake-up mechanism MUST NOT be a
-public trait; it stays an internal runtime detail. One type MAY implement
+idempotency dedup). Exactly these two delivery-state operations are exposed as
+independently-swappable extension points; the in-process admission/ordering
+mechanism is not part of the public contract and MAY vary between
+implementations without being a compatibility concern. One type MAY implement
 both public ports for the shipped in-memory implementation; a future durable
 implementation MUST be able to satisfy each port independently.
 
@@ -119,6 +138,32 @@ guarantee MUST be documented as degrading to at-most-once across a crash.
 - WHEN the process crashes before a pending or in-flight effect completes
 - THEN that effect is lost, asserted by an explicit test, never hidden
 
+### Requirement: Delivery State Is Reconstructable After a Restart
+
+An `EffectStateStore` implementation MUST be able to list the effects whose
+retry time has elapsed so they can be (re-)dispatched, and MUST be able to
+signal which effects were mid-delivery when the process stopped so they are
+treated as not-yet-confirmed and become eligible for redispatch. These
+affordances are what makes crash recovery possible for a durable store; the
+shipped in-memory store exposes them but still loses all state on a crash (per
+the at-least-once requirement above).
+
+#### Scenario: Due effects can be listed for redispatch
+
+- GIVEN effects recorded in an `EffectStateStore`, some with an elapsed retry
+  time
+- WHEN the delivery subsystem asks the store for the effects due at the current
+  time
+- THEN it receives those whose retry time has elapsed, each carrying enough
+  data (tenant and description) to be re-executed
+
+#### Scenario: Mid-delivery effects are recoverable after a restart
+
+- GIVEN effects that were mid-delivery when the process stopped
+- WHEN the store is asked to recover after the restart
+- THEN those effects are signalled as not-yet-confirmed and become eligible for
+  redispatch, never silently treated as delivered
+
 ### Requirement: Executor Classifies Protocol Errors; Runtime Classifies the Rest
 
 Attempt outcomes MUST include `Success`, `RetryableFailure`, and
@@ -154,10 +199,13 @@ the store as `terminal-failed`.
 ### Requirement: ImmediateDeliveryPolicy Is a Configuration, Not a Second Pipeline
 
 There MUST be exactly one execution pipeline (accept → queue → delivery
-runner → executor). `ImmediateDeliveryPolicy` MUST be a configuration
-profile of that same pipeline (minimal queue capacity, zero retries,
-inline-scheduled running) — MUST NOT be a second, bypassing execution model
-or a distinct no-op store type.
+runner → executor), and immediate delivery MUST be observable as that same
+pipeline: an effect accepted under `ImmediateDeliveryPolicy` MUST traverse the
+identical accept → queue → run → execute path that any other configuration
+does, with no bypass path in existence. The profile behaves, from an
+operator's or caller's vantage, as one tuned for minimal backlog and no
+retries. A caller MUST NOT be able to observe a second, bypassing execution
+model or a distinct no-op store standing in for the pipeline.
 
 #### Scenario: Immediate delivery still passes through the one pipeline
 
