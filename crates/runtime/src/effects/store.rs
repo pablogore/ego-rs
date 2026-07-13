@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
-use std::time::Instant;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
 use thiserror::Error;
 use uuid::Uuid;
@@ -37,6 +37,34 @@ impl Default for EffectId {
 impl fmt::Display for EffectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// A persistable, portable point in time (F-02).
+///
+/// Wraps [`chrono::DateTime<Utc>`] — the same convention `ego_domain`'s
+/// [`Clock`](ego_domain::Clock) trait already returns — rather than
+/// `std::time::Instant`. `Instant` is monotonic and process-local: it cannot
+/// be serialized, persisted, or compared across a process restart, which is
+/// exactly what a durable [`EffectStateStore`] needs for `next_at`,
+/// `claim_due`, and `recover_in_flight`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Timestamp(DateTime<Utc>);
+
+impl Timestamp {
+    /// The current wall-clock instant.
+    pub fn now() -> Self {
+        Self(Utc::now())
+    }
+
+    /// Wraps an existing UTC timestamp (e.g. read back from a durable store).
+    pub fn from_utc(dt: DateTime<Utc>) -> Self {
+        Self(dt)
+    }
+
+    /// Unwraps the underlying UTC timestamp.
+    pub fn into_utc(self) -> DateTime<Utc> {
+        self.0
     }
 }
 
@@ -67,7 +95,13 @@ pub enum TerminalReason {
     Other(String),
 }
 
-/// Errors returned by [`EffectStateStore`] and [`EffectDedupStore`].
+/// Errors returned by [`EffectStateStore`] and [`EffectDedupStore`] (F-03).
+///
+/// Beyond bookkeeping errors (`NotFound`/`InvalidTransition`/`Conflict`),
+/// this taxonomy lets a durable backend express *transient* failures
+/// (`TemporarilyUnavailable`) distinctly from *permanent* ones (`Backend`),
+/// which AD-7's future delivery runner needs to classify a bookkeeping
+/// failure as retryable vs terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EffectStoreError {
     /// No effect is recorded under this id.
@@ -83,45 +117,87 @@ pub enum EffectStoreError {
         /// The state the caller attempted to transition to.
         to: EffectState,
     },
+    /// An optimistic-concurrency or dedup conflict (e.g. a concurrent writer
+    /// won the race). Callers should treat this as retryable at the caller's
+    /// discretion, not automatically terminal.
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// The backend is reachable but momentarily unable to serve the request
+    /// (connection pool exhausted, timeout, lock contention). Always
+    /// retryable.
+    #[error("backend temporarily unavailable: {0}")]
+    TemporarilyUnavailable(String),
+    /// A permanent backend failure (corruption, serialization failure,
+    /// schema mismatch). Never automatically retryable.
+    #[error("backend error: {0}")]
+    Backend(String),
 }
 
-/// Runtime-owned metadata wrapper for one accepted effect attempt.
+/// Public DTO describing one accepted effect attempt (F-01).
 ///
-/// **Permanently private** (design.md §4) — never exported as public API.
-/// Expected to grow fields (trace id, correlation id, timestamps) without a
-/// semver-breaking change precisely because it stays crate-private.
+/// This is the type [`EffectStateStore::accept`] takes — unlike the former
+/// `EffectEnvelope`, every field here is public API (`EffectId`, `TenantId`,
+/// `u32`, `ExternalEffectDescription`), so the trait is genuinely
+/// implementable from any crate, not only from within `ego-runtime`.
 #[derive(Debug, Clone)]
-pub(crate) struct EffectEnvelope {
+pub struct AcceptedEffect {
     /// The runtime-minted effect identifier.
     pub id: EffectId,
     /// The tenant established at acceptance time.
-    // ponytail: unread within this slice — `EffectStateStore` only tracks
-    // lifecycle state (id/attempt), while `tenant`/`description` travel to
-    // the runner through the queue (Phase 4/5, out of scope here). Kept on
-    // the envelope now because that's the accept-time unit design.md defines.
-    #[allow(dead_code)]
     pub tenant: TenantId,
-    /// The attempt number this envelope represents.
+    /// The attempt number this acceptance represents.
     pub attempt: u32,
     /// The frozen, handler-described effect.
-    #[allow(dead_code)]
     pub description: ExternalEffectDescription,
+}
+
+/// Runtime-owned metadata wrapper around one [`AcceptedEffect`] (design.md §4).
+///
+/// **Permanently crate-private** — never exported as public API. Wraps the
+/// public [`AcceptedEffect`] plus room to grow internal-only metadata (trace
+/// context, `accepted_at`) later without a semver-breaking change. Used by
+/// the future acceptor/queue/runner (PR2/PR3), not by [`EffectStateStore`]
+/// anymore — that port only ever sees the public `AcceptedEffect`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // ponytail: unused until PR2/PR3 wire the queue/runner around it
+pub(crate) struct EffectEnvelope {
+    /// The publicly-shaped accepted effect this envelope carries.
+    pub accepted: AcceptedEffect,
+}
+
+/// Everything needed to re-execute one accepted effect after a restart (F-02).
+///
+/// Returned by [`EffectStateStore::claim_due`] and used to reconstruct the
+/// in-flight world after a crash — unlike the bare state bookkeeping the
+/// original slice-1 store tracked, this retains `tenant` and `description`
+/// so a future durable store can hand a real, re-dispatchable effect back to
+/// the runner without any other source of truth.
+#[derive(Debug, Clone)]
+pub struct StoredEffect {
+    /// The runtime-minted effect identifier.
+    pub id: EffectId,
+    /// The tenant established at acceptance time.
+    pub tenant: TenantId,
+    /// The frozen, handler-described effect.
+    pub description: ExternalEffectDescription,
+    /// The next attempt number to use for re-dispatch.
+    pub attempt: u32,
+    /// The effect's current lifecycle state.
+    pub state: EffectState,
+    /// The earliest instant this effect may be (re-)dispatched.
+    pub next_at: Timestamp,
 }
 
 /// Public port owning delivery-state bookkeeping for accepted effects.
 ///
-/// Implementable only within `crates/runtime` for the foreseeable future:
-/// [`accept`](EffectStateStore::accept) takes [`EffectEnvelope`] by value,
-/// which is crate-private (design.md §4 consequence note). The
-/// `private_interfaces` lint is silenced deliberately: the trait stays `pub`
-/// (it's the stable seam other `crates/runtime` code depends on) while the
-/// envelope type it takes never leaves the crate — that's the point, not a
-/// leak.
+/// Every method signature here is built from public types only
+/// (`AcceptedEffect`, `EffectId`, `Timestamp`, `StoredEffect`,
+/// `TerminalReason`, `EffectStoreError`) — implementable from any crate that
+/// depends on `ego-runtime`, not only from within it (F-01).
 #[async_trait]
-#[allow(private_interfaces)]
 pub trait EffectStateStore: Send + Sync {
     /// Records a newly-accepted effect as [`EffectState::Pending`].
-    async fn accept(&self, env: EffectEnvelope) -> Result<(), EffectStoreError>;
+    async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError>;
     /// Transitions to [`EffectState::InFlight`] before dispatching an attempt.
     async fn mark_in_flight(&self, id: EffectId) -> Result<(), EffectStoreError>;
     /// Transitions to [`EffectState::Succeeded`] after a successful attempt.
@@ -132,7 +208,7 @@ pub trait EffectStateStore: Send + Sync {
         &self,
         id: EffectId,
         attempt: u32,
-        next_at: Instant,
+        next_at: Timestamp,
     ) -> Result<(), EffectStoreError>;
     /// Transitions to [`EffectState::TerminalFailed`] with the given reason.
     async fn mark_terminal(
@@ -140,6 +216,21 @@ pub trait EffectStateStore: Send + Sync {
         id: EffectId,
         reason: TerminalReason,
     ) -> Result<(), EffectStoreError>;
+    /// Returns up to `limit` effects that are due for (re-)dispatch at `now`
+    /// — i.e. `Pending` or `RetryableFailed` with `next_at <= now` — with
+    /// enough data (`tenant` + `description`) to actually re-execute them
+    /// (F-02). Does not itself transition state; a caller that intends to
+    /// dispatch a claimed effect still calls `mark_in_flight`.
+    async fn claim_due(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<StoredEffect>, EffectStoreError>;
+    /// Recovers bookkeeping after a crash: any effect left `InFlight` (an
+    /// attempt was dispatching when the process died) is returned to
+    /// `Pending` so it becomes claimable again, and the store returns how
+    /// many effects it recovered (F-02).
+    async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError>;
 }
 
 /// The result of a single-flight dedup reservation attempt.
@@ -186,9 +277,11 @@ pub trait EffectDedupStore: Send + Sync {
 
 #[derive(Debug, Clone)]
 struct EffectRecord {
+    tenant: TenantId,
+    description: ExternalEffectDescription,
     state: EffectState,
     attempt: u32,
-    next_at: Option<Instant>,
+    next_at: Option<Timestamp>,
     terminal_reason: Option<TerminalReason>,
 }
 
@@ -235,14 +328,15 @@ impl InMemoryEffectStore {
 }
 
 #[async_trait]
-#[allow(private_interfaces)]
 impl EffectStateStore for InMemoryEffectStore {
-    async fn accept(&self, env: EffectEnvelope) -> Result<(), EffectStoreError> {
+    async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
         self.states.lock().unwrap().insert(
-            env.id,
+            effect.id,
             EffectRecord {
+                tenant: effect.tenant,
+                description: effect.description,
                 state: EffectState::Pending,
-                attempt: env.attempt,
+                attempt: effect.attempt,
                 next_at: None,
                 terminal_reason: None,
             },
@@ -271,7 +365,7 @@ impl EffectStateStore for InMemoryEffectStore {
         &self,
         id: EffectId,
         attempt: u32,
-        next_at: Instant,
+        next_at: Timestamp,
     ) -> Result<(), EffectStoreError> {
         let mut states = self.states.lock().unwrap();
         let record = Self::transition(
@@ -299,6 +393,44 @@ impl EffectStateStore for InMemoryEffectStore {
         )?;
         record.terminal_reason = Some(reason);
         Ok(())
+    }
+
+    async fn claim_due(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<StoredEffect>, EffectStoreError> {
+        let states = self.states.lock().unwrap();
+        let due = states
+            .iter()
+            .filter(|(_, record)| {
+                matches!(record.state, EffectState::Pending | EffectState::RetryableFailed)
+            })
+            .filter(|(_, record)| record.next_at.is_none_or(|next_at| next_at <= now))
+            .take(limit)
+            .map(|(id, record)| StoredEffect {
+                id: *id,
+                tenant: record.tenant.clone(),
+                description: record.description.clone(),
+                attempt: record.attempt,
+                state: record.state,
+                next_at: record.next_at.unwrap_or(now),
+            })
+            .collect();
+        Ok(due)
+    }
+
+    async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError> {
+        let mut states = self.states.lock().unwrap();
+        let mut recovered = 0u64;
+        for record in states.values_mut() {
+            if record.state == EffectState::InFlight {
+                record.state = EffectState::Pending;
+                record.next_at = Some(now);
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
     }
 }
 
@@ -337,7 +469,6 @@ impl EffectDedupStore for InMemoryEffectStore {
 mod tests {
     use super::*;
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
-    use std::time::Instant;
 
     fn sample_description() -> ExternalEffectDescription {
         ExternalEffectDescription {
@@ -348,8 +479,8 @@ mod tests {
         }
     }
 
-    fn envelope(id: EffectId) -> EffectEnvelope {
-        EffectEnvelope {
+    fn accepted_effect(id: EffectId) -> AcceptedEffect {
+        AcceptedEffect {
             id,
             tenant: TenantId::new("tenant-a").unwrap(),
             attempt: 0,
@@ -369,7 +500,7 @@ mod tests {
     async fn accepted_effect_starts_pending_then_moves_in_flight() {
         let store = InMemoryEffectStore::new();
         let id = EffectId::new();
-        store.accept(envelope(id)).await.unwrap();
+        store.accept(accepted_effect(id)).await.unwrap();
 
         store.mark_in_flight(id).await.unwrap();
 
@@ -388,7 +519,7 @@ mod tests {
     async fn in_flight_effect_can_succeed() {
         let store = InMemoryEffectStore::new();
         let id = EffectId::new();
-        store.accept(envelope(id)).await.unwrap();
+        store.accept(accepted_effect(id)).await.unwrap();
         store.mark_in_flight(id).await.unwrap();
 
         store.mark_succeeded(id).await.unwrap();
@@ -407,10 +538,10 @@ mod tests {
     async fn in_flight_effect_can_be_marked_retryable_then_redispatched() {
         let store = InMemoryEffectStore::new();
         let id = EffectId::new();
-        store.accept(envelope(id)).await.unwrap();
+        store.accept(accepted_effect(id)).await.unwrap();
         store.mark_in_flight(id).await.unwrap();
 
-        store.mark_retryable(id, 1, Instant::now()).await.unwrap();
+        store.mark_retryable(id, 1, Timestamp::now()).await.unwrap();
         // Retry loop: the runner re-dispatches, returning it to in-flight.
         store.mark_in_flight(id).await.unwrap();
         store.mark_succeeded(id).await.unwrap();
@@ -420,9 +551,9 @@ mod tests {
     async fn retryable_effect_can_become_terminal() {
         let store = InMemoryEffectStore::new();
         let id = EffectId::new();
-        store.accept(envelope(id)).await.unwrap();
+        store.accept(accepted_effect(id)).await.unwrap();
         store.mark_in_flight(id).await.unwrap();
-        store.mark_retryable(id, 3, Instant::now()).await.unwrap();
+        store.mark_retryable(id, 3, Timestamp::now()).await.unwrap();
 
         store
             .mark_terminal(id, TerminalReason::Other("attempt cap exceeded".into()))
@@ -503,5 +634,146 @@ mod tests {
         let outcome = store.reserve(&s, 42).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Duplicate);
+    }
+
+    // --- F-02: claim_due / recover_in_flight ---
+
+    #[tokio::test]
+    async fn claim_due_returns_pending_effect_with_tenant_and_description_retained() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, id);
+        assert_eq!(claimed[0].tenant, TenantId::new("tenant-a").unwrap());
+        assert_eq!(claimed[0].description, sample_description());
+        assert_eq!(claimed[0].state, EffectState::Pending);
+    }
+
+    #[tokio::test]
+    async fn claim_due_excludes_retryable_effect_whose_next_at_is_in_the_future() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+        store.mark_in_flight(id).await.unwrap();
+        let far_future = Timestamp::from_utc(Utc::now() + chrono::Duration::hours(1));
+        store.mark_retryable(id, 1, far_future).await.unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert!(claimed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_due_includes_retryable_effect_once_next_at_has_passed() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+        store.mark_in_flight(id).await.unwrap();
+        let just_passed = Timestamp::from_utc(Utc::now() - chrono::Duration::seconds(1));
+        store.mark_retryable(id, 1, just_passed).await.unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].attempt, 1);
+        assert_eq!(claimed[0].state, EffectState::RetryableFailed);
+    }
+
+    #[tokio::test]
+    async fn claim_due_respects_limit() {
+        let store = InMemoryEffectStore::new();
+        for _ in 0..3 {
+            store
+                .accept(accepted_effect(EffectId::new()))
+                .await
+                .unwrap();
+        }
+
+        let claimed = store.claim_due(Timestamp::now(), 2).await.unwrap();
+
+        assert_eq!(claimed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn claim_due_excludes_in_flight_and_terminal_effects() {
+        let store = InMemoryEffectStore::new();
+        let in_flight_id = EffectId::new();
+        store
+            .accept(accepted_effect(in_flight_id))
+            .await
+            .unwrap();
+        store.mark_in_flight(in_flight_id).await.unwrap();
+
+        let terminal_id = EffectId::new();
+        store.accept(accepted_effect(terminal_id)).await.unwrap();
+        store.mark_in_flight(terminal_id).await.unwrap();
+        store
+            .mark_terminal(terminal_id, TerminalReason::ExecutorMissing)
+            .await
+            .unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert!(claimed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_in_flight_returns_in_flight_effects_to_pending_and_counts_them() {
+        let store = InMemoryEffectStore::new();
+        let recovered_id = EffectId::new();
+        store.accept(accepted_effect(recovered_id)).await.unwrap();
+        store.mark_in_flight(recovered_id).await.unwrap();
+
+        let untouched_id = EffectId::new();
+        store.accept(accepted_effect(untouched_id)).await.unwrap();
+
+        let recovered = store.recover_in_flight(Timestamp::now()).await.unwrap();
+
+        assert_eq!(recovered, 1);
+        // The recovered effect is claimable again (back to Pending).
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert!(claimed.iter().any(|e| e.id == recovered_id));
+        assert!(claimed.iter().any(|e| e.id == untouched_id));
+    }
+
+    #[tokio::test]
+    async fn recover_in_flight_is_zero_when_nothing_is_in_flight() {
+        let store = InMemoryEffectStore::new();
+        store
+            .accept(accepted_effect(EffectId::new()))
+            .await
+            .unwrap();
+
+        let recovered = store.recover_in_flight(Timestamp::now()).await.unwrap();
+
+        assert_eq!(recovered, 0);
+    }
+
+    // --- F-03: error taxonomy ---
+
+    #[test]
+    fn error_taxonomy_distinguishes_transient_from_permanent_backend_failures() {
+        let transient = EffectStoreError::TemporarilyUnavailable("connection pool exhausted".into());
+        let permanent = EffectStoreError::Backend("corrupt record".into());
+        let conflict = EffectStoreError::Conflict("optimistic lock lost".into());
+
+        // A caller classifying retryability sees the three kinds as distinct.
+        assert!(matches!(transient, EffectStoreError::TemporarilyUnavailable(_)));
+        assert!(matches!(permanent, EffectStoreError::Backend(_)));
+        assert!(matches!(conflict, EffectStoreError::Conflict(_)));
+        assert_ne!(transient, permanent);
+
+        // Each variant carries a human-readable message via `thiserror`.
+        assert_eq!(
+            transient.to_string(),
+            "backend temporarily unavailable: connection pool exhausted"
+        );
+        assert_eq!(permanent.to_string(), "backend error: corrupt record");
+        assert_eq!(conflict.to_string(), "conflict: optimistic lock lost");
     }
 }

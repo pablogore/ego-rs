@@ -100,13 +100,61 @@ pub trait ExternalEffectExecutor: Send + Sync {
 // crates/runtime/src/effects/store.rs
 pub enum EffectState { Pending, InFlight, Succeeded, RetryableFailed, TerminalFailed }
 
+/// Persistable, portable point in time — wraps `chrono::DateTime<Utc>` (the
+/// same convention `ego_domain::Clock` already returns), never
+/// `std::time::Instant`, which is monotonic/process-local and cannot survive
+/// a restart or be compared across processes.
+pub struct Timestamp(chrono::DateTime<chrono::Utc>);
+impl Timestamp {
+    pub fn now() -> Self { /* ... */ }
+    pub fn from_utc(dt: chrono::DateTime<chrono::Utc>) -> Self { /* ... */ }
+    pub fn into_utc(self) -> chrono::DateTime<chrono::Utc> { /* ... */ }
+}
+
+/// Public DTO the trait actually takes — every field is public API, unlike
+/// the crate-private `EffectEnvelope`.
+pub struct AcceptedEffect {
+    pub id: EffectId,
+    pub tenant: TenantId,
+    pub attempt: u32,
+    pub description: ExternalEffectDescription,
+}
+
+/// Everything needed to re-execute one accepted effect after a restart.
+pub struct StoredEffect {
+    pub id: EffectId,
+    pub tenant: TenantId,
+    pub description: ExternalEffectDescription,
+    pub attempt: u32,
+    pub state: EffectState,
+    pub next_at: Timestamp,
+}
+
 #[async_trait]
 pub trait EffectStateStore: Send + Sync {
-    async fn accept(&self, env: EffectEnvelope) -> Result<(), EffectStoreError>;
+    async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError>;
     async fn mark_in_flight(&self, id: EffectId) -> Result<(), EffectStoreError>;
     async fn mark_succeeded(&self, id: EffectId) -> Result<(), EffectStoreError>;
-    async fn mark_retryable(&self, id: EffectId, attempt: u32, next_at: Instant) -> Result<(), EffectStoreError>;
+    async fn mark_retryable(&self, id: EffectId, attempt: u32, next_at: Timestamp) -> Result<(), EffectStoreError>;
     async fn mark_terminal(&self, id: EffectId, reason: TerminalReason) -> Result<(), EffectStoreError>;
+    /// Effects due for (re-)dispatch at `now`, up to `limit` — with enough
+    /// data (`tenant` + `description`) to actually re-execute them.
+    async fn claim_due(&self, now: Timestamp, limit: usize) -> Result<Vec<StoredEffect>, EffectStoreError>;
+    /// Crash recovery: returns any `InFlight` effect to `Pending`; returns
+    /// the count recovered.
+    async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError>;
+}
+
+/// Errors returned by `EffectStateStore`/`EffectDedupStore`. Beyond
+/// bookkeeping errors, a minimal transient/permanent split lets AD-7's
+/// future delivery runner classify a bookkeeping failure as retryable vs
+/// terminal.
+pub enum EffectStoreError {
+    NotFound(EffectId),
+    InvalidTransition { id: EffectId, from: EffectState, to: EffectState },
+    Conflict(String),
+    TemporarilyUnavailable(String),
+    Backend(String),
 }
 
 #[async_trait]
@@ -119,26 +167,28 @@ pub trait EffectDedupStore: Send + Sync {
 // DedupOutcome { Fresh, Duplicate /* already in-flight/succeeded */, Conflict /* same scope, different fingerprint → InvalidEffect */ }
 ```
 
-`EffectEnvelope` is the runtime-owned metadata wrapper (§15): `{ id: EffectId,
-tenant: TenantId, attempt: u32, description: ExternalEffectDescription }`. The
+`EffectEnvelope` is the runtime-owned metadata wrapper (§15) that now wraps
+`AcceptedEffect` plus room for internal-only metadata (trace id, correlation
+id, `created_at`, `accepted_at`) added later without a semver break. The
 frozen `ExternalEffectDescription` gains no fields. Slice 1 ships one
-`InMemoryEffectStore` implementing **both** ports (convenience only, §3 caveat).
+`InMemoryEffectStore` implementing **both** ports (convenience only, §3
+caveat), and now also retains `tenant`/`description` per accepted effect (not
+just state bookkeeping) so `claim_due`/`recover_in_flight` return real,
+re-dispatchable data.
 
 **`EffectEnvelope` is permanently runtime-private and MUST NOT be exposed as
-public API.** It is expected to grow fields over time (e.g. trace id,
-correlation id, `created_at`, `accepted_at`); keeping it private to
-`crates/runtime` is exactly what lets those fields be added without a
-semver-breaking change or any compatibility contract on its shape. It occupies
-the **Private helper** row of the extension-surface table (§2).
+public API.** It occupies the **Private helper** row of the extension-surface
+table (§2) and is used internally by the future acceptor/queue/runner
+(PR2/PR3) — it is no longer part of any `EffectStateStore` signature.
 
-Consequence: because `EffectStateStore::accept` takes `EffectEnvelope` by
-value, this port is implementable only *within* `crates/runtime` for the
-foreseeable future — a future durable-outbox implementation is expected to
-live as a submodule of `crates/runtime::effects`, not as an external crate.
-`EffectStateStore`/`EffectDedupStore` are "public" in the sense of being a
-stable internal seam other `crates/runtime` code depends on, not in the
-sense of being implementable from arbitrary downstream crates. Revisit if a
-concrete need for an out-of-crate store implementation ever materializes.
+**Consequence (revised):** because `EffectStateStore::accept` takes the
+public `AcceptedEffect` (not `EffectEnvelope`), this port — like
+`EffectDedupStore` — is genuinely implementable from any crate that depends
+on `ego-runtime`, not only from within it. A future durable-store crate needs
+only the public `AcceptedEffect`, `StoredEffect`, `Timestamp`, and
+`EffectStoreError` types; nothing crate-private. There is no remaining
+constraint that ties a durable implementation to living inside
+`crates/runtime::effects`.
 
 ## 5. Data Flow
 

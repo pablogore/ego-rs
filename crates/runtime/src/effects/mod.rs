@@ -12,6 +12,7 @@ pub mod store;
 pub use executor::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
 pub use registry::{DuplicateEffectType, ExecutorRegistry};
 pub use store::{
-    DedupOutcome, DedupScope, EffectDedupStore, EffectId, EffectState, EffectStateStore,
-    EffectStoreError, InMemoryEffectStore, TerminalReason,
+    AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectId, EffectState,
+    EffectStateStore, EffectStoreError, InMemoryEffectStore, StoredEffect, TerminalReason,
+    Timestamp,
 };

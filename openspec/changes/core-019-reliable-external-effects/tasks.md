@@ -37,6 +37,31 @@ Chain strategy: stacked-to-main
 - [x] 2.1 RED: duplicate-registration-fails + one-executor-multi-type tests
 - [x] 2.2 GREEN: `ExternalEffectExecutor`, `AttemptOutcome`, `EffectContext` (executor.rs); `ExecutorRegistry`, `DuplicateEffectType` error (registry.rs)
 
+> **Post-review fixes (PR1, before merge)** — maintainer review of PR1 found 3
+> architectural findings against Phases 1-2, all fixed in the same PR before
+> merge:
+> - **F-01 (BLOCKER)**: `EffectStateStore::accept` took the crate-private
+>   `EffectEnvelope`, making the trait not actually implementable outside
+>   `ego-runtime`. Fixed by introducing the public `AcceptedEffect` DTO;
+>   `accept` now takes `AcceptedEffect`, and `EffectEnvelope` stays
+>   crate-private, no longer part of any public trait signature.
+> - **F-02 (BLOCKER)**: no crash-recovery path, and the in-memory store
+>   discarded `tenant`/`description` (unreconstructable), and
+>   `mark_retryable`'s `next_at: Instant` was not persistable. Fixed by adding
+>   `EffectStateStore::claim_due`/`recover_in_flight`, a new `StoredEffect`
+>   DTO, a persistable `Timestamp` newtype (wraps `chrono::DateTime<Utc>`,
+>   aligned with `ego_domain::Clock`'s convention) replacing `Instant`, and
+>   `InMemoryEffectStore` now retains `tenant`/`description` per effect.
+> - **F-03 (HIGH)**: `EffectStoreError` only had `NotFound`/`InvalidTransition`,
+>   with no way to express transient vs permanent backend failures for AD-7.
+>   Fixed by adding `Conflict`, `TemporarilyUnavailable`, and `Backend`
+>   variants.
+>
+> `design.md` §4 updated to match (trait sketch, `Timestamp`, expanded error
+> enum, and the now-corrected "Consequence" paragraph). See
+> `crates/runtime/src/effects/store.rs` and
+> `crates/runtime/tests/effect_store_public_api.rs`.
+
 ## Phase 3: Retry Policy
 
 - [ ] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
