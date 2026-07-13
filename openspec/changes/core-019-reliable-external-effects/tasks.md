@@ -81,9 +81,9 @@ Chain strategy: stacked-to-main
 
 ## Phase 5: Acceptor Port
 
-- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity; never refused at intake, but returns `Err(EffectAcceptanceError)` when a transient `EffectStateStore::accept` error survives the bounded retry policy, and never rolls back the committed event (AD-9)
+- [ ] 5.1 RED: `accept()` mints id + attaches tenant before store interaction; awaits capacity; never refused at intake, but returns `Err(EffectAcceptanceError)` when the one retryable `EffectStateStore::accept` error (`TemporarilyUnavailable`) survives the bounded retry policy, or immediately when the store error is permanent, and never rolls back the committed event (AD-9)
 - [ ] 5.2 GREEN: `EffectAcceptor` trait returning `Result<(), EffectAcceptanceError>` + the `EffectAcceptanceError` type (`crates/persistent-entity/src/effect_acceptor.rs`)
-- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs) — bounded retry of transient store errors via the AD-5 `RetryPolicy`, mapping `EffectStoreError` into `EffectAcceptanceError` on exhaustion (AD-9)
+- [ ] 5.3 GREEN: `RuntimeEffectAcceptor` impl (runtime/effects/acceptor.rs) — bounded retry via the AD-5 `RetryPolicy` of retryable store errors only (`TemporarilyUnavailable`); every other `EffectStoreError` variant (`Backend`, `InvalidTransition`, `NotFound`, and `Conflict` from `accept`) is permanent and maps immediately to `EffectAcceptanceError` without retry (AD-9 classification table)
 
 ## Phase 6: Delivery Runner
 
@@ -117,6 +117,19 @@ Chain strategy: stacked-to-main
 > post-commit error that does NOT mean the command failed or the event was
 > rolled back — commit is final. Docs-only note; this phase is not yet
 > implemented.
+>
+> **REQUIRED — unambiguous post-commit reply variant (AD-9)**: the
+> command-result/reply type this phase introduces MUST expose an unambiguous
+> distinction between "command not committed" (a real failure, safe to retry)
+> and "command committed but effects not fully accepted" (commit is final, MUST
+> NOT be retried as a command) — conceptually something like a
+> `CommittedButEffectsUnaccepted` outcome versus a generic command error. It
+> MUST NOT collapse a post-commit `EffectAcceptanceError` into a single generic
+> `Err` variant indistinguishable from a real command failure, because a caller
+> would then treat it as failure and retry, causing a second commit / duplicate
+> command execution of an already-committed command. The exact enum/type shape
+> is left to this phase's design; this note only fixes the constraint so it
+> cannot be silently skipped.
 
 ## Phase 9: Lifecycle Wiring (`service-sdk`)
 

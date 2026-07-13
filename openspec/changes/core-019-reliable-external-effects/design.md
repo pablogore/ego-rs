@@ -66,7 +66,7 @@ to evolve.
 | AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. Retryable effects re-enter via `tokio::time::sleep` then re-`send`. |
 | AD-7 Bookkeeping-failure semantics | On post-success bookkeeping failure (`mark_succeeded`/`commit_success`), bounded-retry the idempotent write; if it still fails, keep the effect `in-flight`/`retryable` and re-dispatch rather than losing it | Swallow the error and mark succeeded anyway; treat the bookkeeping failure as terminal | Preserves the at-least-once guarantee (§7): re-dispatch is safe because idempotency-key propagation is mandatory, so a cooperating destination collapses the duplicate. Consequence: a rare double-attempt on the destination, never a silent loss or a false-terminal. Failure-window detail in §6.5. |
 | AD-8 Single-consumer claim invariant | Exactly one `DeliveryRunner` instance calls `claim_due` at a time in this slice; `claim_due` is deliberately **non-atomic** — it returns due effects without transitioning their state (a claimant that intends to dispatch still calls `mark_in_flight`) | Make `claim_due` atomically claim (transition to `InFlight` with compare-and-swap / lease-timeout semantics) | Distributed/multi-consumer coordination (leasing, cross-node claims) is out of scope per the proposal's non-goals (§4). Non-atomic `claim_due` is safe **only because** a single runner consumes it. Atomic claiming would add compare-and-swap semantics and lease timeouts with no current driver; deferred until a real multi-consumer need materializes. |
-| AD-9 Acceptance-failure policy | `EffectAcceptor::accept` returns `Result<(), EffectAcceptanceError>`. The committed event is **never** rolled back because acceptance fails (commit and acceptance are separate concerns; commit success is final and unconditional). The caller's *successful* reply is withheld until acceptance of that command's effects completes. Transient `EffectStateStore::accept` errors (`TemporarilyUnavailable`/`Backend`) are retried under the AD-5 `RetryPolicy`; if they survive that policy (or the store error is non-retryable), the caller receives an explicit post-commit `EffectAcceptanceError`. | Roll back the commit on acceptance failure; swallow the failure and reply success anyway; block shutdown until acceptance eventually succeeds | Extends the existing "backpressure delays the reply, never the commit" rule (§9) to also cover acceptance *failure*, not just queue-capacity waiting. Honest by construction: the error means "your command succeeded and its event is committed, but we could not durably-enough register at least one of its described effects, and it may be lost to the post-commit dual-write gap" — not that the command failed. Reuses the AD-5 `RetryPolicy` shape rather than a second policy type: acceptance retries the same class of transient store write, so a distinct tuning surface would be speculative. |
+| AD-9 Acceptance-failure policy | `EffectAcceptor::accept` returns `Result<(), EffectAcceptanceError>`. The committed event is **never** rolled back because acceptance fails (commit and acceptance are separate concerns; commit success is final and unconditional). The caller's *successful* reply is withheld until acceptance of that command's effects completes. Only `EffectStateStore::accept`'s `TemporarilyUnavailable` error is retryable under the AD-5 `RetryPolicy`; every other store error is permanent and surfaces immediately as a post-commit `EffectAcceptanceError` (full mapping in the classification table below). If the retryable error survives the policy, the caller likewise receives an explicit post-commit `EffectAcceptanceError`. | Roll back the commit on acceptance failure; swallow the failure and reply success anyway; block shutdown until acceptance eventually succeeds | Extends the existing "backpressure delays the reply, never the commit" rule (§9) to also cover acceptance *failure*, not just queue-capacity waiting. Honest by construction: the error means "your command succeeded and its event is committed, but we could not durably-enough register at least one of its described effects, and it may be lost to the post-commit dual-write gap" — not that the command failed. Reuses the AD-5 `RetryPolicy` shape rather than a second policy type: acceptance retries the same class of transient store write, so a distinct tuning surface would be speculative. |
 
 **Why the spec leaves the numbers open while the design pins them (AD-5):** the
 spec states a *behavioral* contract; this design is **one valid implementation**
@@ -80,14 +80,31 @@ the spec does not pin exact numbers.
 optimizes for honesty about what survives, so acceptance is honest too. A
 command's event commits atomically and irrevocably; recording that command's
 effects into the `EffectStateStore` happens *after* that commit and can hit a
-transient backend error. The acceptor retries such errors under the AD-5
+store error. Only a genuinely transient store error is retried under the AD-5
 `RetryPolicy` (same bounded-attempt + jittered-backoff shape, not a new policy
-type). If the retries are exhausted, or the store error is non-retryable, the
-caller's reply carries an explicit `EffectAcceptanceError`. This does **not**
-mean the command failed or the event was rolled back — the event is committed
-for good. It means exactly one thing: at least one described effect could not
-be durably-enough registered and may be lost to the post-commit dual-write gap
-(§7 Model B). The successful reply is only ever sent once acceptance completes.
+type). If the retryable error is exhausted, or the store error is permanent,
+the caller's reply carries an explicit `EffectAcceptanceError`. This does
+**not** mean the command failed or the event was rolled back — the event is
+committed for good. It means exactly one thing: at least one described effect
+could not be durably-enough registered and may be lost to the post-commit
+dual-write gap (§7 Model B). The successful reply is only ever sent once
+acceptance completes.
+
+**AD-9 store-error classification (for `EffectStateStore::accept`).** Which
+`EffectStoreError` variants the acceptor retries versus surfaces immediately is
+pinned to the *already-shipped* `EffectStoreError` contract
+(`crates/runtime/src/effects/store.rs`), not re-invented here:
+
+| `EffectStoreError` variant | Acceptance classification |
+|----------------------------|---------------------------|
+| `TemporarilyUnavailable` | **Retryable** under the AD-5 `RetryPolicy` — the backend is reachable but momentarily unable to serve (pool exhausted, timeout, lock contention). The retry loop applies only here. |
+| `Backend` | **Permanent** — a general/permanent backend failure (corruption, serialization failure, schema mismatch). NOT automatically retried; surfaces immediately as the post-commit `EffectAcceptanceError`. |
+| `InvalidTransition` | **Permanent** — a logic error, not retried. |
+| `NotFound` | **Permanent** — a logic error, not retried. |
+| `Conflict` (from `accept` specifically) | **Permanent / invariant violation** — a `Conflict` returned from `accept` means the same idempotency scope was already reserved with a *different* fingerprint, i.e. a logic/data problem, not a transient one. NOT retried automatically, unless a concrete recoverable optimistic-concurrency cause is later identified and separately specified. (This classification is scoped to `accept`; the generic `Conflict` doc on `EffectStoreError` leaves retryability to the call site, and other call sites may classify it differently.) |
+
+Only `TemporarilyUnavailable` drives the retry loop; every other variant is a
+permanent acceptance failure that surfaces at once.
 
 **Shutdown interaction (AD-9).** A bounded acceptance retry that is still in
 flight during graceful shutdown/draining does not retry indefinitely. It
@@ -96,6 +113,22 @@ deadline passes it stops retrying and times out into the same "acceptance
 ultimately failed" (`EffectAcceptanceError`) path, rather than blocking
 shutdown forever. Actor and lifecycle wiring are PR3/PR4/PR5 scope (still
 unbuilt), so this is a contract-level decision now, not an implementation.
+
+**REQUIRED constraint on the future command-result/reply type (PR3 actor
+wiring, AD-9).** A post-commit `EffectAcceptanceError` means "your command
+succeeded and its event is committed, but at least one described effect could
+not be durably-enough registered" — it is *not* a command failure. If PR3
+collapses this into a single generic `Result<CommandReply, Error>` where any
+`Err` is indistinguishable from a real command failure, a caller will treat it
+as command failure and likely retry, causing a **second commit / duplicate
+command execution** of an already-committed command. Therefore the future
+command-result/reply type PR3 introduces MUST expose an unambiguous distinction
+between "command not committed" (a real failure, safe to retry) and "command
+committed but effects not fully accepted" (commit is final, MUST NOT be retried
+as a command) — conceptually something like a `CommittedButEffectsUnaccepted`
+outcome versus a generic command error. PR3 MUST NOT collapse the two into one
+generic `Err` variant. The exact enum/type shape is deliberately left to PR3's
+design; this AD only fixes the constraint so it cannot be silently skipped.
 
 ## 4. Public Contracts (Rust)
 
@@ -127,12 +160,14 @@ pub trait EffectAcceptor: Send + Sync {
 /// `EffectStoreError`; the `RuntimeEffectAcceptor` impl maps the underlying
 /// `EffectStoreError` into these variants after the bounded retry.
 pub enum EffectAcceptanceError {
-    /// A transient store error (`TemporarilyUnavailable`/`Backend`) survived
-    /// the bounded acceptance retry policy. Commit is final; the effect may be
+    /// The one retryable store error (`TemporarilyUnavailable`) survived the
+    /// bounded acceptance retry policy. Commit is final; the effect may be
     /// lost to the post-commit dual-write gap.
     RetriesExhausted(String),
-    /// A non-retryable store failure. Same commit-is-final, no-rollback
-    /// semantics.
+    /// A permanent store failure — `Backend`, `InvalidTransition`, `NotFound`,
+    /// or a `Conflict` from `accept` (idempotency scope already reserved with a
+    /// different fingerprint) — surfaced without retry. Same commit-is-final,
+    /// no-rollback semantics.
     Permanent(String),
 }
 
