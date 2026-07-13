@@ -13,9 +13,9 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ego_domain::Observability;
+use ego_testkit::TestJwtBuilder;
 use persistent_entity::builder::EntityRuntimeBuilder;
 use persistent_entity::runtime::EntityRuntime;
 use reference_app::application::{RegisterUser, RegisterUserImpl};
@@ -50,12 +50,8 @@ pub fn make_register_user(observability: Option<Arc<dyn Observability>>) -> Arc<
 /// Mints an Hs256 JWT that authenticates against `build_runtime`'s
 /// `Hs256AuthenticationProvider` (see `reference_app::DEV_SIGNING_KEY`).
 pub fn make_token(sub: &str, tenant_id: &str) -> String {
-    let exp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
-    let claims = serde_json::json!({ "sub": sub, "exp": exp, "tenant_id": tenant_id });
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-        &claims,
-        &jsonwebtoken::EncodingKey::from_secret(DEV_SIGNING_KEY),
-    )
-    .unwrap()
+    TestJwtBuilder::new(DEV_SIGNING_KEY.to_vec())
+        .subject(sub)
+        .tenant_id(tenant_id)
+        .build()
 }

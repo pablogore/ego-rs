@@ -346,9 +346,19 @@ mod tests {
 
     #[test]
     fn missing_exp_claim_is_rejected() {
-        // Token has sub and nbf but no exp — must be rejected
+        // Token has sub and nbf but no exp — must be rejected.
+        //
+        // `TestJwtBuilder` (and therefore `make_hs256_token`) always seeds a
+        // default `exp` claim (design.md AD-2 open question: no `no_expiry()`
+        // setter — a token that must have NO `exp` claim keeps its own raw
+        // one-liner instead of migrating).
         let claims = json!({ "sub": "u1", "nbf": past_ts(300) });
-        let token = make_hs256_token(&claims);
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(&hs256_secret()),
+        )
+        .unwrap();
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),

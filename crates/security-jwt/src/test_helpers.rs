@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ego_domain::auth::Clock;
-use jsonwebtoken::{encode, EncodingKey, Header};
+use ego_testkit::TestJwtBuilder;
 
 pub(crate) struct FixedClock(pub(crate) chrono::DateTime<Utc>);
 
@@ -31,13 +31,19 @@ pub(crate) fn hs256_secret() -> Vec<u8> {
     b"super-secret-key-for-testing-only".to_vec()
 }
 
+/// Builds an HS256 token from a caller-supplied claims object, via
+/// `TestJwtBuilder`'s `claim()` escape hatch (each field of `claims` is set
+/// individually, overwriting `TestJwtBuilder`'s default `exp`). Callers that
+/// need a token with NO `exp` claim at all cannot use this helper (see
+/// `TestJwtBuilder`'s design note) and build their own token directly.
 pub(crate) fn make_hs256_token(claims: &serde_json::Value) -> String {
-    encode(
-        &Header::new(jsonwebtoken::Algorithm::HS256),
-        claims,
-        &EncodingKey::from_secret(&hs256_secret()),
-    )
-    .unwrap()
+    let mut builder = TestJwtBuilder::new(hs256_secret());
+    if let Some(obj) = claims.as_object() {
+        for (key, value) in obj {
+            builder = builder.claim(key, value.clone());
+        }
+    }
+    builder.build()
 }
 
 pub(crate) fn future_ts(offset_secs: i64) -> i64 {

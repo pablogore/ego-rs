@@ -16,6 +16,7 @@ mod config;
 mod context;
 mod fixtures;
 mod identity;
+mod jwt;
 mod logger;
 mod security;
 
@@ -27,5 +28,6 @@ pub use config::TestConfig;
 pub use context::{test_context, TestContextBuilder};
 pub use fixtures::{FixtureBuilder, ServiceTestFixture};
 pub use identity::{principal, PrincipalBuilder};
+pub use jwt::TestJwtBuilder;
 pub use logger::{CapturedRecord, CapturingLogger};
 pub use security::{authenticated, authenticated_with_claims};

@@ -928,14 +928,11 @@ mod tests {
             JwtAlgorithm::Hs256,
             VerificationKey::Hmac(short_key.clone()),
         ));
-        let claims = serde_json::json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         // Build a token signed with the short key (jsonwebtoken accepts it; we reject on verify)
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(&short_key),
-        )
-        .unwrap();
+        let token = ego_testkit::TestJwtBuilder::new(short_key.clone())
+            .subject("user-1")
+            .expires_at(pinned_future_ts(3600))
+            .build();
         let provider = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(

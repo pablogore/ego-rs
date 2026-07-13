@@ -33,3 +33,4 @@ sha2 = "0.10"
 base64 = "0.22"
 
 [dev-dependencies]
+ego-testkit = { path = "../testkit" }
