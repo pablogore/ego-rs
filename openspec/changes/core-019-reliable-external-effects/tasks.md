@@ -67,6 +67,13 @@ Chain strategy: stacked-to-main
 - [ ] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
 - [ ] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
 
+> **Timestamp conversion (F-02)**: backoff math produces a `Duration`, but
+> `EffectStateStore::mark_retryable` takes `next_at: Timestamp`, which currently
+> exposes no arithmetic helper. Whoever implements this phase should decide then
+> whether `Timestamp` needs a `checked_add(Duration)`-style helper or whether
+> call sites do the conversion inline — flagged so it is not silently
+> rediscovered in Phase 6.
+
 ## Phase 4: Internal Queue (not public)
 
 - [ ] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
@@ -82,6 +89,15 @@ Chain strategy: stacked-to-main
 
 - [ ] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
 - [ ] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
+
+> **Single-consumer invariant (design.md AD-8)**: this slice instantiates
+> exactly **one** `DeliveryRunner`; `claim_due` is deliberately non-atomic and
+> is safe only because a single runner consumes it. The runner must be a
+> singleton — do not spawn more than one instance.
+> **Timestamp conversion (F-02)**: the backoff `Duration` computed here must be
+> turned into a `Timestamp` for `mark_retryable`'s `next_at` (see the Phase 3
+> note); decide between a `Timestamp` helper and inline conversion when
+> implementing.
 
 ## Phase 7: ImmediateDeliveryPolicy
 

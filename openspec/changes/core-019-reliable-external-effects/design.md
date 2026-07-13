@@ -24,7 +24,7 @@ existing dependency shape decides placement — no new crate earns its keep.
 | File | Action | Contents |
 |------|--------|----------|
 | `crates/runtime/src/effects/mod.rs` | Create | Subsystem root, re-exports |
-| `crates/runtime/src/effects/store.rs` | Create | `EffectStateStore`, `EffectDedupStore` traits, `EffectState`, `EffectStoreError` |
+| `crates/runtime/src/effects/store.rs` | Create | `EffectStateStore` + `EffectDedupStore` traits; `EffectState`, `TerminalReason`, `EffectStoreError`; public DTOs `EffectId`, `Timestamp`, `AcceptedEffect`, `StoredEffect`, `DedupScope`, `DedupOutcome`; crate-private `EffectEnvelope`; `InMemoryEffectStore` composite |
 | `crates/runtime/src/effects/executor.rs` | Create | `ExternalEffectExecutor`, `AttemptOutcome`, `EffectContext` |
 | `crates/runtime/src/effects/registry.rs` | Create | `ExecutorRegistry` (HashMap keyed by `effect_type`), duplicate fail-closed |
 | `crates/runtime/src/effects/queue.rs` | Create | Internal `EffectQueue` (bounded `mpsc` wrapper) — **not public** |
@@ -50,8 +50,8 @@ to evolve.
 
 | Category | Meaning | Types / modules this design introduces |
 |----------|---------|------------------------------------------|
-| **Public SPI** | Traits external code implements or depends on | `EffectStateStore`, `EffectDedupStore`, `ExternalEffectExecutor`; plus the `EffectAcceptor` port trait in `persistent-entity` |
-| **Internal runtime** | Exists and is used across the subsystem, but is not a public extension point | `EffectQueue` (bounded `mpsc` + `watch` wake-up), `DeliveryRunner`, `ExecutorRegistry`, `RuntimeEffectAcceptor` (the port impl) |
+| **Public SPI** | Traits external code implements or depends on, plus the public DTOs their signatures use | `EffectStateStore`, `EffectDedupStore`, `ExternalEffectExecutor`, `ExecutorRegistry`, `DuplicateEffectType` (all `pub use`-exported from `effects::mod`); the public DTOs `AcceptedEffect`, `StoredEffect`, `Timestamp`, `EffectStoreError`, `EffectId`, `TerminalReason`, `DedupScope`, `DedupOutcome`; plus the `EffectAcceptor` port trait in `persistent-entity` |
+| **Internal runtime** | Exists and is used across the subsystem, but is not a public extension point | `EffectQueue` (bounded `mpsc` + `watch` wake-up), `DeliveryRunner`, `RuntimeEffectAcceptor` (the port impl) |
 | **Private helper** | Implementation detail, not exposed even within the crate's public module tree; free to change | `EffectEnvelope` (metadata wrapper — permanently private, see §4), internal state-transition helpers in `store.rs` |
 
 ## 3. Architecture Decisions
@@ -65,6 +65,7 @@ to evolve.
 | AD-5 Backoff defaults | Ship the read-side precedent as **runtime default constants**, explicitly **not** spec-normative numbers: `DEFAULT_MAX_ATTEMPTS: u32 = 3`, `DEFAULT_BASE_BACKOFF = Duration::from_millis(100)`, `DEFAULT_MAX_BACKOFF = Duration::from_secs(10)`, exponential + full jitter | Retune for external calls; pin the numbers in the spec | The spec's *behavioral* contract (retry with backoff, capped, jittered) is what is normative; these specific values are just this implementation's chosen defaults, overridable per-`effect_type`/per-adapter. The only in-repo retry precedent (`read_side/error.rs:9`) gives ops familiarity. Cap = 3 retries (4 attempts total). |
 | AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. Retryable effects re-enter via `tokio::time::sleep` then re-`send`. |
 | AD-7 Bookkeeping-failure semantics | On post-success bookkeeping failure (`mark_succeeded`/`commit_success`), bounded-retry the idempotent write; if it still fails, keep the effect `in-flight`/`retryable` and re-dispatch rather than losing it | Swallow the error and mark succeeded anyway; treat the bookkeeping failure as terminal | Preserves the at-least-once guarantee (§7): re-dispatch is safe because idempotency-key propagation is mandatory, so a cooperating destination collapses the duplicate. Consequence: a rare double-attempt on the destination, never a silent loss or a false-terminal. Failure-window detail in §6.5. |
+| AD-8 Single-consumer claim invariant | Exactly one `DeliveryRunner` instance calls `claim_due` at a time in this slice; `claim_due` is deliberately **non-atomic** — it returns due effects without transitioning their state (a claimant that intends to dispatch still calls `mark_in_flight`) | Make `claim_due` atomically claim (transition to `InFlight` with compare-and-swap / lease-timeout semantics) | Distributed/multi-consumer coordination (leasing, cross-node claims) is out of scope per the proposal's non-goals (§4). Non-atomic `claim_due` is safe **only because** a single runner consumes it. Atomic claiming would add compare-and-swap semantics and lease timeouts with no current driver; deferred until a real multi-consumer need materializes. |
 
 **Why the spec leaves the numbers open while the design pins them (AD-5):** the
 spec states a *behavioral* contract; this design is **one valid implementation**
@@ -80,8 +81,10 @@ the spec does not pin exact numbers.
 // crates/persistent-entity/src/effect_acceptor.rs
 #[async_trait]
 pub trait EffectAcceptor: Send + Sync {
-    /// Post-commit acceptance. Awaits queue capacity (backpressure, §9);
-    /// never refuses. Mints the effect id and attaches `tenant` internally.
+    /// Post-commit acceptance. Mints the effect id, attaches `tenant`, and
+    /// records the effect as `Pending` in the configured `EffectStateStore`
+    /// (via `EffectStateStore::accept(AcceptedEffect { .. })`) before awaiting
+    /// queue capacity (backpressure, §9) and enqueuing it. Never refuses.
     async fn accept(&self, tenant: &TenantId, effects: Vec<ExternalEffectDescription>);
 }
 
@@ -197,6 +200,8 @@ constraint that ties a durable implementation to living inside
          │              external_effects(cmd,state,events,ctx) ◄───┘
          ▼
     RuntimeEffectAcceptor.accept(tenant, effects)   ── mint id + attach tenant
+         │   EffectStateStore::accept(AcceptedEffect{..})  ── record Pending in
+         │                                                     the configured store
          │   send().await  ◄── BACKPRESSURE (delays REPLY, never commit)
          ▼
     [ bounded mpsc EffectQueue ]  ──recv().await──►  DeliveryRunner
@@ -206,6 +211,13 @@ constraint that ties a durable implementation to living inside
          └──── RetryableFailure ◄── ExternalEffectExecutor.execute(effect, ctx)
                                           │ Success ─► commit_success + mark_succeeded
                                           │ Terminal/Missing/Invalid ─► mark_terminal + signal
+
+For slice 1 the acceptor records the effect in whatever `EffectStateStore` is
+configured **at acceptance time, before the queue ever sees it**. With the
+in-memory store this ordering offers no crash protection (the store is lost on
+crash, §8), but the accept-then-enqueue sequencing is real and matters for a
+future durable store, whose `claim_due`/`recover_in_flight` — not queue replay
+— become the source of truth for pending work.
 
 ## 6. Open-Question Resolutions
 
@@ -219,7 +231,7 @@ constraint that ties a durable implementation to living inside
 4. **One executor / N types** → builder sugar
    `register_effect_executor(["s3.put","s3.delete"], Arc::new(exec))` iterates
    the keys and inserts the same `Arc` clone per key; duplicate key →
-   `RegistryError::DuplicateEffectType` surfaced at `.build()` (fail-closed, §11).
+   `DuplicateEffectType::AlreadyRegistered` surfaced at `.build()` (fail-closed, §11).
 5. **Executor succeeds, state-update fails** → **accepted at-least-once stance**,
    promoted to a first-class decision in **AD-7**.
    `mark_succeeded`/`commit_success` are retried a bounded number of times
