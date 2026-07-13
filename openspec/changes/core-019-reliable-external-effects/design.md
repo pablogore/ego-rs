@@ -101,7 +101,7 @@ pinned to the *already-shipped* `EffectStoreError` contract
 | `Backend` | **Permanent** — a general/permanent backend failure (corruption, serialization failure, schema mismatch). NOT automatically retried; surfaces immediately as the post-commit `EffectAcceptanceError`. |
 | `InvalidTransition` | **Permanent** — a logic error, not retried. |
 | `NotFound` | **Permanent** — a logic error, not retried. |
-| `Conflict` (from `accept` specifically) | **Permanent / invariant violation** — a `Conflict` returned from `accept` means the same idempotency scope was already reserved with a *different* fingerprint, i.e. a logic/data problem, not a transient one. NOT retried automatically, unless a concrete recoverable optimistic-concurrency cause is later identified and separately specified. (This classification is scoped to `accept`; the generic `Conflict` doc on `EffectStoreError` leaves retryability to the call site, and other call sites may classify it differently.) |
+| `Conflict` (from `accept` specifically) | **Permanent / invariant violation** — `Conflict` from `accept` is treated as a permanent invariant or data conflict (e.g. an `EffectId` collision or another persistence-level conflict — not necessarily the dedup-scope/fingerprint mismatch that `EffectDedupStore::reserve` reports), unless a concrete recoverable optimistic-concurrency case is specified. NOT retried automatically. (This classification is scoped to `accept`; the generic `Conflict` doc on `EffectStoreError` leaves retryability to the call site, and other call sites may classify it differently.) |
 
 Only `TemporarilyUnavailable` drives the retry loop; every other variant is a
 permanent acceptance failure that surfaces at once.
@@ -165,9 +165,10 @@ pub enum EffectAcceptanceError {
     /// lost to the post-commit dual-write gap.
     RetriesExhausted(String),
     /// A permanent store failure — `Backend`, `InvalidTransition`, `NotFound`,
-    /// or a `Conflict` from `accept` (idempotency scope already reserved with a
-    /// different fingerprint) — surfaced without retry. Same commit-is-final,
-    /// no-rollback semantics.
+    /// or a `Conflict` from `accept` (a permanent invariant or data conflict,
+    /// e.g. an `EffectId` collision — not necessarily a dedup-scope/fingerprint
+    /// mismatch) — surfaced without retry. Same commit-is-final, no-rollback
+    /// semantics.
     Permanent(String),
 }
 
