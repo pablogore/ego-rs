@@ -39,6 +39,10 @@ pub mod interpreter;
 /// Read side projection runtime — scheduling, backpressure, and batch execution.
 pub mod read_side;
 
+/// External effect delivery subsystem — dedup, retry, executor registry
+/// (CORE-019). Beside the dormant `EffectInterpreter`, not inside it.
+pub mod effects;
+
 pub use runtime::execution::ExecutionId;
 pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;
