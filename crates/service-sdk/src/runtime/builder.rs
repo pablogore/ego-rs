@@ -2,11 +2,17 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ego_domain::Observability;
+use ego_runtime::effects::{
+    DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
+    ExternalEffectExecutor, InMemoryEffectStore, RuntimeEffectAcceptor,
+};
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
+use persistent_entity::effect_acceptor::EffectAcceptor;
 
 use crate::contract::{ServiceContract, VersionConstraint};
 use crate::di::Injectable;
@@ -16,6 +22,12 @@ use crate::runtime::logger::TeardownStack;
 use crate::runtime::runtime_builder::{DependencyTable, RuntimeError, RuntimeInner};
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
+
+/// Default deadline `Runtime::shutdown_async` waits for the external-effects
+/// `Deferred` drain loop before forcibly recovering any still-`InFlight`
+/// effect back to `Pending` for a future run (CORE-019 Phase 9, design.md
+/// §8). Overridable via [`RuntimeBuilder::with_effect_drain_deadline`].
+const DEFAULT_EFFECT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The pair of security providers registered with a [`Runtime`].
 pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
@@ -61,6 +73,17 @@ pub struct RuntimeBuilder {
     /// AD-2). Default `None` — behaviorally identical to today, before this
     /// change existed.
     observability: Option<Arc<dyn Observability>>,
+    /// Executors registered via [`RuntimeBuilder::register_effect_executor`]
+    /// (CORE-019 Phase 9). Empty by default — the zero-cost gate `build()`
+    /// checks to decide whether to construct the external-effects subsystem
+    /// at all.
+    effect_executors: ExecutorRegistry,
+    /// Delivery pipeline configuration for the external-effects subsystem.
+    /// Only meaningful once at least one executor is registered.
+    delivery_config: DeliveryConfig,
+    /// How long graceful shutdown waits for the `Deferred` drain loop before
+    /// forcing remaining in-flight effects back to `Pending` (design.md §8).
+    effect_drain_deadline: Duration,
 }
 
 impl RuntimeBuilder {
@@ -77,6 +100,9 @@ impl RuntimeBuilder {
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             validators: Vec::new(),
             observability: None,
+            effect_executors: ExecutorRegistry::new(),
+            delivery_config: DeliveryConfig::default(),
+            effect_drain_deadline: DEFAULT_EFFECT_DRAIN_DEADLINE,
         }
     }
 
@@ -172,6 +198,49 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers `executor` as the sole owner of every `effect_type` in
+    /// `effect_types` (CORE-019 Phase 9, design.md §6.4's builder sugar).
+    /// Fails closed on a duplicate `effect_type` — the already-shipped
+    /// `ExecutorRegistry`'s "one owner per type" contract; the first
+    /// registration is left untouched.
+    ///
+    /// Registering at least one executor is what makes [`RuntimeBuilder::build`]
+    /// construct a real external-effects delivery pipeline (see
+    /// [`Runtime::effect_acceptor`]). A `Runtime` that never calls this method
+    /// keeps the whole subsystem at zero cost: no store, no queue, no spawned
+    /// drain task (spec: "zero/near-zero cost when no external effects are
+    /// used").
+    pub fn register_effect_executor(
+        mut self,
+        effect_types: impl IntoIterator<Item = impl Into<String>>,
+        executor: Arc<dyn ExternalEffectExecutor>,
+    ) -> Result<Self, DuplicateEffectType> {
+        for effect_type in effect_types {
+            self.effect_executors.register(effect_type, executor.clone())?;
+        }
+        Ok(self)
+    }
+
+    /// Configures the [`DeliveryConfig`] used by the external-effects delivery
+    /// pipeline. Defaults to [`DeliveryConfig::default`] (AD-5 backoff,
+    /// `Deferred` runner mode) — only meaningful once at least one executor
+    /// is registered via [`RuntimeBuilder::register_effect_executor`].
+    pub fn with_delivery_config(mut self, config: DeliveryConfig) -> Self {
+        self.delivery_config = config;
+        self
+    }
+
+    /// Configures how long [`Runtime::shutdown_async`] waits for the
+    /// external-effects `Deferred` drain loop to finish in-flight deliveries
+    /// before forcing them back to `Pending` for a future run (design.md §8;
+    /// AD-9's "acceptance retries respect the drain deadline, don't block
+    /// shutdown forever" applied to in-flight delivery too). Defaults to 5
+    /// seconds. Only meaningful once at least one executor is registered.
+    pub fn with_effect_drain_deadline(mut self, deadline: Duration) -> Self {
+        self.effect_drain_deadline = deadline;
+        self
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
     /// Always succeeds — security and the logger are both optional. By the
@@ -186,7 +255,30 @@ impl RuntimeBuilder {
         if let Some(logger) = &self.logger {
             teardown.push(logger.clone());
         }
-        Runtime {
+
+        // CORE-019 Phase 9 zero-cost gate (design.md §8/§20): construct the
+        // external-effects store/queue/runner ONLY when at least one
+        // executor was registered. `effect_wiring` keeps the concrete
+        // `RuntimeEffectAcceptor` (needed for its `drain` method below);
+        // `effect_acceptor` below is the trait-object handle stored on
+        // `Runtime`/exposed to callers.
+        let effect_wiring = if self.effect_executors.is_empty() {
+            None
+        } else {
+            let store = Arc::new(InMemoryEffectStore::new());
+            let (acceptor, shutdown_tx) = RuntimeEffectAcceptor::new(
+                store.clone() as Arc<dyn EffectStateStore>,
+                store as Arc<dyn EffectDedupStore>,
+                Arc::new(self.effect_executors),
+                self.delivery_config,
+            );
+            Some((Arc::new(acceptor), shutdown_tx))
+        };
+        let effect_acceptor: Option<Arc<dyn EffectAcceptor>> = effect_wiring
+            .as_ref()
+            .map(|(acceptor, _)| acceptor.clone() as Arc<dyn EffectAcceptor>);
+
+        let rt = Runtime {
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
                 self.interceptor_chain,
@@ -196,8 +288,33 @@ impl RuntimeBuilder {
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
                 self.observability,
+                effect_acceptor,
             )),
+        };
+
+        // Only when ≥1 executor was registered: signal the drain deadline via
+        // `register_async_teardown` so `shutdown_async` recovers any
+        // still-in-flight effect back to `Pending` rather than losing it or
+        // blocking shutdown forever (AD-9). No hook is registered at all in
+        // the zero-cost path above.
+        if let Some((acceptor, shutdown_tx)) = effect_wiring {
+            let deadline = self.effect_drain_deadline;
+            rt.register_async_teardown(async move {
+                let recovered = acceptor.drain(deadline, shutdown_tx).await;
+                if recovered > 0 {
+                    return Err(RuntimeInfraError::Teardown {
+                        reason: format!(
+                            "external-effects drain deadline reached with {recovered} \
+                             effect(s) still in flight; recovered to Pending for a \
+                             future run (drain_incomplete)"
+                        ),
+                    });
+                }
+                Ok(())
+            });
         }
+
+        rt
     }
 
     /// Consumes the builder and produces a [`Runtime`], first running every
@@ -254,6 +371,21 @@ impl Runtime {
     /// Returns the registered logger, if any.
     pub fn logger(&self) -> Option<&Arc<KITLogger>> {
         self.inner.logger()
+    }
+
+    /// Returns the external-effects [`EffectAcceptor`] wired by
+    /// [`RuntimeBuilder::register_effect_executor`], if at least one executor
+    /// was registered (CORE-019 Phase 9). `None` is the zero-cost path
+    /// (design.md §8/§20) — no store, no queue, no spawned drain task was
+    /// ever constructed, not merely an unused acceptor.
+    ///
+    /// This is the seam a host wires into its entity-level runtime (e.g.
+    /// `persistent_entity::builder::EntityRuntimeBuilder`) so spawned actors
+    /// stop silently discarding described effects — that host-side plumbing
+    /// is out of `ego-service-sdk`'s scope (it lives wherever the host
+    /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
+    pub fn effect_acceptor(&self) -> Option<&Arc<dyn EffectAcceptor>> {
+        self.inner.effect_acceptor.as_ref()
     }
 
     /// Resolves `Tag` to its concrete macro-generated proxy — the canonical
@@ -902,5 +1034,241 @@ mod tests {
         // build(), matching the existing "build() Behavior Is Unchanged" contract.
         let rt = RuntimeBuilder::new().with_injectable::<NeedsAdapter>().build();
         assert!(rt.inner().resolve_adapter::<StubAdapter>().is_err());
+    }
+
+    // -- CORE-019 Phase 9 (RED 9.1 / GREEN 9.2): register_effect_executor,
+    // DeliveryConfig option, conditional runner spawn, drain-on-shutdown ----
+
+    use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+    use ego_runtime::effects::{
+        AttemptOutcome, DeliveryConfig, DuplicateEffectType, EffectContext, ExternalEffectExecutor,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    use tokio::sync::Notify;
+
+    fn effect_description(effect_type: &str, key: &str) -> ExternalEffectDescription {
+        ExternalEffectDescription {
+            idempotency_key: IdempotencyKey::new(key).unwrap(),
+            effect_type: effect_type.to_string(),
+            payload: vec![1, 2, 3],
+            destination: "https://example.com".to_string(),
+        }
+    }
+
+    fn effect_tenant() -> TenantId {
+        TenantId::new("tenant-a").unwrap()
+    }
+
+    struct AlwaysSucceedsExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl AlwaysSucceedsExecutor {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ExternalEffectExecutor for AlwaysSucceedsExecutor {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            AttemptOutcome::Success
+        }
+    }
+
+    /// Blocks inside `execute` until `gate` is notified — used to prove a
+    /// stuck delivery is what triggers `drain_incomplete`, never a silently
+    /// swallowed failure.
+    struct GatedExecutor {
+        gate: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ExternalEffectExecutor for GatedExecutor {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
+            self.gate.notified().await;
+            AttemptOutcome::Success
+        }
+    }
+
+    #[test]
+    fn build_without_registering_any_effect_executor_wires_no_acceptor() {
+        // Zero-cost path (design.md §8/§20): no executor registered means
+        // `build()` never constructs a store/queue/runner at all — proven
+        // here by the absence of the acceptor itself, not merely an unused
+        // `Some`.
+        let rt = RuntimeBuilder::new().build();
+        assert!(
+            rt.effect_acceptor().is_none(),
+            "no executor was registered, so no RuntimeEffectAcceptor may exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_with_no_registered_effect_executor_completes_instantly() {
+        // Companion proof of the zero-cost path: with nothing registered, no
+        // async teardown hook exists for the effects subsystem either, so
+        // shutdown_async has nothing effects-related to await.
+        let rt = RuntimeBuilder::new().build();
+        let started = Instant::now();
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "no effect executor was registered — shutdown must not wait on anything effects-related"
+        );
+    }
+
+    #[test]
+    fn register_effect_executor_duplicate_effect_type_fails_closed() {
+        // `RuntimeBuilder` doesn't implement `Debug` (matches `with_service`'s
+        // existing Result-returning pattern above), so match manually rather
+        // than `.expect_err`.
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let err = match RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor.clone())
+            .expect("first registration succeeds")
+            .register_effect_executor(["invoice.created"], executor)
+        {
+            Err(e) => e,
+            Ok(_) => panic!("a second executor for the same effect_type must fail closed"),
+        };
+
+        assert!(matches!(
+            err,
+            DuplicateEffectType::AlreadyRegistered(t) if t == "invoice.created"
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_effect_executor_makes_build_wire_a_real_acceptor() {
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let rt = RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor)
+            .unwrap()
+            .build();
+
+        assert!(
+            rt.effect_acceptor().is_some(),
+            "registering >=1 executor must make build() wire a real RuntimeEffectAcceptor"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_effects_are_actually_delivered_through_the_wired_acceptor() {
+        // Proves the acceptor build() wires is not inert: an accepted effect
+        // really reaches the registered executor — this is the exact gap
+        // PR3 flagged (effects silently lost when no acceptor is configured).
+        let executor = Arc::new(AlwaysSucceedsExecutor::new());
+        let rt = RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor.clone())
+            .unwrap()
+            .build();
+
+        let acceptor = rt.effect_acceptor().unwrap().clone();
+        acceptor
+            .accept(
+                &effect_tenant(),
+                vec![effect_description("invoice.created", "uow-1:0")],
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while executor.call_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the accepted effect is delivered through the spawned Deferred runner");
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_drains_cleanly_when_delivery_completes_before_the_deadline() {
+        let executor = Arc::new(AlwaysSucceedsExecutor::new());
+        let rt = RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor.clone())
+            .unwrap()
+            .with_effect_drain_deadline(Duration::from_millis(200))
+            .build();
+
+        let acceptor = rt.effect_acceptor().unwrap().clone();
+        acceptor
+            .accept(
+                &effect_tenant(),
+                vec![effect_description("invoice.created", "uow-1:0")],
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while executor.call_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("effect delivered before shutdown");
+
+        rt.shutdown_async()
+            .await
+            .expect("nothing was stuck in flight, so drain must report a clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_surfaces_drain_incomplete_when_the_deadline_is_hit() {
+        // RED 9.1's core proof: an effect stuck mid-delivery when the drain
+        // deadline elapses must (a) not block shutdown forever and (b) make
+        // shutdown_async report failure — the documented `drain_incomplete`
+        // signal — rather than silently discarding it.
+        let gate = Arc::new(Notify::new());
+        let executor = Arc::new(GatedExecutor { gate: gate.clone() });
+        let rt = RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor)
+            .unwrap()
+            .with_delivery_config(DeliveryConfig::default())
+            .with_effect_drain_deadline(Duration::from_millis(30))
+            .build();
+
+        let acceptor = rt.effect_acceptor().unwrap().clone();
+        acceptor
+            .accept(
+                &effect_tenant(),
+                vec![effect_description("invoice.created", "uow-1:0")],
+            )
+            .await
+            .unwrap();
+
+        // Let the spawned Deferred loop dequeue and start executing — it
+        // will now block forever inside the gated executor since `gate` is
+        // deliberately never notified.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let started = Instant::now();
+        let result = rt.shutdown_async().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "graceful shutdown must respect the configured drain deadline, never block forever \
+             on a stuck effect (AD-9)"
+        );
+        assert!(
+            result.is_err(),
+            "a still-in-flight effect at the deadline must surface as drain_incomplete, not a \
+             silent success"
+        );
     }
 }

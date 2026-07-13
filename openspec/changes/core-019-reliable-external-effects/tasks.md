@@ -526,14 +526,84 @@ Chain strategy: stacked-to-main
 
 ## Phase 9: Lifecycle Wiring (`service-sdk`)
 
-- [ ] 9.1 RED: zero cost when no executor registered; shutdown drains within deadline, in-flight→`Cancelled`→pending, `drain_incomplete` on remainder
-- [ ] 9.2 GREEN: `register_effect_executor` + `DeliveryConfig` option, conditional runner spawn, `register_async_teardown` drain hook (builder.rs)
+- [x] 9.1 RED: zero cost when no executor registered; shutdown drains within deadline, in-flight→`Cancelled`→pending, `drain_incomplete` on remainder
+- [x] 9.2 GREEN: `register_effect_executor` + `DeliveryConfig` option, conditional runner spawn, `register_async_teardown` drain hook (builder.rs)
 
 > **Shutdown vs. acceptance retry (AD-9)**: a bounded acceptance retry in
 > progress during graceful shutdown MUST respect the same drain deadline as
 > the rest of the lifecycle and time out into the same "acceptance ultimately
 > failed" (`EffectAcceptanceError`) path, never block shutdown indefinitely.
 > Docs-only note; not yet implemented.
+
+> **Implementation notes (this pass, PR4)**:
+> - `RuntimeBuilder::register_effect_executor(effect_types, executor) ->
+>   Result<Self, DuplicateEffectType>` (service-sdk `builder.rs`) accumulates
+>   into a new `effect_executors: ExecutorRegistry` builder field and fails
+>   closed immediately on a duplicate `effect_type`, mirroring the existing
+>   `with_service`'s Result-returning pattern in this same file — **not**
+>   design.md §6.4's literal wording ("surfaced at `.build()`"), because
+>   `.build()` is documented and relied upon as infallible ("Always
+>   succeeds") everywhere else in this builder; making it fallible would be a
+>   breaking change to every existing caller for one new feature. Deviation
+>   recorded here rather than silently diverging from the design doc.
+> - `RuntimeBuilder::with_delivery_config(DeliveryConfig)` and
+>   `RuntimeBuilder::with_effect_drain_deadline(Duration)` (default 5s) added
+>   alongside it.
+> - **Zero-cost gate**: `build()` checks `effect_executors.is_empty()`
+>   (new additive method on `ego-runtime`'s `ExecutorRegistry`) before doing
+>   anything else. Empty → no `InMemoryEffectStore`, no `EffectQueue`, no
+>   `RuntimeEffectAcceptor`, no spawned task, no `register_async_teardown`
+>   hook — `Runtime::effect_acceptor()` returns `None`. Non-empty → a real
+>   `RuntimeEffectAcceptor` is constructed via the already-shipped
+>   `RuntimeEffectAcceptor::new`, exposed through `Runtime::effect_acceptor()
+>   -> Option<&Arc<dyn EffectAcceptor>>` (new field on `RuntimeInner`,
+>   threaded through `RuntimeInner::new_with_logger`'s now-9th parameter; all
+>   4 existing call sites — 3 test fixtures + 1 production — updated with a
+>   trailing `None`).
+> - **Drain-on-shutdown**: new additive `RuntimeEffectAcceptor::drain(deadline,
+>   shutdown_tx) -> u64` method (`ego-runtime`'s `acceptor.rs`) lets the
+>   `Deferred` loop keep consuming normally for up to `deadline` (`Inline` has
+>   no loop, so it skips the sleep), then signals shutdown and calls the
+>   already-shipped `EffectStateStore::recover_in_flight` — the same
+>   crash-recovery mechanism (Phase 1), driven deliberately here instead of by
+>   a crash — to reset any still-`InFlight` effect back to `Pending` for a
+>   future `claim_due` run. Returns the recovered count. `build()` registers
+>   this as a `register_async_teardown` hook only in the non-empty branch;
+>   a non-zero recovered count makes the hook return
+>   `Err(RuntimeInfraError::Teardown{..})` — reusing the existing "a failing
+>   hook surfaces through `shutdown_async`" contract (Finding 6/F-02) as this
+>   phase's `drain_incomplete` signal, rather than inventing a new error path.
+>   Phase 11 (observability) is expected to route this count to a real
+>   `Observability` event; for now it only fails the teardown hook, which is
+>   still honest (never silently discarded) and matches AD-9's "never block
+>   shutdown forever" (proven by a test asserting elapsed time stays well
+>   under the deadline-plus-margin even when an effect is permanently stuck).
+> - ponytail: `drain()` sleeps the *full* `deadline` for `Deferred` mode
+>   rather than polling for early completion — neither `EffectQueue` nor
+>   `DeliveryRunner` expose a queue-depth/in-flight-count accessor to detect
+>   "already done" sooner without a broader (out-of-scope) change to those
+>   already-shipped files. Upgrade path: add such an accessor and poll it if a
+>   flat multi-second shutdown delay ever proves costly in practice.
+> - **"Wire a real acceptor into the actor(s)" — scope resolution**:
+>   design.md's own Phase 9 file table lists only `service-sdk/builder.rs`
+>   as modified; it does **not** list `persistent-entity/{builder,runtime,
+>   entity_ref_tokio}.rs`. Per that file list, this PR closes the gap only as
+>   far as making a real, working `RuntimeEffectAcceptor` constructible and
+>   retrievable via `Runtime::effect_acceptor()` — proven end-to-end in this
+>   PR's own tests (`accepted_effects_are_actually_delivered_through_the_
+>   wired_acceptor`: an effect accepted through the builder-constructed
+>   acceptor really reaches the registered executor). Actually plumbing that
+>   acceptor into `persistent_entity::builder::EntityRuntimeBuilder` /
+>   `EntityRuntime` / `TokioEntityRef::new` (so a spawned production
+>   `EntityActor` picks it up) is host-integration wiring outside
+>   `ego-service-sdk`'s own crate boundary and is left to whichever host
+>   constructs both runtimes — realistically `examples/reference-app`,
+>   Phase 12/PR5's explicit scope ("Wire one trivial executor + handler in
+>   examples/reference-app"). Not implemented in this PR; called out here so
+>   it is not silently assumed done.
+> - `ego-runtime` and `persistent-entity` added as `ego-service-sdk`
+>   dependencies (previously absent, despite design.md §2 describing this
+>   shape) — no cycle: neither depends back on `ego-service-sdk`.
 
 ## Phase 10: Tenant Isolation & Transport-Agnosticism
 

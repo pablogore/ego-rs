@@ -15,6 +15,11 @@ kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "deve
 kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 ego-security-sdk = { path = "../security-sdk" }
 ego-domain = { path = "../domain" }
+# CORE-019 Phase 9: RuntimeBuilder::register_effect_executor wires a real
+# ego-runtime effects::RuntimeEffectAcceptor, exposed through the
+# persistent-entity EffectAcceptor port (design.md §2's dependency shape).
+ego-runtime = { path = "../runtime" }
+persistent-entity = { path = "../persistent-entity" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }

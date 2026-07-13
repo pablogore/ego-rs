@@ -25,6 +25,8 @@ use ego_security_sdk::authorization::{authorize_in_context, Action, Authorizatio
 use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 
+use persistent_entity::effect_acceptor::EffectAcceptor;
+
 use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, DepKey, ProjectionRef};
 use crate::interceptor::InterceptorChain;
@@ -220,6 +222,12 @@ pub struct RuntimeInner {
     /// (post-review Finding F-02): a hook's failure to drain must be
     /// distinguishable from a clean drain, not silently treated as success.
     pub(super) async_teardown: Mutex<Vec<AsyncTeardownHook>>,
+    /// The external-effects acceptor wired by
+    /// `RuntimeBuilder::register_effect_executor` (CORE-019 Phase 9), if at
+    /// least one executor was registered. `None` is the zero-cost path
+    /// (design.md §8/§20): no store, no queue, no spawned drain task exists
+    /// at all when this is `None` — not merely an unused `Some`.
+    pub(crate) effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -258,6 +266,7 @@ impl RuntimeInner {
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
         observability: Option<Arc<dyn Observability>>,
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     ) -> Self {
         Self {
             registry,
@@ -269,6 +278,7 @@ impl RuntimeInner {
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
             observability,
+            effect_acceptor,
         }
     }
 
@@ -509,6 +519,7 @@ impl RuntimeInner {
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
             None,
+            None,
         )
     }
 
@@ -527,6 +538,7 @@ impl RuntimeInner {
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
             Some(obs),
+            None,
         )
     }
 
@@ -546,6 +558,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
             None,
         )
     }
@@ -1168,6 +1181,7 @@ mod tests {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
             None,
         );
 

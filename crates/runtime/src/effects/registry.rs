@@ -24,7 +24,7 @@ pub enum DuplicateEffectType {
 /// Builder-level sugar for registering one executor under several keys at
 /// once (design.md §6.4) is out of scope for this slice; call
 /// [`register`](Self::register) once per key with clones of the same `Arc`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ExecutorRegistry {
     executors: HashMap<String, Arc<dyn ExternalEffectExecutor>>,
 }
@@ -33,6 +33,14 @@ impl ExecutorRegistry {
     /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether no executor has been registered at all (CORE-019 Phase 9,
+    /// design.md §8/§20: this is the zero-cost gate — a builder never
+    /// constructs a [`super::acceptor::RuntimeEffectAcceptor`]/store/queue/
+    /// spawned drain task when this is `true`).
+    pub fn is_empty(&self) -> bool {
+        self.executors.is_empty()
     }
 
     /// Registers `executor` as the sole owner of `effect_type`.
