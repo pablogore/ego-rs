@@ -14,6 +14,7 @@ dev-providers = ["ego-security-sdk/test-helpers"]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonwebtoken = "9"
 ego-domain = { path = "../domain" }
 ego-security-sdk = { path = "../security-sdk" }
 ego-service-sdk = { path = "../service-sdk" }

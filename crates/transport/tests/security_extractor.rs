@@ -3,13 +3,13 @@
 //! (reused from `security-jwt`, not reinvented).
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::FromRequestParts;
 use axum::http::Request;
 use ego_domain::auth::SystemClock;
 use ego_security_sdk::AuthenticationProvider;
 use ego_service_sdk::runtime::RuntimeBuilder;
+use ego_testkit::TestJwtBuilder;
 use ego_transport::state::AppState;
 use ego_transport::security::AuthenticatedContext;
 use security_jwt::{
@@ -37,21 +37,11 @@ fn make_state() -> AppState {
 }
 
 fn make_token(sub: &str, tenant_id: Option<&str>) -> String {
-    let exp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600;
-    let mut claims = serde_json::json!({ "sub": sub, "exp": exp });
+    let mut builder = TestJwtBuilder::new(secret()).subject(sub);
     if let Some(t) = tenant_id {
-        claims["tenant_id"] = serde_json::json!(t);
+        builder = builder.tenant_id(t);
     }
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-        &claims,
-        &jsonwebtoken::EncodingKey::from_secret(&secret()),
-    )
-    .unwrap()
+    builder.build()
 }
 
 fn parts_with_authorization(value: Option<&str>) -> axum::http::request::Parts {

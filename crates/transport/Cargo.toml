@@ -19,4 +19,4 @@ mockall = { workspace = true }
 tokio-test = "0.4"
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
 security-jwt = { path = "../security-jwt" }
-jsonwebtoken = "9"
+ego-testkit = { path = "../testkit" }
