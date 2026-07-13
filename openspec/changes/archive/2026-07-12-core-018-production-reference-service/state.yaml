@@ -1,0 +1,128 @@
+change_id: CORE-018
+title: Production Reference Service
+status: archived
+archived_at: 2026-07-12
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md (Engram #1210)
+  explore:
+    status: complete
+    artifact: explore.md (not persisted on disk)
+  design:
+    status: complete
+    artifact: design.md (Engram #1212)
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: complete
+  verify:
+    status: pass
+    artifact: verify-report.md
+  archive:
+    status: complete
+    artifact: archive-report.md
+
+# Test and verification results (final, at archive time)
+verification:
+  test_status: passed
+  test_count: 976
+  critical_findings: 0
+  warnings: 0
+  suggestions: 0
+  clippy_status: clean (scoped to ego-transport, reference-app, testkit)
+  last_verified_at: 2026-07-12
+  re_verified: true
+  re_verification_note: >
+    Verify report shows PASS after 3 WARNING findings were fixed post-verify but
+    pre-merge: 2 new HTTP-layer tests for 403/500 outcomes, 1 doc comment fix
+    (DEV_SIGNING_KEY byte count), 1 tasks.md cross-reference update. An additional
+    integration defect (missing tokio "time" feature) was discovered post-merge and
+    fixed in PR #161 before archive. Final state: 976 tests passed, all 17 crates
+    individually isolation-checked clean.
+
+# Final release verification — all checks pass
+release_verification:
+  decision: approved
+  scoped_checks:
+    cargo_test_workspace: pass (976/976)
+    cargo_build_workspace: pass
+    cargo_check_all_crates_isolated: pass (all 17 crates individually clean)
+    cargo_clippy_ego_transport_reference_app_testkit: pass (zero new warnings)
+    cargo_doc_workspace_no_deps: pass (no new warnings)
+  post_verify_fixes:
+    - F-01: Fixed unbounded busy-loop in TagSchedulerImpl::run_until_stopped (HIGH)
+    - F-02: Fixed silently-swallowed shutdown failures in ReadSideRuntime (MEDIUM)
+    - F-03: Corrected stale ReadSideRuntime doc comment (LOW)
+    - F-04: Added missing tokio "time" feature to crates/runtime/Cargo.toml (HIGH)
+  note: >
+    CORE-018 passes all verification checks. The 3 post-verify fixes were applied
+    before merge into develop (PR #155). The 4th fix (missing tokio feature) was
+    discovered post-merge and fixed in PR #161. The change is production-ready with
+    zero critical or remaining warning findings.
+
+# Change scope
+artifacts:
+  files_modified:
+    - crates/transport/src/lib.rs
+    - crates/transport/Cargo.toml
+    - crates/testkit/src/fixtures.rs
+    - examples/reference-app/src/lib.rs
+  files_created:
+    - crates/transport/src/state.rs
+    - crates/transport/src/security.rs
+    - crates/transport/src/error.rs
+    - crates/transport/src/server.rs
+    - examples/reference-app/src/domain/user.rs
+    - examples/reference-app/src/domain/tenant_org.rs
+    - examples/reference-app/src/service.rs
+    - examples/reference-app/src/routes.rs
+    - examples/reference-app/src/bin/server.rs
+    - examples/reference-app/tests/user_entity.rs
+    - examples/reference-app/tests/tenant_org_entity.rs
+    - examples/reference-app/tests/register_user_guard_chain.rs
+    - examples/reference-app/tests/register_user_partial_failure.rs
+    - examples/reference-app/tests/register_user_observability.rs
+    - examples/reference-app/tests/http_route.rs
+    - examples/reference-app/tests/e2e_register.rs
+  specs_merged:
+    - openspec/specs/reference-service/spec.md (new)
+    - openspec/specs/http-transport/spec.md (new)
+
+# Engagement record
+merged_commits:
+  - pr: 155
+    title: feat(core-018): Production Reference Service
+    description: >
+      3-PR chain implementation of reference-app dogfooding milestone.
+      All 31 tasks (Phases 1-10) across transport layer, entities, service,
+      and E2E tests. Includes post-verify fixes F-01, F-02, F-03.
+    commit_after_fixes: 3031739
+    merged_to: develop
+  - pr: 161
+    title: fix(core-018): add tokio "time" feature
+    description: >
+      Post-merge integration defect fix. Added missing "time" feature to
+      crates/runtime/Cargo.toml [dependencies] (was only in [dev-dependencies],
+      hidden by workspace feature unification). Fixes cargo check -p ego-runtime.
+    commit: 9c3be8d
+    merged_to: develop
+
+notes: |
+  CORE-018 is a complete dogfooding milestone: a reference implementation of
+  tenant-scoped user registration using only public SDK APIs. ego-transport
+  becomes a real axum HTTP server mechanism; reference-app extends with
+  PersistentEntity aggregates, a guarded service, and full E2E test coverage.
+
+  All 31 planned tasks were implemented across 3 chained PRs and verified
+  independently at each merge gate. The final verify found 3 non-critical
+  WARNINGs (coverage gap in HTTP error mapping, doc comment off-by-one, stale
+  task cross-reference) — all fixed before merge. An additional integration
+  defect (missing tokio feature) was discovered post-merge via isolated crate
+  testing and immediately fixed in PR #161.
+
+  The change is production-ready with zero CRITICAL findings and zero WARNING
+  findings at archive time.
