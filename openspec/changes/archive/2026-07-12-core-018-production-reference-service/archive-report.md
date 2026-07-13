@@ -51,7 +51,7 @@ All fixes discovered during review-round code review and integration testing wer
 
 ### F-01: Unbounded busy-loop on stop-channel drop (HIGH)
 
-**File**: `crates/runtime/src/scheduler/tag_scheduler.rs`
+**File**: `crates/runtime/src/read_side/scheduler.rs`
 
 **Issue**: `TagSchedulerImpl::run_until_stopped`'s `select!` macro was discarding the `Result` from `stop_signal.changed()`. When the stop channel was dropped without sending `true`, the channel would close and return `Err`, but the loop ignored this and continued running forever.
 
@@ -68,7 +68,7 @@ select! {
 
 ### F-02: Silently-swallowed shutdown failures (MEDIUM)
 
-**File**: `crates/runtime/src/runtime.rs`
+**Files**: `examples/reference-app/src/read_side/mod.rs` (`ReadSideRuntime`), `crates/service-sdk/src/runtime/builder.rs` (`Runtime::register_async_teardown`/`shutdown_async`)
 
 **Issue**: `ReadSideRuntime::stop()` called `self.shutdown_async()` and discarded the returned `JoinError`. If a registered async teardown hook panicked, the error was lost and `stop()` reported success.
 
@@ -78,7 +78,7 @@ select! {
 
 ### F-03: Stale doc comment (LOW)
 
-**File**: `crates/runtime/src/runtime.rs` (ReadSideRuntime)
+**File**: `examples/reference-app/src/read_side/mod.rs` (ReadSideRuntime)
 
 **Issue**: A doc comment described an old shared-tag architecture that no longer applied.
 
