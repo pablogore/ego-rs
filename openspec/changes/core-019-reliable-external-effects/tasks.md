@@ -64,8 +64,8 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: Retry Policy
 
-- [ ] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
-- [ ] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
+- [x] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
+- [x] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
 
 > **Timestamp conversion (F-02)**: backoff math produces a `Duration`, but
 > `EffectStateStore::mark_retryable` takes `next_at: Timestamp`, which currently
@@ -73,11 +73,16 @@ Chain strategy: stacked-to-main
 > whether `Timestamp` needs a `checked_add(Duration)`-style helper or whether
 > call sites do the conversion inline — flagged so it is not silently
 > rediscovered in Phase 6.
+>
+> **Resolved (Phase 6)**: call sites do the conversion inline — a private
+> `timestamp_after(Duration) -> Timestamp` helper lives in `runner.rs` (the
+> only caller), not on `Timestamp` itself, to avoid touching the already-shipped
+> `store.rs` (PR1).
 
 ## Phase 4: Internal Queue (not public)
 
-- [ ] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
-- [ ] 4.2 GREEN: internal `EffectQueue` mpsc wrapper (queue.rs)
+- [x] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
+- [x] 4.2 GREEN: internal `EffectQueue` mpsc wrapper (queue.rs)
 
 ## Phase 5: Acceptor Port
 
@@ -87,8 +92,8 @@ Chain strategy: stacked-to-main
 
 ## Phase 6: Delivery Runner
 
-- [ ] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
-- [ ] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
+- [x] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
+- [x] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
 
 > **Single-consumer invariant (design.md AD-8)**: this slice instantiates
 > exactly **one** `DeliveryRunner`; `claim_due` is deliberately non-atomic and
@@ -98,11 +103,44 @@ Chain strategy: stacked-to-main
 > turned into a `Timestamp` for `mark_retryable`'s `next_at` (see the Phase 3
 > note); decide between a `Timestamp` helper and inline conversion when
 > implementing.
+>
+> **Implementation notes (this pass)**:
+> - `mark_terminal` only accepts `from: InFlight | RetryableFailed` (already-shipped
+>   `store.rs`). So `drain_one` calls `mark_in_flight` **before** the dedup
+>   `reserve` check (one step earlier than design.md §5's informal sketch) so
+>   every short-circuit path (`Duplicate`, `Conflict`, `ExecutorMissing`,
+>   dedup-store error) can still reach a valid terminal transition.
+> - AD-7's "re-dispatch" is implemented literally as "bounded-retry the
+>   idempotent write" (`commit_success` + `mark_succeeded`, `BOOKKEEPING_RETRY_ATTEMPTS
+>   = 3`); if still failing after that bound, the effect is left `InFlight`
+>   (never marked `Succeeded`/`TerminalFailed`) and relies on the existing
+>   `recover_in_flight`/`claim_due` machinery (Phase 1) for eventual
+>   re-delivery, rather than inventing a second synchronous re-dispatch path
+>   not required by this phase's RED tests.
+> - AD-8 is documented on `DeliveryRunner` as a doc comment and proven honest
+>   by test `two_runners_can_share_the_same_store_the_type_system_does_not_prevent_it`
+>   (constructs two runners against one shared store and asserts
+>   `Arc::strong_count`), not enforced by any type.
+> - `EffectQueue`/`DeliveryRunner`/`policy` are still `pub(crate)`/internal
+>   only, so `cargo build`/`cargo test -p ego-runtime` reports several
+>   "never constructed/used" warnings until PR3/PR4 wire the acceptor and
+>   builder around them — expected, matches the same pattern already
+>   accepted for `queue.rs` in this same delivery slice.
 
 ## Phase 7: ImmediateDeliveryPolicy
 
-- [ ] 7.1 RED: Inline mode still traverses full pipeline (no bypass); failed attempt signaled, not retried
-- [ ] 7.2 GREEN: `runner_mode: Inline` drain-one-on-accept wiring (runner.rs / acceptor.rs)
+- [x] 7.1 RED: Inline mode still traverses full pipeline (no bypass); failed attempt signaled, not retried
+- [x] 7.2 GREEN: `runner_mode: Inline` drain-one-on-accept wiring (runner.rs / acceptor.rs)
+
+> **Scope note**: the `runner.rs` half of this wiring is `DeliveryRunner::drain_one`
+> itself — the one shared entry point both `Deferred`'s spawned `run()` loop
+> and an `Inline` caller invoke identically (test
+> `immediate_delivery_config_runs_the_same_pipeline_and_signals_failure_without_retry`
+> drives `DeliveryConfig::immediate()`'s policy straight through `drain_one`
+> and asserts exactly one attempt, then a terminal signal, never a retry).
+> The `acceptor.rs` half (the code that actually calls `queue.send` +
+> `drain_one`/spawns `run()` based on `config.runner_mode`) is Phase 5/PR3
+> scope and intentionally not built here.
 
 ## Phase 8: Handler API + Actor Wiring
 
