@@ -155,7 +155,11 @@ impl AuthorizationProvider for ReferenceAllowAllAuthorization {
 /// `build_runtime`'s success payload: the constructed `Runtime`, the
 /// `authn` provider `ego_transport::AppState` needs, and the not-yet-spawned
 /// `UsersByTenant` read-side wiring.
-pub type BuiltRuntime = (Runtime, Arc<dyn AuthenticationProvider>, ReadSideHandles);
+pub struct BuiltRuntime {
+    pub runtime: Runtime,
+    pub authn: Arc<dyn AuthenticationProvider>,
+    pub read_side: ReadSideHandles,
+}
 
 /// Host -> AppConfig -> service construction -> RuntimeBuilder pipeline.
 ///
@@ -234,5 +238,5 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
         builder = builder.with_logger(logger);
     }
 
-    Ok((builder.build(), authn, read_side_handles))
+    Ok(BuiltRuntime { runtime: builder.build(), authn, read_side: read_side_handles })
 }

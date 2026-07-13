@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig};
+use reference_app::{build_runtime, AppConfig, BuiltRuntime};
 use support::make_token;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -40,7 +40,8 @@ async fn http_post(
 #[tokio::test]
 async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operation() {
     let config = AppConfig::default();
-    let (rt, authn, read_side_handles) = build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+        build_runtime(&config).expect("build_runtime succeeds");
     let rt = Arc::new(rt);
     let state = AppState::new(rt.clone(), authn);
     let router = build_router(state, read_side_handles.query.clone());
@@ -71,7 +72,8 @@ async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operati
 #[tokio::test]
 async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let config = AppConfig::default();
-    let (rt, authn, read_side_handles) = build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+        build_runtime(&config).expect("build_runtime succeeds");
     let rt = Arc::new(rt);
     let state = AppState::new(rt.clone(), authn);
     let router = build_router(state, read_side_handles.query.clone());
