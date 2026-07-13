@@ -51,13 +51,18 @@ impl TestJwtBuilder {
     /// (past/future-exp negative tests).
     pub fn expires_at(mut self, unix_ts: i64) -> Self {
         self.claims.insert("exp".to_string(), Value::from(unix_ts));
+        self.named_claims.insert("exp");
         self
     }
 
     /// Sets an arbitrary claim by name — the escape hatch for anything not
     /// covered by a dedicated setter. Panics if `key` was already set through
-    /// its dedicated named method (`.subject()`/`.tenant_id()`), so a
-    /// reserved claim can't be silently overwritten by the escape hatch.
+    /// its dedicated named method (`.subject()`/`.tenant_id()`/
+    /// `.expires_at()`), so a reserved claim can't be silently overwritten by
+    /// the escape hatch. This check is one-directional: calling a named
+    /// method *after* `claim()` already set the same key intentionally
+    /// overwrites it — that's how a generic claim gets upgraded to a typed
+    /// one, not a collision to guard against.
     pub fn claim(mut self, key: &str, value: Value) -> Self {
         assert!(
             !self.named_claims.contains(key),
@@ -157,6 +162,12 @@ mod tests {
             .tenant_id("tenant-a")
             .claim("tenant_id", Value::from("tenant-b"))
             .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "collides")]
+    fn claim_rejects_exp_collision_after_expires_at() {
+        TestJwtBuilder::new(secret()).expires_at(123).claim("exp", Value::from(456)).build();
     }
 
     #[test]
