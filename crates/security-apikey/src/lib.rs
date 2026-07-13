@@ -6,9 +6,41 @@
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```rust
+//! use std::collections::HashMap;
 //! use std::sync::Arc;
-//! use security_apikey::{ApiKeyAuthenticationProvider, InMemoryApiKeyResolver, ApiKeyRecord, ApiKeyHash};
+//!
+//! use ego_domain::auth::SystemClock;
+//! use ego_security_sdk::{AuthenticationProvider, Credential, Principal, PrincipalKind, SubjectId};
+//! use security_apikey::{
+//!     ApiKeyAuthenticationProvider, ApiKeyHash, ApiKeyId, ApiKeyRecord, InMemoryApiKeyResolver,
+//! };
+//!
+//! let secret = b"correct-horse-battery-staple";
+//! let key_id = ApiKeyId::new("svc-key-1").unwrap();
+//!
+//! let mut resolver = InMemoryApiKeyResolver::new();
+//! resolver.insert(
+//!     key_id,
+//!     ApiKeyRecord {
+//!         principal: Principal::new(PrincipalKind::Service, SubjectId::new("billing-service").unwrap()),
+//!         scopes: vec!["invoices:read".to_string()],
+//!         expires_at: None,
+//!         metadata: Arc::new(HashMap::new()),
+//!         key_hash: ApiKeyHash::of(secret),
+//!     },
+//! );
+//!
+//! let provider = ApiKeyAuthenticationProvider::new(Arc::new(resolver), Arc::new(SystemClock));
+//!
+//! let credential = Credential::Bearer(format!("svc-key-1.{}", std::str::from_utf8(secret).unwrap()));
+//! let ctx = provider.authenticate(&credential).expect("valid key authenticates");
+//! assert_eq!(ctx.principal.subject_id.as_str(), "billing-service");
+//!
+//! // A wrong secret is rejected — indistinguishable from an unknown key id
+//! // (see ApiKeyAuthenticationProvider's docs on the constant-time invariant).
+//! let wrong = Credential::Bearer("svc-key-1.wrong-secret".to_string());
+//! assert!(provider.authenticate(&wrong).is_err());
 //! ```
 
 pub(crate) mod authenticator;
