@@ -363,8 +363,14 @@ pub trait EffectDedupStore: Send + Sync {
     /// reservation outright — a later crash-recovery re-attempt by the SAME
     /// effect must still find `OwnedSucceeded`, not `Fresh`.
     async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
-    /// Releases the reservation after a retryable failure, so a subsequent
-    /// retry of the *same* effect is not mistaken for a duplicate.
+    /// Releases the reservation on a terminal (non-retryable) outcome.
+    ///
+    /// The reservation is deliberately held across retries of the *same*
+    /// effect — `reserve` recognizes the owning `EffectId` and returns
+    /// `OwnedInProgress`/`OwnedSucceeded` rather than a fresh collision, so a
+    /// retry never needs `release` to avoid self-deduplication. `release` is
+    /// only for genuinely abandoning the scope (terminal failure), freeing it
+    /// for a future, unrelated submission with the same key.
     async fn release(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
 }
 
@@ -433,7 +439,14 @@ impl InMemoryEffectStore {
 #[async_trait]
 impl EffectStateStore for InMemoryEffectStore {
     async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
-        self.states.lock().unwrap().insert(
+        let mut states = self.states.lock().unwrap();
+        if states.contains_key(&effect.id) {
+            return Err(EffectStoreError::Conflict(format!(
+                "effect {} already accepted",
+                effect.id
+            )));
+        }
+        states.insert(
             effect.id,
             EffectRecord {
                 tenant: effect.tenant,
@@ -643,6 +656,28 @@ mod tests {
             EffectStoreError::InvalidTransition {
                 from: EffectState::InFlight,
                 to: EffectState::InFlight,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepting_an_already_accepted_id_is_rejected_not_silently_overwritten() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+        store.mark_in_flight(id).await.unwrap();
+
+        let err = store.accept(accepted_effect(id)).await.unwrap_err();
+
+        assert!(matches!(err, EffectStoreError::Conflict(_)));
+        // The original record must survive untouched — still `InFlight`, not
+        // silently reset back to `Pending` by the rejected second `accept`.
+        let err = store.mark_in_flight(id).await.unwrap_err();
+        assert!(matches!(
+            err,
+            EffectStoreError::InvalidTransition {
+                from: EffectState::InFlight,
                 ..
             }
         ));
