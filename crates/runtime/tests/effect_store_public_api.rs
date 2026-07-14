@@ -9,6 +9,8 @@
 //! only ever names `AcceptedEffect`, `StoredEffect`, `Timestamp`, and
 //! `EffectStoreError` — all public.
 
+use std::sync::Arc;
+
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
 use ego_runtime::effects::{
     AcceptedEffect, EffectId, EffectState, EffectStateStore, EffectStoreError, InMemoryEffectStore,
@@ -20,12 +22,12 @@ fn sample_effect(id: EffectId) -> AcceptedEffect {
         id,
         tenant: TenantId::new("tenant-external").unwrap(),
         attempt: 0,
-        description: ExternalEffectDescription {
+        description: Arc::new(ExternalEffectDescription {
             idempotency_key: IdempotencyKey::new("uow-ext:0").unwrap(),
             effect_type: "invoice.created".to_string(),
             payload: vec![9, 9, 9],
             destination: "https://example.com/hook".to_string(),
-        },
+        }),
     }
 }
 

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -148,7 +148,11 @@ pub struct AcceptedEffect {
     /// The attempt number this acceptance represents.
     pub attempt: u32,
     /// The frozen, handler-described effect.
-    pub description: ExternalEffectDescription,
+    ///
+    /// `Arc`-wrapped (fix 9, PR2 review) so retries/concurrent attempts
+    /// clone the pointer, not the payload bytes — `tokio::spawn`'s `'static`
+    /// bound used to force a full deep clone of every attempt's description.
+    pub description: Arc<ExternalEffectDescription>,
 }
 
 /// Runtime-owned metadata wrapper around one [`AcceptedEffect`] (design.md §4).
@@ -179,7 +183,7 @@ pub struct StoredEffect {
     /// The tenant established at acceptance time.
     pub tenant: TenantId,
     /// The frozen, handler-described effect.
-    pub description: ExternalEffectDescription,
+    pub description: Arc<ExternalEffectDescription>,
     /// The next attempt number to use for re-dispatch.
     pub attempt: u32,
     /// The effect's current lifecycle state.
@@ -278,7 +282,7 @@ pub trait EffectDedupStore: Send + Sync {
 #[derive(Debug, Clone)]
 struct EffectRecord {
     tenant: TenantId,
-    description: ExternalEffectDescription,
+    description: Arc<ExternalEffectDescription>,
     state: EffectState,
     attempt: u32,
     next_at: Option<Timestamp>,
@@ -484,7 +488,7 @@ mod tests {
             id,
             tenant: TenantId::new("tenant-a").unwrap(),
             attempt: 0,
-            description: sample_description(),
+            description: Arc::new(sample_description()),
         }
     }
 
@@ -649,8 +653,24 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, id);
         assert_eq!(claimed[0].tenant, TenantId::new("tenant-a").unwrap());
-        assert_eq!(claimed[0].description, sample_description());
+        assert_eq!(*claimed[0].description, sample_description());
         assert_eq!(claimed[0].state, EffectState::Pending);
+    }
+
+    #[tokio::test]
+    async fn claim_due_hands_back_the_same_arc_allocation_not_a_deep_clone() {
+        // Fix 9 (PR2 review): `AcceptedEffect`/`StoredEffect` wrap
+        // `description` in `Arc` precisely so a round-trip through the store
+        // clones a pointer, never the payload bytes.
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        let effect = accepted_effect(id);
+        let original_ptr = Arc::as_ptr(&effect.description);
+        store.accept(effect).await.unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert_eq!(Arc::as_ptr(&claimed[0].description), original_ptr);
     }
 
     #[tokio::test]

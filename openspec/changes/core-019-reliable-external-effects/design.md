@@ -76,6 +76,40 @@ spec-normative requirement. A durable adapter or a per-`effect_type` override
 may choose different values without violating the spec, which is precisely why
 the spec does not pin exact numbers.
 
+**PR2 review follow-up (AD-6/AD-7/AD-8, `runner.rs`).** A post-merge review of
+PR2 found three related gaps in the first `DeliveryRunner` cut, all fixed in
+the same PR before the next one built on top:
+
+- **AD-7 redispatch is now unconditional on the in-memory path.** Both
+  `retry_or_give_up` (a delivery failure) and `finish_success` (bookkeeping
+  exhausted after a real success) now always schedule the backoff-sleep-then-
+  `queue.send` redispatch, regardless of whether the corresponding bookkeeping
+  write (`mark_retryable` / `commit_success`+`mark_succeeded`) itself
+  succeeded — that write is for durability/observability of the retry count,
+  never a precondition for the in-process retry. The dedup reservation for
+  the effect's scope is held for the *entire* backoff sleep and released only
+  immediately before the redispatch re-enters the queue, closing a window
+  where an early release could let a racing duplicate submission slip through.
+- **A periodic reclaim loop closes the `mark_in_flight`-failure gap.**
+  `claim_due` already existed for crash recovery (AD-8) but nothing ever
+  drove it during normal operation, so an effect whose `mark_in_flight` write
+  failed at drain time (safely still `Pending`, no side effect, no dedup
+  reserved) had no path back into the pipeline. `DeliveryRunner::run`'s drain
+  loop now also ticks a `claim_due(now, limit)` call on a fixed interval
+  (default 5s, a middle ground between prompt recovery and not hammering the
+  state store) as a third `tokio::select!` branch on the *same* single-
+  consumer task — not a second consumer — re-feeding whatever comes back into
+  the internal queue for another attempt.
+- **Shutdown now actually waits for outstanding work.** Every per-effect
+  dispatch task and every backoff-redispatch task is tracked in a shared
+  `tokio::task::JoinSet` instead of a bare, discarded `tokio::spawn` handle.
+  On the shutdown signal, the drain loop stops accepting new work (queue and
+  reclaim tick alike) and then awaits the `JoinSet` draining, bounded by a
+  local shutdown-drain deadline (5s default) so a stuck task can't block
+  shutdown forever. This deadline is a local constant for now; once PR4's
+  `RuntimeEffectAcceptor::drain(deadline, ..)` lands, its caller-supplied
+  deadline should flow down into this runner instead of duplicating the idea.
+
 **Acceptance-failure policy (AD-9) in plain terms:** the whole CORE-019 effort
 optimizes for honesty about what survives, so acceptance is honest too. A
 command's event commits atomically and irrevocably; recording that command's

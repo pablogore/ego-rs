@@ -59,17 +59,18 @@ mod tests {
     fn sample() -> super::super::store::AcceptedEffect {
         use crate::effects::store::{AcceptedEffect, EffectId};
         use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+        use std::sync::Arc;
 
         AcceptedEffect {
             id: EffectId::new(),
             tenant: TenantId::new("tenant-a").unwrap(),
             attempt: 0,
-            description: ExternalEffectDescription {
+            description: Arc::new(ExternalEffectDescription {
                 idempotency_key: IdempotencyKey::new("uow-1:0").unwrap(),
                 effect_type: "invoice.created".to_string(),
                 payload: vec![],
                 destination: "https://example.com".to_string(),
-            },
+            }),
         }
     }
 

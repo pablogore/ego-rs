@@ -126,6 +126,47 @@ Chain strategy: stacked-to-main
 >   "never constructed/used" warnings until PR3/PR4 wire the acceptor and
 >   builder around them — expected, matches the same pattern already
 >   accepted for `queue.rs` in this same delivery slice.
+>
+> **Post-review fixes (PR2, before the next PR built on top)** — a code
+> review of this PR's diff found 9 findings against `policy.rs`/`queue.rs`/
+> `runner.rs`, all fixed in the same PR:
+> 1. **`retry_or_give_up`'s `mark_retryable` failure used to abandon the
+>    effect** (returning before scheduling redispatch), permanently stranding
+>    it `InFlight` with its dedup reservation leaked. Fixed: redispatch is now
+>    scheduled unconditionally on the in-memory `effect` value; the
+>    bookkeeping write's failure is only logged (`tracing::warn!`).
+> 3. **Dedup was released right after `mark_retryable`, before the backoff
+>    sleep**, opening a duplicate-delivery window. Fixed: `dedup.release` now
+>    happens inside the same spawned redispatch task, immediately before
+>    `queue.send`, via a shared `schedule_redispatch` helper.
+> 2. **`finish_success`'s exhausted-bookkeeping path only left the effect
+>    `InFlight`** with nothing further scheduled, not the "re-dispatched" AD-7
+>    promises. Fixed: it now calls the same `schedule_redispatch` helper.
+> 4. **Nothing ever re-fed a `Pending` effect whose `mark_in_flight` write
+>    failed.** Fixed: `mark_in_flight` gets a bounded, AD-9-classified retry,
+>    and `DeliveryRunner::run` gained a periodic `claim_due`-driven reclaim
+>    tick (same single-consumer task, third `tokio::select!` branch, 5s
+>    default interval) with its own RED tests (reclaims a due `Pending`
+>    effect; ignores a not-yet-due one; stops on shutdown).
+> 6. **A `dedup.reserve` store error was unconditionally terminal**, including
+>    the retryable `TemporarilyUnavailable` case. Fixed: classified the same
+>    way AD-9 classifies `accept`'s errors, bounded-retried under the
+>    existing `RetryPolicy`.
+> 7. **A hand-rolled `Semaphore` duplicated `read_side::backpressure`'s
+>    `Backpressure` type.** Fixed: `run`'s concurrency limiter now reuses it.
+> 5. **Shutdown didn't wait for detached spawned tasks** (main dispatch or
+>    backoff-redispatch). Fixed: both are tracked in a shared
+>    `tokio::task::JoinSet`; shutdown stops accepting new work, then awaits
+>    the `JoinSet` bounded by a local shutdown-drain deadline (5s default).
+> 8. **~6 duplicated `mark_terminal`(+`dedup.release`) call sites.** Fixed:
+>    extracted `abandon`/`abandon_and_release` helpers.
+> 9. **The full `ExternalEffectDescription` (payload included) was deep-cloned
+>    per attempt** just to satisfy `tokio::spawn`'s `'static` bound. Fixed:
+>    `AcceptedEffect`/`StoredEffect` (`store.rs`) now wrap `description` in
+>    `Arc`, so retries clone a pointer.
+>
+> See `design.md`'s "PR2 review follow-up" note (AD-6/AD-7/AD-8) for the
+> coherent redesign rationale behind fixes 1/2/3/4/5 together.
 
 ## Phase 7: ImmediateDeliveryPolicy
 
