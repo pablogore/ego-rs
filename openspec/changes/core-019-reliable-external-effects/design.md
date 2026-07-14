@@ -193,6 +193,42 @@ and three other BLOCKERs, all fixed in the same PR:
   instead of silently degrading to zero on overflow (which would have
   caused a retry storm instead of backoff).
 
+**PR2 round 3 review follow-up (two residual gaps closed).** The round 2
+fix's own report honestly flagged two gaps it left unresolved; both are now
+closed:
+
+- **AD-6/shutdown — drain-deadline expiry now actually aborts outstanding
+  work.** Before this fix, `DeliveryRunner::drain_tasks` simply gave up once
+  its bounded deadline elapsed, leaving any still-running dispatch task (and
+  its inner executor attempt) running, untracked, in the background forever
+  — the exact concern the very first PR2 review round raised about this
+  `JoinSet` design. Fixed: on deadline expiry, every in-flight executor
+  attempt's `AbortHandle` (tracked separately from the outer per-effect
+  `JoinSet`, precisely so classification stays intact) is aborted, giving
+  `classify_join_result`'s `is_cancelled()` branch its first real production
+  caller — the owning dispatch task then runs its already-existing
+  `CancelledForShutdown` handling (`requeue_without_charging_attempt`) to
+  completion and drains out normally. Only if a task is *still* stuck after a
+  second bounded window (e.g. hung somewhere other than the executor await)
+  does shutdown fall back to `JoinSet::abort_all()` as a last resort. Either
+  way, shutdown now provably returns with zero background tasks left running
+  past the deadline.
+- **AD-7 — `mark_retryable` exhaustion now abandons instead of sticking.**
+  Same "stuck and undiscoverable" class of bug F-03 already fixed for
+  `finish_success`'s exhausted bookkeeping path, applied to
+  `retry_or_give_up`'s own `mark_retryable` write: if its bounded retry is
+  still failing after the bound, the effect used to be left silently
+  `InFlight` forever, invisible until a future crash-recovery pass that isn't
+  wired anywhere. Fixed: this exhaustion now falls back to
+  `abandon_and_release` with `TerminalReason::Other("retry bookkeeping
+  exhausted: store unavailable")`, and logs via `tracing::warn!` like every
+  other abandon path — an operator sees a persistent store outage instead of
+  a silent stall. (`finish_success`'s own separate exhaustion fallback is
+  unchanged — out of this fix's scope.) The two fixes are independent: the
+  drain-deadline abort only ever targets an executor attempt, never the flat,
+  no-backoff `mark_retryable` bookkeeping loop itself, so aborting one cannot
+  interrupt the other mid-retry.
+
 **Acceptance-failure policy (AD-9) in plain terms:** the whole CORE-019 effort
 optimizes for honesty about what survives, so acceptance is honest too. A
 command's event commits atomically and irrevocably; recording that command's

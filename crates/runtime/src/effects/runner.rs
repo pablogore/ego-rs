@@ -119,6 +119,18 @@ pub(crate) struct DeliveryRunner {
     /// recursively spawns another tracked task, which is what made the old
     /// timer path deadlock-prone against shutdown (F-01).
     tasks: AsyncMutex<JoinSet<()>>,
+    /// Gap 1 (PR2 residual fix): the [`tokio::task::AbortHandle`] of every
+    /// currently in-flight *executor* attempt (the inner `tokio::spawn`
+    /// inside [`execute_catching_panics`]), so [`Self::drain_tasks`] can
+    /// abort a straggling attempt on drain-deadline expiry. Aborting here
+    /// (rather than the outer `tasks` `JoinSet`) is what gives
+    /// `classify_join_result`'s `is_cancelled()` branch a real production
+    /// caller: the owning per-effect dispatch task observes the resulting
+    /// `Cancelled` join error through its own existing `CancelledForShutdown`
+    /// handling and finishes normally (fast — just bookkeeping calls), so it
+    /// still drains cleanly out of `tasks` instead of being force-aborted
+    /// mid-bookkeeping.
+    executor_aborts: AsyncMutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl DeliveryRunner {
@@ -136,6 +148,7 @@ impl DeliveryRunner {
             retry: retry.into(),
             queue,
             tasks: AsyncMutex::new(JoinSet::new()),
+            executor_aborts: AsyncMutex::new(Vec::new()),
         }
     }
 
@@ -152,6 +165,13 @@ impl DeliveryRunner {
     /// work, waits (bounded by `deadline`) for every outstanding tracked
     /// task to finish.
     ///
+    /// Gap 1 (PR2 residual fix): a task still running once `deadline`
+    /// elapses is no longer left running, untracked, in the background
+    /// forever. It is aborted, and the resulting cancellation is drained out
+    /// of `tasks` before this returns — see [`Self::executor_aborts`] for why
+    /// the abort targets the inner executor attempt rather than the outer
+    /// dispatch task directly.
+    ///
     /// ponytail: holds the `tasks` lock for the whole drain window. A brand
     /// new task spawned by a straggling in-flight attempt during this exact
     /// window (e.g. a retry redispatch scheduled the instant shutdown
@@ -162,10 +182,48 @@ impl DeliveryRunner {
     /// proves surprising in practice.
     async fn drain_tasks(&self, deadline: Duration) {
         let mut tasks = self.tasks.lock().await;
-        let _ = tokio::time::timeout(deadline, async {
+        let timed_out = tokio::time::timeout(deadline, async {
             while tasks.join_next().await.is_some() {}
         })
-        .await;
+        .await
+        .is_err();
+
+        if !timed_out {
+            return;
+        }
+
+        tracing::warn!(
+            "shutdown drain deadline elapsed with dispatch tasks still outstanding; \
+             aborting the underlying executor attempts to guarantee no leaked background work"
+        );
+
+        // Abort every still-running executor attempt. Each owning per-effect
+        // dispatch task observes the resulting `Cancelled` join error through
+        // its already-existing `CancelledForShutdown` handling
+        // (`requeue_without_charging_attempt`) — a couple of immediate,
+        // non-blocking bookkeeping calls — so it should finish and drain out
+        // of `tasks` on its own right after.
+        for handle in self.executor_aborts.lock().await.drain(..) {
+            handle.abort();
+        }
+
+        let still_stuck = tokio::time::timeout(deadline, async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_err();
+
+        if still_stuck {
+            // Last resort: a dispatch task stuck somewhere other than the
+            // executor await (e.g. a hung store call) — force it out so
+            // shutdown provably leaves zero background tasks. The effect it
+            // was processing may be left wherever it currently stood — the
+            // same accepted stuck-until-crash-recovery tradeoff already
+            // documented for a permanently failing bookkeeping write
+            // elsewhere in this file.
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
     }
 
     /// Spawned drain loop (`Deferred` profile, AD-6): receives from the
@@ -367,7 +425,13 @@ impl DeliveryRunner {
             idempotency_key: effect.description.idempotency_key.clone(),
         };
 
-        let outcome = execute_catching_panics(executor, effect.description.clone(), ctx).await;
+        let outcome = execute_catching_panics(
+            executor,
+            effect.description.clone(),
+            ctx,
+            &self.executor_aborts,
+        )
+        .await;
 
         match outcome {
             ExecutionOutcome::Outcome(AttemptOutcome::Success) => {
@@ -576,16 +640,32 @@ impl DeliveryRunner {
             .await
             .is_err()
         {
+            // Gap 2 (PR2 residual fix): `mark_retryable`'s own bounded retry
+            // (above) already tried `BOOKKEEPING_RETRY_ATTEMPTS` times. If
+            // it's STILL failing, this is a genuine store outage, not a
+            // one-off blip — leaving the effect silently `InFlight` forever
+            // (as before this fix) is the same "stuck and undiscoverable"
+            // class of bug F-03 already fixed for `finish_success`'s
+            // exhausted path. Abandon it properly instead: mark terminal and
+            // release the dedup reservation, so an operator sees a real
+            // signal instead of a silent, permanent stall.
             tracing::warn!(
                 effect_id = %effect.id,
-                "mark_retryable bookkeeping exhausted retries; effect may remain stuck InFlight \
-                 until crash recovery"
+                "mark_retryable bookkeeping exhausted retries; abandoning the effect instead \
+                 of leaving it stuck InFlight"
             );
+            self.abandon_and_release(
+                effect.id,
+                TerminalReason::Other("retry bookkeeping exhausted: store unavailable".into()),
+                scope,
+            )
+            .await;
         }
 
         // Dedup reservation stays held for the effect's entire lifetime
         // (dedup-lifetime redesign, `drain_one` doc comment) — released only
-        // on a genuinely terminal outcome, never here.
+        // on a genuinely terminal outcome, never here. (No-op here when the
+        // branch above already abandoned-and-released it.)
     }
 
     /// HIGH-2: re-queues an executor attempt that was aborted/cancelled
@@ -623,12 +703,25 @@ enum ExecutionOutcome {
     CancelledForShutdown,
 }
 
+/// Gap 1 (PR2 residual fix): `executor_aborts` receives this attempt's
+/// [`tokio::task::AbortHandle`] before it is awaited, so
+/// [`DeliveryRunner::drain_tasks`] can abort it on drain-deadline expiry.
+/// Stale (already-finished) handles are swept out opportunistically on every
+/// call rather than tracked precisely by id — this set stays small (bounded
+/// by in-flight concurrency) so an occasional linear scan is cheap.
 async fn execute_catching_panics(
     executor: Arc<dyn ExternalEffectExecutor>,
     description: Arc<ego_domain::ExternalEffectDescription>,
     ctx: EffectContext,
+    executor_aborts: &AsyncMutex<Vec<tokio::task::AbortHandle>>,
 ) -> ExecutionOutcome {
-    classify_join_result(tokio::spawn(async move { executor.execute(&description, &ctx).await }).await)
+    let handle = tokio::spawn(async move { executor.execute(&description, &ctx).await });
+    {
+        let mut aborts = executor_aborts.lock().await;
+        aborts.retain(|h| !h.is_finished());
+        aborts.push(handle.abort_handle());
+    }
+    classify_join_result(handle.await)
 }
 
 /// HIGH-2: a `tokio::task::JoinError` is only ever one of two kinds — a
@@ -713,6 +806,27 @@ mod tests {
             } else {
                 outcomes.remove(0)
             }
+        }
+    }
+
+    /// Gap 1 (PR2 residual fix): an executor whose `execute` never returns on
+    /// its own — simulates a task still running past the shutdown drain
+    /// deadline. Signals `started` once it has actually begun executing, so
+    /// the test can wait for that before triggering shutdown.
+    struct HangingExecutor {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ExternalEffectExecutor for HangingExecutor {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("this executor never returns on its own");
         }
     }
 
@@ -1613,14 +1727,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_retryable_permanent_failure_leaves_effect_stuck_in_flight_until_crash_recovery() {
-        // Documents the known, accepted residual edge (mirrors the existing
-        // `mark_in_flight` permanent-failure tradeoff, fix 4): if
-        // `mark_retryable`'s bounded retry is permanently exhausted, this
-        // effect cannot be reclaimed by the normal reclaim loop (`claim_due`
-        // excludes `InFlight`) — only a future `recover_in_flight` crash
-        // recovery pass (out of this round's scope) can free it. Not a
-        // silent failure: `retry_or_give_up` logs a `tracing::warn!`.
+    async fn mark_retryable_permanent_failure_abandons_effect_instead_of_leaving_it_stuck_in_flight()
+    {
+        // Gap 2 (PR2 residual fix): `mark_retryable`'s own bounded retry
+        // (already exhausted here — `AlwaysFailingMarkRetryableStore` always
+        // fails) used to just log a warning and leave the effect silently
+        // stuck `InFlight` forever — invisible until a future crash-recovery
+        // pass that isn't wired anywhere. `retry_or_give_up` must now fall
+        // back to `abandon_and_release` instead, the same "stuck and
+        // undiscoverable" class of bug F-03 already fixed for
+        // `finish_success`'s exhausted path: the effect ends up
+        // `TerminalFailed`, not stuck, and its dedup reservation is released
+        // like any other genuinely terminal outcome.
         let state = Arc::new(AlwaysFailingMarkRetryableStore::new());
         let dedup = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
@@ -1651,13 +1769,23 @@ mod tests {
 
         runner.drain_one(effect).await;
 
-        // Never reclaim-eligible — `claim_due` excludes `InFlight`.
+        // Not stuck — never reclaim-eligible either, but genuinely
+        // `TerminalFailed`, discoverable via ordinary bookkeeping.
         let due = state.claim_due(Timestamp::now(), 10).await.unwrap();
         assert!(due.is_empty());
+        let err = state.mark_in_flight(id).await.unwrap_err();
+        assert!(matches!(
+            err,
+            EffectStoreError::InvalidTransition {
+                from: EffectState::TerminalFailed,
+                ..
+            }
+        ));
 
-        // Dedup-lifetime redesign: the reservation is never released for a
-        // non-terminal outcome — still held, proven by `Duplicate`.
-        assert_eq!(dedup.reserve(&scope, fp).await.unwrap(), DedupOutcome::Duplicate);
+        // Dedup reservation released, like every other genuinely terminal
+        // outcome — proven by a fresh reservation succeeding for the same
+        // scope.
+        assert_eq!(dedup.reserve(&scope, fp).await.unwrap(), DedupOutcome::Fresh);
     }
 
     // --- Fix 4: bounded retry for `mark_in_flight`, plus the periodic
@@ -1934,6 +2062,96 @@ mod tests {
             elapsed < StdDuration::from_millis(300),
             "shutdown must return almost immediately — nothing tracks the retry's backoff \
              anymore (elapsed: {elapsed:?})"
+        );
+    }
+
+    // --- Gap 1 (PR2 residual fix): drain-deadline expiry actually aborts
+    // outstanding tasks instead of leaving them as untracked background work
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn shutdown_aborts_a_task_still_running_past_the_drain_deadline_and_leaves_no_leaked_background_task(
+    ) {
+        // Before this fix, `drain_tasks` just gave up once its deadline
+        // elapsed, returning with the still-running dispatch task (and its
+        // inner executor attempt) left running, untracked, in the
+        // background forever. This proves: (a) the still-running attempt
+        // gets aborted, (b) `run_inner` returns with the tracked `JoinSet`
+        // fully empty, and (c) the abort is classified as cancelled — not
+        // charged as an ordinary retryable failure.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let executor = Arc::new(HangingExecutor {
+            started: started.clone(),
+        });
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        // Zero-retry policy: if the abort were (wrongly) classified as an
+        // ordinary `RetryableFailure`, `allows_retry(0)` is false and the
+        // effect would be immediately `TerminalFailed` ("attempt cap
+        // exceeded") — the same proof shape HIGH-2's own test already uses.
+        let no_retries = RetryPolicy {
+            max_attempts: 0,
+            base_backoff: StdDuration::ZERO,
+            max_backoff: StdDuration::ZERO,
+        };
+        let (queue, receiver) = EffectQueue::bounded(4);
+        let runner = Arc::new(DeliveryRunner::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            Arc::new(registry),
+            no_retries,
+            queue.clone(),
+        ));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect.clone()).await.unwrap();
+        queue.send(effect).await.unwrap();
+
+        let drain_deadline = StdDuration::from_millis(20);
+        let loop_handle = tokio::spawn(runner.clone().run_inner(
+            receiver,
+            2,
+            shutdown_rx,
+            RECLAIM_INTERVAL,
+            drain_deadline,
+        ));
+
+        tokio::time::timeout(StdDuration::from_secs(1), started.notified())
+            .await
+            .expect("the hanging executor starts running within timeout");
+
+        shutdown_tx.send(true).unwrap();
+
+        tokio::time::timeout(StdDuration::from_secs(1), loop_handle)
+            .await
+            .expect(
+                "run_inner must return once the drain deadline aborts the hanging task, \
+                 not block forever",
+            )
+            .expect("task did not panic");
+
+        assert!(
+            runner.tasks.lock().await.is_empty(),
+            "the tracked JoinSet must be fully drained — no leaked background task past \
+             the deadline"
+        );
+
+        let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert_eq!(
+            due.len(),
+            1,
+            "the aborted attempt must be reclaim-eligible (RetryableFailed), not stuck or \
+             silently discarded"
+        );
+        assert_eq!(due[0].state, EffectState::RetryableFailed);
+        assert_eq!(
+            due[0].attempt, 1,
+            "cancellation must not be charged against the zero-retry attempt cap"
         );
     }
 
