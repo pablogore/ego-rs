@@ -63,7 +63,7 @@ to evolve.
 | AD-3 Acceptor port location | `EffectAcceptor` trait in `persistent-entity`; impl in `runtime` | Trait in `runtime` | Actor references its own crate only, identical to `EventPublisher`. No new layer edge. |
 | AD-4 Ports in runtime | `EffectStateStore` + `EffectDedupStore` in `crates/runtime/src/effects/` | Domain (like read-side `DedupStore`) | Delivery state is a runtime responsibility (§6); domain stays I/O- and state-free. `-Store` suffix still matches the read side. |
 | AD-5 Backoff defaults | Ship the read-side precedent as **runtime default constants**, explicitly **not** spec-normative numbers: `DEFAULT_MAX_ATTEMPTS: u32 = 3`, `DEFAULT_BASE_BACKOFF = Duration::from_millis(100)`, `DEFAULT_MAX_BACKOFF = Duration::from_secs(10)`, exponential + full jitter | Retune for external calls; pin the numbers in the spec | The spec's *behavioral* contract (retry with backoff, capped, jittered) is what is normative; these specific values are just this implementation's chosen defaults, overridable per-`effect_type`/per-adapter. The only in-repo retry precedent (`read_side/error.rs:9`) gives ops familiarity. Cap = 3 retries (4 attempts total). |
-| AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. Retryable effects re-enter via `tokio::time::sleep` then re-`send`. |
+| AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. **Revised (PR2 round 2, see below): retryable effects re-enter SOLELY via `mark_retryable(next_at)` plus the periodic `claim_due`-driven reclaim loop — never via an in-process sleep-then-`send` timer.** |
 | AD-7 Bookkeeping-failure semantics | On post-success bookkeeping failure (`mark_succeeded`/`commit_success`), bounded-retry the idempotent write; if it still fails, keep the effect `in-flight`/`retryable` and re-dispatch rather than losing it | Swallow the error and mark succeeded anyway; treat the bookkeeping failure as terminal | Preserves the at-least-once guarantee (§7): re-dispatch is safe because idempotency-key propagation is mandatory, so a cooperating destination collapses the duplicate. Consequence: a rare double-attempt on the destination, never a silent loss or a false-terminal. Failure-window detail in §6.5. |
 | AD-8 Single-consumer claim invariant | Exactly one `DeliveryRunner` instance calls `claim_due` at a time in this slice; `claim_due` is deliberately **non-atomic** — it returns due effects without transitioning their state (a claimant that intends to dispatch still calls `mark_in_flight`) | Make `claim_due` atomically claim (transition to `InFlight` with compare-and-swap / lease-timeout semantics) | Distributed/multi-consumer coordination (leasing, cross-node claims) is out of scope per the proposal's non-goals (§4). Non-atomic `claim_due` is safe **only because** a single runner consumes it. Atomic claiming would add compare-and-swap semantics and lease timeouts with no current driver; deferred until a real multi-consumer need materializes. |
 | AD-9 Acceptance-failure policy | `EffectAcceptor::accept` returns `Result<(), EffectAcceptanceError>`. The committed event is **never** rolled back because acceptance fails (commit and acceptance are separate concerns; commit success is final and unconditional). The caller's *successful* reply is withheld until acceptance of that command's effects completes. Only `EffectStateStore::accept`'s `TemporarilyUnavailable` error is retryable under the AD-5 `RetryPolicy`; every other store error is permanent and surfaces immediately as a post-commit `EffectAcceptanceError` (full mapping in the classification table below). If the retryable error survives the policy, the caller likewise receives an explicit post-commit `EffectAcceptanceError`. | Roll back the commit on acceptance failure; swallow the failure and reply success anyway; block shutdown until acceptance eventually succeeds | Extends the existing "backpressure delays the reply, never the commit" rule (§9) to also cover acceptance *failure*, not just queue-capacity waiting. Honest by construction: the error means "your command succeeded and its event is committed, but we could not durably-enough register at least one of its described effects, and it may be lost to the post-commit dual-write gap" — not that the command failed. Reuses the AD-5 `RetryPolicy` shape rather than a second policy type: acceptance retries the same class of transient store write, so a distinct tuning surface would be speculative. |
@@ -90,6 +90,8 @@ the same PR before the next one built on top:
   the effect's scope is held for the *entire* backoff sleep and released only
   immediately before the redispatch re-enters the queue, closing a window
   where an early release could let a racing duplicate submission slip through.
+  **(Superseded by the PR2 round 2 redesign immediately below — this
+  sleep-then-`send` timer no longer exists.)**
 - **A periodic reclaim loop closes the `mark_in_flight`-failure gap.**
   `claim_due` already existed for crash recovery (AD-8) but nothing ever
   drove it during normal operation, so an effect whose `mark_in_flight` write
@@ -109,6 +111,87 @@ the same PR before the next one built on top:
   shutdown forever. This deadline is a local constant for now; once PR4's
   `RuntimeEffectAcceptor::drain(deadline, ..)` lands, its caller-supplied
   deadline should flow down into this runner instead of duplicating the idea.
+
+**PR2 round 2 review follow-up (AD-6 revision, F-01 through F-04, dedup
+lifetime).** A second review pass on this PR's diff found a real
+double-dispatch race the fixes above introduced, a `JoinSet` self-deadlock,
+and three other BLOCKERs, all fixed in the same PR:
+
+- **AD-6 revision — one redispatch mechanism, not two.** The round-1 fix
+  above gave every retryable effect *two* competing producers that could both
+  end up enqueueing it around the same time once `next_at` passed: the
+  in-process sleep-then-`queue.send` timer, and the `claim_due`-based reclaim
+  loop (added in the same round, for a different gap). Whichever copy lost
+  the race hit `InvalidTransition` and was silently discarded — accidental
+  behavior, not a contractual one. Separately, the timer task's own need to
+  self-register in the shared, shutdown-drained `JoinSet` was deadlock-prone
+  against a shutdown already waiting on that very `JoinSet` (F-01). Fixed by
+  picking exactly one mechanism: `EffectStateStore::mark_retryable(next_at)`
+  is now the sole source of truth for "when is this effect due," and the
+  periodic reclaim loop is the sole way it re-enters the queue.
+  `retry_or_give_up` and `finish_success`'s exhausted-bookkeeping path now
+  only call `mark_retryable` and return — no task is spawned for the backoff
+  itself. This also resolves the `JoinSet` deadlock as a side effect: with
+  the timer gone, only the main drain loop (queue-fed effects) and the
+  reclaim loop (`claim_due`-fed effects) ever spawn into the tracked
+  `JoinSet`, and neither is itself a tracked task recursively spawning
+  another — no self-referential lock wait is possible.
+- **Dedup-reservation lifetime, decoupled from "attempt".** Once a
+  reservation is made `Fresh` for an effect's `(tenant, effect_type,
+  idempotency_key)` scope, it now stays held for that effect's entire
+  lifetime — released only on a genuinely terminal outcome (`Succeeded` via
+  `commit_success`, or `TerminalFailed` via `abandon_and_release`) — never
+  released and re-reserved on every attempt. `drain_one` only ever calls
+  `EffectDedupStore::reserve` when `effect.attempt == 0` (a genuinely fresh,
+  never-before-dispatched submission); every redispatch path in this file
+  always bumps `attempt` to at least 1 before the effect can be reclaimed, so
+  a retry of the *same* effect re-entering `drain_one` reliably skips
+  `reserve` and can never be `Duplicate`'d against its own still-held
+  reservation.
+- **F-02 — per-`effect_type` retry policy override.** `DeliveryConfig`/
+  `RetryPolicy` only ever supported one global policy per runner instance.
+  Added `RetryPolicies { default_retry: RetryPolicy, retry_overrides:
+  HashMap<String, RetryPolicy> }` (`policy.rs`) with `policy_for(effect_type)
+  -> RetryPolicy`; `DeliveryRunner` now holds a `RetryPolicies` (constructed
+  via `impl Into<RetryPolicies>`, so every existing call site passing a bare
+  `RetryPolicy` keeps compiling unchanged) and calls `policy_for` everywhere
+  it used to read one shared policy field directly — the retry-decision
+  (`allows_retry`) and the backoff computation alike.
+- **F-03 — AD-7's redispatch used to re-enter a state `mark_in_flight`
+  rejects.** `finish_success`'s bookkeeping-exhausted path left the effect's
+  stored state `InFlight` while (pre-redesign) scheduling a redispatch — but
+  `mark_in_flight` only accepts `from: Pending | RetryableFailed`, and
+  `claim_due` explicitly excludes `InFlight`, so that effect could never be
+  picked back up by anything. Fixed: the exhausted path now calls
+  `mark_retryable(id, attempt, next_at)` — its `allowed_from: [InFlight]`
+  fits this "succeeded but bookkeeping didn't confirm" case exactly, no new
+  store operation needed. Combined with the dedup-lifetime fix above, the
+  effect's own reservation stays held and its later redispatch (attempt ≥ 1)
+  skips `reserve` entirely, so it is never mistaken for its own duplicate.
+- **F-04 — stable, portable dedup fingerprint.** `EffectDedupStore::reserve`'s
+  `fingerprint: u64` (computed via `std::collections::hash_map::
+  DefaultHasher`, which carries no cross-version/cross-build stability
+  guarantee) is replaced by a public `EffectFingerprint([u8; 32])`
+  (`store.rs`), computed via SHA-256 (already a transitive workspace
+  dependency, reused rather than adding a new hashing crate) over a
+  length-prefixed framing of payload and destination — so
+  `payload=b"ab"+destination="cd"` never collides with
+  `payload=b"a"+destination="bcd"` the way naive concatenation would.
+  `EffectDedupStore::reserve`'s signature and every call site were updated;
+  this changes already-merged (`develop`) public API, acceptable here since
+  nothing outside this stack consumes it yet.
+- **Previously-existing HIGH findings, fixed in the same pass:**
+  `DedupOutcome::Duplicate` on a fresh submission is now marked `Succeeded`
+  (a benign already-satisfied outcome), never `TerminalFailed` with an
+  error-sounding reason; a cancelled/aborted executor task
+  (`tokio::task::JoinError::is_cancelled()`, as opposed to `is_panic()`) is
+  requeued without charging the effect's retry-attempt cap, instead of being
+  charged as an ordinary `RetryableFailure`; `abandon`/`abandon_and_release`/
+  `reclaim_due`'s previously-silent `let _ = ...` bookkeeping-failure
+  discards now log via `tracing::warn!`; and `timestamp_after`'s
+  `chrono::Duration` conversion now saturates to a large, safe fallback
+  instead of silently degrading to zero on overflow (which would have
+  caused a retry storm instead of backoff).
 
 **Acceptance-failure policy (AD-9) in plain terms:** the whole CORE-019 effort
 optimizes for honesty about what survives, so acceptance is honest too. A

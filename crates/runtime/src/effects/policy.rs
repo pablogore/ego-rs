@@ -6,6 +6,7 @@
 //! are this implementation's choice and may be overridden by constructing a
 //! different [`RetryPolicy`] value per `effect_type`/adapter.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -89,6 +90,59 @@ fn full_jitter(capped: Duration) -> Duration {
     let numerator = u64::from_be_bytes(entropy.as_bytes()[0..8].try_into().unwrap());
     let fraction = numerator as f64 / u64::MAX as f64;
     capped.mul_f64(fraction)
+}
+
+/// F-02: the retry policy the [`crate::effects::runner::DeliveryRunner`]
+/// actually consults, with an optional per-`effect_type` override over one
+/// shared default.
+///
+/// Before this fix a runner instance only ever had a single [`RetryPolicy`]
+/// (design.md's original "a per-`effect_type` override is just a different
+/// `RetryPolicy` value threaded through" note was never wired to anything —
+/// there was exactly one field, shared by every `effect_type`). This type is
+/// that override registry: [`Self::policy_for`] is what the runner now calls
+/// wherever it used to read its own `retry: RetryPolicy` field directly, for
+/// both the retry-decision (`allows_retry`) and the backoff computation.
+#[derive(Debug, Clone)]
+pub struct RetryPolicies {
+    /// Used for every `effect_type` without an explicit override.
+    pub default_retry: RetryPolicy,
+    /// Per-`effect_type` overrides of `default_retry`.
+    pub retry_overrides: HashMap<String, RetryPolicy>,
+}
+
+impl RetryPolicies {
+    /// A single shared policy, no per-type overrides.
+    pub fn new(default_retry: RetryPolicy) -> Self {
+        Self {
+            default_retry,
+            retry_overrides: HashMap::new(),
+        }
+    }
+
+    /// Adds (or replaces) the override for `effect_type`.
+    pub fn with_override(mut self, effect_type: impl Into<String>, policy: RetryPolicy) -> Self {
+        self.retry_overrides.insert(effect_type.into(), policy);
+        self
+    }
+
+    /// The policy the runner must use for `effect_type`: its override if one
+    /// is registered, otherwise `default_retry`.
+    pub fn policy_for(&self, effect_type: &str) -> RetryPolicy {
+        self.retry_overrides
+            .get(effect_type)
+            .copied()
+            .unwrap_or(self.default_retry)
+    }
+}
+
+/// Lets every existing call site that constructs a `DeliveryRunner` with a
+/// bare [`RetryPolicy`] (no overrides needed) keep compiling unchanged —
+/// `DeliveryRunner::new` takes `impl Into<RetryPolicies>`.
+impl From<RetryPolicy> for RetryPolicies {
+    fn from(default_retry: RetryPolicy) -> Self {
+        Self::new(default_retry)
+    }
 }
 
 /// Where the delivery runner drives one drain step (design.md §7): a
@@ -228,6 +282,28 @@ mod tests {
         assert_eq!(config.retry.base_backoff, DEFAULT_BASE_BACKOFF);
         assert_eq!(config.retry.max_backoff, DEFAULT_MAX_BACKOFF);
         assert_eq!(config.runner_mode, RunnerMode::Deferred);
+    }
+
+    // --- F-02: per-`effect_type` retry policy override ---
+
+    #[test]
+    fn policy_for_returns_the_default_when_no_override_is_registered() {
+        let policies = RetryPolicies::new(RetryPolicy::default());
+
+        assert_eq!(policies.policy_for("invoice.created"), RetryPolicy::default());
+    }
+
+    #[test]
+    fn policy_for_returns_the_override_for_its_registered_effect_type_only() {
+        let aggressive = RetryPolicy {
+            max_attempts: 0,
+            base_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(5),
+        };
+        let policies = RetryPolicies::new(RetryPolicy::default()).with_override("s3.put", aggressive);
+
+        assert_eq!(policies.policy_for("s3.put"), aggressive);
+        assert_eq!(policies.policy_for("invoice.created"), RetryPolicy::default());
     }
 
     #[test]

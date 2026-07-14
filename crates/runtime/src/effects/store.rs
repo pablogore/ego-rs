@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -237,6 +238,44 @@ pub trait EffectStateStore: Send + Sync {
     async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError>;
 }
 
+/// A stable, cross-version, cross-build dedup fingerprint over an effect's
+/// payload and destination (F-04).
+///
+/// Replaces the earlier `u64` computed via `std::collections::hash_map::
+/// DefaultHasher` — `DefaultHasher` carries **no** stability guarantee across
+/// Rust versions or even separate builds of the same binary, and 64 bits has
+/// a meaningfully higher collision probability than is appropriate for a
+/// store whose whole job is reliably detecting payload/destination
+/// mismatches. Backed by SHA-256 (already a transitive workspace dependency
+/// via other crates' `sha2 = "0.10"` use, e.g. `security-jwt`/
+/// `security-apikey`) over a length-prefixed framing of each field, so
+/// `payload=b"ab"` + `destination="cd"` never collides with `payload=b"a"` +
+/// `destination="bcd"` the way naive concatenation would.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectFingerprint([u8; 32]);
+
+impl EffectFingerprint {
+    /// Computes the fingerprint of one effect's payload + destination.
+    pub fn compute(payload: &[u8], destination: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update((payload.len() as u64).to_be_bytes());
+        hasher.update(payload);
+        let destination = destination.as_bytes();
+        hasher.update((destination.len() as u64).to_be_bytes());
+        hasher.update(destination);
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for EffectFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EffectFingerprint({:x?})", &self.0[..4])
+    }
+}
+
 /// The result of a single-flight dedup reservation attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupOutcome {
@@ -270,7 +309,7 @@ pub trait EffectDedupStore: Send + Sync {
     async fn reserve(
         &self,
         scope: &DedupScope,
-        fingerprint: u64,
+        fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError>;
     /// Confirms the reservation as permanently delivered.
     async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
@@ -303,7 +342,7 @@ pub struct InMemoryEffectStore {
     // need a separate "committed" flag because nothing calls `release` after
     // a successful delivery. Revisit only if a durable store needs to tell
     // "reserved" and "committed" apart.
-    dedup: Mutex<HashMap<DedupScope, u64>>,
+    dedup: Mutex<HashMap<DedupScope, EffectFingerprint>>,
 }
 
 impl InMemoryEffectStore {
@@ -443,7 +482,7 @@ impl EffectDedupStore for InMemoryEffectStore {
     async fn reserve(
         &self,
         scope: &DedupScope,
-        fingerprint: u64,
+        fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError> {
         let mut dedup = self.dedup.lock().unwrap();
         match dedup.get(scope) {
@@ -498,6 +537,10 @@ mod tests {
             effect_type: "invoice.created".to_string(),
             key: IdempotencyKey::new(key).unwrap(),
         }
+    }
+
+    fn fp(seed: &str) -> EffectFingerprint {
+        EffectFingerprint::compute(seed.as_bytes(), "https://example.com")
     }
 
     #[tokio::test]
@@ -588,7 +631,7 @@ mod tests {
     async fn first_reservation_for_a_scope_is_fresh() {
         let store = InMemoryEffectStore::new();
         let outcome = store
-            .reserve(&scope("tenant-a", "uow-1:0"), 42)
+            .reserve(&scope("tenant-a", "uow-1:0"), fp("a"))
             .await
             .unwrap();
         assert_eq!(outcome, DedupOutcome::Fresh);
@@ -598,9 +641,9 @@ mod tests {
     async fn repeated_reservation_with_same_fingerprint_is_duplicate() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Duplicate);
     }
@@ -609,9 +652,9 @@ mod tests {
     async fn reservation_with_different_fingerprint_same_scope_is_conflict() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, 99).await.unwrap();
+        let outcome = store.reserve(&s, fp("b")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Conflict);
     }
@@ -620,10 +663,10 @@ mod tests {
     async fn released_scope_can_be_reserved_fresh_again() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, fp("a")).await.unwrap();
 
         store.release(&s).await.unwrap();
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Fresh);
     }
@@ -632,12 +675,39 @@ mod tests {
     async fn commit_success_keeps_scope_reserved() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, fp("a")).await.unwrap();
 
         store.commit_success(&s).await.unwrap();
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Duplicate);
+    }
+
+    // --- F-04: stable, portable EffectFingerprint ---
+
+    #[test]
+    fn fingerprint_is_stable_for_identical_inputs() {
+        let a = EffectFingerprint::compute(b"payload", "https://example.com");
+        let b = EffectFingerprint::compute(b"payload", "https://example.com");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_payloads_or_destinations() {
+        let base = EffectFingerprint::compute(b"payload", "https://example.com");
+        let different_payload = EffectFingerprint::compute(b"other", "https://example.com");
+        let different_destination = EffectFingerprint::compute(b"payload", "https://other.com");
+        assert_ne!(base, different_payload);
+        assert_ne!(base, different_destination);
+    }
+
+    #[test]
+    fn fingerprint_length_prefixing_avoids_concatenation_ambiguity() {
+        // Naive concatenation would make payload=b"ab"+destination="cd" collide
+        // with payload=b"a"+destination="bcd" (both concatenate to "abcd").
+        let a = EffectFingerprint::compute(b"ab", "cd");
+        let b = EffectFingerprint::compute(b"a", "bcd");
+        assert_ne!(a, b);
     }
 
     // --- F-02: claim_due / recover_in_flight ---

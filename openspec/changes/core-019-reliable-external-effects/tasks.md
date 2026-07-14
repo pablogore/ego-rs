@@ -78,6 +78,15 @@ Chain strategy: stacked-to-main
 > `timestamp_after(Duration) -> Timestamp` helper lives in `runner.rs` (the
 > only caller), not on `Timestamp` itself, to avoid touching the already-shipped
 > `store.rs` (PR1).
+>
+> **PR2 round 2 fix — per-`effect_type` retry policy override actually wired
+> to the runner.** A single shared `RetryPolicy` per runner instance was the
+> only option; nothing consulted a per-type override even though this note's
+> own RED test title mentions one. Fixed: `RetryPolicies { default_retry,
+> retry_overrides: HashMap<String, RetryPolicy> }` (policy.rs) with
+> `policy_for(effect_type) -> RetryPolicy`; `DeliveryRunner` now calls it
+> wherever it used to read a single `retry` field. See design.md's "PR2
+> round 2 review follow-up" note.
 
 ## Phase 4: Internal Queue (not public)
 
@@ -167,6 +176,26 @@ Chain strategy: stacked-to-main
 >
 > See `design.md`'s "PR2 review follow-up" note (AD-6/AD-7/AD-8) for the
 > coherent redesign rationale behind fixes 1/2/3/4/5 together.
+>
+> **PR2 round 2 review follow-up.** A second review pass on this PR's diff
+> found the timer added by fix 1/2/3 above raced the reclaim loop added by
+> fix 4 for the same effect, and was itself deadlock-prone against fix 5's
+> shutdown-drain — both symptoms of one root cause: two competing redispatch
+> producers. Fixed by removing the timer entirely: `mark_retryable(next_at)`
+> is now the sole source of truth for "when is this effect due", and the
+> reclaim loop is the sole way it re-enters the queue. Also fixed in the same
+> pass: the dedup reservation's lifetime is now decoupled from "attempt" (held
+> for the whole effect lifetime, not released/re-reserved per attempt);
+> `finish_success`'s bookkeeping-exhausted path now transitions out of
+> `InFlight` via `mark_retryable` instead of leaving the effect permanently
+> unreachable; the dedup fingerprint is now a stable `EffectFingerprint`
+> (SHA-256) instead of an unstable `DefaultHasher` `u64`; a `DedupOutcome::
+> Duplicate` on a fresh submission is a benign `Succeeded`, not a
+> `TerminalFailed` error; a cancelled/aborted executor task no longer charges
+> a retry attempt; previously-silent bookkeeping-failure discards now log;
+> and `timestamp_after`'s duration-conversion fallback saturates instead of
+> degrading to zero. Full rationale in design.md's "PR2 round 2 review
+> follow-up" note.
 
 ## Phase 7: ImmediateDeliveryPolicy
 

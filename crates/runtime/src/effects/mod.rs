@@ -13,10 +13,10 @@ pub(crate) mod runner;
 pub mod store;
 
 pub use executor::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
-pub use policy::{DeliveryConfig, RetryPolicy, RunnerMode};
+pub use policy::{DeliveryConfig, RetryPolicies, RetryPolicy, RunnerMode};
 pub use registry::{DuplicateEffectType, ExecutorRegistry};
 pub use store::{
-    AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectId, EffectState,
-    EffectStateStore, EffectStoreError, InMemoryEffectStore, StoredEffect, TerminalReason,
-    Timestamp,
+    AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
+    EffectState, EffectStateStore, EffectStoreError, InMemoryEffectStore, StoredEffect,
+    TerminalReason, Timestamp,
 };
