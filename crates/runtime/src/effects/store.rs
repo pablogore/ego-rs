@@ -202,6 +202,16 @@ pub struct StoredEffect {
 #[async_trait]
 pub trait EffectStateStore: Send + Sync {
     /// Records a newly-accepted effect as [`EffectState::Pending`].
+    ///
+    /// MUST be idempotent for a replayed acceptance: re-accepting the same
+    /// [`EffectId`] with the same acceptance identity (`tenant` +
+    /// `description`) MUST return `Ok` as a no-op, without disturbing the
+    /// record's current lifecycle state. The same `EffectId` with *different*
+    /// immutable content MUST return [`EffectStoreError::Conflict`]. This is
+    /// required so AD-9's bounded retry of a lost `accept` response
+    /// (`TemporarilyUnavailable`) is safe — a durable implementation that
+    /// treats any re-acceptance as a conflict would turn that safe retry into
+    /// a false post-commit acceptance failure.
     async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError>;
     /// Transitions to [`EffectState::InFlight`] before dispatching an attempt.
     async fn mark_in_flight(&self, id: EffectId) -> Result<(), EffectStoreError>;
