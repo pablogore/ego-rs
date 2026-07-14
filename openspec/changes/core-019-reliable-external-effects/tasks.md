@@ -218,6 +218,28 @@ Chain strategy: stacked-to-main
 > permit can no longer block shutdown from ever reaching the drain-deadline
 > abort logic (F-03). Full rationale in design.md's "PR2 round 4 review
 > follow-up" note.
+>
+> **PR2 round 5 review follow-up.** Two more BLOCKERs, both in the round 4
+> fix itself. First, `reclaim_due`'s `QueuedEffect::Reclaimed` +
+> `send_reclaimed` (added in round 4) could self-deadlock: `send_reclaimed`
+> blocks until `EffectQueue` has capacity, but the only consumer that would
+> ever free capacity is this exact reclaim loop — with queue capacity
+> smaller than one `claim_due` batch, the loop could get stuck awaiting its
+> own queue's capacity forever (F-01). Fixed by removing the queue hop for
+> this path entirely: `reclaim_due` now dispatches each claimed, transitioned
+> effect directly through a new shared `acquire_permit_and_spawn` helper (the
+> same concurrency-permit-gated mechanism the queue-fed path uses) —
+> `EffectQueue::send_reclaimed`/`QueuedEffect` are removed. Second,
+> `DedupOutcome::Duplicate` still collapsed every DIFFERENT-owner case into
+> one flat outcome, treated exactly like `OwnedSucceeded` regardless of
+> whether that other owner had actually succeeded yet — a genuine duplicate
+> could be marked `Succeeded` while its real owner was still mid-delivery,
+> the same silent-data-loss class as F-02 (round 4) for the "different
+> submitter" case (F-02, round 5). Fixed: `Duplicate` is split into
+> `OtherInProgress` (must not execute or mark succeeded; left reclaim-eligible
+> for a later re-check) and `OtherSucceeded` (safe to short-circuit, same as
+> `OwnedSucceeded`). Full rationale in design.md's "PR2 round 5 review
+> follow-up" note.
 
 ## Phase 7: ImmediateDeliveryPolicy
 

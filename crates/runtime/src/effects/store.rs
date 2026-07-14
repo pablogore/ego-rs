@@ -277,18 +277,28 @@ impl fmt::Debug for EffectFingerprint {
 }
 
 /// The result of a single-flight dedup reservation attempt (F-02/F-04, PR2
-/// round 4 redesign).
+/// round 4 redesign; further split in PR2 round 5, F-02).
 ///
 /// A reservation now records not just a fingerprint but *ownership*
 /// (`EffectId`) and *status* (has the owner reached `Succeeded`) — see
-/// [`EffectDedupStore::reserve`]'s new `effect_id` parameter. Before this
-/// redesign, `Fresh`/`Duplicate`/`Conflict` alone could not distinguish "a
-/// different submission already succeeded" from "this exact effect's own
-/// reservation is still in-flight, recovering from a crash" — both looked
-/// like a plain `Duplicate`, and the runner treated every `Duplicate` as
-/// "already satisfied elsewhere", silently skipping re-execution even when
-/// the effect had never actually been delivered (F-02: a silent-data-loss
-/// BLOCKER).
+/// [`EffectDedupStore::reserve`]'s new `effect_id` parameter. Before the
+/// round 4 redesign, `Fresh`/`Duplicate`/`Conflict` alone could not
+/// distinguish "a different submission already succeeded" from "this exact
+/// effect's own reservation is still in-flight, recovering from a crash" —
+/// both looked like a plain `Duplicate`. Round 4 fixed that for the
+/// SAME-owner case (`OwnedInProgress`/`OwnedSucceeded`), but still collapsed
+/// every DIFFERENT-owner case into one flat `Duplicate`, treated by the
+/// runner exactly like `OwnedSucceeded` — silently marking a fresh
+/// submission `Succeeded` without ever executing, even when the actual
+/// owner was still `OwnedInProgress` (not yet delivered). If that real owner
+/// later failed terminally and released its reservation, the only recorded
+/// outcome for the idempotency key was this false `Succeeded` — silent data
+/// loss (F-02, round 5 BLOCKER). `Duplicate` is now split the same way
+/// `Fresh`'s same-owner sibling already was: `OtherInProgress` (a different
+/// owner holds the reservation, not yet succeeded — the caller must NOT
+/// execute or mark succeeded yet) and `OtherSucceeded` (a different owner's
+/// reservation is already recorded `Succeeded` — safe to mark succeeded
+/// without re-executing, same as `OwnedSucceeded`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupOutcome {
     /// No prior reservation existed for this scope; this attempt now owns it.
@@ -302,14 +312,20 @@ pub enum DedupOutcome {
     /// This exact `EffectId` already owns this scope's reservation, and it
     /// has already been recorded [`Succeeded`](EffectState::Succeeded) (via
     /// [`EffectDedupStore::commit_success`]) — genuinely already delivered.
-    /// The ONLY outcome allowed to short-circuit to success without
-    /// re-executing.
+    /// Safe to short-circuit to success without re-executing.
     OwnedSucceeded,
-    /// A *different* `EffectId` holds this scope's reservation — a real
-    /// duplicate submission from elsewhere. Treated as "already handled,
-    /// nothing to do" (this effect never owned the reservation it collided
-    /// with).
-    Duplicate,
+    /// A *different* `EffectId` holds this scope's reservation, and it has
+    /// not yet been recorded `Succeeded` — the actual outcome for this
+    /// idempotency key isn't known yet (F-02, round 5). The caller MUST NOT
+    /// execute or mark succeeded now; it must leave this effect to be
+    /// re-evaluated later (see `runner.rs`'s `OtherInProgress` handling).
+    OtherInProgress,
+    /// A *different* `EffectId`'s reservation for this scope is already
+    /// recorded `Succeeded` — a real duplicate submission from elsewhere
+    /// that genuinely already delivered. Safe to short-circuit to success
+    /// without re-executing (this effect never owned the reservation it
+    /// collided with, so there is nothing to release).
+    OtherSucceeded,
     /// The same scope was reserved with a *different* fingerprint — the
     /// caller MUST treat this as `InvalidEffect` (terminal), never silently
     /// deduplicated.
@@ -552,7 +568,16 @@ impl EffectDedupStore for InMemoryEffectStore {
                     Ok(DedupOutcome::OwnedInProgress)
                 }
             }
-            Some(_) => Ok(DedupOutcome::Duplicate),
+            // F-02 (round 5): a different owner's status now matters too —
+            // not yet succeeded (`OtherInProgress`) vs. genuinely already
+            // delivered (`OtherSucceeded`).
+            Some(existing) => {
+                if existing.succeeded {
+                    Ok(DedupOutcome::OtherSucceeded)
+                } else {
+                    Ok(DedupOutcome::OtherInProgress)
+                }
+            }
         }
     }
 
@@ -716,16 +741,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_reservation_by_a_different_effect_before_success_is_duplicate() {
-        // A genuinely different submission racing the same scope while the
-        // original owner hasn't yet succeeded.
+    async fn repeated_reservation_by_a_different_effect_before_success_is_other_in_progress() {
+        // F-02 (PR2 round 5): a genuinely different submission racing the
+        // same scope while the original owner hasn't yet succeeded must be
+        // told the OTHER owner is merely in progress, not a flat
+        // `Duplicate` — the caller must not treat this as "already
+        // delivered" (that used to cause silent data loss: see
+        // `runner.rs`'s `OtherInProgress` handling).
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
         store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
-        assert_eq!(outcome, DedupOutcome::Duplicate);
+        assert_eq!(outcome, DedupOutcome::OtherInProgress);
     }
 
     #[tokio::test]
@@ -765,9 +794,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_success_then_different_effect_reserve_is_duplicate() {
-        // A genuinely different future submission under the same scope must
-        // eventually be told this scope is settled too, not `Fresh`.
+    async fn commit_success_then_different_effect_reserve_is_other_succeeded() {
+        // F-02 (PR2 round 5): a genuinely different future submission under
+        // the same scope, once the actual owner has resolved to Succeeded,
+        // must be told so precisely (`OtherSucceeded`) — safe to mark
+        // succeeded without re-executing, unlike `OtherInProgress`.
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
         let id = EffectId::new();
@@ -776,7 +807,7 @@ mod tests {
 
         let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
-        assert_eq!(outcome, DedupOutcome::Duplicate);
+        assert_eq!(outcome, DedupOutcome::OtherSucceeded);
     }
 
     // --- F-04: stable, portable EffectFingerprint ---

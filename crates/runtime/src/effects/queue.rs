@@ -9,47 +9,33 @@ use tokio::sync::mpsc;
 
 use super::store::AcceptedEffect;
 
-/// Distinguishes a freshly-accepted effect — which still needs
-/// `mark_in_flight` before dispatch — from one the reclaim loop already
-/// claimed via `claim_due` and transitioned to `InFlight` itself, before ever
-/// enqueueing it (F-01, PR2 round 4).
-///
-/// Before this distinction existed, `claim_due` didn't transition state at
-/// all — an effect stayed `Pending`/`RetryableFailed` until `drain_one`
-/// eventually reached `mark_in_flight`, so the same effect could be claimed
-/// and re-enqueued on every reclaim tick until its first queue entry was
-/// finally dequeued, inflating the queue with duplicate entries for one
-/// effect. Now the reclaim loop claims-then-transitions before it ever
-/// enqueues (see [`super::runner::DeliveryRunner::reclaim_due`]), and this
-/// enum tells [`super::runner::DeliveryRunner::run_inner`]'s receive loop
-/// which of `drain_one`/`drain_reclaimed` to call — the latter must NOT
-/// call `mark_in_flight` again (it would immediately fail with
-/// `InvalidTransition`, since the effect is no longer `Pending`/
-/// `RetryableFailed`).
-pub(crate) enum QueuedEffect {
-    /// Needs `mark_in_flight` — the normal, direct-from-acceptance path.
-    Fresh(AcceptedEffect),
-    /// Already `InFlight` — the reclaim loop transitioned it before
-    /// enqueueing.
-    Reclaimed(AcceptedEffect),
-}
-
 /// The sending half of the bounded admission queue.
 ///
-/// Bounded `tokio::sync::mpsc` (AD-6): `send`/`send_reclaimed` block while
-/// the queue is at capacity rather than dropping — the runtime lifecycle
-/// requirement that acceptance backpressure delays the reply, never refuses
-/// or loses an already-committed effect.
+/// Bounded `tokio::sync::mpsc` (AD-6): `send` blocks while the queue is at
+/// capacity rather than dropping — the runtime lifecycle requirement that
+/// acceptance backpressure delays the reply, never refuses or loses an
+/// already-committed effect.
+///
+/// **F-01 (PR2 round 5)**: this queue now carries ONLY freshly-accepted
+/// effects. The reclaim loop's claimed/already-`InFlight` effects (formerly
+/// `QueuedEffect::Reclaimed`, sent via a now-removed `send_reclaimed`) are
+/// dispatched directly by [`super::runner::DeliveryRunner`] instead —
+/// `send`/`send_reclaimed` block until the bounded queue has capacity, and
+/// the ONLY consumer that would ever free that capacity
+/// (`EffectQueueReceiver::recv`) is the very same reclaim loop, so routing
+/// reclaimed effects back through this queue could self-deadlock whenever
+/// `claim_due` returned more due effects than the queue had free capacity.
+/// See `runner.rs`'s reclaim-loop doc comment for the full rationale.
 #[derive(Clone)]
 pub(crate) struct EffectQueue {
-    sender: mpsc::Sender<QueuedEffect>,
+    sender: mpsc::Sender<AcceptedEffect>,
 }
 
 /// The receiving half — [`super::runner::DeliveryRunner`] is the sole
 /// consumer (AD-8's single-consumer invariant applies to the whole subsystem,
 /// not just `claim_due`).
 pub(crate) struct EffectQueueReceiver {
-    receiver: mpsc::Receiver<QueuedEffect>,
+    receiver: mpsc::Receiver<AcceptedEffect>,
 }
 
 impl EffectQueue {
@@ -64,24 +50,15 @@ impl EffectQueue {
     pub(crate) async fn send(
         &self,
         effect: AcceptedEffect,
-    ) -> Result<(), mpsc::error::SendError<QueuedEffect>> {
-        self.sender.send(QueuedEffect::Fresh(effect)).await
-    }
-
-    /// F-01 (PR2 round 4): enqueues an effect the reclaim loop already
-    /// transitioned to `InFlight` — see [`QueuedEffect::Reclaimed`].
-    pub(crate) async fn send_reclaimed(
-        &self,
-        effect: AcceptedEffect,
-    ) -> Result<(), mpsc::error::SendError<QueuedEffect>> {
-        self.sender.send(QueuedEffect::Reclaimed(effect)).await
+    ) -> Result<(), mpsc::error::SendError<AcceptedEffect>> {
+        self.sender.send(effect).await
     }
 }
 
 impl EffectQueueReceiver {
     /// Receives the next queued effect, or `None` once every `EffectQueue`
     /// sender has been dropped.
-    pub(crate) async fn recv(&mut self) -> Option<QueuedEffect> {
+    pub(crate) async fn recv(&mut self) -> Option<AcceptedEffect> {
         self.receiver.recv().await
     }
 }
