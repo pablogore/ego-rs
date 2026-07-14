@@ -23,10 +23,12 @@ use crate::runtime::runtime_builder::{DependencyTable, RuntimeError, RuntimeInne
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 
-/// Default deadline `Runtime::shutdown_async` waits for the external-effects
-/// `Deferred` drain loop before forcibly recovering any still-`InFlight`
-/// effect back to `Pending` for a future run (CORE-019 Phase 9, design.md
-/// §8). Overridable via [`RuntimeBuilder::with_effect_drain_deadline`].
+/// Default deadline `Runtime::shutdown_async`'s registered teardown hook
+/// waits for `EffectRuntimeHandle::shutdown_and_wait`'s lifecycle-gated
+/// drain sequence (close admission, wait for in-flight acceptances, stop the
+/// runner, force-abort anything still hung) to finish before reporting
+/// `drain_incomplete` (CORE-019 Phase 9, design.md §8). Overridable via
+/// [`RuntimeBuilder::with_effect_drain_deadline`].
 const DEFAULT_EFFECT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The pair of security providers registered with a [`Runtime`].
@@ -256,29 +258,31 @@ impl RuntimeBuilder {
             teardown.push(logger.clone());
         }
 
-        // CORE-019 Phase 9 zero-cost gate (design.md §8/§20): construct the
-        // external-effects store/queue/runner ONLY when at least one
-        // executor was registered. `effect_wiring` keeps the concrete
-        // `RuntimeEffectAcceptor` (needed for its `drain` method below);
-        // `effect_acceptor` below is the trait-object handle stored on
-        // `Runtime`/exposed to callers.
-        let effect_wiring = if self.effect_executors.is_empty() {
+        // CORE-019 Phase 9 zero-cost gate (design.md §8/§20), re-separated at
+        // this layer per PR4 review F-01: construct the external-effects
+        // store/queue/acceptor ONLY when at least one executor was
+        // registered — but never call `.start()` here. `build()` is a plain
+        // synchronous method a caller may legitimately invoke during a sync
+        // bootstrap phase, before any Tokio runtime exists yet;
+        // `RuntimeEffectAcceptor::start()` performs a real `tokio::spawn`,
+        // which panics with no active Tokio runtime context. Only
+        // `RuntimeEffectAcceptor::new()` — safe outside Tokio, per PR3's own
+        // `new`/`start` split — runs here. [`Runtime::start_effects`] is the
+        // new, explicit async entry point a host calls once, after entering
+        // Tokio, to actually spawn the `Deferred`-mode drain loop.
+        let effect_acceptor_impl = if self.effect_executors.is_empty() {
             None
         } else {
             let store = Arc::new(InMemoryEffectStore::new());
-            let (acceptor, shutdown_tx) = RuntimeEffectAcceptor::new(
+            Some(Arc::new(RuntimeEffectAcceptor::new(
                 store.clone() as Arc<dyn EffectStateStore>,
                 store as Arc<dyn EffectDedupStore>,
                 Arc::new(self.effect_executors),
                 self.delivery_config,
-            );
-            Some((Arc::new(acceptor), shutdown_tx))
+            )))
         };
-        let effect_acceptor: Option<Arc<dyn EffectAcceptor>> = effect_wiring
-            .as_ref()
-            .map(|(acceptor, _)| acceptor.clone() as Arc<dyn EffectAcceptor>);
 
-        let rt = Runtime {
+        Runtime {
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
                 self.interceptor_chain,
@@ -288,33 +292,10 @@ impl RuntimeBuilder {
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
                 self.observability,
-                effect_acceptor,
+                effect_acceptor_impl,
+                self.effect_drain_deadline,
             )),
-        };
-
-        // Only when ≥1 executor was registered: signal the drain deadline via
-        // `register_async_teardown` so `shutdown_async` recovers any
-        // still-in-flight effect back to `Pending` rather than losing it or
-        // blocking shutdown forever (AD-9). No hook is registered at all in
-        // the zero-cost path above.
-        if let Some((acceptor, shutdown_tx)) = effect_wiring {
-            let deadline = self.effect_drain_deadline;
-            rt.register_async_teardown(async move {
-                let recovered = acceptor.drain(deadline, shutdown_tx).await;
-                if recovered > 0 {
-                    return Err(RuntimeInfraError::Teardown {
-                        reason: format!(
-                            "external-effects drain deadline reached with {recovered} \
-                             effect(s) still in flight; recovered to Pending for a \
-                             future run (drain_incomplete)"
-                        ),
-                    });
-                }
-                Ok(())
-            });
         }
-
-        rt
     }
 
     /// Consumes the builder and produces a [`Runtime`], first running every
@@ -373,19 +354,89 @@ impl Runtime {
         self.inner.logger()
     }
 
-    /// Returns the external-effects [`EffectAcceptor`] wired by
-    /// [`RuntimeBuilder::register_effect_executor`], if at least one executor
-    /// was registered (CORE-019 Phase 9). `None` is the zero-cost path
-    /// (design.md §8/§20) — no store, no queue, no spawned drain task was
-    /// ever constructed, not merely an unused acceptor.
+    /// Spawns the external-effects `Deferred`-mode drain loop (if any
+    /// executor was registered) and registers its drain-on-shutdown teardown
+    /// hook.
+    ///
+    /// **CORE-019 PR4 review F-01 fix:** [`RuntimeBuilder::build`] only ever
+    /// *constructs* the effects subsystem (`RuntimeEffectAcceptor::new`, safe
+    /// outside Tokio) — it deliberately never calls `.start()`, which
+    /// performs a real `tokio::spawn` and panics with no active Tokio
+    /// runtime context. A host that registered at least one executor MUST
+    /// call this method exactly once, from inside an active Tokio runtime,
+    /// after `build()` and before relying on [`Runtime::effect_acceptor`] to
+    /// return `Some` — e.g. from an async `main`, right after constructing
+    /// the `Runtime` and before serving traffic.
+    ///
+    /// A no-op returning `Ok(())` in the zero-cost path (no executor
+    /// registered) and on every call after the first — idempotent, calling
+    /// this twice never double-spawns the runner task.
+    ///
+    /// Until this is called, [`Runtime::effect_acceptor`] returns `None`
+    /// even though an executor was registered. This is deliberate, not a
+    /// regression: a caller who never calls `start_effects` can never
+    /// obtain (and therefore never silently use) an acceptor whose
+    /// `Deferred`-mode runner task was never spawned — closing the "effects
+    /// accepted into a queue nobody ever drains" gap a synchronous,
+    /// auto-starting `build()` used to leave open.
+    pub async fn start_effects(&self) -> Result<(), RuntimeInfraError> {
+        let Some(acceptor) = self.inner.effect_acceptor_impl.clone() else {
+            return Ok(());
+        };
+        if self
+            .inner
+            .effect_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // Already started by a previous call — idempotent no-op rather
+            // than double-spawning the runner task.
+            return Ok(());
+        }
+
+        let handle = acceptor.start();
+        let deadline = self.inner.effect_drain_deadline;
+        // Same "a failing hook surfaces through shutdown_async" contract
+        // Finding 6/F-02 already established: `EffectRuntimeHandle::
+        // shutdown_and_wait`'s `Result` is propagated, never swallowed.
+        self.register_async_teardown(async move {
+            handle.shutdown_and_wait(deadline).await.map_err(|err| RuntimeInfraError::Teardown {
+                reason: format!(
+                    "external-effects drain deadline reached before shutdown completed \
+                     cleanly (drain_incomplete): {err}"
+                ),
+            })
+        });
+        Ok(())
+    }
+
+    /// Returns the external-effects [`EffectAcceptor`] started via
+    /// [`Runtime::start_effects`], if at least one executor was registered
+    /// AND `start_effects` has actually run (CORE-019 Phase 9; PR4 review
+    /// F-01). `None` both in the zero-cost path (design.md §8/§20 — no
+    /// store, no queue, no acceptor was ever constructed) and in the
+    /// constructed-but-not-yet-started path — a caller cannot obtain (and so
+    /// cannot silently use) an acceptor whose `Deferred`-mode runner was
+    /// never spawned.
     ///
     /// This is the seam a host wires into its entity-level runtime (e.g.
     /// `persistent_entity::builder::EntityRuntimeBuilder`) so spawned actors
     /// stop silently discarding described effects — that host-side plumbing
     /// is out of `ego-service-sdk`'s scope (it lives wherever the host
     /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
-    pub fn effect_acceptor(&self) -> Option<&Arc<dyn EffectAcceptor>> {
-        self.inner.effect_acceptor.as_ref()
+    pub fn effect_acceptor(&self) -> Option<Arc<dyn EffectAcceptor>> {
+        if !self.inner.effect_started.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        self.inner
+            .effect_acceptor_impl
+            .as_ref()
+            .map(|acceptor| acceptor.clone() as Arc<dyn EffectAcceptor>)
     }
 
     /// Resolves `Tag` to its concrete macro-generated proxy — the canonical
@@ -1155,32 +1206,79 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn register_effect_executor_makes_build_wire_a_real_acceptor() {
+    // -- CORE-019 PR4 review F-01: build() must never panic outside Tokio ---
+
+    /// **RED/GREEN proof for F-01 (BLOCKER).** Deliberately a plain `#[test]`,
+    /// NOT `#[tokio::test]` — the absence of an active Tokio runtime is the
+    /// whole point. Before the fix, `build()` called `RuntimeEffectAcceptor::
+    /// start()` synchronously whenever an executor was registered, which
+    /// performs a real `tokio::spawn` and panics with "there is no reactor
+    /// running" outside Tokio. `build()` must remain safely callable from a
+    /// plain sync bootstrap phase — it now only *constructs* the effects
+    /// subsystem (`RuntimeEffectAcceptor::new`, itself already safe outside
+    /// Tokio per PR3's own `new`/`start` split) and never starts it.
+    #[test]
+    fn build_with_registered_effect_executor_does_not_panic_outside_a_tokio_runtime() {
         let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
         let rt = RuntimeBuilder::new()
             .register_effect_executor(["invoice.created"], executor)
             .unwrap()
             .build();
 
+        // Constructed, but deliberately NOT started — `effect_acceptor()`
+        // must not expose an acceptor whose Deferred runner was never
+        // spawned (see the companion test below proving it isn't
+        // permanently inert once `start_effects` actually runs).
         assert!(
-            rt.effect_acceptor().is_some(),
-            "registering >=1 executor must make build() wire a real RuntimeEffectAcceptor"
+            rt.effect_acceptor().is_none(),
+            "build() alone must never expose the acceptor — only start_effects() may"
         );
     }
 
     #[tokio::test]
+    async fn start_effects_is_a_no_op_in_the_zero_cost_path() {
+        let rt = RuntimeBuilder::new().build();
+        rt.start_effects()
+            .await
+            .expect("no executor registered — start_effects must be a harmless no-op");
+        assert!(rt.effect_acceptor().is_none());
+    }
+
+    #[tokio::test]
+    async fn start_effects_is_idempotent() {
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let rt = RuntimeBuilder::new()
+            .register_effect_executor(["invoice.created"], executor)
+            .unwrap()
+            .build();
+
+        rt.start_effects().await.expect("first call succeeds");
+        rt.start_effects()
+            .await
+            .expect("a second call must be a safe no-op, not a double-spawn panic");
+    }
+
+    #[tokio::test]
     async fn accepted_effects_are_actually_delivered_through_the_wired_acceptor() {
-        // Proves the acceptor build() wires is not inert: an accepted effect
-        // really reaches the registered executor — this is the exact gap
-        // PR3 flagged (effects silently lost when no acceptor is configured).
+        // Proves the split (construct in build(), start via start_effects())
+        // does not leave the subsystem permanently inert — an accepted
+        // effect really reaches the registered executor once started. This
+        // is the exact gap PR3 flagged (effects silently lost when no
+        // acceptor is configured), now proven end-to-end through the new
+        // two-step lifecycle.
         let executor = Arc::new(AlwaysSucceedsExecutor::new());
         let rt = RuntimeBuilder::new()
             .register_effect_executor(["invoice.created"], executor.clone())
             .unwrap()
             .build();
 
-        let acceptor = rt.effect_acceptor().unwrap().clone();
+        rt.start_effects()
+            .await
+            .expect("an executor was registered — start_effects must succeed");
+
+        let acceptor = rt
+            .effect_acceptor()
+            .expect("start_effects must make the acceptor available");
         acceptor
             .accept(
                 &effect_tenant(),
@@ -1206,8 +1304,9 @@ mod tests {
             .unwrap()
             .with_effect_drain_deadline(Duration::from_millis(200))
             .build();
+        rt.start_effects().await.unwrap();
 
-        let acceptor = rt.effect_acceptor().unwrap().clone();
+        let acceptor = rt.effect_acceptor().unwrap();
         acceptor
             .accept(
                 &effect_tenant(),
@@ -1243,8 +1342,9 @@ mod tests {
             .with_delivery_config(DeliveryConfig::default())
             .with_effect_drain_deadline(Duration::from_millis(30))
             .build();
+        rt.start_effects().await.unwrap();
 
-        let acceptor = rt.effect_acceptor().unwrap().clone();
+        let acceptor = rt.effect_acceptor().unwrap();
         acceptor
             .accept(
                 &effect_tenant(),

@@ -97,6 +97,10 @@ use tokio::task::JoinSet;
 use crate::read_side::backpressure::Backpressure;
 
 use super::executor::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
+use super::observability::{
+    log_attempt, log_deduplicated, log_dispatch_started, log_executor_missing,
+    log_oldest_pending_age, log_queue_depth, log_retry_scheduled, log_success, log_terminal_failed,
+};
 use super::policy::RetryPolicies;
 use super::queue::EffectQueueReceiver;
 use super::registry::ExecutorRegistry;
@@ -415,12 +419,33 @@ impl DeliveryRunner {
                     }
                 }
                 _ = reclaim_tick.tick() => {
+                    // F-02 round 3 (PR4 review round 3): also log queue
+                    // depth/age here, not only in the `receiver.recv()` arm
+                    // below. `oldest_pending_age()` is now honest at any
+                    // moment it's read (queue.rs), but the *emission* of
+                    // that signal previously only ever happened while the
+                    // runner was actively dequeuing — if it stalls
+                    // (backpressure saturation, a hung executor), this tick
+                    // is what keeps the signal observable instead of going
+                    // silent for the whole stall.
+                    log_queue_depth(receiver.depth());
+                    log_oldest_pending_age(receiver.oldest_pending_age());
+
                     if !self.reclaim_due(&backpressure, &mut shutdown).await {
                         break 'drain;
                     }
                 }
                 maybe_effect = receiver.recv() => {
                     let Some(effect) = maybe_effect else { break 'drain; };
+
+                    // CORE-019 Phase 11: queue depth/age at the point of
+                    // dequeue — the receiver shares `EffectQueue`'s
+                    // `pending_since` state (queue.rs), so this reads the
+                    // exact depth/age right as this effect leaves the queue,
+                    // without `DeliveryRunner` itself holding the sender
+                    // half (PR2 round 5, F-01).
+                    log_queue_depth(receiver.depth());
+                    log_oldest_pending_age(receiver.oldest_pending_age());
 
                     // F-03 (PR2 round 4): race backpressure-permit
                     // acquisition against shutdown too — see
@@ -566,6 +591,8 @@ impl DeliveryRunner {
     /// for the entry point used by [`Self::reclaim_due`]-fed effects (F-01),
     /// which are already `InFlight` by the time they get here.
     pub(crate) async fn drain_one(&self, effect: AcceptedEffect) {
+        log_dispatch_started(&effect);
+
         // `EffectStateStore::mark_terminal` only accepts `InFlight` or
         // `RetryableFailed` as its `from` state (store.rs, already shipped in
         // PR1) — so every short-circuit in `dispatch_in_flight` that needs
@@ -652,6 +679,7 @@ impl DeliveryRunner {
             // never owned the reservation it collided with, and
             // `OwnedSucceeded`'s reservation is meant to stay held.
             Ok(DedupOutcome::OtherSucceeded) | Ok(DedupOutcome::OwnedSucceeded) => {
+                log_deduplicated(&effect);
                 self.finish_already_satisfied(effect.id).await;
                 return;
             }
@@ -675,6 +703,7 @@ impl DeliveryRunner {
                 return;
             }
             Ok(DedupOutcome::Conflict) => {
+                log_terminal_failed(&effect, "dedup scope conflict");
                 self.abandon(
                     effect.id,
                     TerminalReason::InvalidEffect("dedup scope conflict".into()),
@@ -683,6 +712,7 @@ impl DeliveryRunner {
                 return;
             }
             Err(()) => {
+                log_terminal_failed(&effect, "dedup store unavailable");
                 self.abandon(
                     effect.id,
                     TerminalReason::Other("dedup store unavailable".into()),
@@ -693,6 +723,7 @@ impl DeliveryRunner {
         }
 
         let Some(executor) = self.registry.get(&effect.description.effect_type) else {
+            log_executor_missing(&effect);
             self.abandon_and_release(effect.id, TerminalReason::ExecutorMissing, scope)
                 .await;
             return;
@@ -704,6 +735,7 @@ impl DeliveryRunner {
             attempt: effect.attempt + 1,
             idempotency_key: effect.description.idempotency_key.clone(),
         };
+        log_attempt(&effect, ctx.attempt);
 
         let outcome = execute_catching_panics(
             executor,
@@ -721,6 +753,7 @@ impl DeliveryRunner {
                 self.retry_or_give_up(effect, scope).await
             }
             ExecutionOutcome::Outcome(AttemptOutcome::TerminalFailure(reason)) => {
+                log_terminal_failed(&effect, &reason);
                 self.abandon_and_release(effect.id, TerminalReason::Other(reason), scope)
                     .await;
             }
@@ -863,6 +896,11 @@ impl DeliveryRunner {
     /// `[InFlight]` (store.rs) — it fits this "succeeded but bookkeeping
     /// didn't confirm" case perfectly, no new store operation needed.
     async fn finish_success(&self, effect: AcceptedEffect, scope: DedupScope) {
+        // The attempt itself succeeded regardless of whether the following
+        // bookkeeping write does — log success once, here, not per retry of
+        // the idempotent write below.
+        log_success(&effect);
+
         for _ in 0..BOOKKEEPING_RETRY_ATTEMPTS {
             if self.dedup.commit_success(&scope).await.is_ok()
                 && self.state.mark_succeeded(effect.id).await.is_ok()
@@ -905,6 +943,7 @@ impl DeliveryRunner {
     async fn retry_or_give_up(&self, effect: AcceptedEffect, scope: DedupScope) {
         let policy = self.retry.policy_for(&scope.effect_type);
         if !policy.allows_retry(effect.attempt) {
+            log_terminal_failed(&effect, "attempt cap exceeded");
             self.abandon_and_release(
                 effect.id,
                 TerminalReason::Other("attempt cap exceeded".into()),
@@ -943,12 +982,14 @@ impl DeliveryRunner {
                 scope,
             )
             .await;
+            return;
         }
+
+        log_retry_scheduled(&effect, dispatched_attempt, backoff);
 
         // Dedup reservation stays held for the effect's entire lifetime
         // (dedup-lifetime redesign, `drain_one` doc comment) — released only
-        // on a genuinely terminal outcome, never here. (No-op here when the
-        // branch above already abandoned-and-released it.)
+        // on a genuinely terminal outcome, never here.
     }
 
     /// HIGH-2: re-queues an executor attempt that was aborted/cancelled
@@ -3305,5 +3346,67 @@ mod tests {
             .await
             .expect("run_inner must return after shutdown, not be stuck deadlocked")
             .expect("task did not panic");
+    }
+
+    // -- CORE-019 Phase 10 (10.1 RED / 10.2 GREEN): opaque payload -----------
+
+    /// spec: "Payload passes through unexamined" — the runtime MUST forward
+    /// `payload: Vec<u8>` to the registered executor unmodified, never
+    /// deserializing, inspecting, or otherwise examining it.
+    #[tokio::test]
+    async fn payload_bytes_pass_through_to_the_executor_unmodified() {
+        struct CapturingExecutor {
+            captured: std::sync::Mutex<Option<Vec<u8>>>,
+        }
+
+        #[async_trait]
+        impl ExternalEffectExecutor for CapturingExecutor {
+            async fn execute(
+                &self,
+                effect: &ExternalEffectDescription,
+                _ctx: &EffectContext,
+            ) -> AttemptOutcome {
+                *self.captured.lock().unwrap() = Some(effect.payload.clone());
+                AttemptOutcome::Success
+            }
+        }
+
+        let store = Arc::new(InMemoryEffectStore::new());
+        let executor = Arc::new(CapturingExecutor {
+            captured: std::sync::Mutex::new(None),
+        });
+        let mut registry = ExecutorRegistry::new();
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let (runner, _queue) = runner_with(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            registry,
+            RetryPolicy::default(),
+        );
+
+        let id = EffectId::new();
+        let original_payload = vec![9, 9, 9, 42, 255, 0, 128];
+        let effect = AcceptedEffect {
+            id,
+            tenant: TenantId::new("tenant-a").unwrap(),
+            attempt: 0,
+            description: Arc::new(ExternalEffectDescription {
+                idempotency_key: IdempotencyKey::new("uow-1:0").unwrap(),
+                effect_type: "invoice.created".to_string(),
+                payload: original_payload.clone(),
+                destination: "https://example.com".to_string(),
+            }),
+        };
+        store.accept(effect.clone()).await.unwrap();
+
+        runner.drain_one(effect).await;
+
+        assert_eq!(
+            executor.captured.lock().unwrap().as_deref(),
+            Some(original_payload.as_slice()),
+            "the executor must receive the exact bytes the handler described, unmodified"
+        );
     }
 }

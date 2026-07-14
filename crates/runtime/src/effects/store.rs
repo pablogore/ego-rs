@@ -1048,6 +1048,48 @@ mod tests {
         assert_eq!(recovered, 0);
     }
 
+    // --- CORE-019 Phase 10 (10.1 RED / 10.2 GREEN): tenant isolation ---
+
+    /// spec: "Cross-tenant dedup collision is impossible" — two tenants
+    /// producing the identical `effect_type` + idempotency key must each be
+    /// tracked under their own tenant-scoped dedup identity. `DedupScope`
+    /// already includes `tenant` in its `Hash`/`Eq` (this file, above), so
+    /// this test is the explicit proof the invariant actually holds, not a
+    /// fix — confirmed clean before this phase.
+    #[tokio::test]
+    async fn cross_tenant_dedup_never_collides_even_with_identical_type_and_key() {
+        let store = InMemoryEffectStore::new();
+        let scope_a = scope("tenant-a", "uow-1:0");
+        let scope_b = scope("tenant-b", "uow-1:0");
+        let fingerprint = fp("payload");
+
+        let outcome_a = store.reserve(&scope_a, EffectId::new(), fingerprint).await.unwrap();
+        let outcome_b = store.reserve(&scope_b, EffectId::new(), fingerprint).await.unwrap();
+
+        assert_eq!(outcome_a, DedupOutcome::Fresh);
+        assert_eq!(
+            outcome_b,
+            DedupOutcome::Fresh,
+            "tenant-b's reservation must not be treated as a duplicate/conflict \
+             of tenant-a's, despite an identical effect_type and idempotency key"
+        );
+
+        // Confirms real isolation, not a shared bucket that happened to
+        // return Fresh twice by coincidence: each tenant's scope keeps its
+        // own reservation independently discoverable — a DIFFERENT owner
+        // reserving the exact same scope again must never see `Fresh` a
+        // second time (F-02's ownership-tracking `DedupOutcome`, post-rebase:
+        // there is no more flat `Duplicate` variant).
+        assert_eq!(
+            store.reserve(&scope_a, EffectId::new(), fingerprint).await.unwrap(),
+            DedupOutcome::OtherInProgress
+        );
+        assert_eq!(
+            store.reserve(&scope_b, EffectId::new(), fingerprint).await.unwrap(),
+            DedupOutcome::OtherInProgress
+        );
+    }
+
     // --- F-03: error taxonomy ---
 
     #[test]

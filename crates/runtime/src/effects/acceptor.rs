@@ -18,6 +18,7 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 
+use super::observability::log_accepted;
 use super::policy::{DeliveryConfig, RetryPolicy, RunnerMode};
 use super::queue::{EffectQueue, EffectQueueReceiver};
 use super::registry::ExecutorRegistry;
@@ -630,6 +631,7 @@ impl RuntimeEffectAcceptor {
 
     async fn accept_one(&self, effect: AcceptedEffect, index: usize) -> Result<(), EffectAcceptanceError> {
         self.accept_into_store(&effect, index).await?;
+        log_accepted(&effect);
 
         match self.runner_mode {
             RunnerMode::Deferred => self.send_to_queue(effect, index).await,

@@ -15,17 +15,18 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ego_domain::context::TenantId;
 use ego_domain::{Observability, SemanticEvent};
 use crate::runtime::error::RuntimeInfraError;
+use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
 use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
-
-use persistent_entity::effect_acceptor::EffectAcceptor;
 
 use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, DepKey, ProjectionRef};
@@ -222,12 +223,32 @@ pub struct RuntimeInner {
     /// (post-review Finding F-02): a hook's failure to drain must be
     /// distinguishable from a clean drain, not silently treated as success.
     pub(super) async_teardown: Mutex<Vec<AsyncTeardownHook>>,
-    /// The external-effects acceptor wired by
-    /// `RuntimeBuilder::register_effect_executor` (CORE-019 Phase 9), if at
-    /// least one executor was registered. `None` is the zero-cost path
-    /// (design.md §8/§20): no store, no queue, no spawned drain task exists
-    /// at all when this is `None` — not merely an unused `Some`.
-    pub(crate) effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    /// **PR4 review F-01 fix:** the external-effects acceptor constructed by
+    /// `RuntimeBuilder::build()` (CORE-019 Phase 9), if at least one executor
+    /// was registered. `None` is the zero-cost path (design.md §8/§20): no
+    /// store, no queue, no acceptor exists at all when this is `None`.
+    ///
+    /// Kept as the concrete `RuntimeEffectAcceptor` (not the `EffectAcceptor`
+    /// trait object `Runtime::effect_acceptor()` exposes) so
+    /// `Runtime::start_effects` can call `.start()` on it — construction
+    /// (safe outside Tokio) and starting (spawns a real Tokio task, panics
+    /// without an active runtime) are deliberately re-separated at this
+    /// layer, mirroring `RuntimeEffectAcceptor`'s own already-shipped
+    /// `new`/`start` split (PR3).
+    pub(crate) effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
+    /// Set to `true` exactly once, by `Runtime::start_effects` — guards
+    /// against calling `RuntimeEffectAcceptor::start` (which spawns a Tokio
+    /// task and must run at most once) more than once, and against
+    /// `Runtime::effect_acceptor()` exposing an acceptor whose `Deferred`
+    /// runner was never spawned. A caller can therefore never obtain (and so
+    /// never silently use) an acceptor that would just accept effects into a
+    /// queue nobody drains (PR4 review F-01).
+    pub(crate) effect_started: AtomicBool,
+    /// How long `Runtime::start_effects`'s registered async teardown hook
+    /// waits for the `Deferred` drain loop before forcing remaining
+    /// in-flight effects back to `Pending` (design.md §8). Meaningless when
+    /// `effect_acceptor_impl` is `None`.
+    pub(crate) effect_drain_deadline: Duration,
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -266,7 +287,8 @@ impl RuntimeInner {
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
         observability: Option<Arc<dyn Observability>>,
-        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+        effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
+        effect_drain_deadline: Duration,
     ) -> Self {
         Self {
             registry,
@@ -278,7 +300,9 @@ impl RuntimeInner {
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
             observability,
-            effect_acceptor,
+            effect_acceptor_impl,
+            effect_started: AtomicBool::new(false),
+            effect_drain_deadline,
         }
     }
 
@@ -520,6 +544,7 @@ impl RuntimeInner {
             TenantResolver::new(mode),
             None,
             None,
+            Duration::from_secs(5),
         )
     }
 
@@ -539,6 +564,7 @@ impl RuntimeInner {
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
             Some(obs),
             None,
+            Duration::from_secs(5),
         )
     }
 
@@ -560,6 +586,7 @@ impl RuntimeInner {
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
             None,
             None,
+            Duration::from_secs(5),
         )
     }
 }
@@ -1183,6 +1210,7 @@ mod tests {
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
             None,
             None,
+            Duration::from_secs(5),
         );
 
         let result = rt.authorization_provider();

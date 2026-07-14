@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use ego_domain::event::DomainEvent;
 
+use crate::effect_acceptor::EffectAcceptor;
 use crate::entity_ref::EntityRef;
 use crate::entity_ref_tokio::TokioEntityRef;
 use crate::persistence::PersistenceFacade;
@@ -92,6 +93,12 @@ pub struct EntityRuntime<E> {
     pub snapshot_strategy: Arc<dyn SnapshotStrategy>,
     /// Scheduler event sender for lifecycle events.
     pub event_sender: SchedulerEventSender,
+    /// Post-commit external-effect acceptance port (CORE-019 PR4 F-03 fix).
+    /// `None` by default — a host that never calls
+    /// [`crate::builder::EntityRuntimeBuilder::with_effect_acceptor`] keeps
+    /// every spawned actor's `effect_acceptor` at `None`, preserving today's
+    /// fail-closed-if-effects-described behavior unchanged.
+    pub effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     _event: PhantomData<E>,
 }
 
@@ -108,6 +115,7 @@ where
         config: RuntimeConfig,
         snapshot_strategy: Arc<dyn SnapshotStrategy>,
         event_sender: SchedulerEventSender,
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     ) -> Self {
         EntityRuntime {
             registry,
@@ -117,6 +125,7 @@ where
             config,
             snapshot_strategy,
             event_sender,
+            effect_acceptor,
             _event: PhantomData,
         }
     }
@@ -160,6 +169,7 @@ where
             self.event_sender.clone(),
             self.config.mailbox_capacity,
             self.config.passivation_timeout(),
+            self.effect_acceptor.clone(),
         )
     }
 
