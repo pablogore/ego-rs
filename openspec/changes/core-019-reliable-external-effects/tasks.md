@@ -64,8 +64,8 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: Retry Policy
 
-- [ ] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
-- [ ] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
+- [x] 3.1 RED: backoff+jitter math, attempt cap (AD-5), per-`effect_type` override tests
+- [x] 3.2 GREEN: `RetryPolicy`, `DeliveryConfig`, `DeliveryConfig::immediate()` (policy.rs)
 
 > **Timestamp conversion (F-02)**: backoff math produces a `Duration`, but
 > `EffectStateStore::mark_retryable` takes `next_at: Timestamp`, which currently
@@ -73,11 +73,25 @@ Chain strategy: stacked-to-main
 > whether `Timestamp` needs a `checked_add(Duration)`-style helper or whether
 > call sites do the conversion inline — flagged so it is not silently
 > rediscovered in Phase 6.
+>
+> **Resolved (Phase 6)**: call sites do the conversion inline — a private
+> `timestamp_after(Duration) -> Timestamp` helper lives in `runner.rs` (the
+> only caller), not on `Timestamp` itself, to avoid touching the already-shipped
+> `store.rs` (PR1).
+>
+> **PR2 round 2 fix — per-`effect_type` retry policy override actually wired
+> to the runner.** A single shared `RetryPolicy` per runner instance was the
+> only option; nothing consulted a per-type override even though this note's
+> own RED test title mentions one. Fixed: `RetryPolicies { default_retry,
+> retry_overrides: HashMap<String, RetryPolicy> }` (policy.rs) with
+> `policy_for(effect_type) -> RetryPolicy`; `DeliveryRunner` now calls it
+> wherever it used to read a single `retry` field. See design.md's "PR2
+> round 2 review follow-up" note.
 
 ## Phase 4: Internal Queue (not public)
 
-- [ ] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
-- [ ] 4.2 GREEN: internal `EffectQueue` mpsc wrapper (queue.rs)
+- [x] 4.1 RED: bounded-queue backpressure test (blocks at capacity, never drops)
+- [x] 4.2 GREEN: internal `EffectQueue` mpsc wrapper (queue.rs)
 
 ## Phase 5: Acceptor Port
 
@@ -87,8 +101,8 @@ Chain strategy: stacked-to-main
 
 ## Phase 6: Delivery Runner
 
-- [ ] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
-- [ ] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
+- [x] 6.1 RED: happy-path success; `RetryableFailure` re-enqueue+backoff; `ExecutorMissing` terminal+signal; dedup `Conflict`→`InvalidEffect` terminal; executor panic = one retryable attempt; AD-7 bookkeeping-failure stays in-flight and re-dispatches
+- [x] 6.2 GREEN: `DeliveryRunner` drain loop, semaphore, watch-shutdown, backoff re-enqueue, AD-7 bounded-retry bookkeeping (runner.rs)
 
 > **Single-consumer invariant (design.md AD-8)**: this slice instantiates
 > exactly **one** `DeliveryRunner`; `claim_due` is deliberately non-atomic and
@@ -98,11 +112,149 @@ Chain strategy: stacked-to-main
 > turned into a `Timestamp` for `mark_retryable`'s `next_at` (see the Phase 3
 > note); decide between a `Timestamp` helper and inline conversion when
 > implementing.
+>
+> **Implementation notes (this pass)**:
+> - `mark_terminal` only accepts `from: InFlight | RetryableFailed` (already-shipped
+>   `store.rs`). So `drain_one` calls `mark_in_flight` **before** the dedup
+>   `reserve` check (one step earlier than design.md §5's informal sketch) so
+>   every short-circuit path (`Duplicate`, `Conflict`, `ExecutorMissing`,
+>   dedup-store error) can still reach a valid terminal transition.
+> - AD-7's "re-dispatch" is implemented literally as "bounded-retry the
+>   idempotent write" (`commit_success` + `mark_succeeded`, `BOOKKEEPING_RETRY_ATTEMPTS
+>   = 3`); if still failing after that bound, the effect is left `InFlight`
+>   (never marked `Succeeded`/`TerminalFailed`) and relies on the existing
+>   `recover_in_flight`/`claim_due` machinery (Phase 1) for eventual
+>   re-delivery, rather than inventing a second synchronous re-dispatch path
+>   not required by this phase's RED tests.
+> - AD-8 is documented on `DeliveryRunner` as a doc comment and proven honest
+>   by test `two_runners_can_share_the_same_store_the_type_system_does_not_prevent_it`
+>   (constructs two runners against one shared store and asserts
+>   `Arc::strong_count`), not enforced by any type.
+> - `EffectQueue`/`DeliveryRunner`/`policy` are still `pub(crate)`/internal
+>   only, so `cargo build`/`cargo test -p ego-runtime` reports several
+>   "never constructed/used" warnings until PR3/PR4 wire the acceptor and
+>   builder around them — expected, matches the same pattern already
+>   accepted for `queue.rs` in this same delivery slice.
+>
+> **Post-review fixes (PR2, before the next PR built on top)** — a code
+> review of this PR's diff found 9 findings against `policy.rs`/`queue.rs`/
+> `runner.rs`, all fixed in the same PR:
+> 1. **`retry_or_give_up`'s `mark_retryable` failure used to abandon the
+>    effect** (returning before scheduling redispatch), permanently stranding
+>    it `InFlight` with its dedup reservation leaked. Fixed: redispatch is now
+>    scheduled unconditionally on the in-memory `effect` value; the
+>    bookkeeping write's failure is only logged (`tracing::warn!`).
+> 3. **Dedup was released right after `mark_retryable`, before the backoff
+>    sleep**, opening a duplicate-delivery window. Fixed: `dedup.release` now
+>    happens inside the same spawned redispatch task, immediately before
+>    `queue.send`, via a shared `schedule_redispatch` helper.
+> 2. **`finish_success`'s exhausted-bookkeeping path only left the effect
+>    `InFlight`** with nothing further scheduled, not the "re-dispatched" AD-7
+>    promises. Fixed: it now calls the same `schedule_redispatch` helper.
+> 4. **Nothing ever re-fed a `Pending` effect whose `mark_in_flight` write
+>    failed.** Fixed: `mark_in_flight` gets a bounded, AD-9-classified retry,
+>    and `DeliveryRunner::run` gained a periodic `claim_due`-driven reclaim
+>    tick (same single-consumer task, third `tokio::select!` branch, 5s
+>    default interval) with its own RED tests (reclaims a due `Pending`
+>    effect; ignores a not-yet-due one; stops on shutdown).
+> 6. **A `dedup.reserve` store error was unconditionally terminal**, including
+>    the retryable `TemporarilyUnavailable` case. Fixed: classified the same
+>    way AD-9 classifies `accept`'s errors, bounded-retried under the
+>    existing `RetryPolicy`.
+> 7. **A hand-rolled `Semaphore` duplicated `read_side::backpressure`'s
+>    `Backpressure` type.** Fixed: `run`'s concurrency limiter now reuses it.
+> 5. **Shutdown didn't wait for detached spawned tasks** (main dispatch or
+>    backoff-redispatch). Fixed: both are tracked in a shared
+>    `tokio::task::JoinSet`; shutdown stops accepting new work, then awaits
+>    the `JoinSet` bounded by a local shutdown-drain deadline (5s default).
+> 8. **~6 duplicated `mark_terminal`(+`dedup.release`) call sites.** Fixed:
+>    extracted `abandon`/`abandon_and_release` helpers.
+> 9. **The full `ExternalEffectDescription` (payload included) was deep-cloned
+>    per attempt** just to satisfy `tokio::spawn`'s `'static` bound. Fixed:
+>    `AcceptedEffect`/`StoredEffect` (`store.rs`) now wrap `description` in
+>    `Arc`, so retries clone a pointer.
+>
+> See `design.md`'s "PR2 review follow-up" note (AD-6/AD-7/AD-8) for the
+> coherent redesign rationale behind fixes 1/2/3/4/5 together.
+>
+> **PR2 round 2 review follow-up.** A second review pass on this PR's diff
+> found the timer added by fix 1/2/3 above raced the reclaim loop added by
+> fix 4 for the same effect, and was itself deadlock-prone against fix 5's
+> shutdown-drain — both symptoms of one root cause: two competing redispatch
+> producers. Fixed by removing the timer entirely: `mark_retryable(next_at)`
+> is now the sole source of truth for "when is this effect due", and the
+> reclaim loop is the sole way it re-enters the queue. Also fixed in the same
+> pass: the dedup reservation's lifetime is now decoupled from "attempt" (held
+> for the whole effect lifetime, not released/re-reserved per attempt);
+> `finish_success`'s bookkeeping-exhausted path now transitions out of
+> `InFlight` via `mark_retryable` instead of leaving the effect permanently
+> unreachable; the dedup fingerprint is now a stable `EffectFingerprint`
+> (SHA-256) instead of an unstable `DefaultHasher` `u64`; a `DedupOutcome::
+> Duplicate` on a fresh submission is a benign `Succeeded`, not a
+> `TerminalFailed` error; a cancelled/aborted executor task no longer charges
+> a retry attempt; previously-silent bookkeeping-failure discards now log;
+> and `timestamp_after`'s duration-conversion fallback saturates instead of
+> degrading to zero. Full rationale in design.md's "PR2 round 2 review
+> follow-up" note.
+>
+> **PR2 round 4 review follow-up.** F-02 and F-04 shared one root cause:
+> `effect.attempt == 0` was overloaded as both "attempts charged against the
+> retry cap" and "has dedup already been reserved" — fixed together as one
+> dedup-identity redesign, not two patches. `DedupOutcome` (`store.rs`) grows
+> `OwnedInProgress`/`OwnedSucceeded` (reservation now records the owning
+> `EffectId` and a `succeeded` flag, not just a fingerprint), so `drain_one`'s
+> `effect.attempt == 0` gate is gone — dedup is checked unconditionally every
+> attempt, fixing a silent-data-loss BLOCKER where a crash mid the first
+> attempt got falsely marked `Succeeded` without ever re-executing (F-02).
+> With that gate gone, `requeue_without_charging_attempt` no longer needs to
+> bump `attempt` to skip re-reservation, so a shutdown cancellation no longer
+> silently eats into the real retry budget (F-04). Separately: `reclaim_due`
+> now calls `mark_in_flight` immediately after `claim_due`, before ever
+> enqueueing — via a new `QueuedEffect::{Fresh,Reclaimed}` distinction
+> (`queue.rs`) so `drain_one`/`drain_reclaimed` don't double-transition —
+> fixing `claim_due`'s same-effect double-enqueue race across reclaim ticks
+> (F-01); and the main loop's backpressure-permit wait now races
+> `shutdown.changed()` too, so a hung executor holding every concurrency
+> permit can no longer block shutdown from ever reaching the drain-deadline
+> abort logic (F-03). Full rationale in design.md's "PR2 round 4 review
+> follow-up" note.
+>
+> **PR2 round 5 review follow-up.** Two more BLOCKERs, both in the round 4
+> fix itself. First, `reclaim_due`'s `QueuedEffect::Reclaimed` +
+> `send_reclaimed` (added in round 4) could self-deadlock: `send_reclaimed`
+> blocks until `EffectQueue` has capacity, but the only consumer that would
+> ever free capacity is this exact reclaim loop — with queue capacity
+> smaller than one `claim_due` batch, the loop could get stuck awaiting its
+> own queue's capacity forever (F-01). Fixed by removing the queue hop for
+> this path entirely: `reclaim_due` now dispatches each claimed, transitioned
+> effect directly through a new shared `acquire_permit_and_spawn` helper (the
+> same concurrency-permit-gated mechanism the queue-fed path uses) —
+> `EffectQueue::send_reclaimed`/`QueuedEffect` are removed. Second,
+> `DedupOutcome::Duplicate` still collapsed every DIFFERENT-owner case into
+> one flat outcome, treated exactly like `OwnedSucceeded` regardless of
+> whether that other owner had actually succeeded yet — a genuine duplicate
+> could be marked `Succeeded` while its real owner was still mid-delivery,
+> the same silent-data-loss class as F-02 (round 4) for the "different
+> submitter" case (F-02, round 5). Fixed: `Duplicate` is split into
+> `OtherInProgress` (must not execute or mark succeeded; left reclaim-eligible
+> for a later re-check) and `OtherSucceeded` (safe to short-circuit, same as
+> `OwnedSucceeded`). Full rationale in design.md's "PR2 round 5 review
+> follow-up" note.
 
 ## Phase 7: ImmediateDeliveryPolicy
 
-- [ ] 7.1 RED: Inline mode still traverses full pipeline (no bypass); failed attempt signaled, not retried
-- [ ] 7.2 GREEN: `runner_mode: Inline` drain-one-on-accept wiring (runner.rs / acceptor.rs)
+- [x] 7.1 RED: Inline mode still traverses full pipeline (no bypass); failed attempt signaled, not retried
+- [x] 7.2 GREEN: `runner_mode: Inline` drain-one-on-accept wiring (runner.rs / acceptor.rs)
+
+> **Scope note**: the `runner.rs` half of this wiring is `DeliveryRunner::drain_one`
+> itself — the one shared entry point both `Deferred`'s spawned `run()` loop
+> and an `Inline` caller invoke identically (test
+> `immediate_delivery_config_runs_the_same_pipeline_and_signals_failure_without_retry`
+> drives `DeliveryConfig::immediate()`'s policy straight through `drain_one`
+> and asserts exactly one attempt, then a terminal signal, never a retry).
+> The `acceptor.rs` half (the code that actually calls `queue.send` +
+> `drain_one`/spawns `run()` based on `config.runner_mode`) is Phase 5/PR3
+> scope and intentionally not built here.
 
 ## Phase 8: Handler API + Actor Wiring
 

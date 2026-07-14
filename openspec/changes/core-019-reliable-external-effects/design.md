@@ -63,7 +63,7 @@ to evolve.
 | AD-3 Acceptor port location | `EffectAcceptor` trait in `persistent-entity`; impl in `runtime` | Trait in `runtime` | Actor references its own crate only, identical to `EventPublisher`. No new layer edge. |
 | AD-4 Ports in runtime | `EffectStateStore` + `EffectDedupStore` in `crates/runtime/src/effects/` | Domain (like read-side `DedupStore`) | Delivery state is a runtime responsibility (§6); domain stays I/O- and state-free. `-Store` suffix still matches the read side. |
 | AD-5 Backoff defaults | Ship the read-side precedent as **runtime default constants**, explicitly **not** spec-normative numbers: `DEFAULT_MAX_ATTEMPTS: u32 = 3`, `DEFAULT_BASE_BACKOFF = Duration::from_millis(100)`, `DEFAULT_MAX_BACKOFF = Duration::from_secs(10)`, exponential + full jitter | Retune for external calls; pin the numbers in the spec | The spec's *behavioral* contract (retry with backoff, capped, jittered) is what is normative; these specific values are just this implementation's chosen defaults, overridable per-`effect_type`/per-adapter. The only in-repo retry precedent (`read_side/error.rs:9`) gives ops familiarity. Cap = 3 retries (4 attempts total). |
-| AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. Retryable effects re-enter via `tokio::time::sleep` then re-`send`. |
+| AD-6 Wake-up | Bounded `tokio::sync::mpsc` for work + `tokio::sync::watch<bool>` for shutdown + `Semaphore` for concurrency | `Notify`, polling tick | Matches `runtime.rs:147` (mpsc handoff) and `scheduler.rs:140` (watch stop); zero idle cost. **Revised (PR2 round 2, see below): retryable effects re-enter SOLELY via `mark_retryable(next_at)` plus the periodic `claim_due`-driven reclaim loop — never via an in-process sleep-then-`send` timer.** **Revised again (PR2 round 4, see below): the reclaim loop claims-then-transitions (`mark_in_flight`) *before* enqueueing (F-01), and the main loop's backpressure-permit wait races shutdown too (F-03).** **Revised once more (PR2 round 5, see below): the reclaim loop no longer enqueues into `EffectQueue` at all — it dispatches claimed effects directly through the same permit-gated helper the queue-fed path uses, closing a self-deadlock where `send_reclaimed` could block forever on a queue only this same loop could ever drain (F-01).** |
 | AD-7 Bookkeeping-failure semantics | On post-success bookkeeping failure (`mark_succeeded`/`commit_success`), bounded-retry the idempotent write; if it still fails, keep the effect `in-flight`/`retryable` and re-dispatch rather than losing it | Swallow the error and mark succeeded anyway; treat the bookkeeping failure as terminal | Preserves the at-least-once guarantee (§7): re-dispatch is safe because idempotency-key propagation is mandatory, so a cooperating destination collapses the duplicate. Consequence: a rare double-attempt on the destination, never a silent loss or a false-terminal. Failure-window detail in §6.5. |
 | AD-8 Single-consumer claim invariant | Exactly one `DeliveryRunner` instance calls `claim_due` at a time in this slice; `claim_due` is deliberately **non-atomic** — it returns due effects without transitioning their state (a claimant that intends to dispatch still calls `mark_in_flight`) | Make `claim_due` atomically claim (transition to `InFlight` with compare-and-swap / lease-timeout semantics) | Distributed/multi-consumer coordination (leasing, cross-node claims) is out of scope per the proposal's non-goals (§4). Non-atomic `claim_due` is safe **only because** a single runner consumes it. Atomic claiming would add compare-and-swap semantics and lease timeouts with no current driver; deferred until a real multi-consumer need materializes. |
 | AD-9 Acceptance-failure policy | `EffectAcceptor::accept` returns `Result<(), EffectAcceptanceError>`. The committed event is **never** rolled back because acceptance fails (commit and acceptance are separate concerns; commit success is final and unconditional). The caller's *successful* reply is withheld until acceptance of that command's effects completes. Only `EffectStateStore::accept`'s `TemporarilyUnavailable` error is retryable under the AD-5 `RetryPolicy`; every other store error is permanent and surfaces immediately as a post-commit `EffectAcceptanceError` (full mapping in the classification table below). If the retryable error survives the policy, the caller likewise receives an explicit post-commit `EffectAcceptanceError`. | Roll back the commit on acceptance failure; swallow the failure and reply success anyway; block shutdown until acceptance eventually succeeds | Extends the existing "backpressure delays the reply, never the commit" rule (§9) to also cover acceptance *failure*, not just queue-capacity waiting. Honest by construction: the error means "your command succeeded and its event is committed, but we could not durably-enough register at least one of its described effects, and it may be lost to the post-commit dual-write gap" — not that the command failed. Reuses the AD-5 `RetryPolicy` shape rather than a second policy type: acceptance retries the same class of transient store write, so a distinct tuning surface would be speculative. |
@@ -75,6 +75,290 @@ of that contract, not a restatement of it. The constants above live in
 spec-normative requirement. A durable adapter or a per-`effect_type` override
 may choose different values without violating the spec, which is precisely why
 the spec does not pin exact numbers.
+
+**PR2 review follow-up (AD-6/AD-7/AD-8, `runner.rs`).** A post-merge review of
+PR2 found three related gaps in the first `DeliveryRunner` cut, all fixed in
+the same PR before the next one built on top:
+
+- **AD-7 redispatch is now unconditional on the in-memory path.** Both
+  `retry_or_give_up` (a delivery failure) and `finish_success` (bookkeeping
+  exhausted after a real success) now always schedule the backoff-sleep-then-
+  `queue.send` redispatch, regardless of whether the corresponding bookkeeping
+  write (`mark_retryable` / `commit_success`+`mark_succeeded`) itself
+  succeeded — that write is for durability/observability of the retry count,
+  never a precondition for the in-process retry. The dedup reservation for
+  the effect's scope is held for the *entire* backoff sleep and released only
+  immediately before the redispatch re-enters the queue, closing a window
+  where an early release could let a racing duplicate submission slip through.
+  **(Superseded by the PR2 round 2 redesign immediately below — this
+  sleep-then-`send` timer no longer exists.)**
+- **A periodic reclaim loop closes the `mark_in_flight`-failure gap.**
+  `claim_due` already existed for crash recovery (AD-8) but nothing ever
+  drove it during normal operation, so an effect whose `mark_in_flight` write
+  failed at drain time (safely still `Pending`, no side effect, no dedup
+  reserved) had no path back into the pipeline. `DeliveryRunner::run`'s drain
+  loop now also ticks a `claim_due(now, limit)` call on a fixed interval
+  (default 5s, a middle ground between prompt recovery and not hammering the
+  state store) as a third `tokio::select!` branch on the *same* single-
+  consumer task — not a second consumer — re-feeding whatever comes back into
+  the internal queue for another attempt.
+- **Shutdown now actually waits for outstanding work.** Every per-effect
+  dispatch task and every backoff-redispatch task is tracked in a shared
+  `tokio::task::JoinSet` instead of a bare, discarded `tokio::spawn` handle.
+  On the shutdown signal, the drain loop stops accepting new work (queue and
+  reclaim tick alike) and then awaits the `JoinSet` draining, bounded by a
+  local shutdown-drain deadline (5s default) so a stuck task can't block
+  shutdown forever. This deadline is a local constant for now; once PR4's
+  `RuntimeEffectAcceptor::drain(deadline, ..)` lands, its caller-supplied
+  deadline should flow down into this runner instead of duplicating the idea.
+
+**PR2 round 2 review follow-up (AD-6 revision, F-01 through F-04, dedup
+lifetime).** A second review pass on this PR's diff found a real
+double-dispatch race the fixes above introduced, a `JoinSet` self-deadlock,
+and three other BLOCKERs, all fixed in the same PR:
+
+- **AD-6 revision — one redispatch mechanism, not two.** The round-1 fix
+  above gave every retryable effect *two* competing producers that could both
+  end up enqueueing it around the same time once `next_at` passed: the
+  in-process sleep-then-`queue.send` timer, and the `claim_due`-based reclaim
+  loop (added in the same round, for a different gap). Whichever copy lost
+  the race hit `InvalidTransition` and was silently discarded — accidental
+  behavior, not a contractual one. Separately, the timer task's own need to
+  self-register in the shared, shutdown-drained `JoinSet` was deadlock-prone
+  against a shutdown already waiting on that very `JoinSet` (F-01). Fixed by
+  picking exactly one mechanism: `EffectStateStore::mark_retryable(next_at)`
+  is now the sole source of truth for "when is this effect due," and the
+  periodic reclaim loop is the sole way it re-enters the queue.
+  `retry_or_give_up` and `finish_success`'s exhausted-bookkeeping path now
+  only call `mark_retryable` and return — no task is spawned for the backoff
+  itself. This also resolves the `JoinSet` deadlock as a side effect: with
+  the timer gone, only the main drain loop (queue-fed effects) and the
+  reclaim loop (`claim_due`-fed effects) ever spawn into the tracked
+  `JoinSet`, and neither is itself a tracked task recursively spawning
+  another — no self-referential lock wait is possible.
+- **Dedup-reservation lifetime, decoupled from "attempt".** Once a
+  reservation is made `Fresh` for an effect's `(tenant, effect_type,
+  idempotency_key)` scope, it now stays held for that effect's entire
+  lifetime — released only on a genuinely terminal outcome (`Succeeded` via
+  `commit_success`, or `TerminalFailed` via `abandon_and_release`) — never
+  released and re-reserved on every attempt. `drain_one` only ever calls
+  `EffectDedupStore::reserve` when `effect.attempt == 0` (a genuinely fresh,
+  never-before-dispatched submission); every redispatch path in this file
+  always bumps `attempt` to at least 1 before the effect can be reclaimed, so
+  a retry of the *same* effect re-entering `drain_one` reliably skips
+  `reserve` and can never be `Duplicate`'d against its own still-held
+  reservation.
+- **F-02 — per-`effect_type` retry policy override.** `DeliveryConfig`/
+  `RetryPolicy` only ever supported one global policy per runner instance.
+  Added `RetryPolicies { default_retry: RetryPolicy, retry_overrides:
+  HashMap<String, RetryPolicy> }` (`policy.rs`) with `policy_for(effect_type)
+  -> RetryPolicy`; `DeliveryRunner` now holds a `RetryPolicies` (constructed
+  via `impl Into<RetryPolicies>`, so every existing call site passing a bare
+  `RetryPolicy` keeps compiling unchanged) and calls `policy_for` everywhere
+  it used to read one shared policy field directly — the retry-decision
+  (`allows_retry`) and the backoff computation alike.
+- **F-03 — AD-7's redispatch used to re-enter a state `mark_in_flight`
+  rejects.** `finish_success`'s bookkeeping-exhausted path left the effect's
+  stored state `InFlight` while (pre-redesign) scheduling a redispatch — but
+  `mark_in_flight` only accepts `from: Pending | RetryableFailed`, and
+  `claim_due` explicitly excludes `InFlight`, so that effect could never be
+  picked back up by anything. Fixed: the exhausted path now calls
+  `mark_retryable(id, attempt, next_at)` — its `allowed_from: [InFlight]`
+  fits this "succeeded but bookkeeping didn't confirm" case exactly, no new
+  store operation needed. Combined with the dedup-lifetime fix above, the
+  effect's own reservation stays held and its later redispatch (attempt ≥ 1)
+  skips `reserve` entirely, so it is never mistaken for its own duplicate.
+- **F-04 — stable, portable dedup fingerprint.** `EffectDedupStore::reserve`'s
+  `fingerprint: u64` (computed via `std::collections::hash_map::
+  DefaultHasher`, which carries no cross-version/cross-build stability
+  guarantee) is replaced by a public `EffectFingerprint([u8; 32])`
+  (`store.rs`), computed via SHA-256 (already a transitive workspace
+  dependency, reused rather than adding a new hashing crate) over a
+  length-prefixed framing of payload and destination — so
+  `payload=b"ab"+destination="cd"` never collides with
+  `payload=b"a"+destination="bcd"` the way naive concatenation would.
+  `EffectDedupStore::reserve`'s signature and every call site were updated;
+  this changes already-merged (`develop`) public API, acceptable here since
+  nothing outside this stack consumes it yet.
+- **Previously-existing HIGH findings, fixed in the same pass:**
+  `DedupOutcome::Duplicate` on a fresh submission is now marked `Succeeded`
+  (a benign already-satisfied outcome), never `TerminalFailed` with an
+  error-sounding reason; a cancelled/aborted executor task
+  (`tokio::task::JoinError::is_cancelled()`, as opposed to `is_panic()`) is
+  requeued without charging the effect's retry-attempt cap, instead of being
+  charged as an ordinary `RetryableFailure`; `abandon`/`abandon_and_release`/
+  `reclaim_due`'s previously-silent `let _ = ...` bookkeeping-failure
+  discards now log via `tracing::warn!`; and `timestamp_after`'s
+  `chrono::Duration` conversion now saturates to a large, safe fallback
+  instead of silently degrading to zero on overflow (which would have
+  caused a retry storm instead of backoff).
+
+**PR2 round 3 review follow-up (two residual gaps closed).** The round 2
+fix's own report honestly flagged two gaps it left unresolved; both are now
+closed:
+
+- **AD-6/shutdown — drain-deadline expiry now actually aborts outstanding
+  work.** Before this fix, `DeliveryRunner::drain_tasks` simply gave up once
+  its bounded deadline elapsed, leaving any still-running dispatch task (and
+  its inner executor attempt) running, untracked, in the background forever
+  — the exact concern the very first PR2 review round raised about this
+  `JoinSet` design. Fixed: on deadline expiry, every in-flight executor
+  attempt's `AbortHandle` (tracked separately from the outer per-effect
+  `JoinSet`, precisely so classification stays intact) is aborted, giving
+  `classify_join_result`'s `is_cancelled()` branch its first real production
+  caller — the owning dispatch task then runs its already-existing
+  `CancelledForShutdown` handling (`requeue_without_charging_attempt`) to
+  completion and drains out normally. Only if a task is *still* stuck after a
+  second bounded window (e.g. hung somewhere other than the executor await)
+  does shutdown fall back to `JoinSet::abort_all()` as a last resort. Either
+  way, shutdown now provably returns with zero background tasks left running
+  past the deadline.
+- **AD-7 — `mark_retryable` exhaustion now abandons instead of sticking.**
+  Same "stuck and undiscoverable" class of bug F-03 already fixed for
+  `finish_success`'s exhausted bookkeeping path, applied to
+  `retry_or_give_up`'s own `mark_retryable` write: if its bounded retry is
+  still failing after the bound, the effect used to be left silently
+  `InFlight` forever, invisible until a future crash-recovery pass that isn't
+  wired anywhere. Fixed: this exhaustion now falls back to
+  `abandon_and_release` with `TerminalReason::Other("retry bookkeeping
+  exhausted: store unavailable")`, and logs via `tracing::warn!` like every
+  other abandon path — an operator sees a persistent store outage instead of
+  a silent stall. (`finish_success`'s own separate exhaustion fallback is
+  unchanged — out of this fix's scope.) The two fixes are independent: the
+  drain-deadline abort only ever targets an executor attempt, never the flat,
+  no-backoff `mark_retryable` bookkeeping loop itself, so aborting one cannot
+  interrupt the other mid-retry.
+
+**PR2 round 4 review follow-up (4 new BLOCKERs, unified dedup-identity
+redesign).** A third review round found F-02 and F-04 shared one root cause
+— the runner used `effect.attempt == 0` as a dual-purpose signal (both "how
+many delivery attempts have been charged against the retry cap" and "has
+dedup already been reserved for this effect") — plus two independent
+BLOCKERs (F-01, F-03), all fixed in the same PR:
+
+- **Dedup store gains real identity/status awareness (F-02 + F-04, unified
+  fix, `store.rs`).** `DedupOutcome` grows two new variants alongside
+  `Fresh`/`Duplicate`/`Conflict`: `OwnedInProgress` (this exact `EffectId`
+  already owns the scope's reservation, not yet `Succeeded` — legitimately
+  the SAME effect recovering/retrying) and `OwnedSucceeded` (this exact
+  `EffectId`'s reservation is already recorded `Succeeded` — the ONLY case
+  allowed to short-circuit without re-executing). `EffectDedupStore::reserve`
+  gained an `effect_id: EffectId` parameter so a reservation records
+  ownership, not just occupancy; `InMemoryEffectStore`'s `HashMap<DedupScope,
+  EffectFingerprint>` became `HashMap<DedupScope, ReservationRecord>`
+  (`effect_id`, `fingerprint`, `succeeded: bool`). `commit_success` now flips
+  `succeeded` in place instead of being a no-op — a later crash-recovery
+  re-attempt by the SAME effect must still find `OwnedSucceeded`, while a
+  genuinely different future submission under the same scope must still be
+  told it's settled (`Duplicate`), never `Fresh`. `release` is unchanged
+  (still fully clears the scope). Before this fix, a plain `Duplicate` could
+  mean either "a different submission already handled this" or "this exact
+  effect's own reservation, still legitimately in-flight" — indistinguishable
+  — and the runner treated every `Duplicate` as the former, silently marking
+  a never-actually-executed, crash-recovered effect `Succeeded` (F-02, a
+  silent-data-loss BLOCKER).
+- **`drain_one`'s `effect.attempt == 0` dedup gate is gone (F-02 + F-04,
+  `runner.rs`).** `dispatch_in_flight` (the post-`mark_in_flight` body
+  `drain_one`/`drain_reclaimed` share) now calls `reserve_with_retry`
+  unconditionally on every attempt — fresh, retried, or crash-recovered —
+  and branches on the richer outcome: `Fresh`/`OwnedInProgress` → proceed to
+  (re-)execute; `Duplicate`/`OwnedSucceeded` → short-circuit to success via
+  `finish_already_satisfied`; `Conflict`/store-error → unchanged terminal
+  handling. This also refines AD-7's redispatch-after-bookkeeping-failure
+  tradeoff: previously *every* reclaim-eligible-after-success effect was
+  unconditionally re-executed (a coarse, always-safe-but-sometimes-wasteful
+  choice); now, when the dedup store can prove this exact effect already
+  succeeded (`commit_success` landed even though `mark_succeeded` kept
+  failing), the redispatch skips re-executing entirely.
+- **`requeue_without_charging_attempt` no longer bumps `attempt` (F-04,
+  `runner.rs`).** With dedup reservation no longer attempt-gated, the
+  shutdown-cancellation path no longer needs to inflate `attempt` to skip
+  re-reservation — it now leaves the stored attempt count exactly as it was
+  before the cancellation. Before this fix, the bump (added purely for the
+  now-removed dedup-gating trick) silently ate into the effect's real retry
+  budget under `RetryPolicy::allows_retry`, directly contradicting the
+  documented "cancellation can never exhaust the retry budget" guarantee.
+- **`claim_due` can no longer enqueue the same effect multiple times across
+  reclaim ticks (F-01, `runner.rs`/`queue.rs`).** `claim_due` itself still
+  doesn't transition state (AD-8, unchanged) — but `reclaim_due` now calls
+  `mark_in_flight` on each claimed `StoredEffect` immediately, before ever
+  enqueueing it, and only enqueues the ones where that transition succeeds
+  (an expected, harmless race — e.g. the direct accept-path queue entry for
+  the same effect already transitioned it first — is logged at `debug` and
+  skipped, not treated as an error). A new `QueuedEffect` enum
+  (`Fresh`/`Reclaimed`, `queue.rs`) distinguishes a freshly-accepted effect
+  (still needs `mark_in_flight`) from a reclaim-fed one (already `InFlight`
+  — must NOT be transitioned again, which would immediately fail with
+  `InvalidTransition`); `DeliveryRunner::run_inner`'s receive loop branches
+  on it to call `drain_one` or the new `drain_reclaimed` accordingly. Before
+  this fix, an effect stayed `Pending`/`RetryableFailed` until `drain_one`
+  eventually reached `mark_in_flight` after being dequeued, so the SAME
+  effect could be claimed and re-enqueued on every reclaim tick while the
+  queue had backlog, inflating it with duplicate entries.
+- **Shutdown no longer blocks on a saturated backpressure permit (F-03,
+  `runner.rs`).** `run_inner`'s main loop previously received an effect from
+  the queue, then did a bare `backpressure.acquire().await` *outside* the
+  `tokio::select!` watching shutdown — a hung/slow executor holding every
+  concurrency permit could prevent the loop from ever reaching
+  `drain_tasks`'s abort-on-deadline logic at all. Fixed: permit acquisition
+  now races `shutdown.changed()` in its own nested `select!`/loop; on
+  shutdown, the already-dequeued effect is dropped un-attempted (safely
+  `Pending`/`RetryableFailed`/`InFlight` in the store, recoverable by a
+  future reclaim/`recover_in_flight`) and the loop proceeds straight to
+  `drain_tasks`.
+- **`reclaim_due`'s previously-silent `queue.send` failure now logs.** A
+  reclaim-driven `send_reclaimed` failure emits `tracing::warn!`, matching
+  this file's existing bookkeeping-failure logging conventions.
+
+**PR2 round 5 review follow-up (2 new BLOCKERs).** A fourth review round
+found the round 4 reclaim-loop redesign and dedup-identity redesign each had
+one remaining gap, both fixed in the same PR:
+
+- **AD-6 revision, again — the reclaim loop no longer feeds itself through
+  `EffectQueue` at all (F-01, `queue.rs`/`runner.rs`).** Round 4's fix made
+  `reclaim_due` claim-then-transition an effect before enqueueing it as
+  `QueuedEffect::Reclaimed` via `send_reclaimed` — but `send_reclaimed`
+  blocks until the bounded queue has capacity, and the ONLY consumer that
+  would ever free that capacity (`EffectQueueReceiver::recv`) is the very
+  same reclaim loop. With queue capacity smaller than one `claim_due` batch,
+  this was a guaranteed self-deadlock: the first reclaimed effect fills the
+  queue, the second blocks forever on `send_reclaimed`, and the loop can
+  never get back to `recv()` to drain the first entry and free capacity —
+  the runner hangs, shutdown is never even observed. Fixed by removing the
+  queue hop entirely for this path: `reclaim_due` now claims, transitions,
+  and dispatches each due effect directly, acquiring a concurrency permit
+  through a new shared helper (`DeliveryRunner::acquire_permit_and_spawn`)
+  that both the queue-fed (fresh) branch and the reclaim-fed branch of
+  `run_inner`'s `select!` call — one dispatch mechanism, not two. Since
+  nothing routes reclaimed effects through `EffectQueue` anymore,
+  `EffectQueue::send_reclaimed` and the `QueuedEffect` enum (`Fresh`/
+  `Reclaimed`) are removed outright; the queue now carries plain
+  `AcceptedEffect`s, always freshly-accepted.
+- **Dedup outcome splits `Duplicate` into `OtherInProgress`/`OtherSucceeded`
+  (F-02, `store.rs`/`runner.rs`).** Round 4 correctly distinguished
+  `OwnedInProgress`/`OwnedSucceeded` for the SAME `EffectId`, but still
+  collapsed every DIFFERENT-owner case into one flat `Duplicate`, which the
+  runner treated exactly like `OwnedSucceeded` — mark succeeded, never
+  execute — regardless of whether that other owner had actually reached
+  `Succeeded` yet. Concretely: effect A reserves a scope and starts
+  executing; effect B arrives with the same scope/fingerprint, gets
+  `Duplicate`, and is marked `Succeeded` WITHOUT EVER EXECUTING; if A later
+  fails terminally and releases its reservation, the only recorded outcome
+  for that idempotency key is B's false `Succeeded` — silent data loss, the
+  same class of bug as F-02 (round 4) but for the "different submitter"
+  case instead of "same effect recovering." Fixed: `DedupOutcome::Duplicate`
+  is replaced by `OtherInProgress` (a different owner holds the reservation,
+  not yet succeeded) and `OtherSucceeded` (a different owner's reservation is
+  already recorded `Succeeded`). The runner's `dispatch_in_flight` now
+  branches on the richer outcome: `OtherSucceeded`/`OwnedSucceeded` →
+  short-circuit to success, same as before; `OtherInProgress` → must NOT
+  execute or mark succeeded — reuses the same "leave it reclaim-eligible, no
+  attempt charged, no dedup release" shape `requeue_without_charging_attempt`
+  already gives shutdown-cancelled attempts, so the effect is simply
+  re-evaluated on a future reclaim tick, by which point the other owner has
+  likely resolved to `OtherSucceeded` (mark succeeded then) or released the
+  reservation on terminal failure (this effect then sees `Fresh` and executes
+  normally).
 
 **Acceptance-failure policy (AD-9) in plain terms:** the whole CORE-019 effort
 optimizes for honesty about what survives, so acceptance is honest too. A

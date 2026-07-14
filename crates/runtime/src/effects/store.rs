@@ -7,11 +7,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -148,7 +149,11 @@ pub struct AcceptedEffect {
     /// The attempt number this acceptance represents.
     pub attempt: u32,
     /// The frozen, handler-described effect.
-    pub description: ExternalEffectDescription,
+    ///
+    /// `Arc`-wrapped (fix 9, PR2 review) so retries/concurrent attempts
+    /// clone the pointer, not the payload bytes — `tokio::spawn`'s `'static`
+    /// bound used to force a full deep clone of every attempt's description.
+    pub description: Arc<ExternalEffectDescription>,
 }
 
 /// Runtime-owned metadata wrapper around one [`AcceptedEffect`] (design.md §4).
@@ -179,7 +184,7 @@ pub struct StoredEffect {
     /// The tenant established at acceptance time.
     pub tenant: TenantId,
     /// The frozen, handler-described effect.
-    pub description: ExternalEffectDescription,
+    pub description: Arc<ExternalEffectDescription>,
     /// The next attempt number to use for re-dispatch.
     pub attempt: u32,
     /// The effect's current lifecycle state.
@@ -197,6 +202,16 @@ pub struct StoredEffect {
 #[async_trait]
 pub trait EffectStateStore: Send + Sync {
     /// Records a newly-accepted effect as [`EffectState::Pending`].
+    ///
+    /// MUST be idempotent for a replayed acceptance: re-accepting the same
+    /// [`EffectId`] with the same acceptance identity (`tenant` +
+    /// `description`) MUST return `Ok` as a no-op, without disturbing the
+    /// record's current lifecycle state. The same `EffectId` with *different*
+    /// immutable content MUST return [`EffectStoreError::Conflict`]. This is
+    /// required so AD-9's bounded retry of a lost `accept` response
+    /// (`TemporarilyUnavailable`) is safe — a durable implementation that
+    /// treats any re-acceptance as a conflict would turn that safe retry into
+    /// a false post-commit acceptance failure.
     async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError>;
     /// Transitions to [`EffectState::InFlight`] before dispatching an attempt.
     async fn mark_in_flight(&self, id: EffectId) -> Result<(), EffectStoreError>;
@@ -233,13 +248,94 @@ pub trait EffectStateStore: Send + Sync {
     async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError>;
 }
 
-/// The result of a single-flight dedup reservation attempt.
+/// A stable, cross-version, cross-build dedup fingerprint over an effect's
+/// payload and destination (F-04).
+///
+/// Replaces the earlier `u64` computed via `std::collections::hash_map::
+/// DefaultHasher` — `DefaultHasher` carries **no** stability guarantee across
+/// Rust versions or even separate builds of the same binary, and 64 bits has
+/// a meaningfully higher collision probability than is appropriate for a
+/// store whose whole job is reliably detecting payload/destination
+/// mismatches. Backed by SHA-256 (already a transitive workspace dependency
+/// via other crates' `sha2 = "0.10"` use, e.g. `security-jwt`/
+/// `security-apikey`) over a length-prefixed framing of each field, so
+/// `payload=b"ab"` + `destination="cd"` never collides with `payload=b"a"` +
+/// `destination="bcd"` the way naive concatenation would.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectFingerprint([u8; 32]);
+
+impl EffectFingerprint {
+    /// Computes the fingerprint of one effect's payload + destination.
+    pub fn compute(payload: &[u8], destination: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update((payload.len() as u64).to_be_bytes());
+        hasher.update(payload);
+        let destination = destination.as_bytes();
+        hasher.update((destination.len() as u64).to_be_bytes());
+        hasher.update(destination);
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for EffectFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EffectFingerprint({:x?})", &self.0[..4])
+    }
+}
+
+/// The result of a single-flight dedup reservation attempt (F-02/F-04, PR2
+/// round 4 redesign; further split in PR2 round 5, F-02).
+///
+/// A reservation now records not just a fingerprint but *ownership*
+/// (`EffectId`) and *status* (has the owner reached `Succeeded`) — see
+/// [`EffectDedupStore::reserve`]'s new `effect_id` parameter. Before the
+/// round 4 redesign, `Fresh`/`Duplicate`/`Conflict` alone could not
+/// distinguish "a different submission already succeeded" from "this exact
+/// effect's own reservation is still in-flight, recovering from a crash" —
+/// both looked like a plain `Duplicate`. Round 4 fixed that for the
+/// SAME-owner case (`OwnedInProgress`/`OwnedSucceeded`), but still collapsed
+/// every DIFFERENT-owner case into one flat `Duplicate`, treated by the
+/// runner exactly like `OwnedSucceeded` — silently marking a fresh
+/// submission `Succeeded` without ever executing, even when the actual
+/// owner was still `OwnedInProgress` (not yet delivered). If that real owner
+/// later failed terminally and released its reservation, the only recorded
+/// outcome for the idempotency key was this false `Succeeded` — silent data
+/// loss (F-02, round 5 BLOCKER). `Duplicate` is now split the same way
+/// `Fresh`'s same-owner sibling already was: `OtherInProgress` (a different
+/// owner holds the reservation, not yet succeeded — the caller must NOT
+/// execute or mark succeeded yet) and `OtherSucceeded` (a different owner's
+/// reservation is already recorded `Succeeded` — safe to mark succeeded
+/// without re-executing, same as `OwnedSucceeded`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupOutcome {
     /// No prior reservation existed for this scope; this attempt now owns it.
     Fresh,
-    /// The same scope was already reserved with an identical fingerprint.
-    Duplicate,
+    /// This exact `EffectId` already owns this scope's reservation, and it
+    /// has not yet been recorded [`Succeeded`](EffectState::Succeeded) —
+    /// legitimately the SAME effect recovering from a crash or retrying.
+    /// The caller MUST proceed to (re-)execute, never short-circuit to
+    /// success here.
+    OwnedInProgress,
+    /// This exact `EffectId` already owns this scope's reservation, and it
+    /// has already been recorded [`Succeeded`](EffectState::Succeeded) (via
+    /// [`EffectDedupStore::commit_success`]) — genuinely already delivered.
+    /// Safe to short-circuit to success without re-executing.
+    OwnedSucceeded,
+    /// A *different* `EffectId` holds this scope's reservation, and it has
+    /// not yet been recorded `Succeeded` — the actual outcome for this
+    /// idempotency key isn't known yet (F-02, round 5). The caller MUST NOT
+    /// execute or mark succeeded now; it must leave this effect to be
+    /// re-evaluated later (see `runner.rs`'s `OtherInProgress` handling).
+    OtherInProgress,
+    /// A *different* `EffectId`'s reservation for this scope is already
+    /// recorded `Succeeded` — a real duplicate submission from elsewhere
+    /// that genuinely already delivered. Safe to short-circuit to success
+    /// without re-executing (this effect never owned the reservation it
+    /// collided with, so there is nothing to release).
+    OtherSucceeded,
     /// The same scope was reserved with a *different* fingerprint — the
     /// caller MUST treat this as `InvalidEffect` (terminal), never silently
     /// deduplicated.
@@ -261,24 +357,37 @@ pub struct DedupScope {
 /// Public port owning single-flight idempotency reservations.
 #[async_trait]
 pub trait EffectDedupStore: Send + Sync {
-    /// Reserves `scope` for this attempt, keyed by a fingerprint of the
-    /// effect's payload/destination.
+    /// Reserves `scope` for `effect_id`'s attempt, keyed by a fingerprint of
+    /// the effect's payload/destination (F-02, PR2 round 4: `effect_id` is
+    /// new — reservations now track ownership, not just occupancy, so the
+    /// runner can tell its own in-progress/recovering attempt apart from a
+    /// genuinely different duplicate submission).
     async fn reserve(
         &self,
         scope: &DedupScope,
-        fingerprint: u64,
+        effect_id: EffectId,
+        fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError>;
-    /// Confirms the reservation as permanently delivered.
+    /// Confirms the reservation as permanently delivered. Marks the scope's
+    /// owner `Succeeded` (F-02, PR2 round 4) rather than removing the
+    /// reservation outright — a later crash-recovery re-attempt by the SAME
+    /// effect must still find `OwnedSucceeded`, not `Fresh`.
     async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
-    /// Releases the reservation after a retryable failure, so a subsequent
-    /// retry of the *same* effect is not mistaken for a duplicate.
+    /// Releases the reservation on a terminal (non-retryable) outcome.
+    ///
+    /// The reservation is deliberately held across retries of the *same*
+    /// effect — `reserve` recognizes the owning `EffectId` and returns
+    /// `OwnedInProgress`/`OwnedSucceeded` rather than a fresh collision, so a
+    /// retry never needs `release` to avoid self-deduplication. `release` is
+    /// only for genuinely abandoning the scope (terminal failure), freeing it
+    /// for a future, unrelated submission with the same key.
     async fn release(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
 }
 
 #[derive(Debug, Clone)]
 struct EffectRecord {
     tenant: TenantId,
-    description: ExternalEffectDescription,
+    description: Arc<ExternalEffectDescription>,
     state: EffectState,
     attempt: u32,
     next_at: Option<Timestamp>,
@@ -291,15 +400,25 @@ struct EffectRecord {
 /// is expected to satisfy each port independently. Loses all pending/
 /// in-flight effects on process crash (spec: "In-memory store loses
 /// undelivered effects on crash").
+/// One scope's dedup reservation: who owns it, what fingerprint it was
+/// reserved under, and whether that owner has reached `Succeeded` (F-02,
+/// PR2 round 4). `commit_success` flips `succeeded` in place rather than
+/// removing the entry — a later crash-recovery re-attempt by the same
+/// `effect_id` must still see `OwnedSucceeded`, and a genuinely different
+/// future submission under the same scope must still be told it's settled
+/// (`Duplicate`), not `Fresh`. Only `release` (a genuinely terminal, non-
+/// success outcome) clears the scope entirely.
+#[derive(Debug, Clone)]
+struct ReservationRecord {
+    effect_id: EffectId,
+    fingerprint: EffectFingerprint,
+    succeeded: bool,
+}
+
 #[derive(Default)]
 pub struct InMemoryEffectStore {
     states: Mutex<HashMap<EffectId, EffectRecord>>,
-    // ponytail: a single fingerprint map is enough for slice-1's semantics —
-    // `reserve` after `release` re-opens the scope, `commit_success` doesn't
-    // need a separate "committed" flag because nothing calls `release` after
-    // a successful delivery. Revisit only if a durable store needs to tell
-    // "reserved" and "committed" apart.
-    dedup: Mutex<HashMap<DedupScope, u64>>,
+    dedup: Mutex<HashMap<DedupScope, ReservationRecord>>,
 }
 
 impl InMemoryEffectStore {
@@ -330,7 +449,27 @@ impl InMemoryEffectStore {
 #[async_trait]
 impl EffectStateStore for InMemoryEffectStore {
     async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
-        self.states.lock().unwrap().insert(
+        let mut states = self.states.lock().unwrap();
+        if let Some(existing) = states.get(&effect.id) {
+            // `accept` must be idempotent for a replayed acceptance (AD-9: a
+            // lost response to an otherwise-successful `accept` is retried
+            // under `TemporarilyUnavailable`) — only a genuine identity
+            // collision with *different* content is a real conflict. `attempt`
+            // is deliberately excluded from this comparison: `accept` is only
+            // ever called at the original acceptance (`attempt == 0`); the
+            // record's `attempt` field advances afterward via `mark_retryable`
+            // and reflects delivery progress, not acceptance identity.
+            return if existing.tenant == effect.tenant && existing.description == effect.description
+            {
+                Ok(())
+            } else {
+                Err(EffectStoreError::Conflict(format!(
+                    "effect {} already accepted with different tenant/description",
+                    effect.id
+                )))
+            };
+        }
+        states.insert(
             effect.id,
             EffectRecord {
                 tenant: effect.tenant,
@@ -439,23 +578,49 @@ impl EffectDedupStore for InMemoryEffectStore {
     async fn reserve(
         &self,
         scope: &DedupScope,
-        fingerprint: u64,
+        effect_id: EffectId,
+        fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError> {
         let mut dedup = self.dedup.lock().unwrap();
         match dedup.get(scope) {
             None => {
-                dedup.insert(scope.clone(), fingerprint);
+                dedup.insert(
+                    scope.clone(),
+                    ReservationRecord {
+                        effect_id,
+                        fingerprint,
+                        succeeded: false,
+                    },
+                );
                 Ok(DedupOutcome::Fresh)
             }
-            Some(existing) if *existing == fingerprint => Ok(DedupOutcome::Duplicate),
-            Some(_) => Ok(DedupOutcome::Conflict),
+            // Different fingerprint under the same scope is always a
+            // conflict, regardless of who owns the existing reservation.
+            Some(existing) if existing.fingerprint != fingerprint => Ok(DedupOutcome::Conflict),
+            Some(existing) if existing.effect_id == effect_id => {
+                if existing.succeeded {
+                    Ok(DedupOutcome::OwnedSucceeded)
+                } else {
+                    Ok(DedupOutcome::OwnedInProgress)
+                }
+            }
+            // F-02 (round 5): a different owner's status now matters too —
+            // not yet succeeded (`OtherInProgress`) vs. genuinely already
+            // delivered (`OtherSucceeded`).
+            Some(existing) => {
+                if existing.succeeded {
+                    Ok(DedupOutcome::OtherSucceeded)
+                } else {
+                    Ok(DedupOutcome::OtherInProgress)
+                }
+            }
         }
     }
 
-    async fn commit_success(&self, _scope: &DedupScope) -> Result<(), EffectStoreError> {
-        // The fingerprint entry recorded at `reserve` time already blocks
-        // re-reservation; no separate committed marker is needed (see the
-        // ponytail note on `InMemoryEffectStore::dedup`).
+    async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError> {
+        if let Some(record) = self.dedup.lock().unwrap().get_mut(scope) {
+            record.succeeded = true;
+        }
         Ok(())
     }
 
@@ -484,7 +649,7 @@ mod tests {
             id,
             tenant: TenantId::new("tenant-a").unwrap(),
             attempt: 0,
-            description: sample_description(),
+            description: Arc::new(sample_description()),
         }
     }
 
@@ -494,6 +659,10 @@ mod tests {
             effect_type: "invoice.created".to_string(),
             key: IdempotencyKey::new(key).unwrap(),
         }
+    }
+
+    fn fp(seed: &str) -> EffectFingerprint {
+        EffectFingerprint::compute(seed.as_bytes(), "https://example.com")
     }
 
     #[tokio::test]
@@ -513,6 +682,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn accepting_the_same_id_and_content_again_is_an_idempotent_no_op() {
+        // A lost `accept` response (e.g. `TemporarilyUnavailable` under AD-9's
+        // bounded retry) means the acceptor may legitimately replay the exact
+        // same `AcceptedEffect` after it already landed — this must succeed,
+        // not be mistaken for a data conflict, or a safe retry becomes a
+        // false post-commit acceptance failure.
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+        store.mark_in_flight(id).await.unwrap();
+
+        store.accept(accepted_effect(id)).await.unwrap();
+
+        // The replay must not disturb the record's current lifecycle state —
+        // still `InFlight`, not silently reset back to `Pending`.
+        let err = store.mark_in_flight(id).await.unwrap_err();
+        assert!(matches!(
+            err,
+            EffectStoreError::InvalidTransition {
+                from: EffectState::InFlight,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepting_the_same_id_with_different_content_is_a_conflict() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+
+        let mut different = accepted_effect(id);
+        different.tenant = TenantId::new("tenant-b").unwrap();
+        let err = store.accept(different).await.unwrap_err();
+
+        assert!(matches!(err, EffectStoreError::Conflict(_)));
+        // The original record must survive untouched.
+        store.mark_in_flight(id).await.unwrap();
     }
 
     #[tokio::test]
@@ -584,30 +794,53 @@ mod tests {
     async fn first_reservation_for_a_scope_is_fresh() {
         let store = InMemoryEffectStore::new();
         let outcome = store
-            .reserve(&scope("tenant-a", "uow-1:0"), 42)
+            .reserve(&scope("tenant-a", "uow-1:0"), EffectId::new(), fp("a"))
             .await
             .unwrap();
         assert_eq!(outcome, DedupOutcome::Fresh);
     }
 
+    // --- F-02 (PR2 round 4): dedup identity/status ---
+
     #[tokio::test]
-    async fn repeated_reservation_with_same_fingerprint_is_duplicate() {
+    async fn repeated_reservation_by_the_same_effect_before_success_is_owned_in_progress() {
+        // Crash-recovery re-attempt of the SAME effect, before it ever
+        // reached `Succeeded` — must proceed to execute, not be mistaken for
+        // a different submission's duplicate.
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, id, fp("a")).await.unwrap();
 
-        assert_eq!(outcome, DedupOutcome::Duplicate);
+        assert_eq!(outcome, DedupOutcome::OwnedInProgress);
+    }
+
+    #[tokio::test]
+    async fn repeated_reservation_by_a_different_effect_before_success_is_other_in_progress() {
+        // F-02 (PR2 round 5): a genuinely different submission racing the
+        // same scope while the original owner hasn't yet succeeded must be
+        // told the OTHER owner is merely in progress, not a flat
+        // `Duplicate` — the caller must not treat this as "already
+        // delivered" (that used to cause silent data loss: see
+        // `runner.rs`'s `OtherInProgress` handling).
+        let store = InMemoryEffectStore::new();
+        let s = scope("tenant-a", "uow-1:0");
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
+
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
+
+        assert_eq!(outcome, DedupOutcome::OtherInProgress);
     }
 
     #[tokio::test]
     async fn reservation_with_different_fingerprint_same_scope_is_conflict() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, 99).await.unwrap();
+        let outcome = store.reserve(&s, EffectId::new(), fp("b")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Conflict);
     }
@@ -616,24 +849,69 @@ mod tests {
     async fn released_scope_can_be_reserved_fresh_again() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         store.release(&s).await.unwrap();
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Fresh);
     }
 
     #[tokio::test]
-    async fn commit_success_keeps_scope_reserved() {
+    async fn commit_success_then_same_effect_reserve_is_owned_succeeded() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, 42).await.unwrap();
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
 
         store.commit_success(&s).await.unwrap();
-        let outcome = store.reserve(&s, 42).await.unwrap();
+        let outcome = store.reserve(&s, id, fp("a")).await.unwrap();
 
-        assert_eq!(outcome, DedupOutcome::Duplicate);
+        assert_eq!(outcome, DedupOutcome::OwnedSucceeded);
+    }
+
+    #[tokio::test]
+    async fn commit_success_then_different_effect_reserve_is_other_succeeded() {
+        // F-02 (PR2 round 5): a genuinely different future submission under
+        // the same scope, once the actual owner has resolved to Succeeded,
+        // must be told so precisely (`OtherSucceeded`) — safe to mark
+        // succeeded without re-executing, unlike `OtherInProgress`.
+        let store = InMemoryEffectStore::new();
+        let s = scope("tenant-a", "uow-1:0");
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
+        store.commit_success(&s).await.unwrap();
+
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
+
+        assert_eq!(outcome, DedupOutcome::OtherSucceeded);
+    }
+
+    // --- F-04: stable, portable EffectFingerprint ---
+
+    #[test]
+    fn fingerprint_is_stable_for_identical_inputs() {
+        let a = EffectFingerprint::compute(b"payload", "https://example.com");
+        let b = EffectFingerprint::compute(b"payload", "https://example.com");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_payloads_or_destinations() {
+        let base = EffectFingerprint::compute(b"payload", "https://example.com");
+        let different_payload = EffectFingerprint::compute(b"other", "https://example.com");
+        let different_destination = EffectFingerprint::compute(b"payload", "https://other.com");
+        assert_ne!(base, different_payload);
+        assert_ne!(base, different_destination);
+    }
+
+    #[test]
+    fn fingerprint_length_prefixing_avoids_concatenation_ambiguity() {
+        // Naive concatenation would make payload=b"ab"+destination="cd" collide
+        // with payload=b"a"+destination="bcd" (both concatenate to "abcd").
+        let a = EffectFingerprint::compute(b"ab", "cd");
+        let b = EffectFingerprint::compute(b"a", "bcd");
+        assert_ne!(a, b);
     }
 
     // --- F-02: claim_due / recover_in_flight ---
@@ -649,8 +927,24 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, id);
         assert_eq!(claimed[0].tenant, TenantId::new("tenant-a").unwrap());
-        assert_eq!(claimed[0].description, sample_description());
+        assert_eq!(*claimed[0].description, sample_description());
         assert_eq!(claimed[0].state, EffectState::Pending);
+    }
+
+    #[tokio::test]
+    async fn claim_due_hands_back_the_same_arc_allocation_not_a_deep_clone() {
+        // Fix 9 (PR2 review): `AcceptedEffect`/`StoredEffect` wrap
+        // `description` in `Arc` precisely so a round-trip through the store
+        // clones a pointer, never the payload bytes.
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        let effect = accepted_effect(id);
+        let original_ptr = Arc::as_ptr(&effect.description);
+        store.accept(effect).await.unwrap();
+
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+
+        assert_eq!(Arc::as_ptr(&claimed[0].description), original_ptr);
     }
 
     #[tokio::test]
