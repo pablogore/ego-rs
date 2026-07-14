@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ego_domain::DomainEvent;
+use ego_domain::{DomainEvent, ExternalEffectDescription, IdempotencyKey};
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::error::EntityError;
 use persistent_entity::persistent_entity::PersistentEntity;
@@ -150,5 +150,38 @@ impl PersistentEntity for UserEntity {
             new_state = self.apply_event(&new_state, event).await?;
         }
         Ok(new_state)
+    }
+
+    /// Describes one "send a welcome email" effect per committed
+    /// `UserRegistered` event (CORE-019 Phase 12.2 dogfood — the reference
+    /// app's own trivial post-registration effect).
+    ///
+    /// When no `EffectAcceptor` is wired, the committed events are preserved
+    /// but the command result is `CommandResult::EffectsAcceptanceFailed`;
+    /// the effect is never silently discarded.
+    ///
+    /// `main.rs` currently registers no effect executor, so registrations
+    /// commit normally while surfacing that post-commit acceptance warning.
+    /// This method exists to prove the real
+    /// `EntityRuntimeBuilder::with_effect_acceptor` wiring end-to-end (see
+    /// `tests/effects_e2e.rs`).
+    async fn external_effects(
+        &self,
+        _command: &Self::Command,
+        _new_state: &Self::State,
+        events: &[Self::Event],
+        _context: &CommandContext,
+    ) -> Vec<ExternalEffectDescription> {
+        events
+            .iter()
+            .filter_map(|event| {
+                Some(ExternalEffectDescription {
+                    idempotency_key: IdempotencyKey::new(format!("welcome-email:{}", event.user_id)).ok()?,
+                    effect_type: "user.welcome_email".to_string(),
+                    payload: event.payload().clone().to_string().into_bytes(),
+                    destination: format!("mailer://welcome/{}", event.user_id),
+                })
+            })
+            .collect()
     }
 }

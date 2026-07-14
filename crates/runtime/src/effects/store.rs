@@ -394,12 +394,6 @@ struct EffectRecord {
     terminal_reason: Option<TerminalReason>,
 }
 
-/// The slice-1 in-memory composite implementing **both** public ports.
-///
-/// Convenience only (design.md §3 caveat) — a future durable implementation
-/// is expected to satisfy each port independently. Loses all pending/
-/// in-flight effects on process crash (spec: "In-memory store loses
-/// undelivered effects on crash").
 /// One scope's dedup reservation: who owns it, what fingerprint it was
 /// reserved under, and whether that owner has reached `Succeeded` (F-02,
 /// PR2 round 4). `commit_success` flips `succeeded` in place rather than
@@ -415,6 +409,16 @@ struct ReservationRecord {
     succeeded: bool,
 }
 
+/// The slice-1 in-memory composite implementing **both** public ports.
+///
+/// Convenience only (design.md §3 caveat) — a future durable implementation
+/// is expected to satisfy each port independently. Holds no state across a
+/// process boundary: every accepted effect and dedup reservation lives only
+/// in this process's heap, so a crash or restart loses every `Pending`/
+/// `InFlight` effect outright (spec: "In-memory store loses undelivered
+/// effects on crash"). Closing that gap is exactly what a future durable
+/// `EffectStateStore`/`EffectDedupStore` implementation is for — this type
+/// is not it.
 #[derive(Default)]
 pub struct InMemoryEffectStore {
     states: Mutex<HashMap<EffectId, EffectRecord>>,
