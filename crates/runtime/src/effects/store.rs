@@ -276,12 +276,39 @@ impl fmt::Debug for EffectFingerprint {
     }
 }
 
-/// The result of a single-flight dedup reservation attempt.
+/// The result of a single-flight dedup reservation attempt (F-02/F-04, PR2
+/// round 4 redesign).
+///
+/// A reservation now records not just a fingerprint but *ownership*
+/// (`EffectId`) and *status* (has the owner reached `Succeeded`) — see
+/// [`EffectDedupStore::reserve`]'s new `effect_id` parameter. Before this
+/// redesign, `Fresh`/`Duplicate`/`Conflict` alone could not distinguish "a
+/// different submission already succeeded" from "this exact effect's own
+/// reservation is still in-flight, recovering from a crash" — both looked
+/// like a plain `Duplicate`, and the runner treated every `Duplicate` as
+/// "already satisfied elsewhere", silently skipping re-execution even when
+/// the effect had never actually been delivered (F-02: a silent-data-loss
+/// BLOCKER).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupOutcome {
     /// No prior reservation existed for this scope; this attempt now owns it.
     Fresh,
-    /// The same scope was already reserved with an identical fingerprint.
+    /// This exact `EffectId` already owns this scope's reservation, and it
+    /// has not yet been recorded [`Succeeded`](EffectState::Succeeded) —
+    /// legitimately the SAME effect recovering from a crash or retrying.
+    /// The caller MUST proceed to (re-)execute, never short-circuit to
+    /// success here.
+    OwnedInProgress,
+    /// This exact `EffectId` already owns this scope's reservation, and it
+    /// has already been recorded [`Succeeded`](EffectState::Succeeded) (via
+    /// [`EffectDedupStore::commit_success`]) — genuinely already delivered.
+    /// The ONLY outcome allowed to short-circuit to success without
+    /// re-executing.
+    OwnedSucceeded,
+    /// A *different* `EffectId` holds this scope's reservation — a real
+    /// duplicate submission from elsewhere. Treated as "already handled,
+    /// nothing to do" (this effect never owned the reservation it collided
+    /// with).
     Duplicate,
     /// The same scope was reserved with a *different* fingerprint — the
     /// caller MUST treat this as `InvalidEffect` (terminal), never silently
@@ -304,14 +331,21 @@ pub struct DedupScope {
 /// Public port owning single-flight idempotency reservations.
 #[async_trait]
 pub trait EffectDedupStore: Send + Sync {
-    /// Reserves `scope` for this attempt, keyed by a fingerprint of the
-    /// effect's payload/destination.
+    /// Reserves `scope` for `effect_id`'s attempt, keyed by a fingerprint of
+    /// the effect's payload/destination (F-02, PR2 round 4: `effect_id` is
+    /// new — reservations now track ownership, not just occupancy, so the
+    /// runner can tell its own in-progress/recovering attempt apart from a
+    /// genuinely different duplicate submission).
     async fn reserve(
         &self,
         scope: &DedupScope,
+        effect_id: EffectId,
         fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError>;
-    /// Confirms the reservation as permanently delivered.
+    /// Confirms the reservation as permanently delivered. Marks the scope's
+    /// owner `Succeeded` (F-02, PR2 round 4) rather than removing the
+    /// reservation outright — a later crash-recovery re-attempt by the SAME
+    /// effect must still find `OwnedSucceeded`, not `Fresh`.
     async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
     /// Releases the reservation after a retryable failure, so a subsequent
     /// retry of the *same* effect is not mistaken for a duplicate.
@@ -334,15 +368,25 @@ struct EffectRecord {
 /// is expected to satisfy each port independently. Loses all pending/
 /// in-flight effects on process crash (spec: "In-memory store loses
 /// undelivered effects on crash").
+/// One scope's dedup reservation: who owns it, what fingerprint it was
+/// reserved under, and whether that owner has reached `Succeeded` (F-02,
+/// PR2 round 4). `commit_success` flips `succeeded` in place rather than
+/// removing the entry — a later crash-recovery re-attempt by the same
+/// `effect_id` must still see `OwnedSucceeded`, and a genuinely different
+/// future submission under the same scope must still be told it's settled
+/// (`Duplicate`), not `Fresh`. Only `release` (a genuinely terminal, non-
+/// success outcome) clears the scope entirely.
+#[derive(Debug, Clone)]
+struct ReservationRecord {
+    effect_id: EffectId,
+    fingerprint: EffectFingerprint,
+    succeeded: bool,
+}
+
 #[derive(Default)]
 pub struct InMemoryEffectStore {
     states: Mutex<HashMap<EffectId, EffectRecord>>,
-    // ponytail: a single fingerprint map is enough for slice-1's semantics —
-    // `reserve` after `release` re-opens the scope, `commit_success` doesn't
-    // need a separate "committed" flag because nothing calls `release` after
-    // a successful delivery. Revisit only if a durable store needs to tell
-    // "reserved" and "committed" apart.
-    dedup: Mutex<HashMap<DedupScope, EffectFingerprint>>,
+    dedup: Mutex<HashMap<DedupScope, ReservationRecord>>,
 }
 
 impl InMemoryEffectStore {
@@ -482,23 +526,40 @@ impl EffectDedupStore for InMemoryEffectStore {
     async fn reserve(
         &self,
         scope: &DedupScope,
+        effect_id: EffectId,
         fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, EffectStoreError> {
         let mut dedup = self.dedup.lock().unwrap();
         match dedup.get(scope) {
             None => {
-                dedup.insert(scope.clone(), fingerprint);
+                dedup.insert(
+                    scope.clone(),
+                    ReservationRecord {
+                        effect_id,
+                        fingerprint,
+                        succeeded: false,
+                    },
+                );
                 Ok(DedupOutcome::Fresh)
             }
-            Some(existing) if *existing == fingerprint => Ok(DedupOutcome::Duplicate),
-            Some(_) => Ok(DedupOutcome::Conflict),
+            // Different fingerprint under the same scope is always a
+            // conflict, regardless of who owns the existing reservation.
+            Some(existing) if existing.fingerprint != fingerprint => Ok(DedupOutcome::Conflict),
+            Some(existing) if existing.effect_id == effect_id => {
+                if existing.succeeded {
+                    Ok(DedupOutcome::OwnedSucceeded)
+                } else {
+                    Ok(DedupOutcome::OwnedInProgress)
+                }
+            }
+            Some(_) => Ok(DedupOutcome::Duplicate),
         }
     }
 
-    async fn commit_success(&self, _scope: &DedupScope) -> Result<(), EffectStoreError> {
-        // The fingerprint entry recorded at `reserve` time already blocks
-        // re-reservation; no separate committed marker is needed (see the
-        // ponytail note on `InMemoryEffectStore::dedup`).
+    async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError> {
+        if let Some(record) = self.dedup.lock().unwrap().get_mut(scope) {
+            record.succeeded = true;
+        }
         Ok(())
     }
 
@@ -631,19 +692,38 @@ mod tests {
     async fn first_reservation_for_a_scope_is_fresh() {
         let store = InMemoryEffectStore::new();
         let outcome = store
-            .reserve(&scope("tenant-a", "uow-1:0"), fp("a"))
+            .reserve(&scope("tenant-a", "uow-1:0"), EffectId::new(), fp("a"))
             .await
             .unwrap();
         assert_eq!(outcome, DedupOutcome::Fresh);
     }
 
+    // --- F-02 (PR2 round 4): dedup identity/status ---
+
     #[tokio::test]
-    async fn repeated_reservation_with_same_fingerprint_is_duplicate() {
+    async fn repeated_reservation_by_the_same_effect_before_success_is_owned_in_progress() {
+        // Crash-recovery re-attempt of the SAME effect, before it ever
+        // reached `Succeeded` — must proceed to execute, not be mistaken for
+        // a different submission's duplicate.
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, fp("a")).await.unwrap();
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, fp("a")).await.unwrap();
+        let outcome = store.reserve(&s, id, fp("a")).await.unwrap();
+
+        assert_eq!(outcome, DedupOutcome::OwnedInProgress);
+    }
+
+    #[tokio::test]
+    async fn repeated_reservation_by_a_different_effect_before_success_is_duplicate() {
+        // A genuinely different submission racing the same scope while the
+        // original owner hasn't yet succeeded.
+        let store = InMemoryEffectStore::new();
+        let s = scope("tenant-a", "uow-1:0");
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
+
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Duplicate);
     }
@@ -652,9 +732,9 @@ mod tests {
     async fn reservation_with_different_fingerprint_same_scope_is_conflict() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, fp("a")).await.unwrap();
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
-        let outcome = store.reserve(&s, fp("b")).await.unwrap();
+        let outcome = store.reserve(&s, EffectId::new(), fp("b")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Conflict);
     }
@@ -663,22 +743,38 @@ mod tests {
     async fn released_scope_can_be_reserved_fresh_again() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, fp("a")).await.unwrap();
+        store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         store.release(&s).await.unwrap();
-        let outcome = store.reserve(&s, fp("a")).await.unwrap();
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Fresh);
     }
 
     #[tokio::test]
-    async fn commit_success_keeps_scope_reserved() {
+    async fn commit_success_then_same_effect_reserve_is_owned_succeeded() {
         let store = InMemoryEffectStore::new();
         let s = scope("tenant-a", "uow-1:0");
-        store.reserve(&s, fp("a")).await.unwrap();
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
 
         store.commit_success(&s).await.unwrap();
-        let outcome = store.reserve(&s, fp("a")).await.unwrap();
+        let outcome = store.reserve(&s, id, fp("a")).await.unwrap();
+
+        assert_eq!(outcome, DedupOutcome::OwnedSucceeded);
+    }
+
+    #[tokio::test]
+    async fn commit_success_then_different_effect_reserve_is_duplicate() {
+        // A genuinely different future submission under the same scope must
+        // eventually be told this scope is settled too, not `Fresh`.
+        let store = InMemoryEffectStore::new();
+        let s = scope("tenant-a", "uow-1:0");
+        let id = EffectId::new();
+        store.reserve(&s, id, fp("a")).await.unwrap();
+        store.commit_success(&s).await.unwrap();
+
+        let outcome = store.reserve(&s, EffectId::new(), fp("a")).await.unwrap();
 
         assert_eq!(outcome, DedupOutcome::Duplicate);
     }

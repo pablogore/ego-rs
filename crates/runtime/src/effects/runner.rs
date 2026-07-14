@@ -25,6 +25,26 @@
 //! `mark_retryable(next_at)` — the periodic reclaim loop (below) is the SOLE
 //! way a retryable/pending effect re-enters the queue. See design.md's AD-6
 //! revision for the full rationale.
+//!
+//! **PR2 round 4 review follow-up.** [`Self::reclaim_due`] now transitions a
+//! claimed effect to `InFlight` (`mark_in_flight`) *before* enqueueing it —
+//! see [`QueuedEffect`] — closing a gap where the same effect could be
+//! claimed and re-enqueued on multiple reclaim ticks before its first queue
+//! entry ever reached `drain_one` (F-01). Dedup (`EffectDedupStore::reserve`)
+//! is now consulted on *every* attempt, fresh or redispatched, keyed by
+//! ownership (`EffectId`) and status (has this owner already succeeded) —
+//! see [`Self::dispatch_in_flight`] — instead of being gated by
+//! `effect.attempt == 0`, which used to misclassify a crash-recovered
+//! re-attempt of an effect's own still-held reservation as `Duplicate` and
+//! silently mark it `Succeeded` without ever re-executing (F-02). With that
+//! gate gone, [`Self::requeue_without_charging_attempt`] no longer needs to
+//! inflate `attempt` to skip re-reservation, so a shutdown cancellation no
+//! longer silently eats into the effect's real retry budget (F-04). The
+//! main drain loop's backpressure-permit wait is now raced against shutdown
+//! too, so a hung executor holding every concurrency permit can no longer
+//! prevent shutdown from ever reaching [`Self::drain_tasks`]'s
+//! abort-on-deadline logic (F-03). Full rationale in design.md's "PR2 round
+//! 4 review follow-up" note.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -38,7 +58,7 @@ use crate::read_side::backpressure::Backpressure;
 
 use super::executor::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
 use super::policy::RetryPolicies;
-use super::queue::{EffectQueue, EffectQueueReceiver};
+use super::queue::{EffectQueue, EffectQueueReceiver, QueuedEffect};
 use super::registry::ExecutorRegistry;
 use super::store::{
     AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
@@ -266,31 +286,65 @@ impl DeliveryRunner {
         // to reclaim.
         reclaim_tick.reset();
 
-        loop {
+        'drain: loop {
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        break;
+                        break 'drain;
                     }
                 }
                 _ = reclaim_tick.tick() => {
                     self.reclaim_due().await;
                 }
                 maybe_effect = receiver.recv() => {
-                    match maybe_effect {
-                        Some(effect) => {
-                            let permit = backpressure
-                                .acquire()
-                                .await
-                                .expect("backpressure semaphore not closed");
-                            let this = self.clone();
+                    let Some(queued) = maybe_effect else { break 'drain; };
+
+                    // F-03 (PR2 round 4): race backpressure-permit
+                    // acquisition against shutdown too. Before this fix,
+                    // `backpressure.acquire()` was a bare `.await` outside
+                    // any `select!` watching shutdown — a hung/slow
+                    // executor holding every concurrency permit could block
+                    // this loop from ever reaching `drain_tasks`'s
+                    // abort-on-deadline logic at all.
+                    let permit = loop {
+                        tokio::select! {
+                            permit = backpressure.acquire() => {
+                                break permit.expect("backpressure semaphore not closed");
+                            }
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() {
+                                    // This one queued effect is dropped
+                                    // un-attempted rather than processed —
+                                    // it is still safely `Pending`/
+                                    // `RetryableFailed` (`Fresh`) or already
+                                    // `InFlight` (`Reclaimed`, recoverable
+                                    // via a future `recover_in_flight`) in
+                                    // the store, never silently lost.
+                                    break 'drain;
+                                }
+                                // Spurious wakeup: the shared `watch` value
+                                // didn't actually change to `true`. Keep
+                                // waiting for a permit.
+                            }
+                        }
+                    };
+
+                    let this = self.clone();
+                    match queued {
+                        QueuedEffect::Fresh(effect) => {
                             self.spawn_tracked(async move {
                                 this.drain_one(effect).await;
                                 drop(permit);
                             })
                             .await;
                         }
-                        None => break,
+                        QueuedEffect::Reclaimed(effect) => {
+                            self.spawn_tracked(async move {
+                                this.drain_reclaimed(effect).await;
+                                drop(permit);
+                            })
+                            .await;
+                        }
                     }
                 }
             }
@@ -306,6 +360,19 @@ impl DeliveryRunner {
     /// attempt. Runs on the same single-consumer loop as the main drain step
     /// (AD-8) — not a second consumer, just another branch of the same
     /// `select!`.
+    ///
+    /// **F-01 (PR2 round 4)**: `claim_due` itself doesn't transition state —
+    /// before this fix, an effect stayed `Pending`/`RetryableFailed` until
+    /// `drain_one` eventually called `mark_in_flight` on it (after being
+    /// dequeued), so the SAME effect could be claimed and re-enqueued on
+    /// every successive reclaim tick while the queue had backlog, inflating
+    /// it with duplicate entries for one effect. Fixed: claim, THEN
+    /// transition to `InFlight` right here, THEN enqueue — only effects that
+    /// actually transition are ever enqueued (as [`QueuedEffect::Reclaimed`],
+    /// so `drain_reclaimed` — not `drain_one` — handles them and doesn't
+    /// attempt its own `mark_in_flight`, which would immediately fail with
+    /// `InvalidTransition` since the effect is no longer `Pending`/
+    /// `RetryableFailed`).
     async fn reclaim_due(&self) {
         let due = match self
             .state
@@ -320,31 +387,45 @@ impl DeliveryRunner {
             Err(_) => return,
         };
         for stored in due {
+            if let Err(err) = self.state.mark_in_flight(stored.id).await {
+                // Expected, harmless race: something else (e.g. the direct
+                // accept-path queue entry for this same effect) already
+                // transitioned it first — not a bug, just skip it.
+                tracing::debug!(
+                    effect_id = %stored.id,
+                    error = %err,
+                    "reclaim: mark_in_flight failed, skipping (likely already claimed elsewhere)"
+                );
+                continue;
+            }
             let effect = AcceptedEffect {
                 id: stored.id,
                 tenant: stored.tenant,
                 attempt: stored.attempt,
                 description: stored.description,
             };
-            let _ = self.queue.send(effect).await;
+            if let Err(err) = self.queue.send_reclaimed(effect).await {
+                tracing::warn!(
+                    effect_id = %stored.id,
+                    error = %err,
+                    "reclaim: queue.send failed"
+                );
+            }
         }
     }
 
-    /// One full attempt of one accepted effect (design.md §5 data flow).
+    /// One full attempt of one freshly-accepted effect (design.md §5 data
+    /// flow) — needs `mark_in_flight` first. See [`Self::drain_reclaimed`]
+    /// for the entry point used by [`Self::reclaim_due`]-fed effects (F-01),
+    /// which are already `InFlight` by the time they get here.
     pub(crate) async fn drain_one(&self, effect: AcceptedEffect) {
-        let scope = DedupScope {
-            tenant: effect.tenant.clone(),
-            effect_type: effect.description.effect_type.clone(),
-            key: effect.description.idempotency_key.clone(),
-        };
-
         // `EffectStateStore::mark_terminal` only accepts `InFlight` or
         // `RetryableFailed` as its `from` state (store.rs, already shipped in
-        // PR1) — so every short-circuit below that needs to record a
-        // terminal outcome must go through `mark_in_flight` first. That
-        // means `mark_in_flight` runs ahead of the dedup `reserve` call here,
-        // one step earlier than design.md §5's informal sketch, to stay
-        // within the real, already-shipped state machine.
+        // PR1) — so every short-circuit in `dispatch_in_flight` that needs
+        // to record a terminal outcome must go through `mark_in_flight`
+        // first. That means `mark_in_flight` runs ahead of the dedup
+        // `reserve` call, one step earlier than design.md §5's informal
+        // sketch, to stay within the real, already-shipped state machine.
         //
         // Fix 4: bounded-retry this write instead of giving up on the very
         // first transient error — a `TemporarilyUnavailable` failure here
@@ -357,58 +438,91 @@ impl DeliveryRunner {
         if self.mark_in_flight_with_retry(effect.id).await.is_err() {
             return;
         }
+        self.dispatch_in_flight(effect).await;
+    }
 
-        // Dedup-reservation lifetime (PR2 round 2 redesign): a reservation,
-        // once made `Fresh`, is held for the effect's *entire* lifetime —
-        // released only on a genuinely terminal outcome
-        // (`abandon_and_release`) — never re-reserved on every attempt. Every
-        // redispatch path in this file (`retry_or_give_up`,
-        // `finish_success`'s exhausted-bookkeeping path,
-        // `requeue_without_charging_attempt`) always bumps `effect.attempt`
-        // to at least 1 before the effect can be reclaimed and re-enter here,
-        // so `effect.attempt == 0` reliably means "this is the fresh,
-        // never-before-dispatched submission" — the only case that must
-        // actually attempt a reservation. A retry of the *same* effect
-        // re-entering `drain_one` therefore skips `reserve` entirely instead
-        // of risking `DedupOutcome::Duplicate` against its own still-held
-        // reservation (see the HIGH-1 fix in the `Duplicate` arm below,
-        // which is only ever reachable now for a genuinely different fresh
-        // submission).
-        let is_fresh_submission = effect.attempt == 0;
-        if is_fresh_submission {
-            let fingerprint = EffectFingerprint::compute(
-                &effect.description.payload,
-                &effect.description.destination,
-            );
-            match self.reserve_with_retry(&scope, fingerprint).await {
-                Ok(DedupOutcome::Duplicate) => {
-                    // HIGH-1: a *different* submission colliding with an
-                    // already in-progress/completed effect under the same
-                    // idempotency scope is "already handled, nothing to do"
-                    // — a benign outcome, not a failure. `Succeeded` (not
-                    // `TerminalFailed` with an error-sounding reason) says
-                    // exactly that. This effect never owned the reservation
-                    // it collided with, so no release here.
-                    self.finish_already_satisfied(effect.id).await;
-                    return;
-                }
-                Ok(DedupOutcome::Conflict) => {
-                    self.abandon(
-                        effect.id,
-                        TerminalReason::InvalidEffect("dedup scope conflict".into()),
-                    )
-                    .await;
-                    return;
-                }
-                Ok(DedupOutcome::Fresh) => {}
-                Err(()) => {
-                    self.abandon(
-                        effect.id,
-                        TerminalReason::Other("dedup store unavailable".into()),
-                    )
-                    .await;
-                    return;
-                }
+    /// F-01 (PR2 round 4): entry point for an effect [`Self::reclaim_due`]
+    /// already claimed and transitioned to `InFlight` before ever enqueueing
+    /// it (see [`QueuedEffect::Reclaimed`]). Must NOT call `mark_in_flight`
+    /// again here — the effect is no longer `Pending`/`RetryableFailed`, so
+    /// that would immediately fail with `InvalidTransition`.
+    pub(crate) async fn drain_reclaimed(&self, effect: AcceptedEffect) {
+        self.dispatch_in_flight(effect).await;
+    }
+
+    /// The shared dedup-reserve → execute → bookkeeping pipeline for an
+    /// effect that is already `InFlight` — called by both [`Self::drain_one`]
+    /// (after its own `mark_in_flight`) and [`Self::drain_reclaimed`] (whose
+    /// caller already transitioned it).
+    async fn dispatch_in_flight(&self, effect: AcceptedEffect) {
+        let scope = DedupScope {
+            tenant: effect.tenant.clone(),
+            effect_type: effect.description.effect_type.clone(),
+            key: effect.description.idempotency_key.clone(),
+        };
+
+        // F-02/F-04 (PR2 round 4 unified redesign): dedup is now consulted
+        // on EVERY attempt — fresh or redispatched, including a post-crash
+        // re-attempt — never gated by `effect.attempt == 0`. That gate used
+        // to be the only way `drain_one` distinguished "never reserved yet"
+        // from "already reserved by myself", by relying on every redispatch
+        // path bumping `attempt` to skip re-reservation. But a crash mid the
+        // very first attempt (before `mark_in_flight`'s caller's executor
+        // call ever completed) leaves `attempt` at 0 even after
+        // `recover_in_flight` resets the effect back to `Pending` — so the
+        // re-attempt still had `attempt == 0`, called `reserve` again,
+        // collided with its OWN still-held `Fresh` reservation, got back a
+        // plain `Duplicate`, and the old code treated any `Duplicate` as
+        // "already satisfied elsewhere" — silently marking the effect
+        // `Succeeded` without ever actually re-executing it (F-02, a
+        // silent-data-loss BLOCKER).
+        //
+        // The dedup store now tracks ownership (`EffectId`) and status (has
+        // the owner already succeeded) — see `store.rs`'s `DedupOutcome` —
+        // so the runner can tell these cases apart directly instead of
+        // faking it via the attempt counter:
+        let fingerprint = EffectFingerprint::compute(
+            &effect.description.payload,
+            &effect.description.destination,
+        );
+        match self.reserve_with_retry(&scope, effect.id, fingerprint).await {
+            // No prior reservation, or this effect's own reservation that
+            // hasn't succeeded yet (a fresh submission, or a legitimate
+            // crash-recovery/retry re-attempt of itself) — proceed to
+            // (re-)execute.
+            Ok(DedupOutcome::Fresh) | Ok(DedupOutcome::OwnedInProgress) => {}
+            // HIGH-1 (unchanged) + F-02 (PR2 round 4): either a genuinely
+            // *different* submission already owns/completed this scope
+            // (`Duplicate`), or this effect's OWN reservation was already
+            // durably recorded `Succeeded` (`OwnedSucceeded` — e.g.
+            // `finish_success`'s bookkeeping-exhausted path already got as
+            // far as `dedup.commit_success` before `state.mark_succeeded`
+            // kept failing). Both are "already handled, nothing to do" —
+            // `OwnedSucceeded` is the ONLY case allowed to short-circuit to
+            // success without re-executing, precisely because the dedup
+            // store itself already durably recorded delivery for THIS
+            // effect. Neither ever needs a release: `Duplicate` never owned
+            // the reservation it collided with, and `OwnedSucceeded`'s
+            // reservation is meant to stay held.
+            Ok(DedupOutcome::Duplicate) | Ok(DedupOutcome::OwnedSucceeded) => {
+                self.finish_already_satisfied(effect.id).await;
+                return;
+            }
+            Ok(DedupOutcome::Conflict) => {
+                self.abandon(
+                    effect.id,
+                    TerminalReason::InvalidEffect("dedup scope conflict".into()),
+                )
+                .await;
+                return;
+            }
+            Err(()) => {
+                self.abandon(
+                    effect.id,
+                    TerminalReason::Other("dedup store unavailable".into()),
+                )
+                .await;
+                return;
             }
         }
 
@@ -480,12 +594,13 @@ impl DeliveryRunner {
     async fn reserve_with_retry(
         &self,
         scope: &DedupScope,
+        effect_id: EffectId,
         fingerprint: EffectFingerprint,
     ) -> Result<DedupOutcome, ()> {
         let policy = self.retry.policy_for(&scope.effect_type);
         let mut attempt: u32 = 0;
         loop {
-            match self.dedup.reserve(scope, fingerprint).await {
+            match self.dedup.reserve(scope, effect_id, fingerprint).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(EffectStoreError::TemporarilyUnavailable(_)) => {
                     if !policy.allows_retry(attempt) {
@@ -673,14 +788,21 @@ impl DeliveryRunner {
     /// reclaim cycle, immediately due. Bypasses the attempt-cap check
     /// entirely — unlike a real `RetryableFailure`, this event can never
     /// exhaust the effect's retry budget, since the effect did not fail on
-    /// its own merits. The `attempt` counter is still bumped so a redispatch
-    /// via the reclaim loop correctly skips re-reserving dedup (`drain_one`'s
-    /// `is_fresh_submission` check), exactly like every other redispatch
-    /// path.
+    /// its own merits.
+    ///
+    /// **F-04 (PR2 round 4)**: this used to bump `effect.attempt` purely so
+    /// a redispatch would skip re-reserving dedup under the (now-removed)
+    /// `effect.attempt == 0` gate — but `RetryPolicy::allows_retry`/
+    /// `policy_for` consult that very same counter for the retry cap, so a
+    /// cancellation silently ate into the effect's real retry budget despite
+    /// being documented as never able to exhaust it. Dedup reservation is
+    /// now identity-based (F-02/F-04 above), not attempt-gated, so this no
+    /// longer needs to touch `attempt` at all — the stored attempt count is
+    /// left exactly as it was before the cancellation, provably free with
+    /// respect to the retry cap.
     async fn requeue_without_charging_attempt(&self, effect: AcceptedEffect) {
-        let next_attempt = effect.attempt + 1;
         if self
-            .mark_retryable_with_retry(effect.id, next_attempt, Timestamp::now())
+            .mark_retryable_with_retry(effect.id, effect.attempt, Timestamp::now())
             .await
             .is_err()
         {
@@ -1159,6 +1281,7 @@ mod tests {
         async fn reserve(
             &self,
             scope: &DedupScope,
+            effect_id: EffectId,
             fingerprint: EffectFingerprint,
         ) -> Result<DedupOutcome, EffectStoreError> {
             if self.failures_left.load(Ordering::SeqCst) > 0 {
@@ -1167,7 +1290,7 @@ mod tests {
                     "dedup store flaky".into(),
                 ));
             }
-            self.inner.reserve(scope, fingerprint).await
+            self.inner.reserve(scope, effect_id, fingerprint).await
         }
         async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError> {
             self.inner.commit_success(scope).await
@@ -1186,6 +1309,7 @@ mod tests {
         async fn reserve(
             &self,
             _scope: &DedupScope,
+            _effect_id: EffectId,
             _fingerprint: EffectFingerprint,
         ) -> Result<DedupOutcome, EffectStoreError> {
             Err(EffectStoreError::Backend("dedup store corrupted".into()))
@@ -1373,6 +1497,7 @@ mod tests {
         store
             .reserve(
                 &scope,
+                EffectId::new(),
                 EffectFingerprint::compute(b"different-payload", "https://different.example.com"),
             )
             .await
@@ -1523,10 +1648,14 @@ mod tests {
         assert_eq!(due[0].state, EffectState::RetryableFailed);
         assert_eq!(due[0].attempt, 1);
 
-        // F-03 dedup semantics: the effect already succeeded at the
-        // destination, so its own reservation (made `Fresh` on its first
-        // attempt) must still be held — proven directly via `reserve`
-        // reporting `Duplicate` for the same scope/fingerprint.
+        // F-03 dedup semantics (unchanged): the effect already succeeded at
+        // the destination, so its own reservation (made `Fresh` on its first
+        // attempt) must still be held. F-02/F-04 (PR2 round 4): the dedup
+        // store's own `commit_success` already durably recorded success on
+        // the very first `finish_success` retry iteration (only the state
+        // store's `mark_succeeded` kept failing) — `reserve` for this SAME
+        // effect id now reports the more precise `OwnedSucceeded`, not the
+        // old ambiguous `Duplicate`.
         let scope = DedupScope {
             tenant: TenantId::new("tenant-a").unwrap(),
             effect_type: "invoice.created".to_string(),
@@ -1534,15 +1663,18 @@ mod tests {
         };
         let fp = EffectFingerprint::compute(&[1, 2, 3], "https://example.com");
         assert_eq!(
-            dedup.reserve(&scope, fp).await.unwrap(),
-            DedupOutcome::Duplicate,
-            "the effect's own reservation must still be held, not released for a non-terminal outcome"
+            dedup.reserve(&scope, id, fp).await.unwrap(),
+            DedupOutcome::OwnedSucceeded,
+            "the effect's own reservation must still be held and known-succeeded, not released"
         );
 
-        // Redispatching this specific effect through `drain_one` must
-        // genuinely re-attempt (attempt > 0 skips `reserve` entirely, per
-        // `drain_one`'s `is_fresh_submission` check) rather than bounce off
-        // its own held reservation as "deduplicated".
+        // F-02/F-04 (PR2 round 4): redispatching this specific effect must
+        // now short-circuit to success WITHOUT re-executing — the dedup
+        // store already knows this exact effect delivered successfully, so
+        // re-running the executor (the old, coarser AD-7 tradeoff that
+        // treated every reclaim-eligible-after-success effect the same,
+        // whether or not dedup had actually confirmed success) is no longer
+        // necessary.
         let redispatched = AcceptedEffect {
             id: due[0].id,
             tenant: due[0].tenant.clone(),
@@ -1553,8 +1685,8 @@ mod tests {
 
         assert_eq!(
             executor.call_count(),
-            2,
-            "the redispatch must genuinely re-execute, not bounce off its own dedup reservation"
+            1,
+            "a known-already-succeeded dedup reservation must short-circuit, never re-execute"
         );
     }
 
@@ -1785,7 +1917,10 @@ mod tests {
         // Dedup reservation released, like every other genuinely terminal
         // outcome — proven by a fresh reservation succeeding for the same
         // scope.
-        assert_eq!(dedup.reserve(&scope, fp).await.unwrap(), DedupOutcome::Fresh);
+        assert_eq!(
+            dedup.reserve(&scope, EffectId::new(), fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
     }
 
     // --- Fix 4: bounded retry for `mark_in_flight`, plus the periodic
@@ -2149,8 +2284,11 @@ mod tests {
              silently discarded"
         );
         assert_eq!(due[0].state, EffectState::RetryableFailed);
+        // F-04 (PR2 round 4): a cancellation no longer bumps `attempt` at
+        // all — it stays exactly as it was before the cancellation (0
+        // here), provably untouched by the zero-retry attempt cap.
         assert_eq!(
-            due[0].attempt, 1,
+            due[0].attempt, 0,
             "cancellation must not be charged against the zero-retry attempt cap"
         );
     }
@@ -2328,17 +2466,17 @@ mod tests {
             RetryPolicy::default(),
         );
 
-        // Pre-reserve the scope with the SAME fingerprint this fresh
-        // effect's own `drain_one` call will compute — simulating a
-        // different, already in-progress/completed submission under the
-        // same idempotency scope.
+        // Pre-reserve the scope, owned by a DIFFERENT effect id, with the
+        // SAME fingerprint this fresh effect's own `drain_one` call will
+        // compute — simulating a different, already in-progress/completed
+        // submission under the same idempotency scope.
         let scope = DedupScope {
             tenant: TenantId::new("tenant-a").unwrap(),
             effect_type: "invoice.created".to_string(),
             key: IdempotencyKey::new("uow-1:0").unwrap(),
         };
         let fp = EffectFingerprint::compute(&[1, 2, 3], "https://example.com");
-        store.reserve(&scope, fp).await.unwrap();
+        store.reserve(&scope, EffectId::new(), fp).await.unwrap();
 
         let id = EffectId::new();
         let effect = accepted(id, "invoice.created", "uow-1:0");
@@ -2428,7 +2566,11 @@ mod tests {
         let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
         assert_eq!(due.len(), 1, "must be reclaim-eligible despite a zero-retry policy");
         assert_eq!(due[0].state, EffectState::RetryableFailed);
-        assert_eq!(due[0].attempt, 1);
+        // F-04 (PR2 round 4): no longer bumped — dedup reservation is
+        // identity-based now, not attempt-gated, so this counter is left
+        // exactly as it was before the cancellation, provably free of any
+        // retry-cap cost.
+        assert_eq!(due[0].attempt, 0);
     }
 
     // --- HIGH-4: backoff/timestamp arithmetic saturates, never silently
@@ -2445,5 +2587,273 @@ mod tests {
             "an unrepresentable duration must saturate to a large fallback, never `now` \
              (which a `zero()` fallback would silently produce, causing a retry storm)"
         );
+    }
+
+    // --- PR2 round 4: F-01 through F-04 (this round's new findings) -------
+
+    #[tokio::test]
+    async fn crash_recovered_first_attempt_actually_re_executes_not_falsely_marked_succeeded() {
+        // F-02 (BLOCKER, silent data loss): before this fix, `reserve` was
+        // only ever called when `effect.attempt == 0`. A crash mid the very
+        // first attempt (after `mark_in_flight`/dedup `reserve`, before the
+        // executor call ever completed) left `recover_in_flight` resetting
+        // the effect back to `Pending` with `attempt` still 0. The
+        // re-attempt, still `attempt == 0`, called `reserve` again, collided
+        // with its OWN still-held `Fresh` reservation, got back a plain
+        // `Duplicate`, and the old code treated any `Duplicate` as "already
+        // satisfied elsewhere" — calling `mark_succeeded` WITHOUT ever
+        // actually re-executing. This proves the recovered re-attempt now
+        // genuinely re-executes instead.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let executor = Arc::new(ScriptedExecutor::new(vec![]));
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let (runner, _queue) = runner_with(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            registry,
+            RetryPolicy::default(),
+        );
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect.clone()).await.unwrap();
+
+        // Simulate the first attempt starting to dispatch — `mark_in_flight`
+        // and the dedup `reserve` it would make — then the process crashing
+        // before the executor call ever completed.
+        store.mark_in_flight(id).await.unwrap();
+        let scope = DedupScope {
+            tenant: effect.tenant.clone(),
+            effect_type: effect.description.effect_type.clone(),
+            key: effect.description.idempotency_key.clone(),
+        };
+        let fp = EffectFingerprint::compute(
+            &effect.description.payload,
+            &effect.description.destination,
+        );
+        assert_eq!(
+            store.reserve(&scope, id, fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
+        let recovered = store.recover_in_flight(Timestamp::now()).await.unwrap();
+        assert_eq!(recovered, 1);
+
+        // Re-attempt: `attempt` is still 0 (`recover_in_flight` never
+        // touches it) — the exact condition the old `attempt == 0` gate
+        // misclassified.
+        runner.drain_one(effect).await;
+
+        assert_eq!(
+            executor.call_count(),
+            1,
+            "the recovered attempt must genuinely re-execute, not bounce off its own \
+             still-held reservation"
+        );
+        let err = store.mark_in_flight(id).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EffectStoreError::InvalidTransition {
+                    from: EffectState::Succeeded,
+                    ..
+                }
+            ),
+            "must reach Succeeded only via a real execution, never a false short-circuit"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_shutdown_cancellations_then_a_genuine_failure_still_has_the_full_retry_budget() {
+        // F-04 (BLOCKER, retry budget corruption): `requeue_without_
+        // charging_attempt` used to bump `effect.attempt` purely to skip
+        // re-reserving dedup under the (now-removed) `attempt == 0` gate —
+        // but that same counter is what `RetryPolicy::allows_retry` checks
+        // against the retry cap, so 2 shutdown cancellations under
+        // `max_attempts: 1` used to silently leave zero real retries, not
+        // the documented "cancellation can never exhaust the retry budget".
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("genuine failure 1".into()),
+            AttemptOutcome::RetryableFailure("genuine failure 2".into()),
+        ]));
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let one_retry = RetryPolicy {
+            max_attempts: 1,
+            base_backoff: StdDuration::ZERO,
+            max_backoff: StdDuration::ZERO,
+        };
+        let (runner, _queue) = runner_with(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            registry,
+            one_retry,
+        );
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect.clone()).await.unwrap();
+
+        // Two shutdown-triggered cancellations in a row — neither is a real
+        // delivery failure, and neither may cost any retry budget.
+        store.mark_in_flight(id).await.unwrap();
+        runner.requeue_without_charging_attempt(effect.clone()).await;
+        let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert_eq!(due[0].attempt, 0, "first cancellation must not bump attempt");
+
+        store.mark_in_flight(id).await.unwrap();
+        runner.requeue_without_charging_attempt(effect.clone()).await;
+        let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert_eq!(due[0].attempt, 0, "second cancellation must not bump attempt either");
+
+        // Now the full `max_attempts: 1` real budget must still be
+        // available: the first genuine failure is retried once, the second
+        // genuine failure exhausts the (still-full) cap.
+        runner.drain_one(effect).await;
+        let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert_eq!(due[0].state, EffectState::RetryableFailed);
+        assert_eq!(due[0].attempt, 1, "the first genuine failure consumes the one real retry");
+
+        let redispatched = AcceptedEffect {
+            id: due[0].id,
+            tenant: due[0].tenant.clone(),
+            attempt: due[0].attempt,
+            description: due[0].description.clone(),
+        };
+        runner.drain_one(redispatched).await;
+
+        let err = store.mark_in_flight(id).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EffectStoreError::InvalidTransition {
+                    from: EffectState::TerminalFailed,
+                    ..
+                }
+            ),
+            "the second genuine failure must exhaust the full (uncorrupted) one-retry budget"
+        );
+        assert_eq!(executor.call_count(), 2, "both genuine attempts must actually run");
+    }
+
+    #[tokio::test]
+    async fn reclaim_loop_does_not_enqueue_the_same_effect_twice_across_multiple_ticks() {
+        // F-01 (BLOCKER): `claim_due` doesn't itself transition state.
+        // Before this fix, an effect stayed `Pending`/`RetryableFailed`
+        // until something later (`drain_one`) called `mark_in_flight` on
+        // it, so the SAME effect could be claimed and re-enqueued on every
+        // successive reclaim tick while its first queue entry was still
+        // waiting to be dequeued. Fixed: `reclaim_due` claims THEN
+        // transitions to `InFlight` THEN enqueues — a second/third tick
+        // over the same still-`InFlight` effect now sees `mark_in_flight`
+        // fail and skips it.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let registry = ExecutorRegistry::new();
+        let (queue, mut receiver) = EffectQueue::bounded(8);
+        let runner = Arc::new(DeliveryRunner::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            Arc::new(registry),
+            RetryPolicy::default(),
+            queue,
+        ));
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect).await.unwrap();
+
+        // Several reclaim ticks fire before anything ever dequeues the
+        // effect (simulating backlog/saturated concurrency).
+        runner.reclaim_due().await;
+        runner.reclaim_due().await;
+        runner.reclaim_due().await;
+
+        let first = receiver.recv().await.expect("one entry must be queued");
+        assert!(
+            matches!(first, QueuedEffect::Reclaimed(e) if e.id == id),
+            "the single queued entry must be the reclaimed effect"
+        );
+
+        // No second entry ever gets enqueued for this same effect.
+        let second = tokio::time::timeout(StdDuration::from_millis(50), receiver.recv()).await;
+        assert!(
+            second.is_err(),
+            "no second queue entry must exist for the same effect across multiple reclaim ticks"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaches_drain_deadline_despite_a_hung_backpressure_permit_wait() {
+        // F-03 (BLOCKER): before this fix, acquiring a backpressure permit
+        // for a newly-received effect was a bare `.await` outside any
+        // `select!` watching shutdown. With every concurrency slot held by
+        // a hung executor, a second queued effect would block the main
+        // loop on `backpressure.acquire()` forever — never reaching
+        // `drain_tasks`'s abort-on-deadline logic at all.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let executor = Arc::new(HangingExecutor {
+            started: started.clone(),
+        });
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let (queue, receiver) = EffectQueue::bounded(4);
+        let runner = Arc::new(DeliveryRunner::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            Arc::new(registry),
+            RetryPolicy::default(),
+            queue.clone(),
+        ));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        // Exactly one concurrency permit — the first (hanging) effect
+        // consumes it entirely.
+        let first_id = EffectId::new();
+        let first_effect = accepted(first_id, "invoice.created", "uow-1:0");
+        store.accept(first_effect.clone()).await.unwrap();
+        queue.send(first_effect).await.unwrap();
+
+        // A second effect, queued behind the first — the pre-fix code would
+        // dequeue it and then block forever trying to acquire the
+        // already-exhausted permit.
+        let second_id = EffectId::new();
+        let second_effect = accepted(second_id, "invoice.created", "uow-2:0");
+        store.accept(second_effect.clone()).await.unwrap();
+        queue.send(second_effect).await.unwrap();
+
+        let drain_deadline = StdDuration::from_millis(30);
+        let loop_handle = tokio::spawn(runner.clone().run_inner(
+            receiver,
+            1, // exactly one concurrency permit
+            shutdown_rx,
+            RECLAIM_INTERVAL,
+            drain_deadline,
+        ));
+
+        tokio::time::timeout(StdDuration::from_secs(1), started.notified())
+            .await
+            .expect("the hanging executor starts running within timeout");
+
+        // Give the loop a moment to dequeue the second effect and get stuck
+        // trying to acquire the already-exhausted permit.
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+
+        shutdown_tx.send(true).unwrap();
+
+        tokio::time::timeout(StdDuration::from_secs(1), loop_handle)
+            .await
+            .expect(
+                "run_inner must return once shutdown is signalled, even with a second effect \
+                 stuck waiting on a saturated backpressure permit",
+            )
+            .expect("task did not panic");
     }
 }

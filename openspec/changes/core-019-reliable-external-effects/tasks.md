@@ -196,6 +196,28 @@ Chain strategy: stacked-to-main
 > and `timestamp_after`'s duration-conversion fallback saturates instead of
 > degrading to zero. Full rationale in design.md's "PR2 round 2 review
 > follow-up" note.
+>
+> **PR2 round 4 review follow-up.** F-02 and F-04 shared one root cause:
+> `effect.attempt == 0` was overloaded as both "attempts charged against the
+> retry cap" and "has dedup already been reserved" — fixed together as one
+> dedup-identity redesign, not two patches. `DedupOutcome` (`store.rs`) grows
+> `OwnedInProgress`/`OwnedSucceeded` (reservation now records the owning
+> `EffectId` and a `succeeded` flag, not just a fingerprint), so `drain_one`'s
+> `effect.attempt == 0` gate is gone — dedup is checked unconditionally every
+> attempt, fixing a silent-data-loss BLOCKER where a crash mid the first
+> attempt got falsely marked `Succeeded` without ever re-executing (F-02).
+> With that gate gone, `requeue_without_charging_attempt` no longer needs to
+> bump `attempt` to skip re-reservation, so a shutdown cancellation no longer
+> silently eats into the real retry budget (F-04). Separately: `reclaim_due`
+> now calls `mark_in_flight` immediately after `claim_due`, before ever
+> enqueueing — via a new `QueuedEffect::{Fresh,Reclaimed}` distinction
+> (`queue.rs`) so `drain_one`/`drain_reclaimed` don't double-transition —
+> fixing `claim_due`'s same-effect double-enqueue race across reclaim ticks
+> (F-01); and the main loop's backpressure-permit wait now races
+> `shutdown.changed()` too, so a hung executor holding every concurrency
+> permit can no longer block shutdown from ever reaching the drain-deadline
+> abort logic (F-03). Full rationale in design.md's "PR2 round 4 review
+> follow-up" note.
 
 ## Phase 7: ImmediateDeliveryPolicy
 
