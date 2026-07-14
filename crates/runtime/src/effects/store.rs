@@ -440,11 +440,24 @@ impl InMemoryEffectStore {
 impl EffectStateStore for InMemoryEffectStore {
     async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
         let mut states = self.states.lock().unwrap();
-        if states.contains_key(&effect.id) {
-            return Err(EffectStoreError::Conflict(format!(
-                "effect {} already accepted",
-                effect.id
-            )));
+        if let Some(existing) = states.get(&effect.id) {
+            // `accept` must be idempotent for a replayed acceptance (AD-9: a
+            // lost response to an otherwise-successful `accept` is retried
+            // under `TemporarilyUnavailable`) — only a genuine identity
+            // collision with *different* content is a real conflict. `attempt`
+            // is deliberately excluded from this comparison: `accept` is only
+            // ever called at the original acceptance (`attempt == 0`); the
+            // record's `attempt` field advances afterward via `mark_retryable`
+            // and reflects delivery progress, not acceptance identity.
+            return if existing.tenant == effect.tenant && existing.description == effect.description
+            {
+                Ok(())
+            } else {
+                Err(EffectStoreError::Conflict(format!(
+                    "effect {} already accepted with different tenant/description",
+                    effect.id
+                )))
+            };
         }
         states.insert(
             effect.id,
@@ -662,17 +675,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepting_an_already_accepted_id_is_rejected_not_silently_overwritten() {
+    async fn accepting_the_same_id_and_content_again_is_an_idempotent_no_op() {
+        // A lost `accept` response (e.g. `TemporarilyUnavailable` under AD-9's
+        // bounded retry) means the acceptor may legitimately replay the exact
+        // same `AcceptedEffect` after it already landed — this must succeed,
+        // not be mistaken for a data conflict, or a safe retry becomes a
+        // false post-commit acceptance failure.
         let store = InMemoryEffectStore::new();
         let id = EffectId::new();
         store.accept(accepted_effect(id)).await.unwrap();
         store.mark_in_flight(id).await.unwrap();
 
-        let err = store.accept(accepted_effect(id)).await.unwrap_err();
+        store.accept(accepted_effect(id)).await.unwrap();
 
-        assert!(matches!(err, EffectStoreError::Conflict(_)));
-        // The original record must survive untouched — still `InFlight`, not
-        // silently reset back to `Pending` by the rejected second `accept`.
+        // The replay must not disturb the record's current lifecycle state —
+        // still `InFlight`, not silently reset back to `Pending`.
         let err = store.mark_in_flight(id).await.unwrap_err();
         assert!(matches!(
             err,
@@ -681,6 +698,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn accepting_the_same_id_with_different_content_is_a_conflict() {
+        let store = InMemoryEffectStore::new();
+        let id = EffectId::new();
+        store.accept(accepted_effect(id)).await.unwrap();
+
+        let mut different = accepted_effect(id);
+        different.tenant = TenantId::new("tenant-b").unwrap();
+        let err = store.accept(different).await.unwrap_err();
+
+        assert!(matches!(err, EffectStoreError::Conflict(_)));
+        // The original record must survive untouched.
+        store.mark_in_flight(id).await.unwrap();
     }
 
     #[tokio::test]
