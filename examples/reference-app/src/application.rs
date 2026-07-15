@@ -184,7 +184,24 @@ impl RegisterUserImpl {
 
 #[async_trait]
 impl RegisterUser for RegisterUserImpl {
-    async fn register(&self, _ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError> {
+    async fn register(&self, ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError> {
+        // Security: `#[tenant_scoped]` only proves `ctx` resolves to SOME
+        // tenant — it never compares that against `input.tenant_id` (a
+        // client-controlled request-body field). Without this check, an
+        // authenticated caller from tenant A could submit `tenant_id:
+        // "tenant-B"` and write into tenant B. Reject the request outright
+        // rather than trusting `input.tenant_id` as the write-tenant.
+        if let Some(resolved) = ctx.canonical_tenant().and_then(|c| c.tenant_id()) {
+            if resolved.as_str() != input.tenant_id {
+                return Err(RegisterUserError::Security(SecurityError::AuthorizationDenied {
+                    reason: format!(
+                        "request tenant_id {:?} does not match the authenticated tenant",
+                        input.tenant_id
+                    ),
+                }));
+            }
+        }
+
         // AD-5: ensure the org FIRST (idempotent) — a User must never
         // reference a missing org.
         let org_ref = self.org_runtime.entity_ref::<TenantOrgCommand, TenantOrgState>(
@@ -201,8 +218,11 @@ impl RegisterUser for RegisterUserImpl {
                 CommandContext::new("tenant_organization".to_string()),
             )
             .await?;
-        if let CommandResult::Events { events, .. } = &org_result {
-            self.publish_read_side(&input.tenant_id, events);
+        match &org_result {
+            CommandResult::Events { events, .. } | CommandResult::EffectsAcceptanceFailed { events, .. } => {
+                self.publish_read_side(&input.tenant_id, events);
+            }
+            CommandResult::NoEvents { .. } => {}
         }
 
         // Then register the User. On failure here, the org write above is
@@ -226,8 +246,21 @@ impl RegisterUser for RegisterUserImpl {
 
         match user_result {
             Ok(result) => {
-                if let CommandResult::Events { events, .. } = &result {
-                    self.publish_read_side(&input.tenant_id, events);
+                // AD-9: `EffectsAcceptanceFailed` is a real, committed write
+                // with a post-commit warning attached, never a command
+                // failure — the read-side projection must still learn about
+                // the committed events exactly as it would for `Events`
+                // (`UserEntity::external_effects` describes a
+                // "welcome email" effect on every registration; this
+                // reference app never wires an `EffectAcceptor`, so that
+                // description always fails closed here — see
+                // `domain/user.rs`).
+                match &result {
+                    CommandResult::Events { events, .. }
+                    | CommandResult::EffectsAcceptanceFailed { events, .. } => {
+                        self.publish_read_side(&input.tenant_id, events);
+                    }
+                    CommandResult::NoEvents { .. } => {}
                 }
                 self.record("register_user.success", &input.user_id, "completed");
                 Ok(RegisterOutput {

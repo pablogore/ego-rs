@@ -620,6 +620,7 @@ dependencies = [
  "async-trait",
  "console-exporter",
  "ego-domain",
+ "ego-runtime",
  "ego-security-sdk",
  "ego-service-sdk",
  "ego-service-sdk-macros",

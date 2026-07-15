@@ -848,7 +848,133 @@ Chain strategy: stacked-to-main
 
 ## Phase 12: Test Doubles, E2E, Docs
 
-- [ ] 12.1 Add recording `ExternalEffectExecutor` test double (`crates/testkit`)
-- [ ] 12.2 Wire one trivial executor + handler in `examples/reference-app`; E2E describe→deliver→retry→dedup
-- [ ] 12.3 E2E: kill-process test asserts in-memory store loses undelivered effects on crash (explicit, never hidden)
-- [ ] 12.4 Update `effects/` module docs; note `EventPublisher` migration deferred to roadmap
+- [x] 12.1 Add recording `ExternalEffectExecutor` test double (`crates/testkit`)
+- [x] 12.2 Wire one trivial executor + handler in `examples/reference-app`; E2E describe→deliver→retry→dedup
+- [x] 12.3 ~~E2E: kill-process test asserts in-memory store loses undelivered effects on crash~~ — **reverted post-review (F-02)**: the test was tautological (see notes below); the crash-loss limitation is now documented via `InMemoryEffectStore`'s own doc comment instead
+- [x] 12.4 Update `effects/` module docs; note `EventPublisher` migration deferred to roadmap
+
+> **Implementation notes (this pass, PR5 — closes the PR3/PR4-documented gap)**:
+> - **12.1**: `ego-testkit`'s `RecordingExecutor` (`crates/testkit/src/effects.rs`,
+>   new) implements the real `ego_runtime::effects::ExternalEffectExecutor`
+>   trait (same-contract principle — no look-alike). Records every attempt's
+>   `effect_type`/`destination`/`payload`/1-based `attempt` number.
+>   `RecordingExecutor::with_outcomes(Vec<AttemptOutcome>)` scripts a sequence
+>   (e.g. one `RetryableFailure` then `Success`) indexed by attempt number,
+>   repeating the last entry once exhausted so a runner that attempts more
+>   times than scripted never panics; `RecordingExecutor::always_succeeds()`
+>   is the one-line happy-path constructor. Added `ego-runtime` as a new
+>   `ego-testkit` dependency.
+> - **12.2 (the critical gap-closing change)**: PR4 documented that
+>   `RuntimeEffectAcceptor` was constructible/retrievable via
+>   `ego-service-sdk`'s `Runtime::effect_acceptor()` but never threaded into
+>   `persistent-entity`'s `EntityRuntimeBuilder`/`EntityRuntime`/
+>   `TokioEntityRef::new`, so a real spawned `EntityActor` always got
+>   `effect_acceptor: None`. Closed additively, no breaking signature changes
+>   to any existing public caller:
+>   - `EntityRuntimeBuilder::with_effect_acceptor(Arc<dyn EffectAcceptor>) -> Self`
+>     (new builder method, `builder.rs`) stores the acceptor and applies it to
+>     the built `EntityRuntime` inside `build()`.
+>   - `EntityRuntime::with_effect_acceptor(Arc<dyn EffectAcceptor>) -> Self`
+>     (new builder-style method, `runtime.rs`) — chosen over adding an 8th
+>     positional parameter to the already-public `EntityRuntime::new` (which
+>     has exactly one caller, `EntityRuntimeBuilder::build`) to keep the
+>     change purely additive for any other potential caller.
+>   - `EntityRuntime::entity_ref` now passes `self.effect_acceptor.clone()`
+>     as a new trailing parameter to `TokioEntityRef::new`, which threads it
+>     straight onto the spawned `EntityActor { effect_acceptor, .. }` instead
+>     of the previous hardcoded `None`. `TokioEntityRef::new`'s 2 existing
+>     test call sites (`entity_ref_tokio.rs`) updated with a trailing `None`
+>     — no other caller exists in the workspace (verified by grep).
+>   - RED proof: `crates/persistent-entity/tests/real_actor_path_tests.rs`
+>     gained `builder_wired_effect_acceptor_reaches_a_real_spawned_actor`
+>     (asserts a `RecordingAcceptor` wired via `with_effect_acceptor` is
+>     actually called once by a real `tokio::spawn`-ed actor reached through
+>     `EntityRuntimeBuilder`/`entity_ref()`/`TokioEntityRef::new` — not the
+>     hand-built `EntityActor` struct-literal `actor.rs`'s own unit tests use)
+>     plus a triangulation companion,
+>     `without_with_effect_acceptor_described_effects_fail_closed_not_silently_dropped`,
+>     proving the unwired default is unchanged (AD-9: described effects with
+>     no acceptor configured commit normally but surface a real
+>     `CommandResult::EffectsAcceptanceFailed` — fail-closed, never a silent
+>     drop).
+>   - `examples/reference-app/src/domain/user.rs`'s `UserEntity` gained a real
+>     `external_effects` override — one `user.welcome_email` effect per
+>     committed `UserRegistered` event, idempotency key derived only from
+>     `user_id` (`welcome-email:{user_id}`). `main.rs`'s production
+>     `build_runtime` registers no executor today, so registrations commit
+>     normally while surfacing `EffectsAcceptanceFailed` (AD-2's zero-cost
+>     default — no delivery infrastructure is constructed — is unaffected) —
+>     exists so the E2E test below exercises a real domain handler, not a
+>     synthetic test-only one.
+>   - E2E proof: `examples/reference-app/tests/effects_e2e.rs`
+>     (`describe_deliver_retry_then_dedup_through_the_real_actor_spawn_path`)
+>     builds a real `ego-service-sdk` `RuntimeBuilder` with
+>     `register_effect_executor(["user.welcome_email"], recording_executor)`,
+>     clones `Runtime::effect_acceptor()`, wires it into
+>     `EntityRuntimeBuilder::with_effect_acceptor`, spawns a real `UserEntity`
+>     actor via `entity_ref()`, sends a real `Register` command, and asserts:
+>     **describe** (the handler's `external_effects` produces the effect),
+>     **deliver+retry** (the `RecordingExecutor`'s scripted
+>     `RetryableFailure`-then-`Success` sequence is observed as 2 recorded
+>     attempts, `attempt` 1 then 2), and **dedup** (re-registering the same
+>     `user_id` — same idempotency key — never grows the recorded-attempts
+>     count past 2, proving the delivery runner's dedup short-circuit, not
+>     merely an untested assumption).
+> - **12.3 — discarded implementation (historical record only, not current
+>   state)**: no existing subprocess-kill/restart-simulation test harness was
+>   found anywhere else in the repo (checked read-side/persistence tests
+>   first, per instruction), so the smallest one was introduced:
+>   `crates/runtime/src/bin/effect_crash_harness.rs` (a bin target accepting
+>   one effect into its own `InMemoryEffectStore`, printing `"accepted"` to
+>   stdout, then blocking forever) plus
+>   `crates/runtime/tests/effect_store_crash_loss.rs`
+>   (`in_memory_store_loses_undelivered_effect_on_real_process_kill`, which
+>   spawned that binary, sent a real `SIGKILL`, then constructed a brand-new
+>   `InMemoryEffectStore` in the test process and asserted `recover_in_flight`
+>   reported `0`).
+>
+>   **This implementation no longer exists on this branch — both files were
+>   removed.** A maintainer review (F-02) found the test tautological, not a
+>   genuine crash-consistency proof: asserting a brand-new, entirely
+>   independent `InMemoryEffectStore` is empty holds for ANY two
+>   independently-constructed in-memory stores, regardless of whether the
+>   killed process ever accepted anything, was actually killed, or even ran —
+>   it never exercised the killed process's store at all. The limitation this
+>   test intended to demonstrate (in-memory means no cross-process/
+>   cross-restart durability) is instead covered by a plain doc comment
+>   directly on `InMemoryEffectStore` (`crates/runtime/src/effects/store.rs`)
+>   stating it for a reader who never opens design.md/proposal.md, rather
+>   than a demonstrative-only test that proved nothing. This entry stays
+>   `[x]`-with-strikethrough (not deleted, not silently unchecked) per this
+>   project's honesty-about-guarantees convention: 12.3's closure condition is
+>   "the crash-loss limitation is documented," which the doc comment
+>   satisfies — the kill-process test was one considered, attempted, and
+>   rejected approach to satisfying it, not the mechanism that ended up
+>   shipping.
+> - **12.4**: `crates/runtime/src/effects/mod.rs`'s module doc gained a
+>   "Subsystem summary" section (describe → accept → dedup → dispatch →
+>   retry/backoff, `InMemoryEffectStore`'s crash-loss caveat (now
+>   cross-referenced to its own doc comment, post-F-02 revert above),
+>   `Deferred` vs `Inline` runner modes) and a
+>   "Deferred: migrating `EventPublisher.publish`" section citing
+>   `proposal.md` §22 Open Question 3 ("Deferred — see Design §6.3:
+>   EventPublisher migration out of scope for this slice") verbatim, per this
+>   phase's explicit instruction. All intra-doc links use fully-qualified
+>   `crate::effects::...` paths (bare names failed to resolve from this
+>   module-level `//!` doc position; verified via `cargo doc -p ego-runtime`
+>   producing zero new warnings beyond the one pre-existing private-link
+>   warning already present in `acceptor.rs`).
+>
+> **Full workspace verification (current head, post-review)**: `cargo test
+> --workspace` — 1160 passed, 0 failed (baseline 1096 + 5 net new tests: 2
+> testkit, 2 persistent-entity, 1 reference-app E2E — the originally-added
+> 6th, a runtime crash-loss test, was removed post-review as tautological;
+> see 12.3 above). One `ego-runtime` lib test,
+> `effects::acceptor::tests::acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses`,
+> is documented (from an earlier PR3 review round) to fail intermittently
+> only under full-workspace parallel scheduler contention, passing reliably
+> in isolation — pre-existing, unrelated to this phase's changes; not fixed
+> here so it is not silently rediscovered.
+>
+> **CORE-019 apply phase status**: this is the last PR in the chain. Every
+> task across Phases 1–12 is now `[x]`. No open tasks remain in this file.

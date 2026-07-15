@@ -130,6 +130,16 @@ where
         }
     }
 
+    /// Wires a post-commit external-effect acceptor (CORE-019 Phase 12) so
+    /// every actor spawned via [`Self::entity_ref`] from now on actually
+    /// delivers effects a handler's `external_effects` describes, instead of
+    /// silently dropping them. Purely additive — a runtime that never calls
+    /// this keeps behaving exactly as before this method existed.
+    pub fn with_effect_acceptor(mut self, acceptor: Arc<dyn EffectAcceptor>) -> Self {
+        self.effect_acceptor = Some(acceptor);
+        self
+    }
+
     /// Returns a [`TokioEntityRef`] for sending commands to the identified entity.
     ///
     /// Spawns a real [`EntityActor`] via `tokio::spawn` and returns a ref

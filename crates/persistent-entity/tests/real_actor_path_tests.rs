@@ -1,15 +1,19 @@
 /// Integration tests for the real `TokioEntityRef` → `EntityActor` path.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use ego_domain::persistence::{PersistenceError, Snapshot};
+use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
 use persistent_entity::builder::EntityRuntimeBuilder;
 use persistent_entity::command_context::CommandContext;
+use persistent_entity::effect_acceptor::{EffectAcceptanceError, EffectAcceptor};
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::error::EntityError;
-use persistent_entity::persistent_entity::CommandResult;
+use persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
 use persistent_entity::snapshot::NoSnapshot;
 use persistent_entity::test_entity::TestEntity;
 use persistent_entity::testing::{TestCommand, TestEvent, TestState};
@@ -213,5 +217,160 @@ async fn test_recovery_failure_returns_error() {
         runtime.active_count(),
         0,
         "failed actor must not appear as active"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-019 Phase 12.2: EntityRuntimeBuilder::with_effect_acceptor reaches a
+// REAL tokio::spawn-ed EntityActor via the full TokioEntityRef::new path —
+// closes the PR3/PR4-documented gap (design.md Phase 9 notes: "actually
+// plumbing that acceptor into persistent_entity::builder::EntityRuntimeBuilder
+// / EntityRuntime / TokioEntityRef::new ... is left to whichever host
+// constructs both runtimes ... Phase 12/PR5's explicit scope").
+// ---------------------------------------------------------------------------
+
+/// Describes one external effect for `Increment`, none otherwise — mirrors
+/// `actor.rs`'s unit-test-only `EffectEmittingHandler`, but spawned through
+/// the real builder/`TokioEntityRef` path instead of a hand-built
+/// `EntityActor` struct literal.
+#[derive(Debug)]
+struct EffectEmittingEntity;
+
+#[async_trait]
+impl PersistentEntity for EffectEmittingEntity {
+    type Command = TestCommand;
+    type Event = TestEvent;
+    type State = TestState;
+
+    fn initial_state(&self) -> TestState {
+        TestState::new(0)
+    }
+
+    async fn handle_command(
+        &self,
+        command: &TestCommand,
+        _state: &TestState,
+        _context: &CommandContext,
+    ) -> Result<Vec<TestEvent>, EntityError> {
+        match command {
+            TestCommand::Increment(v) => Ok(vec![TestEvent::Incremented(*v)]),
+            TestCommand::Decrement(v) => Ok(vec![TestEvent::Decremented(*v)]),
+            TestCommand::GetState => Ok(vec![]),
+        }
+    }
+
+    async fn apply_event(&self, state: &TestState, event: &TestEvent) -> Result<TestState, EntityError> {
+        match event {
+            TestEvent::Incremented(v) => Ok(TestState {
+                value: state.value + v,
+                version: state.version + 1,
+            }),
+            TestEvent::Decremented(v) => Ok(TestState {
+                value: state.value.saturating_sub(*v),
+                version: state.version + 1,
+            }),
+        }
+    }
+
+    async fn apply_events(&self, state: &TestState, events: &[TestEvent]) -> Result<TestState, EntityError> {
+        let mut s = state.clone();
+        for event in events {
+            s = self.apply_event(&s, event).await?;
+        }
+        Ok(s)
+    }
+
+    async fn external_effects(
+        &self,
+        command: &TestCommand,
+        _new_state: &TestState,
+        events: &[TestEvent],
+        _context: &CommandContext,
+    ) -> Vec<ExternalEffectDescription> {
+        if events.is_empty() {
+            return Vec::new();
+        }
+        match command {
+            TestCommand::Increment(_) => vec![ExternalEffectDescription {
+                idempotency_key: IdempotencyKey::new("real-actor-path:0").unwrap(),
+                effect_type: "probe.effect".to_string(),
+                payload: vec![9, 9, 9],
+                destination: "https://example.com/probe".to_string(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
+struct RecordingAcceptor {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectAcceptor for RecordingAcceptor {
+    async fn accept(
+        &self,
+        _tenant: &TenantId,
+        effects: Vec<ExternalEffectDescription>,
+    ) -> Result<(), EffectAcceptanceError> {
+        self.calls.fetch_add(effects.len(), Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn builder_wired_effect_acceptor_reaches_a_real_spawned_actor() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let acceptor: Arc<dyn EffectAcceptor> = Arc::new(RecordingAcceptor { calls: calls.clone() });
+
+    let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+        .passivation_timeout(Duration::from_secs(3600))
+        .snapshot_strategy(Arc::new(NoSnapshot))
+        .with_effect_acceptor(acceptor)
+        .build();
+
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "effects-wired-1", Arc::new(EffectEmittingEntity))
+        .unwrap();
+
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
+        entity_ref.send_command(TestCommand::Increment(1), ctx()).await;
+
+    assert!(result.is_ok(), "command should succeed: {:?}", result.err());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the acceptor registered via EntityRuntimeBuilder::with_effect_acceptor must be reached \
+         by a real tokio::spawn-ed EntityActor through TokioEntityRef::new — this is the exact \
+         gap PR4 documented and left to this PR"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn without_with_effect_acceptor_described_effects_fail_closed_not_silently_dropped() {
+    // Triangulation, updated for PR4's F-03 review-round fix (AD-9): the
+    // zero-cost default (no acceptor configured) commits the event as
+    // normal, but a described effect that has nowhere to go now fails
+    // closed with an honest `EffectsAcceptanceFailed` reply — it is never
+    // silently dropped as if nothing had been described (see
+    // `actor.rs`'s `missing_acceptor_with_described_effects_fails_closed_not_silently_discarded`
+    // and the companion `ego-service-sdk` proof,
+    // `without_with_effect_acceptor_the_executor_is_never_reached`).
+    let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+        .passivation_timeout(Duration::from_secs(3600))
+        .snapshot_strategy(Arc::new(NoSnapshot))
+        .build();
+
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "effects-unwired-1", Arc::new(EffectEmittingEntity))
+        .unwrap();
+
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
+        entity_ref.send_command(TestCommand::Increment(1), ctx()).await;
+
+    assert!(
+        matches!(result, Ok(CommandResult::EffectsAcceptanceFailed { .. })),
+        "no acceptor configured: the commit must still happen, but a described effect must fail \
+         closed, not silently succeed as a normal commit: got {result:?}"
     );
 }
