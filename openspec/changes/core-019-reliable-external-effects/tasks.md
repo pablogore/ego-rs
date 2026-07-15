@@ -920,43 +920,37 @@ Chain strategy: stacked-to-main
 >     `user_id` — same idempotency key — never grows the recorded-attempts
 >     count past 2, proving the delivery runner's dedup short-circuit, not
 >     merely an untested assumption).
-> - **12.3**: no existing subprocess-kill/restart-simulation test harness was
+> - **12.3 — discarded implementation (historical record only, not current
+>   state)**: no existing subprocess-kill/restart-simulation test harness was
 >   found anywhere else in the repo (checked read-side/persistence tests
->   first, per instruction) — introduced the smallest one.
->   `crates/runtime/src/bin/effect_crash_harness.rs` (new bin target) accepts
->   one effect into its own `InMemoryEffectStore`, prints `"accepted"` to
->   stdout, flushes, then blocks forever (`std::thread::park()` loop).
+>   first, per instruction), so the smallest one was introduced:
+>   `crates/runtime/src/bin/effect_crash_harness.rs` (a bin target accepting
+>   one effect into its own `InMemoryEffectStore`, printing `"accepted"` to
+>   stdout, then blocking forever) plus
 >   `crates/runtime/tests/effect_store_crash_loss.rs`
->   (`in_memory_store_loses_undelivered_effect_on_real_process_kill`) spawns
->   that binary via `env!("CARGO_BIN_EXE_effect_crash_harness")`, blocks on
->   its stdout until the readiness line arrives (never races the kill against
->   an unstarted accept), sends a real `SIGKILL` via `Child::kill()`, asserts
->   the exit status is not success, then constructs a brand-new
->   `InMemoryEffectStore` in the test process (the only way a real restarted
->   process could ever be observed here — there is no channel back to the
->   killed process's memory) and asserts `recover_in_flight` reports `0`
->   recovered effects. This is a REAL OS-level crash, not an in-process Drop
->   simulation — makes the documented in-memory dual-write-gap/no-crash-
->   durability limitation explicit and visible, never silently hidden.
+>   (`in_memory_store_loses_undelivered_effect_on_real_process_kill`, which
+>   spawned that binary, sent a real `SIGKILL`, then constructed a brand-new
+>   `InMemoryEffectStore` in the test process and asserted `recover_in_flight`
+>   reported `0`).
 >
-> **Post-review revert (F-02, this round)**: the kill-process test above was
-> found to be tautological, not a genuine crash-consistency proof — it kills
-> a child process holding one `InMemoryEffectStore`, then constructs a
-> brand-new, entirely independent `InMemoryEffectStore` in the parent
-> process and asserts it's empty. That assertion holds for any two
-> independently-constructed in-memory stores regardless of whether the
-> killed process ever accepted anything, was actually killed, or even ran —
-> it does not exercise the killed process's store at all. Both
-> `crates/runtime/tests/effect_store_crash_loss.rs` and
-> `crates/runtime/src/bin/effect_crash_harness.rs` were removed. The
-> limitation this test intended to demonstrate (in-memory means no
-> cross-process/cross-restart durability) is genuinely covered — now via a
-> plain doc comment on `InMemoryEffectStore` itself (`crates/runtime/src/
-> effects/store.rs`) stating it plainly for a reader who never opens
-> design.md/proposal.md, rather than a demonstrative-only test. This entry
-> is kept `[x]` with a strikethrough (not deleted) per this project's
-> honesty-about-guarantees convention: the attempt and the reason it was
-> reverted are both part of the record.
+>   **This implementation no longer exists on this branch — both files were
+>   removed.** A maintainer review (F-02) found the test tautological, not a
+>   genuine crash-consistency proof: asserting a brand-new, entirely
+>   independent `InMemoryEffectStore` is empty holds for ANY two
+>   independently-constructed in-memory stores, regardless of whether the
+>   killed process ever accepted anything, was actually killed, or even ran —
+>   it never exercised the killed process's store at all. The limitation this
+>   test intended to demonstrate (in-memory means no cross-process/
+>   cross-restart durability) is instead covered by a plain doc comment
+>   directly on `InMemoryEffectStore` (`crates/runtime/src/effects/store.rs`)
+>   stating it for a reader who never opens design.md/proposal.md, rather
+>   than a demonstrative-only test that proved nothing. This entry stays
+>   `[x]`-with-strikethrough (not deleted, not silently unchecked) per this
+>   project's honesty-about-guarantees convention: 12.3's closure condition is
+>   "the crash-loss limitation is documented," which the doc comment
+>   satisfies — the kill-process test was one considered, attempted, and
+>   rejected approach to satisfying it, not the mechanism that ended up
+>   shipping.
 > - **12.4**: `crates/runtime/src/effects/mod.rs`'s module doc gained a
 >   "Subsystem summary" section (describe → accept → dedup → dispatch →
 >   retry/backoff, `InMemoryEffectStore`'s crash-loss caveat (now
@@ -971,16 +965,16 @@ Chain strategy: stacked-to-main
 >   producing zero new warnings beyond the one pre-existing private-link
 >   warning already present in `acceptor.rs`).
 >
-> **Full workspace verification**: `cargo test --workspace` — 1102 passed, 0
-> failed (baseline 1096 + 6 new tests: 2 testkit, 2 persistent-entity, 1
-> reference-app E2E, 1 runtime crash-loss). One `ego-runtime` lib test,
-> `effects::observability::tests::every_signal_redacts_the_idempotency_key_and_never_carries_the_raw_key_or_payload`,
-> was observed to fail intermittently only when run in parallel with the
-> rest of the crate's own test binary (passes reliably alone and in the full
-> `--workspace` run above) — pre-existing flakiness in PR4's shipped
-> `observability.rs` test harness, unrelated to this phase's changes (no file
-> in that module was touched here); not fixed in this PR, noted here so it
-> is not silently rediscovered.
+> **Full workspace verification (current head, post-review)**: `cargo test
+> --workspace` — 1160 passed, 0 failed (baseline 1096 + 5 net new tests: 2
+> testkit, 2 persistent-entity, 1 reference-app E2E — the originally-added
+> 6th, a runtime crash-loss test, was removed post-review as tautological;
+> see 12.3 above). One `ego-runtime` lib test,
+> `effects::acceptor::tests::acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses`,
+> is documented (from an earlier PR3 review round) to fail intermittently
+> only under full-workspace parallel scheduler contention, passing reliably
+> in isolation — pre-existing, unrelated to this phase's changes; not fixed
+> here so it is not silently rediscovered.
 >
 > **CORE-019 apply phase status**: this is the last PR in the chain. Every
 > task across Phases 1–12 is now `[x]`. No open tasks remain in this file.
