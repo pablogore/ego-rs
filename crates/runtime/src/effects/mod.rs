@@ -7,6 +7,7 @@
 
 pub mod acceptor;
 pub mod executor;
+pub(crate) mod observability;
 pub mod policy;
 pub(crate) mod queue;
 pub mod registry;

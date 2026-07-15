@@ -11,6 +11,7 @@ use tokio::sync::{oneshot, watch};
 use crate::actor::EntityActor;
 use crate::command_context::CommandContext;
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
+use crate::effect_acceptor::EffectAcceptor;
 use crate::entity_ref::EntityRef;
 use crate::error::EntityError;
 use crate::lifecycle::{EntityState, LifecycleStateMachine};
@@ -123,6 +124,7 @@ where
         event_sender: SchedulerEventSender,
         mailbox_capacity: usize,
         passivation_timeout: std::time::Duration,
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     ) -> Result<Self, EntityError> {
         let aggregate_id = triple.aggregate_id();
 
@@ -182,13 +184,14 @@ where
                     tx: tx_for_actor,
                     persistence,
                     publisher,
-                    // Phase 9/PR4 (builder lifecycle wiring, out of scope
-                    // here) is expected to thread a configured
-                    // `EffectAcceptor` through once the runtime builder
-                    // registers ≥1 external-effect executor. Until then,
-                    // `None` keeps this capability at zero cost (AD-2/spec:
-                    // "Zero cost when the capability is unused").
-                    effect_acceptor: None,
+                    // CORE-019 PR4 F-03 fix: threaded from the caller
+                    // (`EntityRuntime::entity_ref` -> `EntityRuntimeBuilder`
+                    // -> whatever host wires
+                    // `service_sdk::Runtime::effect_acceptor()` in). `None`
+                    // by default — a host that never configures an acceptor
+                    // keeps this capability at zero cost (AD-2/spec: "Zero
+                    // cost when the capability is unused").
+                    effect_acceptor,
                     snapshot_strategy,
                     entity_handler,
                     event_sender,
@@ -322,6 +325,7 @@ mod tests {
             event_bus_channel().0,
             4,
             std::time::Duration::from_secs(300),
+            None,
         )
         .expect("existing entry must downcast cleanly");
 
@@ -349,6 +353,7 @@ mod tests {
             event_bus_channel().0,
             4,
             std::time::Duration::from_secs(300),
+            None,
         )
         .expect("no live entry remains, a fresh spawn must succeed");
 

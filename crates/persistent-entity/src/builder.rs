@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::DomainEvent;
 
+use crate::effect_acceptor::EffectAcceptor;
 use crate::persistence::{InMemoryEventStore, InMemorySnapshotStore, PersistenceFacade};
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
@@ -30,6 +31,11 @@ pub struct EntityRuntimeBuilder<
     event_store: Option<Arc<Mutex<dyn EventStore<E> + Send>>>,
     /// Optionally injected snapshot store. Defaults to in-memory.
     snapshot_store: Option<Arc<Mutex<dyn Snapshot + Send>>>,
+    /// Optional external-effects acceptance port (CORE-019 PR4 F-03 fix),
+    /// threaded to every actor this runtime spawns. `None` by default —
+    /// spawned actors keep the zero-cost, fail-closed-if-effects-described
+    /// behavior unless a host opts in via [`Self::with_effect_acceptor`].
+    effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
 }
 
 impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static> EntityRuntimeBuilder<E> {
@@ -46,6 +52,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
             event_bus_capacity: 4096,
             event_store: None,
             snapshot_store: None,
+            effect_acceptor: None,
         }
     }
 
@@ -160,6 +167,19 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         self
     }
 
+    /// Wires an [`EffectAcceptor`] into every actor this runtime spawns
+    /// (CORE-019 PR4 F-03 fix). This is the seam a host uses to connect
+    /// `ego_service_sdk::Runtime::effect_acceptor()` (once
+    /// `RuntimeBuilder::register_effect_executor` has been called at least
+    /// once) to real, production-spawned entity actors — without this call,
+    /// a registered executor has zero effect on any actor spawned through
+    /// [`crate::runtime::EntityRuntime::entity_ref`], since the actor's own
+    /// `effect_acceptor` field defaults to `None`.
+    pub fn with_effect_acceptor(mut self, acceptor: Arc<dyn EffectAcceptor>) -> Self {
+        self.effect_acceptor = Some(acceptor);
+        self
+    }
+
     pub fn build(self) -> EntityRuntime<E> {
         let publisher = self
             .publisher
@@ -209,6 +229,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
             config,
             snapshot_strategy,
             event_sender,
+            self.effect_acceptor,
         )
     }
 }

@@ -774,6 +774,60 @@ was confirmed correct; a sixth review found the final `Result`
    admitted, but a NEW call arriving after draining has begun is rejected
    immediately at intake — see §4's updated contract below.
 
+**PR4 review follow-up (1 BLOCKER, PR #174): the constructed `EffectAcceptor`
+never reached a real, production-spawned `EntityActor`.** PR4 wired
+`ego_service_sdk::RuntimeBuilder::register_effect_executor` all the way to a
+real, started `RuntimeEffectAcceptor` exposed via `Runtime::effect_acceptor()`
+(§6.4's builder sugar), and the earlier PR3 rounds above closed every gap in
+*that* acceptor's own lifecycle. But nothing threaded the constructed acceptor
+into `persistent_entity::entity_ref_tokio::TokioEntityRef::new` — the real
+production spawn path — which unconditionally hard-coded
+`effect_acceptor: None` on every actor it constructed. A host that called
+`register_effect_executor(..)` got a fully-working, fully-drained delivery
+pipeline that no actor spawned through `EntityRuntime::entity_ref` could ever
+reach; every described effect fell into F-03 (round 1)'s existing
+fail-closed `EffectsAcceptanceFailed` path, indistinguishable from a host that
+never registered anything.
+
+1. **F-03 (BLOCKER): no seam existed between `service-sdk`'s `RuntimeBuilder`/
+   `Runtime` and `persistent-entity`'s `EntityRuntimeBuilder`/`EntityRuntime`
+   for the acceptor itself.** Investigated whether `service-sdk` has its own
+   entity-spawning surface first (per this document's existing
+   "config not bypass" discipline): it does not — `crates/service-sdk/src/
+   runtime/` never constructs an `EntityRuntimeBuilder`/`EntityRuntime`, and
+   `examples/reference-app` builds its two `EntityRuntime`s
+   (`EntityRuntimeBuilder::new().build()`, AD-4) entirely independently of
+   its `RuntimeBuilder`. So the correct, narrower fix is threading the
+   acceptor through `persistent-entity`'s own chain and leaving the
+   already-ergonomic `Runtime::effect_acceptor() -> Option<&Arc<dyn
+   EffectAcceptor>>` accessor as-is (`.cloned()` is a one-line hand-off; no
+   service-sdk change was needed). Fixed additively, every new parameter
+   defaulting to `None`/unset so no existing caller's behavior changes:
+   `EntityRuntimeBuilder::with_effect_acceptor(Arc<dyn EffectAcceptor>)`
+   (`persistent-entity/src/builder.rs`) → threaded onto `EntityRuntime<E>` as
+   a new `effect_acceptor` field and `EntityRuntime::new` parameter
+   (`runtime.rs`) → passed by `EntityRuntime::entity_ref` as a new trailing
+   parameter to `TokioEntityRef::new` (`entity_ref_tokio.rs`), which now
+   forwards it onto the spawned `EntityActor` instead of the old hard-coded
+   `None`. RED test (`crates/service-sdk/tests/
+   effect_acceptor_entity_wiring.rs`):
+   `effect_executor_registered_on_runtime_builder_is_invoked_by_a_really_spawned_actor`
+   — registers a recording executor on `RuntimeBuilder`, builds the real
+   `Runtime`, hands `Runtime::effect_acceptor()` into
+   `EntityRuntimeBuilder::with_effect_acceptor`, spawns a real actor via
+   `EntityRuntime::entity_ref`, sends a real command whose handler describes
+   an effect, and asserts the recording executor was actually invoked —
+   never driving the assertion through a manual `effect_acceptor().accept(..)`
+   call the way PR4's own existing acceptor-lifecycle tests do. Confirmed RED
+   against the pre-fix code (temporarily reverting the final `TokioEntityRef`
+   hand-off back to a hard-coded `None` reproduces the exact
+   `EffectsAcceptanceFailed` reply this finding describes) before restoring
+   the fix to GREEN. A companion test,
+   `without_with_effect_acceptor_the_executor_is_never_reached`, proves the
+   opt-in default is unchanged: a host that registers an executor but never
+   calls `with_effect_acceptor` still gets today's correct fail-closed
+   behavior, not a silent effect loss.
+
 ## 4. Public Contracts (Rust)
 
 ```rust
@@ -1014,10 +1068,33 @@ A failed attempt under this profile is signaled, not retried.
 
 Builder constructs store + runner; runner task spawned only when ≥1 executor is
 registered (zero cost otherwise, §20). Drain registered via
-`Runtime::register_async_teardown` (builder.rs:311) so it runs before the sync
+`Runtime::register_async_teardown` so it runs before the sync
 teardown stack: stop accepting, drain pending until deadline, cancel in-flight
 back to `pending`, emit `drain_incomplete` for the remainder (in-memory loss is
 loud, never silent). Store init failure fails startup; backlog does not gate readiness.
+
+> **PR4 review F-01 fix (BLOCKER):** `RuntimeBuilder::build()` had re-coupled
+> construction and starting — it called `RuntimeEffectAcceptor::start()`
+> (a real `tokio::spawn`) synchronously whenever ≥1 executor was registered,
+> so `build()` panicked with no active Tokio runtime, breaking the common
+> "construct in sync bootstrap, start once inside Tokio" pattern. Fixed by
+> re-separating the two steps at the `service-sdk` layer, mirroring
+> `RuntimeEffectAcceptor`'s own already-shipped `new`/`start` split (PR3):
+> `build()` now only calls `RuntimeEffectAcceptor::new()` (safe outside
+> Tokio) and stores the constructed-but-unstarted acceptor on `RuntimeInner`.
+> The new `Runtime::start_effects(&self) -> Result<(), RuntimeInfraError>`
+> is the explicit async entry point a host calls exactly once, from inside
+> an active Tokio runtime, after `build()` and before relying on
+> `Runtime::effect_acceptor()` — it calls `.start()` and registers the
+> drain-on-shutdown teardown hook (previously done inline in `build()`).
+> `Runtime::effect_acceptor()` returns `None` until `start_effects` has
+> actually run, even if an executor was registered — deliberate, not a
+> regression: a caller can never obtain (and so never silently use) an
+> acceptor whose `Deferred`-mode runner was never spawned. Idempotent —
+> calling `start_effects` twice never double-spawns the runner. Also folds
+> in the pending ergonomic fix: `effect_acceptor()` now returns
+> `Option<Arc<dyn EffectAcceptor>>` (clones internally) instead of
+> `Option<&Arc<dyn EffectAcceptor>>`.
 
 ## 9. Observability (CORE-012A)
 
@@ -1027,6 +1104,75 @@ attempt), post-`execute` (success | retry_scheduled | terminal_failed),
 per-attempt latency, queue depth (from `mpsc` capacity), oldest-pending age,
 drain_incomplete. Correlation: effect id, `effect_type`, destination, tenant,
 trace ctx, **hashed** idempotency key. `payload` never logged.
+
+> **PR4 review F-02 fix (BLOCKER):** the shipped implementation had drifted
+> from "queue depth (from `mpsc` capacity)" above — `EffectQueue` tracked
+> depth/age via a separate `Arc<Mutex<VecDeque<Instant>>>` (`pending_since`)
+> pushed on `send`/popped on `recv`, updated as two independent steps not
+> atomic with the channel send/recv itself or with each other. A receiver
+> could dequeue an effect and pop the (still-empty) side structure before
+> the sender's own `push_back` for that same effect had run, permanently
+> desyncing `depth()`/`oldest_pending_age()` from reality. Fixed by
+> returning to the original design intent: the enqueue timestamp now
+> travels *inside* the same channel message (`QueuedEffect { effect,
+> enqueued_at }`), and `depth()` reads the channel's actual occupancy
+> directly (`Sender`/`Receiver::max_capacity() - capacity()`) — no separate
+> structure left to desync. `oldest_pending_age()` changed semantics
+> accordingly: it now reports the wait time of the effect most recently
+> returned by `recv` (computed atomically from the timestamp carried in its
+> own message), rather than attempting to peek the oldest still-queued
+> timestamp from the sender side, which `tokio::sync::mpsc` does not expose
+> without reintroducing a parallel, desyncable structure.
+
+> **PR4 review round 3 (F-02, BLOCKER fix): the round-2 "just-dequeued"
+> semantics was itself a regression.** `runner.rs` only calls
+> `log_oldest_pending_age` from inside `run_inner`'s `receiver.recv()`
+> select branch, so the round-2 signal stopped reflecting reality the
+> instant the runner stopped making dequeue progress (backpressure
+> saturation, a hung executor) — exactly the failure scenario this signal
+> exists to detect, and a violation of this section's original "age of
+> oldest pending effect" contract. A naive fix reintroducing the *original*
+> `VecDeque<Instant>` (position-keyed: push on send, pop-front on recv)
+> would reopen the *original* F-02 race: `EffectQueue` is `Clone`, and two
+> concurrent `send()` calls can land their messages in the channel in an
+> order that does not match the order their own push_backs happened,
+> desyncing a "front of the deque" assumption even with "push before send"
+> per-sender ordering. Fixed by tracking pending enqueue timestamps by the
+> effect's own identity — `pending_since: Arc<Mutex<HashMap<EffectId,
+> Instant>>`, shared between `EffectQueue`/`EffectQueueReceiver` — inserted
+> on `send` (before the channel send, keyed by the effect's own id) and
+> removed on `recv` (by that exact id, never "pop the front"). There is no
+> shared "position" for two concurrent senders to disagree about.
+> `oldest_pending_age()` now scans for the minimum still-pending timestamp
+> (O(depth), cheap for this bounded/small queue) and correctly returns
+> `None` once the queue fully drains. `depth()` is unchanged — already
+> correct and race-free from the round-2 fix. `runner.rs`'s `run_inner` also
+> now logs `queue_depth`/`oldest_pending_age` from its existing
+> `reclaim_tick` branch too (not only the `recv()` branch), so the signal
+> keeps being emitted periodically even while the runner is stalled — no
+> new interval/parameter added, reusing the tick that was already there.
+
+> **PR4 review round 4 (F-03, BLOCKER fix): the round 3 identity-keyed
+> redesign fixed the concurrent-sender and freeze-during-stall bugs but
+> introduced a cancellation-safety leak of its own.** `EffectQueue::send`'s
+> `pending_since` insert is synchronous, executed before the channel-send
+> `.await`, with no RAII guard between the two. `acceptor.rs`'s
+> `send_to_queue` races `self.queue.send(effect)` inside a `tokio::select!`
+> against `wait_for_deadline(...)`; if the deadline branch wins while the
+> send is blocked awaiting queue capacity, `tokio::select!` drops the send
+> future mid-flight — the insert already happened, but the effect was never
+> actually enqueued, and nothing removes the now-orphaned entry (the
+> previous `Err`-branch cleanup only ran when the future actually resolved
+> to `Err`, never on cancellation-via-drop). Left unfixed, this permanently
+> corrupts `oldest_pending_age()`: it would never return to `None` again
+> even once the queue is genuinely fully drained. Fixed with a `PendingGuard`
+> RAII type: constructed right after the insert, armed by default, its
+> `Drop` removes the entry unless explicitly disarmed. `send` disarms it
+> only on the genuine success path, where responsibility for removing the
+> entry transfers to `EffectQueueReceiver::recv`; every other exit path —
+> the existing `Err` branch and cancellation alike — is now handled
+> uniformly by the guard's own `Drop`. `depth()`, `recv()`'s removal logic,
+> and every other already-fixed behavior are unchanged.
 
 ## 10. Threat Matrix
 
