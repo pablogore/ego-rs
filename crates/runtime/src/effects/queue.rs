@@ -237,9 +237,19 @@ impl EffectQueueReceiver {
         self.receiver.max_capacity() - self.receiver.capacity()
     }
 
-    /// How long the oldest effect *still sitting in the queue* has been
-    /// waiting (`oldest_pending_age` signal). `None` when nothing is
+    /// Age of the oldest accepted effect waiting to enter or leave the
+    /// delivery queue (`oldest_pending_age` signal). `None` when nothing is
     /// currently pending — including after the queue fully drains.
+    ///
+    /// **Deliberately includes backpressure wait time:** an effect is
+    /// tracked from the moment `send()` is called — including any time
+    /// spent blocked awaiting channel capacity — not only once it physically
+    /// occupies an mpsc slot. The effect was already durably accepted at
+    /// that point and is genuinely waiting on delivery, so counting
+    /// backpressure time is the operationally useful signal (a producer
+    /// stuck on a saturated queue is exactly the kind of stall an operator
+    /// needs "oldest pending" to surface). `queue_depth` stays a distinct,
+    /// narrower signal — the mpsc channel's actual physical occupancy only.
     ///
     /// **F-02 round 3 fix:** the previous round reported the wait time of
     /// the effect most recently returned by [`Self::recv`] — honest only at
