@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 ego-domain = { path = "../domain" }
+# CORE-019 Phase 5 (AD-3): RuntimeEffectAcceptor implements the EffectAcceptor
+# port trait defined in persistent-entity, keeping the runtime -> persistent-entity
+# dependency direction (design.md §2) so the actor never depends on ego-runtime.
+persistent-entity = { path = "../persistent-entity" }
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 async-trait = "0.1"

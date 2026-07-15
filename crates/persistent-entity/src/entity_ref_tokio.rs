@@ -182,6 +182,13 @@ where
                     tx: tx_for_actor,
                     persistence,
                     publisher,
+                    // Phase 9/PR4 (builder lifecycle wiring, out of scope
+                    // here) is expected to thread a configured
+                    // `EffectAcceptor` through once the runtime builder
+                    // registers ≥1 external-effect executor. Until then,
+                    // `None` keeps this capability at zero cost (AD-2/spec:
+                    // "Zero cost when the capability is unused").
+                    effect_acceptor: None,
                     snapshot_strategy,
                     entity_handler,
                     event_sender,

@@ -10,6 +10,7 @@ use ego_domain::event::DomainEvent;
 use tokio::sync::watch;
 
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
+use crate::effect_acceptor::EffectAcceptor;
 use crate::lifecycle::{EntityState, LifecycleStateMachine};
 use crate::mailbox::{BoundedMailbox, CommandErasedResult};
 use crate::passivation_signal::PassivationSignal;
@@ -46,6 +47,11 @@ pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     pub(crate) persistence: Arc<PersistenceFacade<E>>,
     /// Event publisher for notifying downstream consumers.
     pub(crate) publisher: Arc<dyn EventPublisher<E>>,
+    /// Post-commit external-effect acceptance port (AD-1, AD-3). `None` when
+    /// no effect delivery subsystem is configured — keeps the cost of this
+    /// capability at zero for entities/deployments that never describe
+    /// effects (AD-2). Set by whoever wires the runtime lifecycle (Phase 9).
+    pub(crate) effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     /// Snapshot strategy for periodic state snapshots.
     pub(crate) snapshot_strategy: Arc<dyn SnapshotStrategy>,
     /// Domain handler that implements command → events and event application.
@@ -293,6 +299,76 @@ where
 
                         let _ = self.publisher.publish(&events).await;
 
+                        // AD-1: the acceptance seam is the actor's own
+                        // post-persist sequence, right beside the
+                        // fire-and-forget publish above — never the
+                        // dormant EffectInterpreter arm. `external_effects`
+                        // receives the just-committed `state`/`events`, not
+                        // the pre-command state (AD-2).
+                        let described_effects = self
+                            .entity_handler
+                            .external_effects(&command, &state, &events, &context)
+                            .await;
+
+                        if !described_effects.is_empty() {
+                            // Backpressure/acceptance-failure-retry delays
+                            // the reply below, never the commit above, which
+                            // has already completed (AD-9, spec: "Acceptance
+                            // backpressure delays the reply, not the
+                            // commit"). F-03 (PR3 review): a handler that
+                            // opts into describing effects on an actor with
+                            // no `effect_acceptor` configured must fail
+                            // closed, not silently discard the effects and
+                            // reply as if nothing was described.
+                            let first_idempotency_key =
+                                described_effects[0].idempotency_key.clone();
+                            let acceptance = match &self.effect_acceptor {
+                                Some(acceptor) => match ego_domain::TenantId::new(
+                                    self.entity_id.tenant_id.clone(),
+                                ) {
+                                    Ok(tenant) => acceptor.accept(&tenant, described_effects).await,
+                                    Err(_) => {
+                                        Err(crate::effect_acceptor::EffectAcceptanceError::Permanent {
+                                            message: format!(
+                                                "invalid tenant identity '{}' for effect acceptance",
+                                                self.entity_id.tenant_id
+                                            ),
+                                            failed_at_index: 0,
+                                            failed_idempotency_key: first_idempotency_key,
+                                        })
+                                    }
+                                },
+                                None => Err(crate::effect_acceptor::EffectAcceptanceError::Permanent {
+                                    message: "external effects were described but no EffectAcceptor \
+                                              is configured"
+                                        .to_string(),
+                                    failed_at_index: 0,
+                                    failed_idempotency_key: first_idempotency_key,
+                                }),
+                            };
+
+                            if let Err(error) = acceptance {
+                                // AD-9 REQUIRED constraint: this is NOT a
+                                // command failure — the commit above is final
+                                // and was never rolled back.
+                                // `CommandResult::EffectsAcceptanceFailed`
+                                // keeps the reply `Ok(..)` while carrying a
+                                // distinguishable outcome, so a caller can
+                                // never mistake this for "not committed, safe
+                                // to retry" and cause a duplicate command
+                                // execution.
+                                let result: CommandResult<E, S> =
+                                    CommandResult::EffectsAcceptanceFailed {
+                                        new_state: state,
+                                        events,
+                                        error,
+                                    };
+                                let boxed: CommandErasedResult = Box::new(result);
+                                let _ = reply.send(Ok(boxed));
+                                return;
+                            }
+                        }
+
                         let result: CommandResult<E, S> = CommandResult::Events {
                             new_state: state,
                             events,
@@ -518,6 +594,7 @@ mod tests {
             tx: tx.clone(),
             persistence: Arc::new(PersistenceFacade::new()),
             publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor: None,
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(PanicOnBoomHandler),
             event_sender,
@@ -559,5 +636,377 @@ mod tests {
                 "a queued command whose actor died mid-processing must resolve to a terminal Err"
             );
         }
+    }
+
+    // --- CORE-019 Phase 8: handler API + actor post-persist wiring ---
+
+    use crate::effect_acceptor::EffectAcceptanceError;
+    use crate::testing::{TestCommand, TestEvent};
+    use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    fn sample_effect() -> ExternalEffectDescription {
+        ExternalEffectDescription {
+            idempotency_key: IdempotencyKey::new("uow-1:0").unwrap(),
+            effect_type: "invoice.created".to_string(),
+            payload: vec![],
+            destination: "https://example.com".to_string(),
+        }
+    }
+
+    /// Describes one external effect for `Increment`, none for `Decrement` —
+    /// lets tests exercise both "acceptor called" and "acceptor skipped"
+    /// paths through the same handler.
+    #[derive(Debug)]
+    struct EffectEmittingHandler;
+
+    #[async_trait]
+    impl PersistentEntity for EffectEmittingHandler {
+        type Command = TestCommand;
+        type Event = TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> TestState {
+            TestState::new(0)
+        }
+
+        async fn handle_command(
+            &self,
+            command: &TestCommand,
+            _state: &TestState,
+            _context: &CommandContext,
+        ) -> Result<Vec<TestEvent>, crate::error::EntityError> {
+            match command {
+                TestCommand::Increment(v) => Ok(vec![TestEvent::Incremented(*v)]),
+                TestCommand::Decrement(v) => Ok(vec![TestEvent::Decremented(*v)]),
+                TestCommand::GetState => Ok(vec![]),
+            }
+        }
+
+        async fn apply_event(
+            &self,
+            state: &TestState,
+            event: &TestEvent,
+        ) -> Result<TestState, crate::error::EntityError> {
+            match event {
+                TestEvent::Incremented(v) => Ok(TestState {
+                    value: state.value + v,
+                    version: state.version + 1,
+                }),
+                TestEvent::Decremented(v) => Ok(TestState {
+                    value: state.value.saturating_sub(*v),
+                    version: state.version + 1,
+                }),
+            }
+        }
+
+        async fn apply_events(
+            &self,
+            state: &TestState,
+            events: &[TestEvent],
+        ) -> Result<TestState, crate::error::EntityError> {
+            let mut s = state.clone();
+            for event in events {
+                s = self.apply_event(&s, event).await?;
+            }
+            Ok(s)
+        }
+
+        async fn external_effects(
+            &self,
+            command: &TestCommand,
+            _new_state: &TestState,
+            events: &[TestEvent],
+            _context: &CommandContext,
+        ) -> Vec<ExternalEffectDescription> {
+            if events.is_empty() {
+                return Vec::new();
+            }
+            match command {
+                TestCommand::Increment(_) => vec![sample_effect()],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    struct RecordingAcceptor {
+        calls: Arc<AtomicUsize>,
+        result: Result<(), EffectAcceptanceError>,
+    }
+
+    #[async_trait]
+    impl EffectAcceptor for RecordingAcceptor {
+        async fn accept(
+            &self,
+            _tenant: &TenantId,
+            effects: Vec<ExternalEffectDescription>,
+        ) -> Result<(), EffectAcceptanceError> {
+            self.calls.fetch_add(effects.len(), Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    struct GatedAcceptor {
+        gate: Arc<Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EffectAcceptor for GatedAcceptor {
+        async fn accept(
+            &self,
+            _tenant: &TenantId,
+            effects: Vec<ExternalEffectDescription>,
+        ) -> Result<(), EffectAcceptanceError> {
+            self.calls.fetch_add(effects.len(), Ordering::SeqCst);
+            self.gate.notified().await;
+            Ok(())
+        }
+    }
+
+    /// Builds a standalone actor (state pre-seeded, no recovery run) wired
+    /// with `EffectEmittingHandler` and the given optional acceptor — enough
+    /// to call `execute_command` directly without a full `run()` loop.
+    fn build_effect_actor(
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    ) -> EntityActor<TestCommand, TestEvent, TestState, ManualSignal> {
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("tenant-x".to_string(), "probe", "actor-effects-1");
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(8);
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        EntityActor {
+            entity_id,
+            mailbox,
+            state: Some(TestState::new(0)),
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry,
+            tx,
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor,
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(EffectEmittingHandler),
+            event_sender,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_describing_effects_calls_acceptor_after_commit_before_reply() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let acceptor = Arc::new(RecordingAcceptor {
+            calls: calls.clone(),
+            result: Ok(()),
+        });
+        let mut actor = build_effect_actor(Some(acceptor));
+
+        let (tx, rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::Increment(1),
+                context: ctx(),
+            },
+            reply: tx,
+        };
+        actor.execute_command(envelope).await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the acceptor must be called exactly once for the one described effect"
+        );
+        assert!(rx.await.unwrap().is_ok(), "successful acceptance yields an Ok reply");
+    }
+
+    #[tokio::test]
+    async fn handler_returning_no_effects_never_calls_the_acceptor() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let acceptor = Arc::new(RecordingAcceptor {
+            calls: calls.clone(),
+            result: Ok(()),
+        });
+        let mut actor = build_effect_actor(Some(acceptor));
+
+        let (tx, rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::Decrement(1),
+                context: ctx(),
+            },
+            reply: tx,
+        };
+        actor.execute_command(envelope).await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "Decrement describes zero effects — the acceptor must never be touched"
+        );
+        assert!(rx.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn acceptance_failure_yields_committed_but_unaccepted_reply_not_a_command_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let acceptor = Arc::new(RecordingAcceptor {
+            calls: calls.clone(),
+            result: Err(EffectAcceptanceError::Permanent {
+                message: "backend corrupt".to_string(),
+                failed_at_index: 0,
+                failed_idempotency_key: IdempotencyKey::new("uow-1:0").unwrap(),
+            }),
+        });
+        let mut actor = build_effect_actor(Some(acceptor));
+
+        let (tx, rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::Increment(5),
+                context: ctx(),
+            },
+            reply: tx,
+        };
+        actor.execute_command(envelope).await;
+
+        // Commit is final regardless of acceptance outcome (AD-9) — the
+        // actor's own in-memory state already reflects the committed event.
+        assert_eq!(
+            actor.state.as_ref().unwrap().value,
+            5,
+            "commit must never be rolled back on acceptance failure"
+        );
+
+        let reply = rx.await.unwrap();
+        let boxed = reply.expect(
+            "acceptance failure must still be a successful Ok reply, never Err(EntityError) — \
+             collapsing it into Err would make it indistinguishable from a real command failure \
+             and cause a caller to retry an already-committed command",
+        );
+        let result: Box<CommandResult<TestEvent, TestState>> = boxed
+            .downcast()
+            .expect("reply carries the expected CommandResult<TestEvent, TestState>");
+        match *result {
+            CommandResult::EffectsAcceptanceFailed {
+                new_state,
+                events,
+                error,
+            } => {
+                assert_eq!(new_state.value, 5);
+                assert_eq!(events.len(), 1);
+                assert!(matches!(error, EffectAcceptanceError::Permanent { .. }));
+            }
+            other => panic!(
+                "expected CommandResult::EffectsAcceptanceFailed, got a different variant: {other:?}"
+            ),
+        }
+    }
+
+    /// F-03 (PR3 review, BLOCKER): a handler that opts into describing
+    /// effects, running on an actor with `effect_acceptor: None`, must fail
+    /// closed (an honest `EffectsAcceptanceFailed` reply) rather than
+    /// silently discarding the described effects and replying as if nothing
+    /// had been described. The commit itself must remain intact regardless.
+    #[tokio::test]
+    async fn missing_acceptor_with_described_effects_fails_closed_not_silently_discarded() {
+        let mut actor = build_effect_actor(None);
+
+        let (tx, rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::Increment(3),
+                context: ctx(),
+            },
+            reply: tx,
+        };
+        actor.execute_command(envelope).await;
+
+        assert_eq!(
+            actor.state.as_ref().unwrap().value,
+            3,
+            "commit must still happen even though no acceptor is configured"
+        );
+
+        let reply = rx.await.unwrap();
+        let boxed = reply.expect(
+            "must still be an Ok reply — the commit succeeded, only acceptance was impossible",
+        );
+        let result: Box<CommandResult<TestEvent, TestState>> = boxed
+            .downcast()
+            .expect("reply carries the expected CommandResult<TestEvent, TestState>");
+        match *result {
+            CommandResult::EffectsAcceptanceFailed {
+                new_state,
+                events,
+                error,
+            } => {
+                assert_eq!(new_state.value, 3);
+                assert_eq!(events.len(), 1);
+                assert!(
+                    matches!(error, EffectAcceptanceError::Permanent { .. }),
+                    "a missing acceptor is a permanent acceptance failure, not retryable"
+                );
+            }
+            other => panic!(
+                "expected EffectsAcceptanceFailed when no acceptor is configured, \
+                 got a different variant: {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn acceptance_backpressure_delays_reply_but_commit_already_happened() {
+        let gate = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let acceptor = Arc::new(GatedAcceptor {
+            gate: gate.clone(),
+            calls: calls.clone(),
+        });
+        let mut actor = build_effect_actor(Some(acceptor));
+
+        let (tx, mut rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::Increment(7),
+                context: ctx(),
+            },
+            reply: tx,
+        };
+
+        let handle = tokio::spawn(async move {
+            actor.execute_command(envelope).await;
+            actor
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the acceptor must be reached before the reply resolves");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the reply must be delayed while acceptance is still pending"
+        );
+
+        gate.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("reply eventually arrives once acceptance completes")
+            .unwrap();
+        assert!(result.is_ok());
+
+        let actor = handle.await.unwrap();
+        assert_eq!(
+            actor.state.as_ref().unwrap().value,
+            7,
+            "the commit that happened before the gate must be reflected regardless of the delayed reply"
+        );
     }
 }

@@ -29,6 +29,7 @@ pub mod actor;
 pub mod builder;
 pub mod command_context;
 pub mod command_envelope;
+pub mod effect_acceptor;
 pub mod entity_ref;
 pub mod entity_ref_tokio;
 pub mod error;

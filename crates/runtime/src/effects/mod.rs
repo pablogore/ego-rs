@@ -5,6 +5,7 @@
 //! retry/backoff, and an `effect_type`-keyed executor registry. See
 //! `openspec/changes/core-019-reliable-external-effects/design.md`.
 
+pub mod acceptor;
 pub mod executor;
 pub mod policy;
 pub(crate) mod queue;
@@ -12,6 +13,7 @@ pub mod registry;
 pub(crate) mod runner;
 pub mod store;
 
+pub use acceptor::RuntimeEffectAcceptor;
 pub use executor::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
 pub use policy::{DeliveryConfig, RetryPolicies, RetryPolicy, RunnerMode};
 pub use registry::{DuplicateEffectType, ExecutorRegistry};

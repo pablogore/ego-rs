@@ -42,9 +42,8 @@
 //! longer silently eats into the effect's real retry budget (F-04). The
 //! main drain loop's backpressure-permit wait is now raced against shutdown
 //! too, so a hung executor holding every concurrency permit can no longer
-//! prevent shutdown from ever reaching [`Self::drain_tasks`]'s
-//! abort-on-deadline logic (F-03). Full rationale in design.md's "PR2 round
-//! 4 review follow-up" note.
+//! prevent shutdown from ever being observed at all (F-03). Full rationale
+//! in design.md's "PR2 round 4 review follow-up" note.
 //!
 //! **PR2 round 5 review follow-up.** [`Self::reclaim_due`] no longer
 //! re-enqueues a claimed, transitioned effect into [`EffectQueue`] at all
@@ -62,6 +61,30 @@
 //! duplicate could be marked `Succeeded` while its actual owner was still
 //! mid-delivery (F-02). Full rationale in design.md's "PR2 round 5 review
 //! follow-up" note.
+//!
+//! **PR3 round 5 review follow-up (F-01, BLOCKER).** PR3 round 4 gave
+//! [`Self::run_inner`]'s own end-of-loop drain step and an
+//! externally-invoked [`Self::shutdown_and_drain`] call a leader/follower
+//! election (`drain_claimed`/`drain_done_tx`/`drain_done_rx`) so they'd never
+//! both lock `tasks` for the same shutdown. That coordination was itself
+//! unsafe: `run_inner` runs INSIDE the very task `EffectRuntimeHandle` holds
+//! as `runner_task`, so if it ever won the leader race (using its own,
+//! longer internal deadline) before an external `shutdown_and_wait` caller's
+//! shorter-deadlined follower call, that follower's timeout-triggered
+//! `runner_task.abort()` would kill the LEADER mid-`drain_tasks_locked` —
+//! before it ever finished aborting the hung executor attempt it was
+//! cleaning up. Fixed by removing the ambiguity outright ("Option A"):
+//! `run_inner` no longer drains anything itself — on shutdown it only stops
+//! consuming new work and returns; [`Self::shutdown_and_drain`], called
+//! solely by `EffectRuntimeHandle::shutdown_and_wait`, is now the ONE
+//! cleanup authority. With exactly one caller, the leader/follower election
+//! and its `watch<bool>` signal are gone — there is nothing left to race.
+//! Separately, [`Self::drain_tasks_locked`]'s lock-acquisition-timeout branch
+//! now still aborts whatever `AbortHandle`s are tracked in
+//! [`Self::executor_aborts`] via a non-blocking `try_lock` fallback, instead
+//! of abandoning cleanup entirely when the `tasks` lock can't be acquired in
+//! time. RED test (`acceptor.rs`):
+//! `shutdown_and_wait_stops_a_hung_executor_task_even_when_run_inner_would_have_raced_it_for_drain_leadership`.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -101,18 +124,6 @@ const RECLAIM_INTERVAL: Duration = Duration::from_secs(5);
 /// bounded batch so one tick can't monopolize the queue.
 const RECLAIM_BATCH_LIMIT: usize = 32;
 
-/// Fix 5 (PR2 review): bounded wait, once shutdown is signalled, for
-/// already-spawned per-effect and backoff-redispatch tasks to finish before
-/// `run`/`run_inner` returns.
-///
-/// ponytail: a fixed local constant, not yet threaded through from a caller
-/// — PR4's `RuntimeEffectAcceptor::drain(deadline, ..)` (unmerged as of this
-/// PR) already owns exactly this "bounded shutdown deadline" concept one
-/// layer up; once PR4 lands, its `deadline` should flow down into this
-/// runner instead of this constant duplicating the idea. Not required by
-/// this PR's scope.
-const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
-
 /// HIGH-4: a safe fallback for [`timestamp_after`] when `duration` cannot be
 /// represented as a [`chrono::Duration`] (`chrono::Duration::from_std` fails
 /// for values approaching `std::time::Duration::MAX`, which a pathological
@@ -147,13 +158,14 @@ pub(crate) struct DeliveryRunner {
     /// to be read directly.
     retry: RetryPolicies,
     /// Fix 5 (PR2 review): every per-effect dispatch task is tracked here
-    /// (instead of a bare `tokio::spawn` with a discarded handle) so shutdown
-    /// can actually wait for it to drain within [`SHUTDOWN_DRAIN_DEADLINE`].
-    /// Since the AD-6 revision removed the separate backoff-redispatch timer
-    /// task, this set now only ever holds per-effect dispatch tasks spawned
-    /// by [`Self::run_inner`]'s receiver branch — never a task that itself
-    /// recursively spawns another tracked task, which is what made the old
-    /// timer path deadlock-prone against shutdown (F-01).
+    /// (instead of a bare `tokio::spawn` with a discarded handle) so
+    /// [`Self::shutdown_and_drain`] can actually wait for it to drain within
+    /// its caller-supplied deadline. Since the AD-6 revision removed the
+    /// separate backoff-redispatch timer task, this set now only ever holds
+    /// per-effect dispatch tasks spawned by [`Self::run_inner`]'s receiver
+    /// branch — never a task that itself recursively spawns another tracked
+    /// task, which is what made the old timer path deadlock-prone against
+    /// shutdown (F-01).
     tasks: AsyncMutex<JoinSet<()>>,
     /// Gap 1 (PR2 residual fix): the [`tokio::task::AbortHandle`] of every
     /// currently in-flight *executor* attempt (the inner `tokio::spawn`
@@ -220,16 +232,74 @@ impl DeliveryRunner {
     /// case already covered by the same accepted at-least-once/duplicate-
     /// delivery tradeoff AD-6/AD-7 document elsewhere. Revisit only if this
     /// proves surprising in practice.
-    async fn drain_tasks(&self, deadline: Duration) {
-        let mut tasks = self.tasks.lock().await;
-        let timed_out = tokio::time::timeout(deadline, async {
+    ///
+    /// **F-01 (PR3 round 5 review, BLOCKER fix):** now the SOLE cleanup path
+    /// — called only by [`Self::shutdown_and_drain`], itself called only by
+    /// `EffectRuntimeHandle::shutdown_and_wait`. There is exactly one caller,
+    /// so this can never be entered concurrently by two racing callers, and
+    /// the mutex acquisition itself remains bounded by `deadline_instant` as
+    /// defense-in-depth against an unanticipated stuck lock.
+    ///
+    /// **Round 5 minor fix:** if the `tasks` lock genuinely can't be acquired
+    /// before the deadline, this no longer abandons cleanup entirely — it
+    /// still aborts whatever `AbortHandle`s are tracked in
+    /// [`Self::executor_aborts`] via a non-blocking `try_lock` on that
+    /// separate mutex (which doesn't require the contended `tasks` lock),
+    /// rather than leaving them running. This branch is expected to be
+    /// nearly unreachable now that there is only ever one caller of this
+    /// method at all.
+    ///
+    /// **PR3 round 6 review follow-up (F-01, BLOCKER).** Now returns `bool`:
+    /// `true` iff every tracked task/executor attempt drained naturally,
+    /// within `deadline_instant`, with nothing forcibly aborted; `false`
+    /// otherwise (the `tasks` lock itself timed out, or any executor
+    /// attempt/dispatch task had to be force-aborted). Threaded outward
+    /// through [`Self::shutdown_and_drain`] so
+    /// `EffectRuntimeHandle::shutdown_and_wait` can fold it into an honest
+    /// final `Result` instead of always reporting `Ok(())`.
+    ///
+    /// One case needs an explicit check rather than falling out of the
+    /// existing `tasks`-timeout logic on its own: `Inline` mode's
+    /// [`Self::drain_one`] runs synchronously on the caller's own task, never
+    /// through [`Self::spawn_tracked`] — so `tasks` stays empty for the whole
+    /// run, and the `join_next` loop below completes instantly regardless of
+    /// whether an executor attempt is still genuinely hung. A hung Inline
+    /// executor is tracked ONLY in [`Self::executor_aborts`] (Gap 1), so this
+    /// also checks there directly for any handle that is not yet
+    /// `is_finished()` — a real, still-running attempt `tasks` alone can
+    /// never see. Deliberately NOT a check against `deadline_instant` itself:
+    /// legitimate in-flight work that simply finishes right around the
+    /// deadline (the common case) must still report a clean drain, so only
+    /// an attempt provably still running counts as "forced".
+    async fn drain_tasks_locked(&self, deadline_instant: tokio::time::Instant) -> bool {
+        let remaining = deadline_instant.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(mut tasks) = tokio::time::timeout(remaining, self.tasks.lock()).await else {
+            tracing::warn!(
+                "timed out acquiring the tasks lock before the drain deadline; aborting \
+                 tracked executor attempts via a non-blocking fallback instead of leaving \
+                 them untracked"
+            );
+            if let Ok(mut aborts) = self.executor_aborts.try_lock() {
+                for handle in aborts.drain(..) {
+                    handle.abort();
+                }
+            }
+            return false;
+        };
+        let remaining = deadline_instant.saturating_duration_since(tokio::time::Instant::now());
+        let timed_out = tokio::time::timeout(remaining, async {
             while tasks.join_next().await.is_some() {}
         })
         .await
         .is_err();
 
-        if !timed_out {
-            return;
+        let lingering_executor = !timed_out && {
+            let aborts = self.executor_aborts.lock().await;
+            aborts.iter().any(|handle| !handle.is_finished())
+        };
+
+        if !timed_out && !lingering_executor {
+            return true;
         }
 
         tracing::warn!(
@@ -247,7 +317,8 @@ impl DeliveryRunner {
             handle.abort();
         }
 
-        let still_stuck = tokio::time::timeout(deadline, async {
+        let remaining = deadline_instant.saturating_duration_since(tokio::time::Instant::now());
+        let still_stuck = tokio::time::timeout(remaining, async {
             while tasks.join_next().await.is_some() {}
         })
         .await
@@ -264,39 +335,69 @@ impl DeliveryRunner {
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
         }
+
+        false
+    }
+
+    /// **F-01 (PR3 round 5 review, BLOCKER fix — leader/follower removed):**
+    /// the single, authoritative shutdown-drain entry point, callable
+    /// directly on `&self`/`Arc<Self>` — not through `run()`'s own spawned
+    /// task's future. Aborting the OUTER `run()`/`run_inner` task (e.g. on an
+    /// external deadline) does NOT cancel the child tasks this struct
+    /// spawned itself: per-effect dispatch tasks tracked in `tasks`, and
+    /// in-flight executor calls tracked in `executor_aborts`. Those are
+    /// owned by this struct's own fields, not scoped to `run()`'s future.
+    ///
+    /// `EffectRuntimeHandle::shutdown_and_wait` calls this directly on the
+    /// shared `Arc<DeliveryRunner>` as the ONE guarantee that every
+    /// runner-owned child task is gone. PR3 round 4 had `run_inner`'s own
+    /// end-of-loop step ALSO call into this same drain logic, coordinated via
+    /// a leader/follower election — but `run_inner` runs inside the very task
+    /// `shutdown_and_wait` holds as `runner_task`, so a follower's own
+    /// timeout-triggered abort of that task could kill a leader still
+    /// mid-drain, abandoning its cleanup before it finished (see the module
+    /// doc's "PR3 round 5" note). `run_inner` no longer drains anything of
+    /// its own at all — this is now the ONLY caller of
+    /// [`Self::drain_tasks_locked`].
+    ///
+    /// **PR3 round 6 review follow-up (F-01, BLOCKER):** now returns `bool` —
+    /// see [`Self::drain_tasks_locked`] for exactly what `true`/`false` mean.
+    /// `EffectRuntimeHandle::shutdown_and_wait` folds this into its final
+    /// `Result` instead of discarding it.
+    pub(crate) async fn shutdown_and_drain(&self, deadline_instant: tokio::time::Instant) -> bool {
+        self.drain_tasks_locked(deadline_instant).await
     }
 
     /// Spawned drain loop (`Deferred` profile, AD-6): receives from the
     /// queue, bounds concurrency with [`Backpressure`] (fix 7, reusing
     /// `read_side::backpressure`), periodically reclaims due effects (fix
-    /// 4), and stops on shutdown signal via `watch`, waiting for
-    /// outstanding tasks to drain (fix 5) before returning.
+    /// 4), and stops consuming on shutdown signal via `watch`, returning
+    /// promptly.
+    ///
+    /// **PR3 round 5 review (F-01, BLOCKER fix):** no longer drains its own
+    /// spawned tasks on the way out — see the module doc's "PR3 round 5"
+    /// note. `EffectRuntimeHandle::shutdown_and_wait`'s call into
+    /// [`DeliveryRunner::shutdown_and_drain`] is the ONE place that happens
+    /// now, so this task can return as soon as it stops consuming.
     pub(crate) async fn run(
         self: Arc<Self>,
         receiver: EffectQueueReceiver,
         concurrency: usize,
         shutdown: watch::Receiver<bool>,
     ) {
-        self.run_inner(
-            receiver,
-            concurrency,
-            shutdown,
-            RECLAIM_INTERVAL,
-            SHUTDOWN_DRAIN_DEADLINE,
-        )
-        .await;
+        self.run_inner(receiver, concurrency, shutdown, RECLAIM_INTERVAL)
+            .await;
     }
 
     /// Test-observable variant of [`Self::run`] with a configurable reclaim
-    /// interval and shutdown-drain deadline, so tests don't have to wait out
-    /// the real [`RECLAIM_INTERVAL`]/[`SHUTDOWN_DRAIN_DEADLINE`].
+    /// interval, so tests don't have to wait out the real
+    /// [`RECLAIM_INTERVAL`].
     async fn run_inner(
         self: Arc<Self>,
         mut receiver: EffectQueueReceiver,
         concurrency: usize,
         mut shutdown: watch::Receiver<bool>,
         reclaim_interval: Duration,
-        drain_deadline: Duration,
     ) {
         let backpressure = Arc::new(Backpressure::new(concurrency.max(1)));
         let mut reclaim_tick = tokio::time::interval(reclaim_interval);
@@ -340,9 +441,11 @@ impl DeliveryRunner {
             }
         }
 
-        // Fix 5: stop accepting new work above, then wait for every
-        // outstanding dispatch/redispatch task to actually finish.
-        self.drain_tasks(drain_deadline).await;
+        // **PR3 round 5 review (F-01, BLOCKER fix):** this task deliberately
+        // does NOT drain/wait for its own spawned dispatch tasks here anymore
+        // — it just stops consuming and returns. `shutdown_and_drain` (called
+        // solely by `EffectRuntimeHandle::shutdown_and_wait`) is now the ONE
+        // place that aborts/drains `tasks`/`executor_aborts`.
     }
 
     /// F-01 (PR2 round 5): the ONE "acquire a concurrency permit (racing
@@ -1483,7 +1586,6 @@ mod tests {
             2,
             shutdown_rx,
             StdDuration::from_millis(10),
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         tokio::time::timeout(StdDuration::from_secs(1), async {
@@ -2082,7 +2184,6 @@ mod tests {
             1,
             shutdown_rx,
             StdDuration::from_millis(20),
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         tokio::time::timeout(StdDuration::from_secs(1), async {
@@ -2129,7 +2230,6 @@ mod tests {
             1,
             shutdown_rx,
             StdDuration::from_millis(10),
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         // Give several reclaim ticks a chance to fire.
@@ -2165,7 +2265,6 @@ mod tests {
             1,
             shutdown_rx,
             StdDuration::from_millis(10),
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         shutdown_tx.send(true).unwrap();
@@ -2229,7 +2328,6 @@ mod tests {
             2,
             shutdown_rx,
             RECLAIM_INTERVAL,
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         tokio::time::timeout(StdDuration::from_secs(1), async {
@@ -2263,15 +2361,19 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    async fn shutdown_aborts_a_task_still_running_past_the_drain_deadline_and_leaves_no_leaked_background_task(
+    async fn shutdown_and_drain_aborts_a_task_still_running_past_the_drain_deadline_and_leaves_no_leaked_background_task(
     ) {
-        // Before this fix, `drain_tasks` just gave up once its deadline
-        // elapsed, returning with the still-running dispatch task (and its
-        // inner executor attempt) left running, untracked, in the
-        // background forever. This proves: (a) the still-running attempt
-        // gets aborted, (b) `run_inner` returns with the tracked `JoinSet`
-        // fully empty, and (c) the abort is classified as cancelled — not
-        // charged as an ordinary retryable failure.
+        // Before Gap 1's original fix, drain logic just gave up once its
+        // deadline elapsed, returning with the still-running dispatch task
+        // (and its inner executor attempt) left running, untracked, in the
+        // background forever. **PR3 round 5:** `run_inner` no longer drains
+        // anything itself at all — it returns as soon as it stops consuming
+        // — so this now proves the SAME guarantee against the sole cleanup
+        // authority, `DeliveryRunner::shutdown_and_drain`, called explicitly
+        // after `run_inner` returns: (a) the still-running attempt gets
+        // aborted, (b) the tracked `JoinSet` ends up fully empty, and (c) the
+        // abort is classified as cancelled — not charged as an ordinary
+        // retryable failure.
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let started = Arc::new(tokio::sync::Notify::new());
@@ -2304,14 +2406,8 @@ mod tests {
         store.accept(effect.clone()).await.unwrap();
         queue.send(effect).await.unwrap();
 
-        let drain_deadline = StdDuration::from_millis(20);
-        let loop_handle = tokio::spawn(runner.clone().run_inner(
-            receiver,
-            2,
-            shutdown_rx,
-            RECLAIM_INTERVAL,
-            drain_deadline,
-        ));
+        let loop_handle =
+            tokio::spawn(runner.clone().run_inner(receiver, 2, shutdown_rx, RECLAIM_INTERVAL));
 
         tokio::time::timeout(StdDuration::from_secs(1), started.notified())
             .await
@@ -2322,10 +2418,17 @@ mod tests {
         tokio::time::timeout(StdDuration::from_secs(1), loop_handle)
             .await
             .expect(
-                "run_inner must return once the drain deadline aborts the hanging task, \
-                 not block forever",
+                "run_inner must return promptly once it stops consuming — it no longer waits \
+                 on its own spawned dispatch tasks at all",
             )
             .expect("task did not panic");
+
+        // The sole cleanup authority, invoked explicitly (as
+        // `EffectRuntimeHandle::shutdown_and_wait` does in production) with a
+        // short deadline the hanging task cannot finish within.
+        runner
+            .shutdown_and_drain(tokio::time::Instant::now() + StdDuration::from_millis(20))
+            .await;
 
         assert!(
             runner.tasks.lock().await.is_empty(),
@@ -2347,6 +2450,109 @@ mod tests {
         assert_eq!(
             due[0].attempt, 0,
             "cancellation must not be charged against the zero-retry attempt cap"
+        );
+    }
+
+    /// Executor that increments a shared counter forever, never returning on
+    /// its own — unlike [`HangingExecutor`] (which just parks), this proves
+    /// the executor task actually stopped RUNNING (not merely that some
+    /// outer task returned) by asserting the counter stops changing.
+    struct CountingHangingExecutor {
+        started: Arc<tokio::sync::Notify>,
+        counter: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExternalEffectExecutor for CountingHangingExecutor {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
+            self.started.notify_one();
+            loop {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        }
+    }
+
+    /// **F-01 (PR3 round 3 review, BLOCKER):** aborting the OUTER
+    /// `run()`/`run_inner` task does NOT cancel `DeliveryRunner`'s own child
+    /// tasks — they are owned by the struct's `tasks`/`executor_aborts`
+    /// fields, not scoped to the outer task's future. Proven by hard-aborting
+    /// the outer task FIRST — simulating exactly the bug: the outer task
+    /// never reaches its own internal `drain_tasks` call — and then calling
+    /// the new, authoritative `DeliveryRunner::shutdown_and_drain` directly
+    /// on the shared `Arc<DeliveryRunner>`: the hung executor must actually
+    /// stop running afterward (its counter stops changing), not just that
+    /// the outer task returned.
+    #[tokio::test]
+    async fn shutdown_and_drain_aborts_runner_owned_child_tasks_even_when_the_outer_run_task_was_hard_aborted_first(
+    ) {
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let executor = Arc::new(CountingHangingExecutor {
+            started: started.clone(),
+            counter: counter.clone(),
+        });
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let (queue, receiver) = EffectQueue::bounded(4);
+        let runner = Arc::new(DeliveryRunner::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store.clone() as Arc<dyn EffectDedupStore>,
+            Arc::new(registry),
+            RetryPolicy::default(),
+        ));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect.clone()).await.unwrap();
+        queue.send(effect).await.unwrap();
+
+        let outer_task = tokio::spawn(runner.clone().run_inner(
+            receiver,
+            2,
+            shutdown_rx,
+            RECLAIM_INTERVAL,
+        ));
+
+        tokio::time::timeout(StdDuration::from_secs(1), started.notified())
+            .await
+            .expect("the hanging executor starts running within timeout");
+
+        // Simulate the F-01 bug scenario directly: hard-abort the outer task
+        // before it ever reaches its own end-of-loop `drain_tasks` call. The
+        // executor task (an independent `tokio::spawn`, tracked only in this
+        // runner's own `executor_aborts`) is untouched by this — it keeps
+        // incrementing `counter` right after this returns.
+        outer_task.abort();
+        let _ = outer_task.await;
+
+        let count_right_after_abort = counter.load(Ordering::SeqCst);
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        assert!(
+            counter.load(Ordering::SeqCst) > count_right_after_abort,
+            "sanity check: the hung executor must still be running right after the outer \
+             task alone was aborted — otherwise this test cannot prove anything"
+        );
+
+        runner
+            .shutdown_and_drain(tokio::time::Instant::now() + StdDuration::from_millis(200))
+            .await;
+
+        let count_right_after_drain = counter.load(Ordering::SeqCst);
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert_eq!(
+            count_right_after_drain,
+            counter.load(Ordering::SeqCst),
+            "shutdown_and_drain must genuinely abort the hung executor task, not merely \
+             leave it running after the outer run() task was hard-aborted first"
         );
     }
 
@@ -2962,8 +3168,8 @@ mod tests {
         // for a newly-received effect was a bare `.await` outside any
         // `select!` watching shutdown. With every concurrency slot held by
         // a hung executor, a second queued effect would block the main
-        // loop on `backpressure.acquire()` forever — never reaching
-        // `drain_tasks`'s abort-on-deadline logic at all.
+        // loop on `backpressure.acquire()` forever — never reaching the
+        // shutdown-observing branch of the select loop at all.
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let started = Arc::new(tokio::sync::Notify::new());
@@ -2997,13 +3203,11 @@ mod tests {
         store.accept(second_effect.clone()).await.unwrap();
         queue.send(second_effect).await.unwrap();
 
-        let drain_deadline = StdDuration::from_millis(30);
         let loop_handle = tokio::spawn(runner.clone().run_inner(
             receiver,
             1, // exactly one concurrency permit
             shutdown_rx,
             RECLAIM_INTERVAL,
-            drain_deadline,
         ));
 
         tokio::time::timeout(StdDuration::from_secs(1), started.notified())
@@ -3083,7 +3287,6 @@ mod tests {
             4,
             shutdown_rx,
             StdDuration::from_millis(10),
-            SHUTDOWN_DRAIN_DEADLINE,
         ));
 
         tokio::time::timeout(StdDuration::from_secs(1), async {
