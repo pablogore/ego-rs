@@ -108,26 +108,26 @@ cross-provider-isolation integration test (design.md §8); `persistent-entity`
 delta — "Missing Registration Fails Closed From the Handler's Perspective",
 "Fetch Attempts Are Observable".
 
-- [ ] 3.1 RED: resolving an unregistered `provider_id` through
+- [x] 3.1 RED: resolving an unregistered `provider_id` through
   `RuntimeDataProviderAccess::fetch` returns
   `DataProviderError::ProviderMissing`, never a silent default or empty
   value ("Fail-Closed Provider Resolution" / "Missing Registration Fails
   Closed" scenarios)
-- [ ] 3.2 RED: a successful fetch emits one `tracing` span carrying
+- [x] 3.2 RED: a successful fetch emits one `tracing` event carrying
   `provider_id`, a hashed `key` (never the raw key or `payload`), latency,
   `cache_hit`, and an explicit `outcome: ProviderOutcome` field
   (`Success | NotFound | Transient | Fatal | ProviderMissing`) derived once
   at the chokepoint (AD-008) — captured via an in-file `tracing::Subscriber`
   test double, following the same pattern as CORE-019's
   `effects/observability.rs` test
-- [ ] 3.3 RED: **cross-provider isolation** — two `testkit` doubles
+- [x] 3.3 RED: **cross-provider isolation** — two `testkit` doubles
   registered under distinct `provider_id`s, given structurally identical
   `DataRequest`s, never cross-resolve; each fetch returns exactly its own
   provider's response (design.md §8 newly-added integration test)
-- [ ] 3.4 GREEN: `RuntimeDataProviderAccess` implementing
-  `DataProviderAccess` — registry lookup, span emission, `ProviderOutcome`
+- [x] 3.4 GREEN: `RuntimeDataProviderAccess` implementing
+  `DataProviderAccess` — registry lookup, event emission, `ProviderOutcome`
   derivation (`access.rs`)
-- [ ] 3.5 GREEN: `crates/runtime/src/providers/mod.rs` — subsystem root,
+- [x] 3.5 GREEN: `crates/runtime/src/providers/mod.rs` — subsystem root,
   re-exports (`ExternalDataProvider`, `ExternalDataProviderRegistry`,
   `DuplicateProviderId`, `RuntimeDataProviderAccess`)
 
@@ -136,13 +136,13 @@ delta — "Missing Registration Fails Closed From the Handler's Perspective",
 Design refs: AD-001, AD-006. Spec refs: "Zero Runtime Overhead When Unused",
 "Explicit, Single-Owner Lifecycle".
 
-- [ ] 4.1 RED: a `RuntimeBuilder` with zero providers registered incurs no
+- [x] 4.1 RED: a `RuntimeBuilder` with zero providers registered incurs no
   measurable startup cost attributable to this capability (no registry, no
   facade constructed) — "Zero Runtime Overhead When Unused" scenario
-- [ ] 4.2 RED: with ≥2 providers registered, runtime shutdown invokes each
+- [x] 4.2 RED: with ≥2 providers registered, runtime shutdown invokes each
   registered provider's `shutdown()` exactly once, through the one owning
   teardown path — "Explicit, Single-Owner Lifecycle" scenario
-- [ ] 4.3 GREEN: `RuntimeBuilder::register_data_provider(id, provider) ->
+- [x] 4.3 GREEN: `RuntimeBuilder::register_data_provider(id, provider) ->
   Result<Self, DuplicateProviderId>`; conditional registry/facade
   construction (empty registry → no `RuntimeDataProviderAccess` built);
   `register_async_teardown` hook drives every registered provider's
@@ -198,3 +198,13 @@ command handling" (E2E proof).
   spec (`specs/external-data-providers/spec.md`, already written in the spec
   phase) — not a code task in `sdd-apply`'s scope. Noted here so it is not
   silently assumed done by this file.
+- **Timeout/Retry Observability** (spec.md `external-data-providers`
+  requirement) is **not implemented in this slice** — AD-007 adopts no
+  retry/backoff policy this slice (a fetch is inline to command handling,
+  so there is no delivery loop for a policy to drive), so there is no
+  timeout or retry attempt for any signal to reflect. PR2 review (F-01)
+  found this MUST unimplemented and unscoped in spec.md; spec.md now
+  carries a dedicated "Timeout/Retry Observability (Deferred — Future
+  Capability)" requirement recording the target contract for once a retry
+  policy exists, and the Fetch Observability Signals requirement no longer
+  claims timeout/retry as part of this slice's MUST-emit set.
