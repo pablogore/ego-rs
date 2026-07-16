@@ -27,6 +27,7 @@ use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
 use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
+use persistent_entity::data_provider_access::DataProviderAccess;
 
 use crate::context::ServiceContext;
 use crate::di::{AdapterRef, ConfigValue, DepKey, ProjectionRef};
@@ -249,6 +250,15 @@ pub struct RuntimeInner {
     /// in-flight effects back to `Pending` (design.md §8). Meaningless when
     /// `effect_acceptor_impl` is `None`.
     pub(crate) effect_drain_deadline: Duration,
+    /// The external-data-provider facade constructed by
+    /// `RuntimeBuilder::build()` (CORE-019A Phase 4), if at least one
+    /// provider was registered via `RuntimeBuilder::register_data_provider`.
+    /// `None` is the zero-cost path (design.md AD-006): no registry, no
+    /// `RuntimeDataProviderAccess` is ever constructed when this is `None`.
+    /// Unlike `effect_acceptor_impl`, there is no separate `start` step —
+    /// `RuntimeDataProviderAccess` never spawns a task, so it is fully usable
+    /// the moment `build()` returns.
+    pub(crate) data_provider_access: Option<Arc<dyn DataProviderAccess>>,
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -289,6 +299,7 @@ impl RuntimeInner {
         observability: Option<Arc<dyn Observability>>,
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
+        data_provider_access: Option<Arc<dyn DataProviderAccess>>,
     ) -> Self {
         Self {
             registry,
@@ -303,6 +314,7 @@ impl RuntimeInner {
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
             effect_drain_deadline,
+            data_provider_access,
         }
     }
 
@@ -545,6 +557,7 @@ impl RuntimeInner {
             None,
             None,
             Duration::from_secs(5),
+            None,
         )
     }
 
@@ -565,6 +578,7 @@ impl RuntimeInner {
             Some(obs),
             None,
             Duration::from_secs(5),
+            None,
         )
     }
 
@@ -587,6 +601,7 @@ impl RuntimeInner {
             None,
             None,
             Duration::from_secs(5),
+            None,
         )
     }
 }
@@ -1211,6 +1226,7 @@ mod tests {
             None,
             None,
             Duration::from_secs(5),
+            None,
         );
 
         let result = rt.authorization_provider();

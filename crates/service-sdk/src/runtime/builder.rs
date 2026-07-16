@@ -9,9 +9,14 @@ use ego_runtime::effects::{
     DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
     ExternalEffectExecutor, InMemoryEffectStore, RuntimeEffectAcceptor,
 };
+use ego_runtime::providers::{
+    DuplicateProviderId, ExternalDataProvider, ExternalDataProviderRegistry,
+    RuntimeDataProviderAccess,
+};
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
+use persistent_entity::data_provider_access::DataProviderAccess;
 use persistent_entity::effect_acceptor::EffectAcceptor;
 
 use crate::contract::{ServiceContract, VersionConstraint};
@@ -86,6 +91,19 @@ pub struct RuntimeBuilder {
     /// How long graceful shutdown waits for the `Deferred` drain loop before
     /// forcing remaining in-flight effects back to `Pending` (design.md §8).
     effect_drain_deadline: Duration,
+    /// Providers registered via
+    /// [`RuntimeBuilder::register_data_provider`] (CORE-019A Phase 4). Empty
+    /// by default — the zero-cost gate `build()` checks to decide whether to
+    /// construct the `RuntimeDataProviderAccess` facade at all (AD-006).
+    data_provider_registry: ExternalDataProviderRegistry,
+    /// Every provider registered via
+    /// [`RuntimeBuilder::register_data_provider`], kept alongside the
+    /// registry above purely so `build()` can drive each one's `shutdown()`
+    /// exactly once through the single owning teardown path (spec:
+    /// "Explicit, Single-Owner Lifecycle") — the registry itself is moved
+    /// into `RuntimeDataProviderAccess` and is no longer iterable once
+    /// `build()` constructs the facade.
+    data_providers_for_teardown: Vec<Arc<dyn ExternalDataProvider>>,
 }
 
 impl RuntimeBuilder {
@@ -105,6 +123,8 @@ impl RuntimeBuilder {
             effect_executors: ExecutorRegistry::new(),
             delivery_config: DeliveryConfig::default(),
             effect_drain_deadline: DEFAULT_EFFECT_DRAIN_DEADLINE,
+            data_provider_registry: ExternalDataProviderRegistry::new(),
+            data_providers_for_teardown: Vec::new(),
         }
     }
 
@@ -223,6 +243,36 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
+    /// Registers `provider` as the sole owner of `provider_id` (CORE-019A
+    /// Phase 4, design.md §6). Fails closed on a duplicate `provider_id` —
+    /// the already-shipped `ExternalDataProviderRegistry`'s "one owner per
+    /// id" contract; the first registration is left untouched.
+    ///
+    /// Registering at least one provider is what makes [`RuntimeBuilder::build`]
+    /// construct a real `RuntimeDataProviderAccess` facade (AD-006's
+    /// zero-cost-when-unused gate: no registration → no registry, no facade
+    /// constructed). Every *distinct* registered provider's `shutdown()` is
+    /// driven, exactly once, by the single owning teardown path `build()`
+    /// registers (spec: "Explicit, Single-Owner Lifecycle") — registering the
+    /// same `Arc` under two different `provider_id`s (a valid aliasing
+    /// pattern, e.g. during a migration) still tears it down only once,
+    /// never twice.
+    pub fn register_data_provider(
+        mut self,
+        provider_id: impl Into<String>,
+        provider: Arc<dyn ExternalDataProvider>,
+    ) -> Result<Self, DuplicateProviderId> {
+        self.data_provider_registry.register(provider_id, provider.clone())?;
+        let already_tracked = self
+            .data_providers_for_teardown
+            .iter()
+            .any(|tracked| Arc::ptr_eq(tracked, &provider));
+        if !already_tracked {
+            self.data_providers_for_teardown.push(provider);
+        }
+        Ok(self)
+    }
+
     /// Configures the [`DeliveryConfig`] used by the external-effects delivery
     /// pipeline. Defaults to [`DeliveryConfig::default`] (AD-5 backoff,
     /// `Deferred` runner mode) — only meaningful once at least one executor
@@ -282,7 +332,23 @@ impl RuntimeBuilder {
             )))
         };
 
-        Runtime {
+        // CORE-019A Phase 4 zero-cost gate (AD-006), mirroring the
+        // effect-executors gate above: construct the
+        // `RuntimeDataProviderAccess` facade ONLY when at least one provider
+        // was registered. Unlike the effects acceptor, there is no separate
+        // `start()` step to re-separate — `RuntimeDataProviderAccess` never
+        // spawns a task, so it is immediately usable once built.
+        let data_provider_access: Option<Arc<dyn DataProviderAccess>> =
+            if self.data_provider_registry.is_empty() {
+                None
+            } else {
+                Some(Arc::new(RuntimeDataProviderAccess::new(
+                    self.data_provider_registry,
+                )))
+            };
+        let data_providers_for_teardown = self.data_providers_for_teardown;
+
+        let runtime = Runtime {
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
                 self.interceptor_chain,
@@ -294,8 +360,26 @@ impl RuntimeBuilder {
                 self.observability,
                 effect_acceptor_impl,
                 self.effect_drain_deadline,
+                data_provider_access,
             )),
+        };
+
+        // Single owning teardown path (spec: "Explicit, Single-Owner
+        // Lifecycle") — every registered provider's `shutdown()` runs
+        // exactly once, through the same `register_async_teardown`/
+        // `shutdown_async` mechanism the effects subsystem already uses.
+        // A no-op registration when no provider was ever registered — the
+        // zero-cost path incurs no extra hook.
+        if !data_providers_for_teardown.is_empty() {
+            runtime.register_async_teardown(async move {
+                for provider in data_providers_for_teardown {
+                    provider.shutdown().await;
+                }
+                Ok(())
+            });
         }
+
+        runtime
     }
 
     /// Consumes the builder and produces a [`Runtime`], first running every
@@ -437,6 +521,17 @@ impl Runtime {
             .effect_acceptor_impl
             .as_ref()
             .map(|acceptor| acceptor.clone() as Arc<dyn EffectAcceptor>)
+    }
+
+    /// Returns the external-data-provider [`DataProviderAccess`] facade
+    /// built via [`RuntimeBuilder::register_data_provider`] (CORE-019A Phase
+    /// 4), if at least one provider was registered. `None` in the zero-cost
+    /// path (AD-006) — no registry, no facade was ever constructed. Unlike
+    /// [`Runtime::effect_acceptor`], this is available immediately after
+    /// `build()` — there is no separate `start_effects`-style step, since
+    /// `RuntimeDataProviderAccess` never spawns a task.
+    pub fn data_provider_access(&self) -> Option<Arc<dyn DataProviderAccess>> {
+        self.inner.data_provider_access.clone()
     }
 
     /// Resolves `Tag` to its concrete macro-generated proxy — the canonical
@@ -1370,5 +1465,148 @@ mod tests {
             "a still-in-flight effect at the deadline must surface as drain_incomplete, not a \
              silent success"
         );
+    }
+
+    // -- CORE-019A Phase 4 (RED 4.1/4.2): register_data_provider, conditional
+    // facade construction, single-owner teardown ---------------------------
+
+    use ego_runtime::providers::{DuplicateProviderId, ExternalDataProvider};
+    use persistent_entity::data_provider_access::{DataProviderError, DataRequest, DataResponse};
+
+    struct RecordingShutdownProvider {
+        shutdown_calls: AtomicUsize,
+    }
+
+    impl RecordingShutdownProvider {
+        fn new() -> Self {
+            Self {
+                shutdown_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn shutdown_call_count(&self) -> usize {
+            self.shutdown_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ExternalDataProvider for RecordingShutdownProvider {
+        async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            Ok(DataResponse {
+                payload: request.payload,
+                cache_hit: false,
+            })
+        }
+
+        async fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn build_without_registering_any_data_provider_wires_no_facade() {
+        // Zero-cost path (spec: "Zero Runtime Overhead When Unused";
+        // design.md AD-006): no provider registered means `build()` never
+        // constructs a registry or `RuntimeDataProviderAccess` at all.
+        let rt = RuntimeBuilder::new().build();
+        assert!(
+            rt.data_provider_access().is_none(),
+            "no provider was registered, so no RuntimeDataProviderAccess may exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_with_no_registered_data_provider_completes_instantly() {
+        let rt = RuntimeBuilder::new().build();
+        let started = Instant::now();
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "no data provider was registered — shutdown must not wait on anything provider-related"
+        );
+    }
+
+    #[test]
+    fn register_data_provider_duplicate_provider_id_fails_closed() {
+        let provider: Arc<dyn ExternalDataProvider> = Arc::new(RecordingShutdownProvider::new());
+        let err = match RuntimeBuilder::new()
+            .register_data_provider("pricing", provider.clone())
+            .expect("first registration succeeds")
+            .register_data_provider("pricing", provider)
+        {
+            Err(e) => e,
+            Ok(_) => panic!("a second provider for the same provider_id must fail closed"),
+        };
+
+        assert!(matches!(
+            err,
+            DuplicateProviderId::AlreadyRegistered(id) if id == "pricing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_with_registered_data_provider_wires_a_usable_facade() {
+        let provider: Arc<dyn ExternalDataProvider> = Arc::new(RecordingShutdownProvider::new());
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("pricing", provider)
+            .unwrap()
+            .build();
+
+        let access = rt
+            .data_provider_access()
+            .expect("a provider was registered — the facade must be constructed");
+        let response = access
+            .fetch(
+                "pricing",
+                DataRequest {
+                    key: "sku-1".to_string(),
+                    payload: vec![1, 2, 3],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.payload, vec![1, 2, 3]);
+    }
+
+    /// Spec scenario "Shutdown reaches every registered provider exactly
+    /// once": with two providers registered, `shutdown_async` must invoke
+    /// each one's `shutdown()` exactly once, through the single owning
+    /// teardown path — never skipped, never double-invoked.
+    #[tokio::test]
+    async fn shutdown_async_invokes_every_registered_provider_shutdown_exactly_once() {
+        let provider_a = Arc::new(RecordingShutdownProvider::new());
+        let provider_b = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("pricing", provider_a.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .register_data_provider("jwks", provider_b.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(provider_a.shutdown_call_count(), 1);
+        assert_eq!(provider_b.shutdown_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_tears_down_an_aliased_provider_only_once() {
+        // Registering the same Arc under two provider_ids is a valid
+        // aliasing pattern (e.g. a migration exposing one client under both
+        // an old and a new id) — it must still be torn down exactly once,
+        // never once per registration (review finding on PR2).
+        let provider = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("jwks", provider.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .register_data_provider("jwks-legacy", provider.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(provider.shutdown_call_count(), 1);
     }
 }

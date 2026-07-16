@@ -108,26 +108,26 @@ cross-provider-isolation integration test (design.md §8); `persistent-entity`
 delta — "Missing Registration Fails Closed From the Handler's Perspective",
 "Fetch Attempts Are Observable".
 
-- [ ] 3.1 RED: resolving an unregistered `provider_id` through
+- [x] 3.1 RED: resolving an unregistered `provider_id` through
   `RuntimeDataProviderAccess::fetch` returns
   `DataProviderError::ProviderMissing`, never a silent default or empty
   value ("Fail-Closed Provider Resolution" / "Missing Registration Fails
   Closed" scenarios)
-- [ ] 3.2 RED: a successful fetch emits one `tracing` span carrying
+- [x] 3.2 RED: a successful fetch emits one `tracing` span carrying
   `provider_id`, a hashed `key` (never the raw key or `payload`), latency,
   `cache_hit`, and an explicit `outcome: ProviderOutcome` field
   (`Success | NotFound | Transient | Fatal | ProviderMissing`) derived once
   at the chokepoint (AD-008) — captured via an in-file `tracing::Subscriber`
   test double, following the same pattern as CORE-019's
   `effects/observability.rs` test
-- [ ] 3.3 RED: **cross-provider isolation** — two `testkit` doubles
+- [x] 3.3 RED: **cross-provider isolation** — two `testkit` doubles
   registered under distinct `provider_id`s, given structurally identical
   `DataRequest`s, never cross-resolve; each fetch returns exactly its own
   provider's response (design.md §8 newly-added integration test)
-- [ ] 3.4 GREEN: `RuntimeDataProviderAccess` implementing
+- [x] 3.4 GREEN: `RuntimeDataProviderAccess` implementing
   `DataProviderAccess` — registry lookup, span emission, `ProviderOutcome`
   derivation (`access.rs`)
-- [ ] 3.5 GREEN: `crates/runtime/src/providers/mod.rs` — subsystem root,
+- [x] 3.5 GREEN: `crates/runtime/src/providers/mod.rs` — subsystem root,
   re-exports (`ExternalDataProvider`, `ExternalDataProviderRegistry`,
   `DuplicateProviderId`, `RuntimeDataProviderAccess`)
 
@@ -136,13 +136,13 @@ delta — "Missing Registration Fails Closed From the Handler's Perspective",
 Design refs: AD-001, AD-006. Spec refs: "Zero Runtime Overhead When Unused",
 "Explicit, Single-Owner Lifecycle".
 
-- [ ] 4.1 RED: a `RuntimeBuilder` with zero providers registered incurs no
+- [x] 4.1 RED: a `RuntimeBuilder` with zero providers registered incurs no
   measurable startup cost attributable to this capability (no registry, no
   facade constructed) — "Zero Runtime Overhead When Unused" scenario
-- [ ] 4.2 RED: with ≥2 providers registered, runtime shutdown invokes each
+- [x] 4.2 RED: with ≥2 providers registered, runtime shutdown invokes each
   registered provider's `shutdown()` exactly once, through the one owning
   teardown path — "Explicit, Single-Owner Lifecycle" scenario
-- [ ] 4.3 GREEN: `RuntimeBuilder::register_data_provider(id, provider) ->
+- [x] 4.3 GREEN: `RuntimeBuilder::register_data_provider(id, provider) ->
   Result<Self, DuplicateProviderId>`; conditional registry/facade
   construction (empty registry → no `RuntimeDataProviderAccess` built);
   `register_async_teardown` hook drives every registered provider's
