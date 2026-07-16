@@ -24,3 +24,6 @@ sha2 = "0.11.0"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "test-util", "time"] }
 serde_json = "1"
+# CORE-019A Phase 2: proves the ExternalDataProvider cache-first block_on
+# sync bridge (AD-006/AD-013), mirroring security-jwt's key_resolver.rs test.
+futures-executor = "0.3"

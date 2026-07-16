@@ -43,6 +43,15 @@ pub mod read_side;
 /// (CORE-019). Beside the dormant `EffectInterpreter`, not inside it.
 pub mod effects;
 
+/// External data provider subsystem — SPI + registry (CORE-019A Phase 2).
+/// Read-side counterpart to [`effects`]. This slice ships only `provider`
+/// and `registry`; the observability chokepoint and subsystem root
+/// (`mod.rs`) land in a later work unit.
+pub mod providers {
+    pub mod provider;
+    pub mod registry;
+}
+
 pub use runtime::execution::ExecutionId;
 pub use runtime::failure::{SendError, SendErrorKind, SpawnError, SpawnErrorKind};
 pub use runtime::handle::RuntimeHandle;

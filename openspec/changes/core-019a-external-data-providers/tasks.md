@@ -53,20 +53,20 @@ Design refs: AD-001, AD-004, AD-009. Spec refs: `persistent-entity` delta —
 From the Handler's Perspective", "Fetch Attempts Are Observable" (signal
 shape only — chokepoint itself is Phase 3), "Existing Handlers Unaffected".
 
-- [ ] 1.1 RED: unmodified `PersistentEntity` handler that never references
+- [x] 1.1 RED: unmodified `PersistentEntity` handler that never references
   `DataProviderAccess` compiles and its existing tests pass unchanged
   ("Existing Handlers Unaffected" scenario)
-- [ ] 1.2 RED: `DataProviderAccess` is object-safe (`Arc<dyn
+- [x] 1.2 RED: `DataProviderAccess` is object-safe (`Arc<dyn
   DataProviderAccess>` compiles) — mirrors `key_resolver.rs`'s
   object-safety test
-- [ ] 1.3 GREEN: `DataRequest { key: String, payload: Vec<u8> }`,
+- [x] 1.3 GREEN: `DataRequest { key: String, payload: Vec<u8> }`,
   `DataResponse { payload: Vec<u8>, cache_hit: bool }`,
   `DataProviderError { Transient(String), Fatal(String), NotFound { key },
   ProviderMissing { provider_id } }` (AD-007), `#[async_trait] trait
   DataProviderAccess: Send + Sync { async fn fetch(&self, provider_id: &str,
   request: DataRequest) -> Result<DataResponse, DataProviderError>; }`
   (`data_provider_access.rs`)
-- [ ] 1.4 Note (not a test): "SPI Isolated From Runtime Internals" is
+- [x] 1.4 Note (not a test): "SPI Isolated From Runtime Internals" is
   satisfied structurally by this phase's layering (the port + DTOs live in
   `persistent-entity`, which never depends on `runtime`) — proven end-to-end
   once Phase 6's dogfood provider compiles against only public SPI types, not
@@ -78,23 +78,23 @@ Design refs: AD-002, AD-004, AD-005, AD-006, AD-012. Spec refs:
 `external-data-providers` — "Duplicate Registration Fails At Registration
 Time", "Explicit, Non-Reflective Registration".
 
-- [ ] 2.1 RED: `ExternalDataProvider` is object-safe (`Arc<dyn
+- [x] 2.1 RED: `ExternalDataProvider` is object-safe (`Arc<dyn
   ExternalDataProvider>` compiles); a `StaticDataProvider`-shaped test double
   calling `fetch` synchronously via `futures_executor::block_on` returns the
   expected cached response without deadlocking — mirrors
   `key_resolver.rs`'s cache-first bridge test (AD-006)
-- [ ] 2.2 GREEN: `#[async_trait] trait ExternalDataProvider: Send + Sync {
+- [x] 2.2 GREEN: `#[async_trait] trait ExternalDataProvider: Send + Sync {
   async fn fetch(&self, request: DataRequest) -> Result<DataResponse,
   DataProviderError>; async fn shutdown(&self) {} }` (`provider.rs`)
-- [ ] 2.3 RED: registering two providers under distinct `provider_id`s both
+- [x] 2.3 RED: registering two providers under distinct `provider_id`s both
   succeed and each resolves independently; registering a second provider
   under an already-registered `provider_id` fails immediately and the first
   registration remains sole owner (both scenarios from "Duplicate
   Registration Fails At Registration Time")
-- [ ] 2.4 RED: a provider type that exists but was never registered fails to
+- [x] 2.4 RED: a provider type that exists but was never registered fails to
   resolve exactly as an unregistered key would ("Explicit, Non-Reflective
   Registration" scenario) — proves no scanning/reflection path exists
-- [ ] 2.5 GREEN: `ExternalDataProviderRegistry` = `HashMap<String, Arc<dyn
+- [x] 2.5 GREEN: `ExternalDataProviderRegistry` = `HashMap<String, Arc<dyn
   ExternalDataProvider>>`; `register(id, provider) -> Result<(),
   DuplicateProviderId>`, fail-closed at registration (`registry.rs`)
 

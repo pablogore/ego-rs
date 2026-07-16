@@ -29,6 +29,10 @@ pub mod actor;
 pub mod builder;
 pub mod command_context;
 pub mod command_envelope;
+/// Handler-facing external data access port + DTOs (CORE-019A Phase 1,
+/// AD-001/AD-004/AD-009). Sibling of [`effect_acceptor`]: the trait lives
+/// here so a handler depends only on this crate, never on `ego-runtime`.
+pub mod data_provider_access;
 pub mod effect_acceptor;
 pub mod entity_ref;
 pub mod entity_ref_tokio;
