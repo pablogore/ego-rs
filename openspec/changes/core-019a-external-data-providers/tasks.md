@@ -80,9 +80,11 @@ Time", "Explicit, Non-Reflective Registration".
 
 - [x] 2.1 RED: `ExternalDataProvider` is object-safe (`Arc<dyn
   ExternalDataProvider>` compiles); a `StaticDataProvider`-shaped test double
-  calling `fetch` synchronously via `futures_executor::block_on` returns the
-  expected cached response without deadlocking — mirrors
-  `key_resolver.rs`'s cache-first bridge test (AD-006)
+  calling `fetch` (via `#[tokio::test]`) returns the expected response —
+  proves object-safety and result propagation only. No `block_on` sync
+  bridge: `handle_command`/`apply_event`/`apply_events` are already async,
+  so there is no synchronous call site to bridge (AD-006 correction, PR1
+  review — cache-first was never a real constraint here)
 - [x] 2.2 GREEN: `#[async_trait] trait ExternalDataProvider: Send + Sync {
   async fn fetch(&self, request: DataRequest) -> Result<DataResponse,
   DataProviderError>; async fn shutdown(&self) {} }` (`provider.rs`)

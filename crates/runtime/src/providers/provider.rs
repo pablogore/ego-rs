@@ -1,9 +1,12 @@
 //! External data provider SPI (CORE-019A Phase 2, AD-002/AD-004).
 //!
-//! Apps implement this trait; the runtime never does. Cache-first contract
-//! (AD-006/AD-013): `fetch` MUST resolve from local state so the
-//! `futures_executor::block_on` sync bridge stays correct — remote warm-up
-//! happens outside `fetch`. Deliberate superset of `security_jwt::KeyResolver`
+//! Apps implement this trait; the runtime never does. `fetch` may do real
+//! I/O — `handle_command`/`apply_event`/`apply_events` are already `async
+//! fn`, so there is no synchronous call site requiring a `block_on` bridge
+//! (AD-006 correction, PR1 review: an earlier cache-first mandate, copied
+//! from `KeyResolver`'s justified-but-specific sync call site, did not
+//! apply here and was dropped). Caching, if a provider wants it, is the
+//! provider's own concern. Deliberate superset of `security_jwt::KeyResolver`
 //! (AD-011): a future retrofit is a thin adapter, not a rewrite.
 
 use async_trait::async_trait;
@@ -14,8 +17,8 @@ use persistent_entity::data_provider_access::{DataProviderError, DataRequest, Da
 /// Object-safe — stored behind `Arc<dyn ExternalDataProvider>`.
 #[async_trait]
 pub trait ExternalDataProvider: Send + Sync {
-    /// Fetches data for `request`. MUST be cache-first (AD-006): remote
-    /// warm-up happens outside this call, never inside it.
+    /// Fetches data for `request`. May perform real I/O — there is no
+    /// cache-first precondition (AD-006).
     async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError>;
 
     /// Tears down any long-lived resource (HTTP pool, gRPC channel, Redis/S3
@@ -31,10 +34,11 @@ mod tests {
     use persistent_entity::data_provider_access::{DataProviderError, DataRequest, DataResponse};
     use std::sync::Arc;
 
-    /// Cache-first provider shaped like `testkit`'s future `StaticDataProvider`
-    /// (Phase 5) — returns a canned response with no I/O, proving the
-    /// `block_on` sync bridge stays correct (mirrors `key_resolver.rs`'s
-    /// `local_key_resolver_is_runtime_free`).
+    /// Test double shaped like `testkit`'s future `StaticDataProvider`
+    /// (Phase 5) — returns a canned response, proving the trait object is
+    /// callable through a real `async` executor (no `block_on` bridge: the
+    /// real call site, `handle_command`, is already async — AD-006
+    /// correction).
     struct StaticDataProvider {
         response: DataResponse,
     }
@@ -46,8 +50,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn external_data_provider_is_object_safe_and_cache_first_via_block_on() {
+    #[tokio::test]
+    async fn external_data_provider_is_object_safe() {
         let provider: Arc<dyn ExternalDataProvider> = Arc::new(StaticDataProvider {
             response: DataResponse {
                 payload: vec![9, 9],
@@ -55,11 +59,13 @@ mod tests {
             },
         });
 
-        let response = futures_executor::block_on(provider.fetch(DataRequest {
-            key: "k".to_string(),
-            payload: vec![],
-        }))
-        .unwrap();
+        let response = provider
+            .fetch(DataRequest {
+                key: "k".to_string(),
+                payload: vec![],
+            })
+            .await
+            .unwrap();
 
         assert_eq!(response.payload, vec![9, 9]);
         assert!(response.cache_hit);
@@ -68,8 +74,8 @@ mod tests {
     /// Triangulation: a distinct provider instance carrying a different
     /// canned response, resolved through the same trait object type,
     /// proving the response is not a fixed constant baked into the trait.
-    #[test]
-    fn a_second_provider_instance_returns_its_own_distinct_response() {
+    #[tokio::test]
+    async fn a_second_provider_instance_returns_its_own_distinct_response() {
         let provider: Arc<dyn ExternalDataProvider> = Arc::new(StaticDataProvider {
             response: DataResponse {
                 payload: vec![1],
@@ -77,11 +83,13 @@ mod tests {
             },
         });
 
-        let response = futures_executor::block_on(provider.fetch(DataRequest {
-            key: "other".to_string(),
-            payload: vec![],
-        }))
-        .unwrap();
+        let response = provider
+            .fetch(DataRequest {
+                key: "other".to_string(),
+                payload: vec![],
+            })
+            .await
+            .unwrap();
 
         assert_eq!(response.payload, vec![1]);
         assert!(!response.cache_hit);
