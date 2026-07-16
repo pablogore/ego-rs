@@ -11,7 +11,14 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 /// Opaque request handed to a registered external data provider (AD-004).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written, never derived: `key` and `payload` are exactly
+/// the fields design.md forbids from ever appearing in a log or span
+/// (§7: "payload never logged"). Deriving `Debug` here would let a future
+/// `tracing::debug!(?request)` in the Phase 3 chokepoint leak them by
+/// accident; the real observability hash of `key` is computed by the
+/// chokepoint directly from this field, not through `Debug`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataRequest {
     /// The provider-defined lookup key (e.g. a JWKS `kid`, a pricing SKU).
     pub key: String,
@@ -20,8 +27,23 @@ pub struct DataRequest {
     pub payload: Vec<u8>,
 }
 
+impl std::fmt::Debug for DataRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataRequest")
+            .field("key", &format_args!("<redacted, {} bytes>", self.key.len()))
+            .field(
+                "payload",
+                &format_args!("<redacted, {} bytes>", self.payload.len()),
+            )
+            .finish()
+    }
+}
+
 /// Opaque response returned by a registered external data provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written for the same reason as [`DataRequest`]: `payload`
+/// must never appear in a log or span.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataResponse {
     /// Opaque response payload; never inspected by the runtime chokepoint.
     pub payload: Vec<u8>,
@@ -31,12 +53,28 @@ pub struct DataResponse {
     pub cache_hit: bool,
 }
 
+impl std::fmt::Debug for DataResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataResponse")
+            .field(
+                "payload",
+                &format_args!("<redacted, {} bytes>", self.payload.len()),
+            )
+            .field("cache_hit", &self.cache_hit)
+            .finish()
+    }
+}
+
 /// Read-side error classification (AD-007). Every variant traces to an
 /// existing in-repo error: `Transient`/`Fatal` mirror the read-side
 /// classification convention, `NotFound` traces to
 /// `KeyResolverError::KeyNotFound`, `ProviderMissing` traces to CORE-019's
 /// `ExecutorMissing`.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+///
+/// `Debug` is hand-written, never derived: `NotFound`'s `key` is the same
+/// log-sensitive field as [`DataRequest::key`] and must never appear raw in
+/// a log or span, in `Display` or `Debug`.
+#[derive(Clone, PartialEq, Eq, Error)]
 pub enum DataProviderError {
     /// A retryable failure; no retry/backoff policy exists in this slice
     /// (§9 non-goals) — the handler decides whether/how to retry.
@@ -46,9 +84,10 @@ pub enum DataProviderError {
     #[error("fatal data provider failure: {0}")]
     Fatal(String),
     /// The provider was resolved but has no data for `key`.
-    #[error("no data found for key '{key}'")]
+    #[error("no data found for the requested key")]
     NotFound {
-        /// The key that had no matching data.
+        /// The key that had no matching data. Never rendered raw — see the
+        /// hand-written `Debug` impl below.
         key: String,
     },
     /// No provider is registered for `provider_id` — the fail-closed
@@ -58,6 +97,23 @@ pub enum DataProviderError {
         /// The `provider_id` that had no registered owner.
         provider_id: String,
     },
+}
+
+impl std::fmt::Debug for DataProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(msg) => f.debug_tuple("Transient").field(msg).finish(),
+            Self::Fatal(msg) => f.debug_tuple("Fatal").field(msg).finish(),
+            Self::NotFound { key } => f
+                .debug_struct("NotFound")
+                .field("key", &format_args!("<redacted, {} bytes>", key.len()))
+                .finish(),
+            Self::ProviderMissing { provider_id } => f
+                .debug_struct("ProviderMissing")
+                .field("provider_id", provider_id)
+                .finish(),
+        }
+    }
 }
 
 /// Handler-facing external data access port (AD-003 hybrid model). A
@@ -175,5 +231,36 @@ mod tests {
         .unwrap();
         assert_eq!(ok.payload, vec![9, 8, 7]);
         assert!(ok.cache_hit);
+    }
+
+    #[test]
+    fn debug_output_never_contains_raw_key_or_payload() {
+        let request = DataRequest {
+            key: "secret-kid-123".to_string(),
+            payload: b"super-sensitive-bytes".to_vec(),
+        };
+        let response = DataResponse {
+            payload: b"super-sensitive-bytes".to_vec(),
+            cache_hit: true,
+        };
+        let error = DataProviderError::NotFound {
+            key: "secret-kid-123".to_string(),
+        };
+
+        let request_debug = format!("{request:?}");
+        let response_debug = format!("{response:?}");
+        let error_debug = format!("{error:?}");
+        let error_display = format!("{error}");
+
+        for rendered in [&request_debug, &response_debug, &error_debug, &error_display] {
+            assert!(
+                !rendered.contains("secret-kid-123"),
+                "raw key leaked in: {rendered}"
+            );
+            assert!(
+                !rendered.contains("super-sensitive-bytes"),
+                "raw payload leaked in: {rendered}"
+            );
+        }
     }
 }
