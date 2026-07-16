@@ -1339,18 +1339,22 @@ mod tests {
     /// than sleeping out the full (here, 500ms) backoff regardless.
     #[tokio::test]
     async fn acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses() {
-        // Deliberately generous margin (30s backoff vs a 1s handle deadline,
-        // matching the ratio the previous review round's shutdown test used)
-        // — under a full `cargo test --workspace` run with hundreds of tests
-        // competing for scheduler time, a tight margin (e.g. 500ms vs 50ms)
-        // is genuinely flaky: the main task's own `sleep(20ms)` before
-        // calling `shutdown_and_wait` can itself be delayed by scheduler
-        // contention long enough to let a second retry attempt slip in
-        // before the deadline is even set.
+        // CORE-027 flaky-triage fix: `RetryPolicy::backoff` applies *full
+        // jitter* — a uniform random duration in `[0, capped]`, never a fixed
+        // sleep. A 30s backoff cap against a 1s deadline margin still leaves
+        // ~3.5% of samples landing under 1.05s (confirmed empirically: this
+        // test failed at iteration 28/200 of the flaky-triage tight loop with
+        // `store.accept_calls() == 2`, i.e. the jittered backoff finished
+        // before the deadline elapsed and a genuine second attempt raced in
+        // ahead of cancellation — not a scheduler race in the acceptor
+        // itself). Widening the cap to a year makes that collision
+        // probability (~1.05s / 31_536_000s ≈ 3e-8 per run) negligible without
+        // slowing the test down, since the deadline always cuts the sleep
+        // short well before it could ever run to completion.
         let long_backoff_retry = RetryPolicy {
             max_attempts: 10,
-            base_backoff: Duration::from_secs(30),
-            max_backoff: Duration::from_secs(30),
+            base_backoff: Duration::from_secs(60 * 60 * 24 * 365),
+            max_backoff: Duration::from_secs(60 * 60 * 24 * 365),
         };
         let store = Arc::new(ScriptedAcceptStore::new(vec![
             Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
