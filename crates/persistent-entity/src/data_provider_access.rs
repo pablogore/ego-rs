@@ -162,18 +162,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn data_provider_access_is_object_safe() {
+    #[tokio::test]
+    async fn data_provider_access_is_object_safe() {
         let access: Arc<dyn DataProviderAccess> = Arc::new(AlwaysEcho);
 
-        let response = futures::executor::block_on(access.fetch(
-            "prov-a",
-            DataRequest {
-                key: "k".to_string(),
-                payload: vec![1, 2, 3],
-            },
-        ))
-        .unwrap();
+        let response = access
+            .fetch(
+                "prov-a",
+                DataRequest {
+                    key: "k".to_string(),
+                    payload: vec![1, 2, 3],
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(response.payload, vec![1, 2, 3]);
         assert!(!response.cache_hit);
@@ -202,18 +204,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn data_provider_access_propagates_typed_errors_through_the_trait_object() {
+    #[tokio::test]
+    async fn data_provider_access_propagates_typed_errors_through_the_trait_object() {
         let access: Arc<dyn DataProviderAccess> = Arc::new(KeyGatedProvider);
 
-        let err = futures::executor::block_on(access.fetch(
-            "prov-a",
-            DataRequest {
-                key: "missing".to_string(),
-                payload: vec![],
-            },
-        ))
-        .unwrap_err();
+        let err = access
+            .fetch(
+                "prov-a",
+                DataRequest {
+                    key: "missing".to_string(),
+                    payload: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             err,
             DataProviderError::NotFound {
@@ -221,14 +225,16 @@ mod tests {
             }
         );
 
-        let ok = futures::executor::block_on(access.fetch(
-            "prov-a",
-            DataRequest {
-                key: "present".to_string(),
-                payload: vec![9, 8, 7],
-            },
-        ))
-        .unwrap();
+        let ok = access
+            .fetch(
+                "prov-a",
+                DataRequest {
+                    key: "present".to_string(),
+                    payload: vec![9, 8, 7],
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(ok.payload, vec![9, 8, 7]);
         assert!(ok.cache_hit);
     }
