@@ -19,7 +19,8 @@ use persistent_entity::data_provider_access::DataResponse;
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::error::EntityError;
 use persistent_entity::persistent_entity::CommandResult;
-use reference_app::domain::pricing::{PriceLooked, PricingCommand, PricingEntity, PricingLookupProvider, PricingState};
+use reference_app::domain::pricing::{PriceLooked, PricingCommand, PricingEntity, PricingState};
+use reference_app::providers::pricing_lookup::PricingLookupProvider;
 
 fn ctx() -> CommandContext {
     CommandContext::new("pricing".to_string())

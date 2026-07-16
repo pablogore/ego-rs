@@ -1,10 +1,12 @@
 //! `PricingEntity` — CORE-019A Phase 6 dogfood: a trivial `PersistentEntity`
 //! handler that fetches external data exclusively through the
 //! `DataProviderAccess` facade (design.md AD-010/AD-012), never by
-//! constructing an external client inline. `PricingLookupProvider` is this
-//! reference app's own trivial `ExternalDataProvider` — a deterministic,
-//! in-memory-only lookup, not a real external call — registered via
-//! `RuntimeBuilder::register_data_provider` (see `tests/providers_e2e.rs`).
+//! constructing an external client inline. The concrete dogfood provider
+//! type lives in `crate::providers::pricing_lookup` instead of here —
+//! `handle_command` below never names it — so `external_data_provider_lint.rs`
+//! can audit every file under `domain/` (this one included) for that
+//! separation instead of having to exclude the one file that most needs
+//! auditing.
 //!
 //! Satisfies `external-data-providers` spec: "Reference-app handler never
 //! constructs a client inline"; `persistent-entity` spec: "Handler fetches
@@ -15,36 +17,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ego_domain::DomainEvent;
-use ego_runtime::providers::ExternalDataProvider;
 use persistent_entity::command_context::CommandContext;
-use persistent_entity::data_provider_access::{DataProviderAccess, DataProviderError, DataRequest, DataResponse};
+use persistent_entity::data_provider_access::{DataProviderAccess, DataRequest};
 use persistent_entity::error::EntityError;
 use persistent_entity::persistent_entity::PersistentEntity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// This reference app's own trivial dogfood provider (AD-010/AD-012):
-/// deterministically derives a "price" from the requested SKU — never a
-/// real HTTP/gRPC/DB call — so this crate has no external client dependency
-/// to construct inline anywhere.
-pub struct PricingLookupProvider;
-
-#[async_trait]
-impl ExternalDataProvider for PricingLookupProvider {
-    async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
-        // Deterministic, non-hardcoded: the price is derived from the key
-        // itself, proving the response is real data flowing through, not a
-        // fixed constant (mirrors persistent-entity's `AlwaysEcho` double).
-        let price_cents = 100u64 + (request.key.len() as u64) * 10;
-        let payload = serde_json::json!({ "sku": request.key, "price_cents": price_cents })
-            .to_string()
-            .into_bytes();
-        Ok(DataResponse {
-            payload,
-            cache_hit: false,
-        })
-    }
-}
 
 /// Commands accepted by [`PricingEntity`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -143,8 +121,8 @@ impl PersistentEntity for PricingEntity {
         match command {
             PricingCommand::Lookup { sku } => {
                 // The ONLY path to external data: the facade. Never a
-                // concrete `PricingLookupProvider` reference, never a
-                // runtime-internal type.
+                // concrete provider reference, never a runtime-internal
+                // type.
                 let response = self
                     .access
                     .fetch(
