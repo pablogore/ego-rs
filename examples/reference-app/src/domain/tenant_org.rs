@@ -32,22 +32,24 @@ pub enum TenantOrgCommand {
 pub struct OrganizationEnsured {
     pub org_id: String,
     pub name: String,
+    #[serde(skip_serializing)]
     pub occurred_at: DateTime<Utc>,
+    #[serde(skip_serializing)]
     payload: Value,
 }
 
 impl OrganizationEnsured {
+    /// Derives `payload()` from the struct's own `Serialize` impl instead of
+    /// hand-listing keys — see `pricing.rs`'s `PriceLooked::new` for why.
     fn new(org_id: String, name: String, occurred_at: DateTime<Utc>) -> Self {
-        let payload = serde_json::json!({
-            "org_id": org_id,
-            "name": name,
-        });
-        Self {
+        let mut event = Self {
             org_id,
             name,
             occurred_at,
-            payload,
-        }
+            payload: Value::Null,
+        };
+        event.payload = serde_json::to_value(&event).expect("OrganizationEnsured always serializes");
+        event
     }
 }
 
