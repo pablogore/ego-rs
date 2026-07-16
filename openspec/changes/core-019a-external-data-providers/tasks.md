@@ -113,7 +113,7 @@ delta — "Missing Registration Fails Closed From the Handler's Perspective",
   `DataProviderError::ProviderMissing`, never a silent default or empty
   value ("Fail-Closed Provider Resolution" / "Missing Registration Fails
   Closed" scenarios)
-- [x] 3.2 RED: a successful fetch emits one `tracing` span carrying
+- [x] 3.2 RED: a successful fetch emits one `tracing` event carrying
   `provider_id`, a hashed `key` (never the raw key or `payload`), latency,
   `cache_hit`, and an explicit `outcome: ProviderOutcome` field
   (`Success | NotFound | Transient | Fatal | ProviderMissing`) derived once
@@ -125,7 +125,7 @@ delta — "Missing Registration Fails Closed From the Handler's Perspective",
   `DataRequest`s, never cross-resolve; each fetch returns exactly its own
   provider's response (design.md §8 newly-added integration test)
 - [x] 3.4 GREEN: `RuntimeDataProviderAccess` implementing
-  `DataProviderAccess` — registry lookup, span emission, `ProviderOutcome`
+  `DataProviderAccess` — registry lookup, event emission, `ProviderOutcome`
   derivation (`access.rs`)
 - [x] 3.5 GREEN: `crates/runtime/src/providers/mod.rs` — subsystem root,
   re-exports (`ExternalDataProvider`, `ExternalDataProviderRegistry`,
@@ -198,3 +198,13 @@ command handling" (E2E proof).
   spec (`specs/external-data-providers/spec.md`, already written in the spec
   phase) — not a code task in `sdd-apply`'s scope. Noted here so it is not
   silently assumed done by this file.
+- **Timeout/Retry Observability** (spec.md `external-data-providers`
+  requirement) is **not implemented in this slice** — AD-007 adopts no
+  retry/backoff policy this slice (a fetch is inline to command handling,
+  so there is no delivery loop for a policy to drive), so there is no
+  timeout or retry attempt for any signal to reflect. PR2 review (F-01)
+  found this MUST unimplemented and unscoped in spec.md; spec.md now
+  carries a dedicated "Timeout/Retry Observability (Deferred — Future
+  Capability)" requirement recording the target contract for once a retry
+  policy exists, and the Fetch Observability Signals requirement no longer
+  claims timeout/retry as part of this slice's MUST-emit set.

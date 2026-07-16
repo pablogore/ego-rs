@@ -88,9 +88,9 @@ providers trivially requires.
 
 Every fetch attempt MUST emit, through the runtime's existing
 observability pipeline (never a separate or provider-owned pipeline): its
-latency, whether it timed out, how many retries occurred, whether it was
-served from cache or fetched fresh, and the provider's name/identity as a
-correlation field.
+latency, an explicit outcome classification, whether it was served from
+cache or fetched fresh, and the provider's name/identity as a correlation
+field.
 
 #### Scenario: Successful fetch emits latency and provider identity
 
@@ -105,9 +105,21 @@ correlation field.
 - WHEN each is observed through emitted signals
 - THEN the cache hit and the cache miss are distinguishable from each other
 
-#### Scenario: Retried or timed-out fetch signals retries and timeout
+### Requirement: Timeout/Retry Observability (Deferred — Future Capability)
 
-- GIVEN a fetch that times out and is retried before eventually completing
+This slice has no retry/backoff policy for external-data-provider fetches
+(design.md AD-007) — a fetch is inline to command handling, so there is no
+delivery loop for a policy to drive. Timeout occurrence and retry-attempt
+count are therefore **not** part of this slice's MUST-emit signal set. This
+requirement records the target contract for once a retry policy exists, so
+it is not silently lost: **when** a retry/backoff policy is introduced for
+this capability, fetch signals MUST additionally reflect timeout occurrence
+and the number of retry attempts.
+
+#### Scenario: Retried or timed-out fetch signals retries and timeout (not yet implemented)
+
+- GIVEN a retry/backoff policy exists for external-data-provider fetches
+- AND a fetch times out and is retried before eventually completing
 - WHEN the fetch sequence finishes
 - THEN emitted signals reflect the timeout occurrence and the number of
   retry attempts

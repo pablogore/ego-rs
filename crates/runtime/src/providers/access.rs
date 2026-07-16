@@ -188,7 +188,7 @@ mod tests {
         ));
     }
 
-    // -- 3.2: tracing span/event content --------------------------------
+    // -- 3.2: tracing event content --------------------------------------
 
     #[derive(Default, Clone, Debug)]
     struct CapturedEvent {

@@ -28,7 +28,7 @@ ships here (§9 non-goals).
 | **AD-005 Registry Key** | `provider_id: String`. | `TypeId`; trait-object identity; request type as key; dedicated id newtype. | Matches `effect_type: String` and the whole `*Provider` naming convention; directly usable as the observability correlation field (§7). Typed keys drag generics back in (fights object-safety, AD-012). |
 | **AD-006 Lifecycle** | Singleton providers, registered at build, held for runtime lifetime. `fetch` may do real I/O — `handle_command`/`apply_event`/`apply_events` are already `async fn` (`persistent-entity/src/persistent_entity.rs`), so there is no synchronous call site requiring a cache-first/`block_on` bridge; caching is a per-provider optimization, never an SPI precondition. Cache (if a provider has one) lives **inside** the provider (never runtime-owned); the runtime never inspects cache contents, only the `cache_hit` flag the provider reports. Optional `async fn shutdown(&self) {}` (default no-op) driven by `register_async_teardown` for providers holding long-lived resources (HTTP pool, gRPC channel, Redis/S3 client). Zero-cost when unused: no registration → no registry, no facade injected. | Scoped/per-request providers; runtime-owned cache store; mandatory shutdown; mandating cache-first/`block_on` (rejected on review — see Correction below). | No real consumer justifies scoped lifetimes or a shared cache (non-goals §9, AD-012). Singleton + optional-teardown is the minimal shape that still accommodates long-lived-resource providers and reuses the existing teardown hook. |
 | **AD-007 Error Model** | Adopt the **read-side classification** convention: `DataProviderError { Transient(String), Fatal(String), NotFound { key }, ProviderMissing { provider_id } }`. No retry/backoff policy in this slice. | Reuse CORE-019 `RetryPolicy`; reuse `ProjectionError` verbatim (incl. `PoisonEvent`). | A fetch is inline to command handling — there is no delivery loop, so `RetryPolicy` (write-side) has nothing to drive. `Transient`/`Fatal` mirror `ProjectionError`; `PoisonEvent` is projection-stream-specific and omitted; `NotFound` traces to `KeyResolverError::KeyNotFound`; `ProviderMissing` traces to CORE-019 `ExecutorMissing`. Every variant is grounded in an existing in-repo error — no third convention invented (§13). |
-| **AD-008 Observability** | The `RuntimeDataProviderAccess` chokepoint emits one `tracing` span per fetch: `provider_id`, hashed `key`, latency, `cache_hit`, and an explicit `outcome: ProviderOutcome { Success, NotFound, Transient, Fatal, ProviderMissing }` field derived once at the chokepoint. Providers never emit independently. | Providers emit their own telemetry; per-provider metric registries; inferring outcome ad hoc from `DataProviderError` at each call site. | Single chokepoint = consistent signals across the running service (§7). Reuses CORE-012A/CORE-019 `tracing` pipeline. `payload` and sensitive values never logged by default (CORE-019 precedent). An explicit `ProviderOutcome` enum (mirrors `DataProviderError`'s variants) is queryable/alertable without parsing error strings. No `retries` signal — no retry loop exists this slice. |
+| **AD-008 Observability** | The `RuntimeDataProviderAccess` chokepoint emits one `tracing` event per fetch: `provider_id`, hashed `key`, latency, `cache_hit`, and an explicit `outcome: ProviderOutcome { Success, NotFound, Transient, Fatal, ProviderMissing }` field derived once at the chokepoint. Providers never emit independently. | Providers emit their own telemetry; per-provider metric registries; inferring outcome ad hoc from `DataProviderError` at each call site. | Single chokepoint = consistent signals across the running service (§7). Reuses CORE-012A/CORE-019 `tracing` pipeline. `payload` and sensitive values never logged by default (CORE-019 precedent). An explicit `ProviderOutcome` enum (mirrors `DataProviderError`'s variants) is queryable/alertable without parsing error strings. No `retries` signal — no retry loop exists this slice. |
 | **AD-009 Crate Placement** | `crates/runtime/src/providers/{mod,provider,registry,access}.rs`; `crates/persistent-entity/src/data_provider_access.rs` (port + `DataRequest`/`DataResponse`/`DataProviderError` DTOs); `service-sdk/src/runtime/builder.rs` gains registration. | Port trait in `runtime`; new crate. | DTOs and port live in `persistent-entity` so the port signature never references a `runtime` type (would be a wrong-direction edge). Exact mirror of `effect_acceptor.rs` + `effects/` layout. |
 | **AD-010 Testability** | `testkit` ships `RecordingDataProvider` / `StaticDataProvider` (canned bytes, records calls); `examples/reference-app` dogfoods one trivial provider through the facade. | Mock frameworks; no test double. | Object-safe async trait → doubles are trivial. Continues CORE-017/018/019 TestKit-first convention; the dogfood is the forcing function against an over-abstract SPI (§13). |
 | **AD-011 KeyResolver Relationship** | Establish direction only: `ExternalDataProvider` (general) ← `KeyResolver` (specific). The SPI shape (async, `Send + Sync`, object-safe) is a deliberate superset of `KeyResolver`, so a future retrofit is a thin adapter (`impl ExternalDataProvider` wrapping a `KeyResolver`, registered as `"jwt.verification-key"`), not a rewrite. | Retrofit `KeyResolver` now. | Retrofit is out of scope (§8); forcing it couples this change to the security stack for no first-slice benefit. `key_resolver.rs` is unchanged, referenced as prior art. `KeyResolver`'s own cache-first/`block_on` constraint is specific to its sync call site and is *not* generalized onto `ExternalDataProvider` (AD-006 correction). |
@@ -54,7 +54,7 @@ ships here (§9 non-goals).
 |----------|-------|
 | **Public SPI** | `ExternalDataProvider`, `ExternalDataProviderRegistry`, `DuplicateProviderId` (runtime); `DataProviderAccess` port + `DataRequest`, `DataResponse`, `DataProviderError` DTOs (persistent-entity) |
 | **Internal runtime** | `RuntimeDataProviderAccess` (the port impl / observability chokepoint) |
-| **Private helper** | key-hashing + span helpers in `access.rs` |
+| **Private helper** | key-hashing + event-logging helpers in `access.rs` |
 
 ## 4. Dependency Edges (layering preserved)
 
@@ -80,7 +80,7 @@ keeps it that way.
         access.fetch(provider_id, DataRequest { key, payload })
             ├─ registry lookup ── miss ─▶ DataProviderError::ProviderMissing (fail closed, signalled)
             └─ hit ─▶ Provider::fetch (may do real I/O) ─▶ DataResponse { payload, cache_hit }
-        emit span: provider_id, hashed key, latency, outcome, cache_hit   (payload never logged)
+        emit event: provider_id, hashed key, latency, outcome, cache_hit   (payload never logged)
 
 ## 6. Interfaces
 
@@ -151,6 +151,12 @@ existing handler, frozen domain type, or `KeyResolver` call site is touched.
       real design point for that consumer.
 - [ ] First concrete domain use case — none named in-repo; the trivial
       reference-app provider stands in until a real consumer exists.
+- [ ] **Timeout/retry observability (spec-owned):** spec.md's "Timeout/Retry
+      Observability" requirement records the target contract for once a
+      retry/backoff policy exists for this capability (AD-007 — no such
+      policy exists this slice, so there is nothing to time out or retry).
+      Deferred until that policy is introduced; PR2 review (F-01) flagged
+      this MUST as unimplemented and unscoped-down before this fix.
 
 **Implementation watch-items (not blocking, not a design change — revisit
 only when the first real provider lands):**
@@ -170,5 +176,5 @@ only when the first real provider lands):**
 - **PR1 review (G-02):** `DataProviderError::Transient(String)` and
   `Fatal(String)` carry provider-authored free text, which may contain
   sensitive detail. When Phase 3's chokepoint (`RuntimeDataProviderAccess`)
-  emits its `tracing` span, do not log these strings directly — only the
+  emits its `tracing` event, do not log these strings directly — only the
   `ProviderOutcome` variant (AD-008), never the message payload.
