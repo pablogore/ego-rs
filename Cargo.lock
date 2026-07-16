@@ -628,6 +628,7 @@ dependencies = [
  "kitlogger",
  "kitlogger-formatter",
  "kitlogger-log-domain",
+ "persistent-entity",
  "serde",
  "serde_json",
  "tokio",

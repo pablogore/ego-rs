@@ -42,6 +42,7 @@ use std::sync::Arc;
 pub mod application;
 pub mod domain;
 pub mod ports;
+pub mod providers;
 pub mod read_side;
 
 use ego_domain::{Clock, ConfigError, SystemClock, Validate};
