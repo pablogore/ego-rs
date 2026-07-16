@@ -19,6 +19,7 @@ ego-domain = { path = "../domain" }
 ego-runtime = { path = "../runtime" }
 ego-security-sdk = { path = "../security-sdk" }
 ego-service-sdk = { path = "../service-sdk" }
+persistent-entity = { path = "../persistent-entity" }
 kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 console-exporter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }

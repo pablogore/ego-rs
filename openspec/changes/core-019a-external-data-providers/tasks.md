@@ -153,12 +153,12 @@ Design refs: AD-001, AD-006. Spec refs: "Zero Runtime Overhead When Unused",
 Design refs: AD-010. Spec refs: "Providers Replaceable By Deterministic Test
 Doubles" (first scenario).
 
-- [ ] 5.1 RED: `StaticDataProvider` returns a canned `DataResponse` for every
+- [x] 5.1 RED: `StaticDataProvider` returns a canned `DataResponse` for every
   `fetch` call; `RecordingDataProvider` records each `DataRequest` it
   receives and is inspectable after the fact
-- [ ] 5.2 GREEN: `RecordingDataProvider` / `StaticDataProvider`
+- [x] 5.2 GREEN: `RecordingDataProvider` / `StaticDataProvider`
   implementations of `ExternalDataProvider` (`crates/testkit/...`)
-- [ ] 5.3 RED: a handler resolving through the facade behaves identically
+- [x] 5.3 RED: a handler resolving through the facade behaves identically
   and deterministically when its registered provider is swapped for a
   `testkit` double, with zero handler code changes — "Test double swaps in
   without touching handler code" scenario
@@ -171,14 +171,14 @@ function). Spec refs: "Reference-app handler never constructs a client
 inline", `persistent-entity` delta — "Handler fetches external data during
 command handling" (E2E proof).
 
-- [ ] 6.1 RED: E2E — a reference-app handler fetches external data through a
+- [x] 6.1 RED: E2E — a reference-app handler fetches external data through a
   registered provider (never an inline client) and receives the expected
   response, driven end-to-end through `RuntimeBuilder::register_data_provider`
   → the handler's `DataProviderAccess` facade
-- [ ] 6.2 GREEN: one trivial dogfood provider (`impl ExternalDataProvider`)
+- [x] 6.2 GREEN: one trivial dogfood provider (`impl ExternalDataProvider`)
   registered and wired in `examples/reference-app`; handler code calls only
   the facade, never constructs a client inline
-- [ ] 6.3 Verify: grep-style regression check (mirrors CORE-019's
+- [x] 6.3 Verify: grep-style regression check (mirrors CORE-019's
   `transport_agnostic_lint.rs` precedent) — no reference-app handler
   constructs an external client type directly; every external-data access
   path routes through the registered facade
