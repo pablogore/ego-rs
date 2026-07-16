@@ -136,3 +136,49 @@ pub fn workspace_root() -> &'static Path {
         .parent()
         .expect("xtask/Cargo.toml has a parent directory (the workspace root)")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `a` depends on `b` (dev), `c` (normal, `kind: null`), and `d` (build).
+    /// Only the normal and build edges should survive into the graph — the
+    /// dev edge (e.g. the legitimate `service-sdk <-> testkit` cycle) must
+    /// not appear, since dev-deps aren't part of the build graph the layer
+    /// checks reason about.
+    fn fixture_json() -> &'static str {
+        r#"{
+            "packages": [
+                {"id": "a 0.1.0", "name": "a", "manifest_path": "/ws/crates/a/Cargo.toml"},
+                {"id": "b 0.1.0", "name": "b", "manifest_path": "/ws/crates/b/Cargo.toml"},
+                {"id": "c 0.1.0", "name": "c", "manifest_path": "/ws/crates/c/Cargo.toml"},
+                {"id": "d 0.1.0", "name": "d", "manifest_path": "/ws/crates/d/Cargo.toml"}
+            ],
+            "workspace_members": ["a 0.1.0", "b 0.1.0", "c 0.1.0", "d 0.1.0"],
+            "workspace_root": "/ws",
+            "resolve": {
+                "nodes": [
+                    {"id": "a 0.1.0", "deps": [
+                        {"pkg": "b 0.1.0", "dep_kinds": [{"kind": "dev"}]},
+                        {"pkg": "c 0.1.0", "dep_kinds": [{"kind": null}]},
+                        {"pkg": "d 0.1.0", "dep_kinds": [{"kind": "build"}]}
+                    ]},
+                    {"id": "b 0.1.0", "deps": []},
+                    {"id": "c 0.1.0", "deps": []},
+                    {"id": "d 0.1.0", "deps": []}
+                ]
+            }
+        }"#
+    }
+
+    #[test]
+    fn dev_dependency_excluded_normal_and_build_included() {
+        let raw: RawMetadata = serde_json::from_str(fixture_json()).unwrap();
+        let workspace = build_workspace(&raw);
+
+        let a_deps = &workspace.graph["a"];
+        assert!(!a_deps.contains(&"b".to_string()), "dev dep must be excluded");
+        assert!(a_deps.contains(&"c".to_string()), "normal (kind: null) dep must be included");
+        assert!(a_deps.contains(&"d".to_string()), "build dep must be included");
+    }
+}

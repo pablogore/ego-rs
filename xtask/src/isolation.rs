@@ -5,6 +5,9 @@
 /// workspace declares a `default` feature, so `--no-default-features` is a
 /// harmless strict floor rather than a behavior change.
 pub fn verify_isolation(crates: &[String]) -> anyhow::Result<Vec<String>> {
+    if crates.is_empty() {
+        anyhow::bail!("verify-isolation: crate list is empty, refusing a vacuous pass");
+    }
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut failures = Vec::new();
     for name in crates {
@@ -17,4 +20,15 @@ pub fn verify_isolation(crates: &[String]) -> anyhow::Result<Vec<String>> {
         }
     }
     Ok(failures)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_crate_list_is_an_error_not_a_vacuous_pass() {
+        let result = verify_isolation(&[]);
+        assert!(result.is_err(), "empty crate list must fail loudly, not silently pass");
+    }
 }
