@@ -38,31 +38,45 @@ pub struct PriceLooked {
     /// The provider's opaque response payload, passed through unexamined.
     pub price_payload: Vec<u8>,
     pub cache_hit: bool,
-    #[serde(skip_serializing)]
     pub occurred_at: DateTime<Utc>,
-    #[serde(skip_serializing)]
     payload: Value,
 }
 
+/// Exactly what belongs in [`PriceLooked`]'s `DomainEvent::payload()` —
+/// deliberately a separate type from `PriceLooked` itself (PR3 review F-01):
+/// `PriceLooked`'s own `#[derive(Serialize, Deserialize)]` stays the
+/// complete, ordinary representation of every field (`occurred_at`
+/// included) for any consumer that serializes the whole event directly:
+/// `#[serde(skip_serializing)]` on `PriceLooked` itself would have silently
+/// narrowed that general contract too, not just `payload()`.
+#[derive(Serialize)]
+struct PriceLookedPayload<'a> {
+    sku: &'a str,
+    price_payload: &'a [u8],
+    cache_hit: bool,
+}
+
 impl PriceLooked {
-    /// Derives `payload()` from the struct's own `Serialize` impl instead of
-    /// hand-listing keys — `occurred_at` and `payload` itself are excluded
-    /// via `#[serde(skip_serializing)]` (matching the established
-    /// occurred_at-has-its-own-column convention), so every OTHER field
-    /// (including any added later) is in `payload()` automatically. A
-    /// hand-built `json!{...}` previously omitted `price_payload` here,
-    /// silently losing it on persistence — this shape makes that class of
-    /// bug impossible to reintroduce by forgetting to update the payload.
+    /// A hand-built `json!{...}` previously omitted `price_payload` here,
+    /// silently losing it on persistence (`payload()` is the only thing an
+    /// `EventStore` backend serializing through it would ever persist).
+    /// Building it from [`PriceLookedPayload`] instead means every field
+    /// that belongs in the payload is declared once, in one dedicated type,
+    /// rather than listed a second time by hand at each construction site.
     fn new(sku: String, price_payload: Vec<u8>, cache_hit: bool, occurred_at: DateTime<Utc>) -> Self {
-        let mut event = Self {
+        let payload = serde_json::to_value(PriceLookedPayload {
+            sku: &sku,
+            price_payload: &price_payload,
+            cache_hit,
+        })
+        .expect("PriceLookedPayload always serializes");
+        Self {
             sku,
             price_payload,
             cache_hit,
             occurred_at,
-            payload: Value::Null,
-        };
-        event.payload = serde_json::to_value(&event).expect("PriceLooked always serializes");
-        event
+            payload,
+        }
     }
 }
 
@@ -182,11 +196,10 @@ mod tests {
     /// (e.g. `crates/persistence/src/postgres/event_store.rs`, not currently
     /// wired up anywhere in this repo) would silently lose any field this
     /// method omits. A hand-built `json!{...}` previously omitted
-    /// `price_payload` here; `payload()` is now derived from the struct's
-    /// own fields instead, so this asserts the derived shape is exactly
-    /// right rather than re-checking a hand-maintained list.
+    /// `price_payload` here; it's now built from `PriceLookedPayload`
+    /// instead, asserted here against its exact expected shape.
     #[test]
-    fn payload_carries_every_field_except_occurred_at_and_itself() {
+    fn payload_carries_every_payload_field() {
         let event = PriceLooked::new("sku-1".to_string(), vec![9, 9, 8], true, Utc::now());
 
         let persisted = DomainEvent::payload(&event).clone();

@@ -28,29 +28,24 @@ pub struct UserRegistered {
     pub user_id: String,
     pub email: String,
     pub tenant_id: String,
-    #[serde(skip_serializing)]
     pub occurred_at: DateTime<Utc>,
-    #[serde(skip_serializing)]
     payload: Value,
 }
 
 impl UserRegistered {
-    /// Derives `payload()` from the struct's own `Serialize` impl instead of
-    /// hand-listing keys — `occurred_at` and `payload` itself are excluded
-    /// via `#[serde(skip_serializing)]`, so every other field (including any
-    /// added later) is in `payload()` automatically, with no manual list to
-    /// forget to update (see `pricing.rs`'s `PriceLooked::new` — the same
-    /// hand-built pattern there once silently dropped a field).
     fn new(user_id: String, email: String, tenant_id: String, occurred_at: DateTime<Utc>) -> Self {
-        let mut event = Self {
+        let payload = serde_json::json!({
+            "user_id": user_id,
+            "email": email,
+            "tenant_id": tenant_id,
+        });
+        Self {
             user_id,
             email,
             tenant_id,
             occurred_at,
-            payload: Value::Null,
-        };
-        event.payload = serde_json::to_value(&event).expect("UserRegistered always serializes");
-        event
+            payload,
+        }
     }
 }
 
