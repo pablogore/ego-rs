@@ -75,10 +75,18 @@ pub fn load_workspace() -> anyhow::Result<Workspace> {
     Ok(build_workspace(&raw))
 }
 
+/// Whether `manifest_path` lives under `<workspace_root>/crates/`, compared
+/// as paths (not strings) so a `cargo metadata`-reported path using the
+/// platform's native separator (e.g. `\` on Windows) is handled correctly —
+/// a hardcoded `/`-joined string prefix would silently match nothing there.
+fn is_under_crates_dir(manifest_path: &str, workspace_root: &str) -> bool {
+    let crates_dir = Path::new(workspace_root).join("crates");
+    Path::new(manifest_path).starts_with(&crates_dir)
+}
+
 fn build_workspace(raw: &RawMetadata) -> Workspace {
     let members: std::collections::HashSet<&str> =
         raw.workspace_members.iter().map(String::as_str).collect();
-    let crates_prefix = format!("{}/crates/", raw.workspace_root.trim_end_matches('/'));
 
     let id_to_name: HashMap<&str, &str> = raw
         .packages
@@ -89,7 +97,7 @@ fn build_workspace(raw: &RawMetadata) -> Workspace {
     let crate_ids: Vec<&str> = raw
         .packages
         .iter()
-        .filter(|p| members.contains(p.id.as_str()) && p.manifest_path.starts_with(&crates_prefix))
+        .filter(|p| members.contains(p.id.as_str()) && is_under_crates_dir(&p.manifest_path, &raw.workspace_root))
         .map(|p| p.id.as_str())
         .collect();
     let crate_id_set: std::collections::HashSet<&str> = crate_ids.iter().copied().collect();
@@ -180,5 +188,19 @@ mod tests {
         assert!(!a_deps.contains(&"b".to_string()), "dev dep must be excluded");
         assert!(a_deps.contains(&"c".to_string()), "normal (kind: null) dep must be included");
         assert!(a_deps.contains(&"d".to_string()), "build dep must be included");
+    }
+
+    #[test]
+    fn discovers_crates_with_platform_native_paths() {
+        // Path::starts_with compares components, not raw bytes, so this must
+        // hold regardless of how workspace_root's trailing separator (or
+        // lack of one) is spelled.
+        assert!(is_under_crates_dir("/ws/crates/domain/Cargo.toml", "/ws"));
+        assert!(is_under_crates_dir("/ws/crates/domain/Cargo.toml", "/ws/"));
+        assert!(!is_under_crates_dir(
+            "/ws/examples/reference-app/Cargo.toml",
+            "/ws"
+        ));
+        assert!(!is_under_crates_dir("/ws/xtask/Cargo.toml", "/ws"));
     }
 }

@@ -7,6 +7,21 @@ use std::path::Path;
 pub type Graph = BTreeMap<String, Vec<String>>;
 pub type LayerMap = BTreeMap<String, String>;
 
+/// The only layer names `allowed_layers` understands. A `layers.toml` entry
+/// naming anything else is a data error, not a crate with zero permitted
+/// dependencies — `check_completeness` rejects it explicitly rather than
+/// letting it silently behave like `domain`.
+pub const KNOWN_LAYERS: &[&str] = &[
+    "domain",
+    "foundation",
+    "cross-cutting",
+    "application",
+    "infrastructure",
+    "sdk",
+    "transport",
+    "tooling",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
     WrongDirection {
@@ -18,6 +33,7 @@ pub enum Violation {
     Cycle(Vec<String>),
     UnmappedCrate(String),
     DeadLayerEntry(String),
+    InvalidLayer { crate_name: String, layer: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -41,6 +57,11 @@ impl std::fmt::Display for Violation {
             Violation::DeadLayerEntry(name) => {
                 write!(f, "dead layer-map entry: {name} does not name a real workspace crate")
             }
+            Violation::InvalidLayer { crate_name, layer } => write!(
+                f,
+                "invalid layer: {crate_name} is mapped to unknown layer \"{layer}\" (expected one of {})",
+                KNOWN_LAYERS.join(", ")
+            ),
         }
     }
 }
@@ -95,8 +116,9 @@ pub fn check_direction(graph: &Graph, layers: &LayerMap) -> Vec<Violation> {
     violations
 }
 
-/// FR-001: every crate in `crates` MUST have a `layers` entry, and every
-/// `layers` entry MUST name a crate present in `crates`.
+/// FR-001: every crate in `crates` MUST have a `layers` entry, every `layers`
+/// entry MUST name a crate present in `crates`, and every `layers` value
+/// MUST be one of `KNOWN_LAYERS`.
 pub fn check_completeness(crates: &[String], layers: &LayerMap) -> Vec<Violation> {
     let mut violations = Vec::new();
     for c in crates {
@@ -105,9 +127,15 @@ pub fn check_completeness(crates: &[String], layers: &LayerMap) -> Vec<Violation
         }
     }
     let crate_set: std::collections::BTreeSet<&str> = crates.iter().map(String::as_str).collect();
-    for name in layers.keys() {
+    for (name, layer) in layers {
         if !crate_set.contains(name.as_str()) {
             violations.push(Violation::DeadLayerEntry(name.clone()));
+        }
+        if !KNOWN_LAYERS.contains(&layer.as_str()) {
+            violations.push(Violation::InvalidLayer {
+                crate_name: name.clone(),
+                layer: layer.clone(),
+            });
         }
     }
     violations
@@ -202,5 +230,21 @@ mod tests {
         let layers = layers_from(&[("a", "domain"), ("b", "foundation")]);
 
         assert!(check_completeness(&crates, &layers).is_empty());
+    }
+
+    #[test]
+    fn completeness_rejects_unknown_layer_name() {
+        let crates = vec!["a".to_string()];
+        let layers = layers_from(&[("a", "domian")]); // typo, not a KNOWN_LAYERS value
+
+        let violations = check_completeness(&crates, &layers);
+
+        assert_eq!(
+            violations,
+            vec![Violation::InvalidLayer {
+                crate_name: "a".into(),
+                layer: "domian".into(),
+            }]
+        );
     }
 }
