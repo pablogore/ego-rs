@@ -4,9 +4,10 @@ Protocol per design.md §4: `N` scaled to whether the root cause has a known
 probability model. Suspects with no analytical model (persistent-entity,
 provider-access) ran the full `N = 200` tight-loop + `~50` full-crate
 parallel sweeps. The effects suspect, whose fix reduces a *quantified*
-collision probability to a negligible one (deterministic by construction,
-not just empirically rare), ran `N = 30` tight-loop — see design.md §4 for
-the full reasoning. Every verdict below is backed by actual run counts, not
+collision probability to a negligible ~3×10⁻⁸/run (not eliminated in
+principle, just far below what any practical N could resample — not just
+empirically rare), ran `N = 30` tight-loop — see design.md §4 for the full
+reasoning. Every verdict below is backed by actual run counts, not
 assumption.
 
 ## Suspect 1: `persistent-entity` concurrent spawn
@@ -32,8 +33,9 @@ assumption.
   iteration 28 of an initial 200-run attempt (`store.accept_calls() == 2`
   instead of the expected 1). Fix: widen the test's backoff cap to 1 year,
   making the collision probability (~1.05s / 31,536,000s ≈ 3e-8 per run)
-  negligible — the deadline still cuts the sleep short well before it could
-  run to completion, deterministically. Re-verified: 200/200 tight-loop clean
+  negligible, though not zero — the deadline overwhelmingly cuts the sleep
+  short before it could run to completion, but the race is reduced in
+  probability, not removed in principle. Re-verified: 200/200 tight-loop clean
   for `acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses`
   (exceeds the N=30 bar), 30/30 clean for the other two.
 - Also cleaned up a separate, unrelated flakiness risk in the same file: six

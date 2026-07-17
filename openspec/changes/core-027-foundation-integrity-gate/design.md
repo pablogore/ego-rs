@@ -88,10 +88,13 @@ model**:
   sampling landing under a deadline margin: ~3.5% pre-fix, ~3×10⁻⁸ post-fix
   once the backoff cap is widened to 1 year against a 1s/5s deadline): `N =
   30` tight-loop runs, no dedicated full-crate sweep (still exercised
-  incidentally by the other suspects' sweeps in the same crate). Once a fix
-  makes the race deterministic by construction (the deadline provably always
-  wins), 30 clean runs and 200 clean runs carry equivalent evidentiary
-  weight — the fix's correctness follows from the math, not the sample size.
+  incidentally by the other suspects' sweeps in the same crate). The
+  collision is not eliminated in principle — it is still possible, just at
+  ~3×10⁻⁸/run — but once the failure rate is quantified this low, 30 clean
+  runs and 200 clean runs carry equivalent evidentiary weight: neither count
+  is high enough to meaningfully sample an event that rare, so the fix's
+  confidence comes from the math bounding the rate, not from the sample
+  size.
 
 **Verdict** per suspect ∈ {`fixed` (root cause + fix commit), `non-reproducing`
 (N clean runs, evidence noted)}. Verdicts are recorded in
