@@ -42,10 +42,19 @@ assumption.
   tests used a fixed-duration `sleep(20-100ms)` purely as a guess that a
   background task had reached some internal state (a *sleep-as-happens-before*
   anti-pattern — under load, the guessed duration may not be enough). Four
-  were replaced with an explicit `tokio::sync::Notify` signal or a bounded
-  `yield_now()` loop; two were left as real sleeps where they generatively
-  prove an *absence* of further activity (no event exists to signal "nothing
-  happened"). Full crate green throughout.
+  were replaced with an explicit `tokio::sync::Notify` signal; two were left
+  as real sleeps where they generatively prove an *absence* of further
+  activity (no event exists to signal "nothing happened").
+- A bounded `yield_now()` loop was tried as an interim replacement for three
+  of those four, on the theory that `#[tokio::test]`'s current-thread runtime
+  makes polling order deterministic. Review caught that this overclaims a
+  guarantee `tokio::task::yield_now`'s own docs explicitly disclaim (polling
+  order is not covered by semver — the runtime may repoll the same task
+  without running any other ready task first). Replaced with real
+  synchronization: two `#[cfg(test)]`-only `tokio::sync::Notify` probes wired
+  to the actual blocking points under test (`RuntimeEffectAcceptor`'s inline
+  capacity-mutex acquisition, `LifecycleGate::wait_until_drained`'s blocking
+  wait), zero cost in production builds. Full crate green throughout.
 
 ## Suspect 3: provider-access under parallel execution
 
