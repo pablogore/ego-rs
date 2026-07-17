@@ -20,9 +20,12 @@ use tower::ServiceExt;
 
 fn app() -> Router {
     let config = AppConfig::default();
-    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+    let BuiltRuntime { app, authn, read_side: read_side_handles } =
         build_runtime(&config).expect("build_runtime succeeds");
-    let state = AppState::new(Arc::new(rt), authn);
+    // Router-level tests never call `App::start()` — no effect executor is
+    // registered in this reference app, and `App::runtime()` is callable
+    // before starting (request-time resolution never depended on it).
+    let state = AppState::new(Arc::new(app.runtime()), authn);
     build_router(state, read_side_handles.query.clone())
 }
 
@@ -165,9 +168,9 @@ async fn users_by_tenant_cross_tenant_request_returns_403() {
 #[tokio::test]
 async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
     let config = AppConfig::default();
-    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+    let BuiltRuntime { app, authn, read_side: read_side_handles } =
         build_runtime(&config).expect("build_runtime succeeds");
-    let state = AppState::new(Arc::new(rt), authn);
+    let state = AppState::new(Arc::new(app.runtime()), authn);
     let query = read_side_handles.query.clone();
     let router = build_router(state, query.clone());
     let read_side = read_side_handles.spawn();

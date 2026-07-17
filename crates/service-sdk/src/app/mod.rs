@@ -120,6 +120,20 @@ impl App {
         AppBuilder::new()
     }
 
+    /// Returns a handle to the underlying [`Runtime`] (Stage 1 PR2 — found
+    /// during the reference-app migration). `App` deliberately doesn't
+    /// expose composition/lifecycle internals, but a transport layer built
+    /// against the lower-level `Runtime` API (e.g. `ego_transport::AppState`,
+    /// which predates `App`/`AppBuilder` and needs `Runtime` directly for
+    /// its own generic per-request `resolve::<Tag>()` dispatch) is a
+    /// legitimate, expected integration point, not something `App` should
+    /// reinvent. Cheap — `Runtime` clones only its inner `Arc`. Callable
+    /// before [`App::start`] since request-time resolution doesn't depend
+    /// on whether effects have started.
+    pub fn runtime(&self) -> Runtime {
+        self.runtime.clone()
+    }
+
     /// Resolves `Tag` to its generated proxy — a thin pass-through to
     /// [`Runtime::resolve`], the same production resolution path (AD-1,
     /// AD-9). Lets a test assert on a resolved service or adapter without
@@ -653,6 +667,21 @@ mod tests {
             app.runtime.effect_acceptor().is_none(),
             "no executor was registered and start() was never called"
         );
+    }
+
+    // Stage 1 PR2 (found during reference-app migration): `App::runtime()`
+    // hands out a working `Runtime` handle usable exactly like the
+    // production `resolve` path — proves it isn't a dead/disconnected clone.
+    #[test]
+    fn app_runtime_resolves_a_registered_adapter_identically_to_app_resolve_adapter() {
+        let app = App::builder()
+            .adapter(Arc::new(StubAdapter(7)))
+            .build()
+            .expect("build succeeds");
+
+        let via_runtime = app.runtime().inner().resolve_adapter::<StubAdapter>().unwrap();
+        let via_app = app.resolve_adapter::<StubAdapter>().unwrap();
+        assert_eq!(*via_runtime, *via_app);
     }
 
     // -- Phase 3: runtime lifecycle (App::start / RunningApp::shutdown) ----

@@ -51,7 +51,7 @@ use ego_scheduler::event_bus::EventBusConfig;
 use ego_security_sdk::{
     AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Principal, SecurityContext, SecurityError,
 };
-use ego_service_sdk::{build_logger, ConfigurationProvider, Runtime, RuntimeBuilder};
+use ego_service_sdk::{build_logger, App, ConfigurationProvider};
 use ego_transport::GrpcServerConfig;
 use kit_config::ConfigLoader;
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -153,33 +153,39 @@ impl AuthorizationProvider for ReferenceAllowAllAuthorization {
     }
 }
 
-/// `build_runtime`'s success payload: the constructed `Runtime`, the
-/// `authn` provider `ego_transport::AppState` needs, and the not-yet-spawned
-/// `UsersByTenant` read-side wiring.
+/// `build_runtime`'s success payload: the constructed, not-yet-started
+/// [`App`], the `authn` provider `ego_transport::AppState` needs, and the
+/// not-yet-spawned `UsersByTenant` read-side wiring.
 pub struct BuiltRuntime {
-    pub runtime: Runtime,
+    pub app: App,
     pub authn: Arc<dyn AuthenticationProvider>,
     pub read_side: ReadSideHandles,
 }
 
-/// Host -> AppConfig -> service construction -> RuntimeBuilder pipeline.
+/// Host -> AppConfig -> service construction -> `App::builder()` pipeline
+/// (CORE-028 Stage 1 PR2 — migrated from constructing `RuntimeBuilder`
+/// directly; see design.md AD-1: `AppBuilder` delegates to `RuntimeBuilder`,
+/// it does not replace it).
 ///
 /// Mirrors design.md's Data Flow: validation runs before any service is
 /// constructed, then each subtree's typed config goes only to the service
-/// that owns it. `RuntimeBuilder` never receives raw configuration — it
-/// only ever receives already-constructed security providers and, when
-/// present, an already-constructed logger materialized through kit-config.
+/// that owns it. `AppBuilder` (like the `RuntimeBuilder` it delegates to)
+/// never receives raw configuration — it only ever receives
+/// already-constructed security providers and, when present, an
+/// already-constructed logger materialized through kit-config.
 ///
 /// CORE-018 TASK-024: also builds the two `EntityRuntime`s (AD-4) and
-/// registers `RegisterUser` via the canonical `with_service` path (AD-7),
-/// and returns the constructed `authn` alongside `Runtime` (previously
-/// discarded after `.with_security(authn, authz)`) so a caller (e.g.
-/// `main.rs`) can build `ego_transport::AppState`.
+/// registers `RegisterUser` via `.service_instance()` (see the FLAG comment
+/// at that call site for why `.service::<S, Tag>()`'s `Injectable` path
+/// isn't used), and returns the constructed `authn` alongside the built
+/// `App` (previously discarded after `.with_security(authn, authz)`) so a
+/// caller (e.g. `main.rs`) can build `ego_transport::AppState` via
+/// [`App::runtime`].
 ///
 /// Also wires the `UsersByTenant` read-side projection (new capability,
 /// see `crate::read_side`): a `ReadSideSink` is attached to the
 /// `RegisterUser` write path, and the not-yet-spawned `ReadSideHandles` are
-/// returned alongside `Runtime`/`authn` — `ReadSideHandles::new` is a plain
+/// returned alongside `App`/`authn` — `ReadSideHandles::new` is a plain
 /// sync call (safe from `tests/pipeline.rs`'s non-Tokio tests); only
 /// `ReadSideHandles::spawn` requires a running Tokio runtime, so the
 /// caller (`main.rs`) decides when to start the background poller.
@@ -199,9 +205,9 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let _database = DatabaseService(&config.database);
 
     // Materialize configuration through the real kit-config loader before any
-    // RuntimeBuilder construction begins. Only the resulting materialized
-    // `LoggingSettings` (via `ConfigurationProvider`) reaches `RuntimeBuilder`
-    // — never the loader or its raw sources (CORE-016 frozen constraint).
+    // AppBuilder/RuntimeBuilder construction begins. Only the resulting
+    // materialized `LoggingSettings` (via `ConfigurationProvider`) reaches
+    // it — never the loader or its raw sources (CORE-016 frozen constraint).
     let map = ConfigLoader::builder()
         .add_defaults()
         // ponytail: file sources (TomlFileSource, priority 200) outrank
@@ -231,12 +237,20 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
 
     let register_user = Arc::new(RegisterUserImpl::new(org_runtime, user_runtime, None).with_read_side_sink(read_side_sink));
 
-    let mut builder = RuntimeBuilder::new()
-        .with_security(authn.clone(), authz)
-        .with_service::<RegisterUserTag>(register_user)?;
+    let mut builder = App::builder().security(authn.clone(), authz);
+    // FLAG (design.md AD-3, task 5.1): `RegisterUserImpl` does not — and, as
+    // built today, cannot cheaply — implement `Injectable`. Its two
+    // `EntityRuntime`s aren't `AdapterRef`/`ConfigValue`-resolvable (no
+    // generic DI mechanism resolves a per-aggregate `EntityRuntime`; see
+    // explore.md #15), and its `read_side_sink` is a hand-wired collaborator
+    // assembled above, not something `Injectable::build` could construct
+    // from the registry. `.service::<S, Tag>()`'s `Injectable` path was
+    // rejected for this reason, not overlooked — `.service_instance()` is
+    // the correct, intended escape hatch here (AD-3), not a workaround.
+    builder = builder.service_instance::<RegisterUserTag>(register_user);
     if let Some(logger) = logger {
-        builder = builder.with_logger(logger);
+        builder = builder.logger(logger);
     }
 
-    Ok(BuiltRuntime { runtime: builder.build(), authn, read_side: read_side_handles })
+    Ok(BuiltRuntime { app: builder.build()?, authn, read_side: read_side_handles })
 }

@@ -449,6 +449,12 @@ impl App {
     pub fn resolve<Tag: Resolvable>(&self) -> Result<Tag::Proxy, RuntimeError>;
     pub fn resolve_adapter<A: Send + Sync + 'static>(&self) -> Result<AdapterRef<A>, RuntimeError>;
     pub fn resolve_config<C: Send + Sync + 'static>(&self) -> Result<ConfigValue<C>, RuntimeError>;
+    // Found during Phase 5 (reference-app migration, PR2): ego_transport::AppState
+    // predates App/AppBuilder and needs a raw Runtime handle for its own generic
+    // per-request resolve::<Tag>() dispatch — a legitimate integration seam, not
+    // a reach into composition internals. Cheap: Runtime is now Clone (wraps only
+    // Arc<RuntimeInner>). Callable pre-start() like resolve_adapter/resolve_config.
+    pub fn runtime(&self) -> Runtime;
     // App owns the RUNTIME lifecycle only. It receives NO transport/serve future
     // and awaits none (AD-6). Requires an active Tokio runtime (start_effects).
     pub async fn start(self) -> Result<RunningApp, CompositionError>;       // starts effects

@@ -416,6 +416,14 @@ impl Default for RuntimeBuilder {
 }
 
 /// A configured runtime handle wrapping shared [`RuntimeInner`] state.
+///
+/// `Clone` (CORE-028 Stage 1 PR2): cheap — clones only the inner `Arc`, the
+/// same shared state. Needed so `App::runtime()` can hand a caller (e.g. a
+/// transport layer's `AppState`, which predates `App`/`AppBuilder` and needs
+/// direct `Runtime` access for its own generic per-request resolution) a
+/// handle without giving up `App`'s own ownership needed to later call
+/// `App::start()`.
+#[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }

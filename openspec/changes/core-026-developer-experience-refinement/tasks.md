@@ -76,11 +76,15 @@ Chain strategy: pending
 
 ## Phase 5: Reference-app migration (proof)
 
-- [ ] 5.1 `examples/reference-app/src/application.rs`: **resolves open question** (AD-3 FLAG) — model `RegisterUserImpl`'s `read_side_sink` as a DI dependency (`AdapterRef<ReadSideSink>`) if feasible under 2.1's confirmed mechanism; otherwise register `RegisterUserImpl` via `.service_instance::<RegisterUserTag>()` and document why DI modeling was rejected. Decide and record inline.
-- [ ] 5.2 RED — extend `examples/reference-app/tests/e2e_register.rs` (or add a composition-level test) asserting the app boots via `App::builder()...build()` and a register-user request still succeeds end-to-end.
-- [ ] 5.3 GREEN — `examples/reference-app/src/lib.rs`: migrate `build_runtime` to `App::builder()` composition (security, config, logger pipeline, adapters/services per 5.1).
-- [ ] 5.4 GREEN — `examples/reference-app/src/main.rs`: replace hand-sequenced `Arc::new(rt)` + `shutdown_async` with `App::start()` → `ego_transport::serve(...)` (unchanged, host-owned) → `RunningApp::shutdown()`.
-- [ ] 5.5 Run full existing reference-app suite (`cargo test -p reference-app`) to confirm no regression in `e2e_register.rs`, `register_user_guard_chain.rs`, `effects_e2e.rs`, `providers_e2e.rs`.
+- [x] 5.1 `examples/reference-app/src/application.rs`: **resolves open question** (AD-3 FLAG) — confirmed empirically (no `impl Injectable for RegisterUserImpl` exists anywhere in the crate) that DI modeling is not feasible: its dependencies (`Arc<EntityRuntime<_>>`s, hand-wired `ReadSideSink`) aren't DI-resolvable types. Registered via `.service_instance::<RegisterUserTag>()` instead, documented inline at the call site in `lib.rs`.
+- [x] 5.2 RED — upgraded `examples/reference-app/tests/e2e_register.rs`'s `real_http_request_with_valid_jwt_registers_both_entities_end_to_end` to exercise the full production lifecycle (`App::builder()...build()`, `App::register_shutdown`, `App::start()`, `RunningApp::shutdown()`) instead of only the request/response path, so the composition/lifecycle surface is proven end-to-end, not just build_runtime's plumbing.
+- [x] 5.3 GREEN — `examples/reference-app/src/lib.rs`: `build_runtime` migrated to `App::builder()` (`.security()`, `.service_instance::<RegisterUserTag>()`, conditional `.logger()`, `.build()`); `BuiltRuntime.runtime: Runtime` field replaced with `BuiltRuntime.app: App`.
+- [x] 5.4 GREEN — `examples/reference-app/src/main.rs`: hand-sequenced `Arc::new(rt)` + `shutdown_async` replaced with `App::start()` → `ego_transport::serve(...)` (unchanged, host-owned) → `RunningApp::shutdown()`.
+- [x] 5.5 Ran full existing reference-app suite (`cargo test -p reference-app`) — 0 failures across all ~14 test files, including `e2e_register.rs`, `http_route.rs`, `effects_e2e.rs`, `providers_e2e.rs`. Also ran full `cargo test --workspace` — 0 failures, confirming the `Runtime: Clone` addition (5b) didn't regress any other crate.
+
+## Phase 5b: PR2 gap found during migration
+
+- [x] 5b.1 (Integration gap) `ego_transport::AppState::new` requires `Arc<Runtime>` for its own generic per-request `resolve::<Tag>()` dispatch, but `App`/`RunningApp` never exposed the inner `Runtime` — this transport layer predates `App`/`AppBuilder` and was never covered by PR1's design. Fixed by adding `#[derive(Clone)]` to `Runtime` (cheap — wraps only `Arc<RuntimeInner>`) and adding `App::runtime(&self) -> Runtime`, callable pre-`start()` since request-time resolution doesn't depend on effects having started. Regression test: `app_runtime_resolves_a_registered_adapter_identically_to_app_resolve_adapter` (`crates/service-sdk/src/app/mod.rs`).
 
 ## Threat Matrix
 

@@ -40,10 +40,9 @@ async fn http_post(
 #[tokio::test]
 async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operation() {
     let config = AppConfig::default();
-    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+    let BuiltRuntime { app, authn, read_side: read_side_handles } =
         build_runtime(&config).expect("build_runtime succeeds");
-    let rt = Arc::new(rt);
-    let state = AppState::new(rt.clone(), authn);
+    let state = AppState::new(Arc::new(app.runtime()), authn);
     let router = build_router(state, read_side_handles.query.clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -69,14 +68,25 @@ async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operati
         .expect("serve() must return Ok(())");
 }
 
+// Task 5.2 (CORE-028 Stage 1 PR2): exercises the exact production lifecycle
+// `main.rs` uses — `App::builder()...build()` (via `build_runtime`),
+// `App::register_shutdown` for the read-side scheduler, `App::start()`,
+// then `RunningApp::shutdown()` after the server drains — not just the
+// request/response path `build_runtime` alone would prove.
 #[tokio::test]
 async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let config = AppConfig::default();
-    let BuiltRuntime { runtime: rt, authn, read_side: read_side_handles } =
+    let BuiltRuntime { app, authn, read_side: read_side_handles } =
         build_runtime(&config).expect("build_runtime succeeds");
-    let rt = Arc::new(rt);
-    let state = AppState::new(rt.clone(), authn);
-    let router = build_router(state, read_side_handles.query.clone());
+
+    let query = read_side_handles.query.clone();
+    let read_side_runtime = read_side_handles.spawn();
+    app.register_shutdown(read_side_runtime.stop());
+
+    let state = AppState::new(Arc::new(app.runtime()), authn);
+    let router = build_router(state, query);
+
+    let running = app.start().await.expect("App::start succeeds (no effects registered)");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -101,4 +111,9 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
         .expect("serve() must return within the bounded timeout")
         .expect("serve task must not panic")
         .expect("serve() must return Ok(())");
+
+    // Same two-phase shutdown main.rs runs: read-side stop-and-drain first,
+    // then the sync teardown stack — now via RunningApp::shutdown() instead
+    // of a raw Runtime handle.
+    running.shutdown().await.expect("RunningApp::shutdown succeeds");
 }
