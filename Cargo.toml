@@ -17,6 +17,7 @@ members = [
     "crates/security-apikey",
     "crates/testkit",
     "examples/reference-app",
+    "xtask",
 ]
 resolver = "2"
 

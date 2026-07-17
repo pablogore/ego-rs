@@ -1,21 +1,33 @@
 # Maps each workspace crate to its architectural layer.
-# Allowed layers: domain, application, infrastructure, transport
+# Allowed layers: domain, application, infrastructure, transport, foundation,
+#                 cross-cutting, sdk, tooling
 #
-# Dependency rules (enforced by scripts/verify-layers.sh):
-#   transport      → application, domain           (NOT infrastructure)
-#   infrastructure → application, domain           (NOT transport)
-#   application    → domain                        (NOT infrastructure, NOT transport)
-#   domain         → nothing                       (no internal deps)
+# Dependency rules (enforced by `cargo run -p xtask -- verify-layers`):
+#   domain         → nothing                                          (no internal deps)
+#   foundation     → domain, foundation
+#   cross-cutting  → domain
+#   application    → domain                                           (NOT infrastructure, NOT transport)
+#   infrastructure → domain, application, foundation, cross-cutting, infrastructure
+#   sdk            → domain, foundation, cross-cutting
+#   transport      → domain, application, cross-cutting, sdk          (NOT infrastructure)
+#   tooling        → any                                              (sink; no production crate may depend on tooling)
 
 [layers]
 "ego-domain" = "domain"
 "ego-application" = "application"
 "ego-infrastructure" = "infrastructure"
 "ego-transport" = "transport"
-"runtime-slice" = "domain"
 "ego-runtime" = "foundation"
 "ego-runtime-tokio" = "infrastructure"
 "ego-scheduler" = "foundation"
 # security-jwt is infrastructure: it depends on ego-domain and implements JWT auth.
 # CONSTRAINT: ego-runtime MUST NOT depend on security-jwt (would create a layer violation).
 "security-jwt" = "infrastructure"
+"ego-persistence" = "infrastructure"
+"ego-event-adapter" = "infrastructure"
+"persistent-entity" = "foundation"
+"ego-security-sdk" = "cross-cutting"
+"security-apikey" = "infrastructure"
+"ego-service-sdk" = "sdk"
+"ego-service-sdk-macros" = "tooling"
+"ego-testkit" = "tooling"
