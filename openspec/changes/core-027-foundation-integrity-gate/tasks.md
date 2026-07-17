@@ -123,19 +123,23 @@ Spec ref: FR-005 (isolation), FR-006 (hygiene). Design ref: AD-4, AD-5.
 
 Spec ref: FR-007 (resolved verdicts). Design ref: §4 protocol.
 
-- [x] 4.1 Run the persistent-entity suspect (protocol reduced to N=20
-  tight-loop + N=15 parallel sweeps — see flaky-triage.md deviation note):
+- [x] 4.1 Run the persistent-entity suspect (full protocol, design.md §4 —
+  no analytical model for this suspect's failure mode): N=200 tight-loop +
+  N=50 full-crate parallel sweeps:
   `registry.rs::concurrent_lookups_for_one_triple_spawn_exactly_once` and
   `mailbox.rs::close_and_drain_races_concurrent_sends_without_losing_envelopes`;
   verdict recorded: non-reproducing.
-- [x] 4.2 Run the effects suspect (N=30 tight-loop, reduced protocol):
+- [x] 4.2 Run the effects suspect (N=30 tight-loop — design.md §4's
+  analytically-bounded-root-cause bar, since the fix makes the race
+  deterministic by construction):
   `effects/acceptor.rs::acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses`,
   `::lost_wakeup_pattern_is_reproduced_with_a_widened_race_window`, and
   `effects/runner.rs::shutdown_reaches_drain_deadline_despite_a_hung_backpressure_permit_wait`;
   verdict recorded: fixed.
 - [x] 4.3 Grepped `crates/runtime/src/providers/access.rs` — the failure
   point is the shared `capture_events` test helper, not a single named test;
-  ran the reduced protocol against it; verdict recorded: fixed.
+  ran the full N=200 protocol against it (no analytical model); verdict
+  recorded: fixed.
 - [x] 4.4 Created `openspec/changes/core-027-foundation-integrity-gate/flaky-triage.md`
   recording, per suspect: test name(s), actual run counts, verdict, plus one
   out-of-scope discovery (see below).
@@ -153,14 +157,21 @@ Spec ref: FR-007 (resolved verdicts). Design ref: §4 protocol.
 - [x] 5.4 Neither fix changes `persistent-entity` or `external-effects`
   spec-level behavior — both are test-helper/test-fixture corrections, not
   behavior changes. No spec delta needed.
-- [ ] 5.5 (Not in original scope, added during triage) A fourth flaky test —
+- [x] 5.5 (Not in original scope, added during triage) A fourth flaky test —
   `effects/observability.rs::every_signal_redacts_the_idempotency_key_and_never_carries_the_raw_key_or_payload` —
-  was discovered incidentally during the same parallel sweeps. The same
-  `Arc::try_unwrap` → `Mutex` fix pattern was attempted and did **not**
-  resolve it (still lost an event afterward: genuine event loss via
-  `tracing`'s global per-callsite interest cache, not an ownership panic).
-  Reverted; left unresolved. Tracked in `flaky-triage.md` as a follow-up,
-  explicitly out of CORE-027's scope — not blocking this change's archive.
+  was discovered incidentally during the same parallel sweeps. Root cause
+  confirmed against `tracing-core` 0.1.36 source: a callsite's `Interest` is
+  cached process-wide on first hit, resolved against whichever thread
+  reaches it first — if that thread has no subscriber installed (true for
+  `effects::runner`/`effects::acceptor`'s own tests, which call the same
+  production `log_*` functions directly), the callsite permanently caches
+  "no one's listening", so a later `capture_events` call can silently miss
+  it. Fixed in `effects::observability::tests::ensure_interest_cache_race_immune`:
+  installs one real, always-enabled subscriber as `tracing`'s global default
+  via the public `tracing::subscriber::set_global_default`, once, before any
+  test runs — no undocumented internals, no leaked guards. Re-verified: 5x
+  clean `--test-threads=64` full-crate sweeps plus the full 50-sweep
+  protocol (see `flaky-triage.md`).
 
 ## Phase 6: Final Verification
 

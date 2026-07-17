@@ -751,9 +751,12 @@ mod tests {
     }
 
     /// Blocks inside `execute` until `gate` is notified — used to prove
-    /// `accept` awaits queue capacity rather than refusing.
+    /// `accept` awaits queue capacity rather than refusing. `entered` fires
+    /// the instant `execute` is called, letting a test await "this call has
+    /// genuinely reached the gate" instead of guessing a sleep duration.
     struct GatedExecutor {
         gate: Arc<Notify>,
+        entered: Arc<Notify>,
     }
 
     #[async_trait]
@@ -763,6 +766,7 @@ mod tests {
             _effect: &ExternalEffectDescription,
             _ctx: &EffectContext,
         ) -> AttemptOutcome {
+            self.entered.notify_one();
             self.gate.notified().await;
             AttemptOutcome::Success
         }
@@ -831,6 +835,9 @@ mod tests {
         inner: InMemoryEffectStore,
         script: StdMutex<Vec<Result<(), EffectStoreError>>>,
         accept_calls: AtomicU32,
+        /// Fires on every `accept` call — lets a test await "the retry loop
+        /// just made its next attempt" instead of guessing a sleep duration.
+        called: Notify,
     }
 
     impl ScriptedAcceptStore {
@@ -839,6 +846,7 @@ mod tests {
                 inner: InMemoryEffectStore::new(),
                 script: StdMutex::new(script),
                 accept_calls: AtomicU32::new(0),
+                called: Notify::new(),
             }
         }
 
@@ -851,6 +859,7 @@ mod tests {
     impl EffectStateStore for ScriptedAcceptStore {
         async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
             self.accept_calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_one();
             let next = self.script.lock().unwrap().pop();
             match next {
                 Some(scripted) => scripted,
@@ -1055,10 +1064,14 @@ mod tests {
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let gate = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
         registry
             .register(
                 "invoice.created",
-                Arc::new(GatedExecutor { gate: gate.clone() }),
+                Arc::new(GatedExecutor {
+                    gate: gate.clone(),
+                    entered: entered.clone(),
+                }),
             )
             .unwrap();
         let acceptor = RuntimeEffectAcceptor::new(
@@ -1077,7 +1090,9 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the first accept must reach the gated executor");
         assert!(
             !first.is_finished(),
             "first accept should still be blocked inside the gated executor"
@@ -1091,7 +1106,13 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // `second` cannot reach the executor's gate until `first` releases
+        // capacity, so there is no "entered" event to await here yet — just
+        // give the scheduler a bounded, non-time-based chance to actually
+        // poll it and observe it blocking on capacity rather than refusing.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
         assert!(
             !second.is_finished(),
             "second accept must block awaiting capacity, never refuse or drop the effect"
@@ -1102,6 +1123,9 @@ mod tests {
             .await
             .expect("task joins")
             .expect("first accept eventually completes");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the second accept must reach the gated executor once capacity frees up");
         gate.notify_waiters();
         second
             .await
@@ -1311,7 +1335,9 @@ mod tests {
         // Let the retry loop fail its first attempt and enter its 100ms
         // backoff sleep, then signal shutdown with a deadline (5s) that is
         // nowhere close to elapsing yet.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(1), store.called.notified())
+            .await
+            .expect("the retry loop must have made its first (failing) attempt");
         handle
             .shutdown_and_wait(Duration::from_secs(5))
             .await
@@ -1388,7 +1414,9 @@ mod tests {
         // Let the retry loop fail its first attempt and enter its (would-be
         // 30s) backoff sleep, then signal shutdown with a deadline (1s) short
         // enough to elapse well before that backoff would ever finish.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(1), store.called.notified())
+            .await
+            .expect("the retry loop must have made its first (failing) attempt");
         handle
             .shutdown_and_wait(Duration::from_secs(1))
             .await
@@ -1611,7 +1639,12 @@ mod tests {
 
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Nothing signals "shutdown_and_wait has reached its blocking wait"
+        // without touching production code, so give the scheduler a
+        // bounded, non-time-based chance to actually poll it forward first.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must not return while the already-in-flight accept call is \
@@ -1699,12 +1732,14 @@ mod tests {
 
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        // Give shutdown_and_wait a generous head start: under the pre-fix
-        // ordering it sends `shutdown=true` (and the runner stops consuming)
-        // essentially immediately; under the fix, it is still blocked inside
-        // `wait_until_drained` this whole time, since the in-flight accept
-        // hasn't finished yet.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Give shutdown_and_wait a bounded, non-time-based head start: under
+        // the pre-fix ordering it sends `shutdown=true` (and the runner
+        // stops consuming) essentially immediately; under the fix, it is
+        // still blocked inside `wait_until_drained` this whole time, since
+        // the in-flight accept hasn't finished yet.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must still be waiting on the in-flight accept call"

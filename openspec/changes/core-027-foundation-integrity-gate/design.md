@@ -71,15 +71,33 @@ Three suspects, exact names pinned against source:
 | provider-access under parallel execution | the `#[tokio::test]` module in `crates/runtime/src/providers/access.rs` |
 
 **Protocol per suspect** (evidence-driven, local — CI-like load reproduced by
-contention): `N = 200` tight-loop runs
-(`for i in $(seq 1 200); do cargo test -p <crate> <test> -- --exact || break; done`)
-**plus** ~50 full-crate parallel sweeps
-(`cargo test -p <crate> -- --test-threads=$(( $(sysctl -n hw.ncpu) * 4 ))`) to
-force scheduler interleaving. **Verdict** per suspect ∈ {`fixed` (root cause +
-fix commit), `non-reproducing` (N clean runs, evidence noted)}. Verdicts are
-recorded in `openspec/changes/core-027-foundation-integrity-gate/flaky-triage.md`
-(apply phase) and summarized in `verify-report.md`. A fix that changes
-spec-level behavior triggers a spec delta (proposal §4).
+contention), **N scaled to whether the root cause has a known probability
+model**:
+
+- **No analytical model** (the failure is a scheduler/library-internal race
+  with no derivable failure rate — persistent-entity's concurrent-spawn
+  suspect, provider-access's `Arc`/`tracing_core` interest-cache race): full
+  `N = 200` tight-loop runs
+  (`for i in $(seq 1 200); do cargo test -p <crate> <test> || break; done`)
+  **plus** ~50 full-crate parallel sweeps
+  (`cargo test -p <crate> -- --test-threads=$(( $(sysctl -n hw.ncpu) * 4 ))`).
+  Here, only a large N gives real confidence of absence — there is no formula
+  to fall back on.
+- **Analytically bounded root cause** (the fix reduces a *quantified*
+  collision probability to a negligible one — e.g. `RetryPolicy`'s full-jitter
+  sampling landing under a deadline margin: ~3.5% pre-fix, ~3×10⁻⁸ post-fix
+  once the backoff cap is widened to 1 year against a 1s/5s deadline): `N =
+  30` tight-loop runs, no dedicated full-crate sweep (still exercised
+  incidentally by the other suspects' sweeps in the same crate). Once a fix
+  makes the race deterministic by construction (the deadline provably always
+  wins), 30 clean runs and 200 clean runs carry equivalent evidentiary
+  weight — the fix's correctness follows from the math, not the sample size.
+
+**Verdict** per suspect ∈ {`fixed` (root cause + fix commit), `non-reproducing`
+(N clean runs, evidence noted)}. Verdicts are recorded in
+`openspec/changes/core-027-foundation-integrity-gate/flaky-triage.md` (apply
+phase) and summarized in `verify-report.md`. A fix that changes spec-level
+behavior triggers a spec delta (proposal §4).
 
 ## 5. File Changes
 

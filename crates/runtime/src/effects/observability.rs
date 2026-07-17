@@ -179,7 +179,7 @@ pub(crate) fn log_drain_incomplete(recovered: u64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::effects::store::EffectId;
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
@@ -224,10 +224,71 @@ mod tests {
         fn exit(&self, _span: &tracing::span::Id) {}
     }
 
+    /// Installs one real, always-enabled subscriber as `tracing`'s *global*
+    /// default (CORE-027 flaky-triage root cause fix).
+    ///
+    /// A `log_*` callsite's very first hit anywhere in the process resolves
+    /// "is anyone interested?" against whatever the current default is on
+    /// the calling thread. Before this fix, that could be `tracing-core`'s
+    /// built-in no-op default — which answers "never" — if the first thread
+    /// to reach a given callsite happened to be one that never installed a
+    /// subscriber itself (true for `effects::runner`'s and
+    /// `effects::acceptor`'s own tests, which call these same production
+    /// `log_*` functions directly). That "never" verdict then caches
+    /// permanently for that callsite, so a later `capture_events` call can
+    /// silently miss it even with its own subscriber active — a race that a
+    /// per-file mutex around our own `with_default` calls cannot reach,
+    /// since the other side of the race is unrelated test code with no
+    /// subscriber at all.
+    ///
+    /// Fix: use `tracing::subscriber::set_global_default` (the public,
+    /// documented mechanism for "the process always has a default
+    /// subscriber") to replace the no-op built-in default with a real one
+    /// whose `enabled()` always returns `true`, exactly once, before any
+    /// test runs. A callsite's first hit then always resolves to "someone's
+    /// interested", so `event()` always fires — delivered to this harmless
+    /// global default when no test-local subscriber is active, or correctly
+    /// overridden by a thread's own `with_default` during a capture window
+    /// (thread-local always wins over the global default on that thread).
+    pub(crate) fn ensure_interest_cache_race_immune() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            struct AlwaysOn;
+            impl tracing::Subscriber for AlwaysOn {
+                fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+                    true
+                }
+                fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                    tracing::span::Id::from_u64(1)
+                }
+                fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+                fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+                fn event(&self, _event: &tracing::Event<'_>) {}
+                fn enter(&self, _span: &tracing::span::Id) {}
+                fn exit(&self, _span: &tracing::span::Id) {}
+            }
+            // Ignore the error: if something else already set a global
+            // default first, that default is at least as real as ours.
+            let _ = tracing::subscriber::set_global_default(AlwaysOn);
+        });
+    }
+
+    /// Serializes every `capture_events` call in the crate against the
+    /// documented `Arc::try_unwrap` transient-strong-count hazard (see
+    /// `providers::access`'s `capture_events`, which shares this exact
+    /// static via `crate::effects::observability::tests::
+    /// CAPTURE_EVENTS_GUARD`). Belt-and-braces alongside
+    /// `ensure_interest_cache_race_immune` above, not a substitute for it.
+    pub(crate) static CAPTURE_EVENTS_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Runs `f` under a subscriber that records every emitted event's fields,
     /// returning them all — lets a test assert on the exact fields a `log_*`
     /// call actually produced, not just that it compiles.
     fn capture_events(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        ensure_interest_cache_race_immune();
+        let _guard = CAPTURE_EVENTS_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = TestSubscriber {
             events: events.clone(),
