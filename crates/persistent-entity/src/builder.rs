@@ -230,6 +230,12 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
             snapshot_strategy,
             event_sender,
             self.effect_acceptor,
+            // Full-precision Duration as configured directly via
+            // `.passivation_timeout()` — NOT reconstructed from `config`
+            // above, whose `passivation_timeout_secs: u64` silently
+            // truncates any sub-second value to zero (see
+            // `EntityRuntime`'s `passivation_timeout` field doc comment).
+            self.passivation_timeout,
         )
     }
 }
@@ -239,5 +245,65 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_context::CommandContext;
+    use crate::entity_ref::EntityRef;
+    use crate::persistent_entity::{CommandResult, PersistentEntity};
+    use crate::snapshot::NoSnapshot;
+    use crate::test_entity::TestEntity;
+    use crate::testing::{TestCommand, TestEvent, TestState};
+
+    /// Regression test for a bug found during CORE-028 Stage-1 flaky-test
+    /// triage: `build()` used to reconstruct the actor-facing passivation
+    /// timeout from `RuntimeConfig.passivation_timeout_secs: u64`, whose
+    /// `.as_secs()` silently truncates any sub-second `Duration` to `0` —
+    /// making every spawned actor passivate almost immediately regardless of
+    /// what `.passivation_timeout(...)` was actually configured with. Fixed
+    /// by threading the original full-precision `Duration` into
+    /// `EntityRuntime` directly (see its `passivation_timeout` field).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sub_second_passivation_timeout_is_not_truncated_to_zero() {
+        let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+            .passivation_timeout(std::time::Duration::from_millis(300))
+            .snapshot_strategy(Arc::new(NoSnapshot))
+            .build();
+        let handler: Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> =
+            Arc::new(TestEntity::new());
+
+        let entity_ref = runtime
+            .entity_ref::<TestCommand, TestState>("test", "regression-entity", handler)
+            .unwrap();
+        let _: CommandResult<TestEvent, TestState> = entity_ref
+            .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(runtime.active_count(), 1, "freshly activated entity must be active");
+
+        // Well under the configured 300ms timeout, the entity must still be
+        // active — a truncated-to-zero timeout would have already passivated
+        // it by now.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            runtime.active_count(),
+            1,
+            "entity passivated in well under its configured 300ms timeout — \
+             the sub-second Duration was likely truncated to zero again"
+        );
+
+        // It must still genuinely passivate once idle past the configured
+        // timeout (bounded poll, not a guessed sleep).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if runtime.active_count() == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "entity never passivated");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 }

@@ -99,6 +99,15 @@ pub struct EntityRuntime<E> {
     /// every spawned actor's `effect_acceptor` at `None`, preserving today's
     /// fail-closed-if-effects-described behavior unchanged.
     pub effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    /// Full-precision passivation timeout, as configured directly via
+    /// [`crate::builder::EntityRuntimeBuilder::passivation_timeout`] — kept
+    /// separate from `config.passivation_timeout_secs` (whole seconds only,
+    /// intentional for that JSON/kit-config-facing schema) because rounding a
+    /// sub-second `Duration` through `.as_secs()` silently truncates it to
+    /// zero, making every spawned actor passivate almost immediately instead
+    /// of after the configured idle period. This field is what
+    /// [`Self::entity_ref`] actually uses.
+    passivation_timeout: std::time::Duration,
     _event: PhantomData<E>,
 }
 
@@ -107,6 +116,11 @@ where
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
 {
     /// Creates a new [`EntityRuntime`] with the given components.
+    ///
+    /// `passivation_timeout` is the full-precision idle duration actually
+    /// used when spawning actors — see the field's doc comment for why this
+    /// is threaded separately from `config.passivation_timeout_secs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
@@ -116,6 +130,7 @@ where
         snapshot_strategy: Arc<dyn SnapshotStrategy>,
         event_sender: SchedulerEventSender,
         effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+        passivation_timeout: std::time::Duration,
     ) -> Self {
         EntityRuntime {
             registry,
@@ -126,6 +141,7 @@ where
             snapshot_strategy,
             event_sender,
             effect_acceptor,
+            passivation_timeout,
             _event: PhantomData,
         }
     }
@@ -178,7 +194,7 @@ where
             entity_handler,
             self.event_sender.clone(),
             self.config.mailbox_capacity,
-            self.config.passivation_timeout(),
+            self.passivation_timeout,
             self.effect_acceptor.clone(),
         )
     }
