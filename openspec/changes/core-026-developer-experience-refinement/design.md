@@ -418,6 +418,7 @@ impl AppBuilder {
     pub fn adapter<A: Send + Sync + 'static>(self, a: Arc<A>) -> Self;      // dup-guarded, AD-4
     pub fn replace_adapter<A: Send + Sync + 'static>(self, a: Arc<A>) -> Self;
     pub fn config<C: Send + Sync + 'static>(self, c: Arc<C>) -> Self;
+    pub fn logger(self, logger: Arc<KITLogger>) -> Self;                    // thin delegation, found missing during PR1 implementation review — proposal.md/spec.md require it, this sketch had silently dropped it
     pub fn security(self, authn: Arc<dyn AuthenticationProvider>, authz: Arc<dyn AuthorizationProvider>) -> Self;
     pub fn build(self) -> Result<App, CompositionError>;                    // no Tokio, starts nothing
 }

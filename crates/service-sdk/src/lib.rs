@@ -1,5 +1,6 @@
 //! Service SDK — contracts, runtime, DI, and interceptors for ego-rs services.
 
+pub mod app;
 pub mod context;
 pub mod contract;
 pub mod di;
@@ -16,6 +17,7 @@ pub mod runtime;
 #[cfg(test)]
 mod test_support;
 
+pub use app::*;
 pub use context::*;
 pub use contract::*;
 pub use di::*;
