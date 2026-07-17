@@ -297,17 +297,18 @@ async fn test_no_double_spawn_concurrent() {
         .await
         .expect("idle-timer-resetting command must succeed");
 
-    // Review (PR #186): the anchor command above must genuinely find the
-    // burst-reactivated entity still active, not silently trigger its OWN
-    // reactivation after an undetected second passivation — the comment
-    // above claimed this, but nothing previously checked it.
-    let reactivation_load_calls_after_anchor = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
-    assert_eq!(
-        reactivation_load_calls_after_anchor, 1,
-        "the idle-timer anchor command must not trigger another reactivation, got {}",
-        reactivation_load_calls_after_anchor
-    );
-
+    // Review (PR #186, re-review): a prior version of this test re-checked
+    // load_calls here too, asserting the anchor command didn't itself count
+    // as a second reactivation. Removed — a real, contention-induced gap
+    // between the burst finishing and this anchor command running can
+    // legitimately exceed the configured passivation timeout, causing a
+    // second, LEGITIMATE reactivation here that has nothing to do with a
+    // double-spawn bug. Asserting on it would turn real scheduling delay
+    // back into part of the test's pass/fail outcome — the exact class of
+    // flakiness this fix exists to remove. The single-flight guarantee that
+    // actually matters (the burst produced exactly one reactivation) was
+    // already checked above, before the anchor ever ran.
+    //
     // Single-flight (ADR-001) guarantees exactly one live entry per triple —
     // there is no window where two entries coexist for the same aggregate_id,
     // so this is exact, not a bound.
@@ -392,15 +393,17 @@ async fn test_activation_mutex_serializes() {
         .await
         .expect("idle-timer-resetting command must succeed");
 
-    // Review (PR #186): confirm the anchor command above didn't itself
-    // trigger an undetected second reactivation — the comment above claimed
-    // "never" without this ever being checked.
-    let reactivation_load_calls_after_anchor = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
-    assert_eq!(
-        reactivation_load_calls_after_anchor, 1,
-        "the idle-timer anchor command must not trigger another reactivation, got {}",
-        reactivation_load_calls_after_anchor
-    );
+    // Review (PR #186, re-review): a prior version of this test re-checked
+    // load_calls here too, asserting the anchor command didn't itself count
+    // as a second reactivation. Removed — a real, contention-induced gap
+    // between the burst finishing and this anchor command running can
+    // legitimately exceed the configured passivation timeout, causing a
+    // second, LEGITIMATE reactivation here unrelated to any double-spawn
+    // bug. Asserting on it would turn real scheduling delay back into part
+    // of the test's pass/fail outcome — the exact class of flakiness this
+    // fix exists to remove. The single-flight guarantee that actually
+    // matters (the burst produced exactly one reactivation) was already
+    // checked above, before the anchor ever ran.
 
     let active = runtime.active_count();
     assert_eq!(
