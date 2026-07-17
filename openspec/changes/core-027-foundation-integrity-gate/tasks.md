@@ -123,45 +123,65 @@ Spec ref: FR-005 (isolation), FR-006 (hygiene). Design ref: AD-4, AD-5.
 
 Spec ref: FR-007 (resolved verdicts). Design ref: §4 protocol.
 
-- [ ] 4.1 Run the persistent-entity suspect: 200 tight-loop runs of
+- [x] 4.1 Run the persistent-entity suspect (full protocol, design.md §4 —
+  no analytical model for this suspect's failure mode): N=200 tight-loop +
+  N=50 full-crate parallel sweeps:
   `registry.rs::concurrent_lookups_for_one_triple_spawn_exactly_once` and
-  `mailbox.rs::close_and_drain_races_concurrent_sends_without_losing_envelopes`
-  plus ~50 parallel sweeps (`cargo test -p persistent-entity --
-  --test-threads=$(( $(sysctl -n hw.ncpu) * 4 ))`); record verdict.
-- [ ] 4.2 Run the effects suspect: 200 tight-loop runs of
+  `mailbox.rs::close_and_drain_races_concurrent_sends_without_losing_envelopes`;
+  verdict recorded: non-reproducing.
+- [x] 4.2 Run the effects suspect (N=30 tight-loop — design.md §4's
+  analytically-bounded-root-cause bar, since the fix makes the race
+  deterministic by construction):
   `effects/acceptor.rs::acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses`,
   `::lost_wakeup_pattern_is_reproduced_with_a_widened_race_window`, and
-  `effects/runner.rs::shutdown_reaches_drain_deadline_despite_a_hung_backpressure_permit_wait`
-  plus ~50 parallel sweeps; record verdict.
-- [ ] 4.3 Grep `crates/runtime/src/providers/access.rs` for the exact
-  `#[tokio::test]` name(s) in its test module (design.md §9 — pinned at
-  apply time), then run the same 200-loop + ~50-parallel-sweep protocol;
-  record verdict.
-- [ ] 4.4 Create `openspec/changes/core-027-foundation-integrity-gate/flaky-triage.md`
-  recording, per suspect: test name(s), run counts, verdict (`fixed` with
-  root cause + fix commit, or `non-reproducing` with evidence), so none of
-  the three suspects is left unresolved (FR-007).
+  `effects/runner.rs::shutdown_reaches_drain_deadline_despite_a_hung_backpressure_permit_wait`;
+  verdict recorded: fixed.
+- [x] 4.3 Grepped `crates/runtime/src/providers/access.rs` — the failure
+  point is the shared `capture_events` test helper, not a single named test;
+  ran the full N=200 protocol against it (no analytical model); verdict
+  recorded: fixed.
+- [x] 4.4 Created `openspec/changes/core-027-foundation-integrity-gate/flaky-triage.md`
+  recording, per suspect: test name(s), actual run counts, verdict, plus one
+  out-of-scope discovery (see below).
 
 ## Phase 5: Conditional Fixes (Only If a Suspect Reproduces)
 
-- [ ] 5.1 If the persistent-entity suspect reproduces: root-cause and fix in
-  `crates/persistent-entity`; re-run its 200-loop protocol clean before
-  recording `fixed` in `flaky-triage.md`.
-- [ ] 5.2 If the effects suspect reproduces: root-cause and fix in
-  `crates/runtime/src/effects/`; re-run its 200-loop protocol clean before
-  recording `fixed`.
-- [ ] 5.3 If the provider-access suspect reproduces: root-cause and fix in
-  `crates/runtime/src/providers/access.rs`; re-run its 200-loop protocol
-  clean before recording `fixed`.
-- [ ] 5.4 If any fix changes `persistent-entity` or `external-effects`
-  spec-level behavior, flag it — proposal §4 requires a spec delta before
-  archive, not silently absorbed here.
+- [x] 5.1 persistent-entity suspect did not reproduce — no fix needed.
+- [x] 5.2 Effects suspect reproduced: fixed in `crates/runtime/src/effects/acceptor.rs`
+  (widened test backoff cap to remove a real jitter/deadline collision
+  probability). Re-run clean (30/30).
+- [x] 5.3 Provider-access suspect reproduced: fixed in
+  `crates/runtime/src/providers/access.rs` (`capture_events` reads through
+  the `Mutex` instead of `Arc::try_unwrap`). Re-run clean across multiple
+  parallel sweeps.
+- [x] 5.4 Neither fix changes `persistent-entity` or `external-effects`
+  spec-level behavior — both are test-helper/test-fixture corrections, not
+  behavior changes. No spec delta needed.
+- [x] 5.5 (Not in original scope, added during triage) A fourth flaky test —
+  `effects/observability.rs::every_signal_redacts_the_idempotency_key_and_never_carries_the_raw_key_or_payload` —
+  was discovered incidentally during the same parallel sweeps. Root cause
+  confirmed against `tracing-core` 0.1.36 source: a callsite's `Interest` is
+  cached process-wide on first hit, resolved against whichever thread
+  reaches it first — if that thread has no subscriber installed (true for
+  `effects::runner`/`effects::acceptor`'s own tests, which call the same
+  production `log_*` functions directly), the callsite permanently caches
+  "no one's listening", so a later `capture_events` call can silently miss
+  it. A first fix attempt (`ensure_interest_cache_race_immune` +
+  `set_global_default`, called lazily from `capture_events`) was rejected on
+  PR review: it didn't actually run before unrelated tests could hit the
+  same callsites first (F-01), and silently ignored failure to install
+  (F-02). Real fix: stopped depending on `tracing`'s dispatch/interest-cache
+  for correctness at all — each signal's field construction/redaction
+  (`effect_fields`) is now a pure, deterministic function tested directly,
+  with no subscriber, no global state, and no harness-ordering dependency.
+  Re-verified: 5x clean `--test-threads=64` full-crate sweeps plus the full
+  50-sweep protocol (see `flaky-triage.md`).
 
 ## Phase 6: Final Verification
 
-- [ ] 6.1 `cargo test --workspace` passes with `xtask`'s unit tests
+- [x] 6.1 `cargo test --workspace` passes with `xtask`'s unit tests
   included.
-- [ ] 6.2 All three `xtask` subcommands pass against the final workspace
+- [x] 6.2 All three `xtask` subcommands pass against the final workspace
   state: `verify-layers`, `verify-isolation`, `verify-hygiene`.
-- [ ] 6.3 Confirm no `.github/workflows/` or Dagger files were added or
-  modified (proposal success criteria, out-of-scope guard).
+- [x] 6.3 Confirmed no `.github/workflows/` or Dagger files were added or
+  modified.

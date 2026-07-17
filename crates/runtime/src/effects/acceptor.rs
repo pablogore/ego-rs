@@ -50,6 +50,15 @@ struct LifecycleGate {
     /// sent value regardless of exactly when they are called relative to the
     /// send, so there is no equivalent lost-wakeup window.
     in_flight: watch::Sender<u64>,
+    /// Test-only: fires the instant [`Self::wait_until_drained`] commits to
+    /// its blocking wait (i.e. it found a nonzero in-flight count and is
+    /// about to await `in_flight_rx.changed()`), so a test can await this
+    /// signal instead of a fixed `yield_now()` count — `tokio::task::
+    /// yield_now`'s own docs explicitly disclaim any scheduling-order
+    /// guarantee, so a bounded-yield loop cannot reliably prove this point
+    /// was reached (CORE-027 flaky-triage review).
+    #[cfg(test)]
+    probe: tokio::sync::Notify,
 }
 
 enum LifecycleState {
@@ -78,6 +87,8 @@ impl LifecycleGate {
         Arc::new(Self {
             state: StdMutex::new(LifecycleState::Running),
             in_flight,
+            #[cfg(test)]
+            probe: tokio::sync::Notify::new(),
         })
     }
 
@@ -129,6 +140,8 @@ impl LifecycleGate {
             if *in_flight_rx.borrow() == 0 {
                 return;
             }
+            #[cfg(test)]
+            self.probe.notify_one();
             tokio::select! {
                 result = in_flight_rx.changed() => {
                     if result.is_err() {
@@ -419,6 +432,15 @@ pub struct RuntimeEffectAcceptor {
     /// `std::sync::Mutex` is enough since `start` only ever takes the
     /// receiver out synchronously, once.
     deferred_receiver: Option<StdMutex<Option<EffectQueueReceiver>>>,
+    /// Test-only: fires immediately before `Inline` mode's `accept_one`
+    /// attempts `inline_receiver.lock().await`, so a test can await this
+    /// signal instead of a fixed `yield_now()` count to prove a concurrent
+    /// `accept()` call has genuinely reached (and is blocked on) capacity
+    /// acquisition, not merely "hasn't finished yet for any reason"
+    /// (CORE-027 flaky-triage review — `yield_now`'s docs explicitly
+    /// disclaim any scheduling-order guarantee).
+    #[cfg(test)]
+    probe_before_inline_lock: tokio::sync::Notify,
     /// Shared with the spawned `Deferred` runner's own drain loop
     /// ([`Self::start`]) — flips to `true` the moment
     /// [`EffectRuntimeHandle::shutdown_and_wait`] begins, telling that loop
@@ -483,6 +505,8 @@ impl RuntimeEffectAcceptor {
             runner_mode: config.runner_mode,
             inline_receiver,
             deferred_receiver,
+            #[cfg(test)]
+            probe_before_inline_lock: tokio::sync::Notify::new(),
             shutdown_rx,
             shutdown_tx,
             deadline_rx,
@@ -636,6 +660,8 @@ impl RuntimeEffectAcceptor {
         match self.runner_mode {
             RunnerMode::Deferred => self.send_to_queue(effect, index).await,
             RunnerMode::Inline => {
+                #[cfg(test)]
+                self.probe_before_inline_lock.notify_one();
                 let mut receiver = self
                     .inline_receiver
                     .as_ref()
@@ -751,9 +777,12 @@ mod tests {
     }
 
     /// Blocks inside `execute` until `gate` is notified — used to prove
-    /// `accept` awaits queue capacity rather than refusing.
+    /// `accept` awaits queue capacity rather than refusing. `entered` fires
+    /// the instant `execute` is called, letting a test await "this call has
+    /// genuinely reached the gate" instead of guessing a sleep duration.
     struct GatedExecutor {
         gate: Arc<Notify>,
+        entered: Arc<Notify>,
     }
 
     #[async_trait]
@@ -763,6 +792,7 @@ mod tests {
             _effect: &ExternalEffectDescription,
             _ctx: &EffectContext,
         ) -> AttemptOutcome {
+            self.entered.notify_one();
             self.gate.notified().await;
             AttemptOutcome::Success
         }
@@ -831,6 +861,9 @@ mod tests {
         inner: InMemoryEffectStore,
         script: StdMutex<Vec<Result<(), EffectStoreError>>>,
         accept_calls: AtomicU32,
+        /// Fires on every `accept` call — lets a test await "the retry loop
+        /// just made its next attempt" instead of guessing a sleep duration.
+        called: Notify,
     }
 
     impl ScriptedAcceptStore {
@@ -839,6 +872,7 @@ mod tests {
                 inner: InMemoryEffectStore::new(),
                 script: StdMutex::new(script),
                 accept_calls: AtomicU32::new(0),
+                called: Notify::new(),
             }
         }
 
@@ -851,6 +885,7 @@ mod tests {
     impl EffectStateStore for ScriptedAcceptStore {
         async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
             self.accept_calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_one();
             let next = self.script.lock().unwrap().pop();
             match next {
                 Some(scripted) => scripted,
@@ -1055,10 +1090,14 @@ mod tests {
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let gate = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
         registry
             .register(
                 "invoice.created",
-                Arc::new(GatedExecutor { gate: gate.clone() }),
+                Arc::new(GatedExecutor {
+                    gate: gate.clone(),
+                    entered: entered.clone(),
+                }),
             )
             .unwrap();
         let acceptor = RuntimeEffectAcceptor::new(
@@ -1077,7 +1116,9 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the first accept must reach the gated executor");
         assert!(
             !first.is_finished(),
             "first accept should still be blocked inside the gated executor"
@@ -1091,7 +1132,20 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // `second` cannot reach the executor's gate until `first` releases
+        // capacity, so there is no "entered" event to await here yet —
+        // instead, await the test-only probe fired immediately before
+        // `second`'s `accept_one` attempts `inline_receiver.lock().await`,
+        // proving it has genuinely reached (and is blocked on) capacity
+        // acquisition, not merely "hasn't finished yet for some other
+        // reason" (`yield_now`'s own docs disclaim any scheduling-order
+        // guarantee, so a bounded-yield loop cannot prove this).
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            acceptor.probe_before_inline_lock.notified(),
+        )
+        .await
+        .expect("second must have attempted to acquire inline capacity");
         assert!(
             !second.is_finished(),
             "second accept must block awaiting capacity, never refuse or drop the effect"
@@ -1102,6 +1156,9 @@ mod tests {
             .await
             .expect("task joins")
             .expect("first accept eventually completes");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the second accept must reach the gated executor once capacity frees up");
         gate.notify_waiters();
         second
             .await
@@ -1311,7 +1368,9 @@ mod tests {
         // Let the retry loop fail its first attempt and enter its 100ms
         // backoff sleep, then signal shutdown with a deadline (5s) that is
         // nowhere close to elapsing yet.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(1), store.called.notified())
+            .await
+            .expect("the retry loop must have made its first (failing) attempt");
         handle
             .shutdown_and_wait(Duration::from_secs(5))
             .await
@@ -1339,18 +1398,22 @@ mod tests {
     /// than sleeping out the full (here, 500ms) backoff regardless.
     #[tokio::test]
     async fn acceptance_in_progress_is_cancelled_once_the_deadline_instant_actually_elapses() {
-        // Deliberately generous margin (30s backoff vs a 1s handle deadline,
-        // matching the ratio the previous review round's shutdown test used)
-        // — under a full `cargo test --workspace` run with hundreds of tests
-        // competing for scheduler time, a tight margin (e.g. 500ms vs 50ms)
-        // is genuinely flaky: the main task's own `sleep(20ms)` before
-        // calling `shutdown_and_wait` can itself be delayed by scheduler
-        // contention long enough to let a second retry attempt slip in
-        // before the deadline is even set.
+        // CORE-027 flaky-triage fix: `RetryPolicy::backoff` applies *full
+        // jitter* — a uniform random duration in `[0, capped]`, never a fixed
+        // sleep. A 30s backoff cap against a 1s deadline margin still leaves
+        // ~3.5% of samples landing under 1.05s (confirmed empirically: this
+        // test failed at iteration 28/200 of the flaky-triage tight loop with
+        // `store.accept_calls() == 2`, i.e. the jittered backoff finished
+        // before the deadline elapsed and a genuine second attempt raced in
+        // ahead of cancellation — not a scheduler race in the acceptor
+        // itself). Widening the cap to a year makes that collision
+        // probability (~1.05s / 31_536_000s ≈ 3e-8 per run) negligible without
+        // slowing the test down, since the deadline always cuts the sleep
+        // short well before it could ever run to completion.
         let long_backoff_retry = RetryPolicy {
             max_attempts: 10,
-            base_backoff: Duration::from_secs(30),
-            max_backoff: Duration::from_secs(30),
+            base_backoff: Duration::from_secs(60 * 60 * 24 * 365),
+            max_backoff: Duration::from_secs(60 * 60 * 24 * 365),
         };
         let store = Arc::new(ScriptedAcceptStore::new(vec![
             Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
@@ -1384,7 +1447,9 @@ mod tests {
         // Let the retry loop fail its first attempt and enter its (would-be
         // 30s) backoff sleep, then signal shutdown with a deadline (1s) short
         // enough to elapse well before that backoff would ever finish.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(1), store.called.notified())
+            .await
+            .expect("the retry loop must have made its first (failing) attempt");
         handle
             .shutdown_and_wait(Duration::from_secs(1))
             .await
@@ -1605,9 +1670,17 @@ mod tests {
             .await
             .expect("the accept call must have already entered the gated store.accept");
 
+        let lifecycle = handle.lifecycle.clone();
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Await the test-only probe fired the instant `wait_until_drained`
+        // commits to its blocking wait, instead of a fixed `yield_now()`
+        // count — `yield_now`'s own docs disclaim any scheduling-order
+        // guarantee, so a bounded-yield loop cannot prove this point was
+        // reached.
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.probe.notified())
+            .await
+            .expect("shutdown_and_wait must have reached wait_until_drained's blocking wait");
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must not return while the already-in-flight accept call is \
@@ -1693,14 +1766,16 @@ mod tests {
             .await
             .expect("the accept call must have already entered the gated store.accept");
 
+        let lifecycle = handle.lifecycle.clone();
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        // Give shutdown_and_wait a generous head start: under the pre-fix
-        // ordering it sends `shutdown=true` (and the runner stops consuming)
-        // essentially immediately; under the fix, it is still blocked inside
-        // `wait_until_drained` this whole time, since the in-flight accept
-        // hasn't finished yet.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Await the test-only probe fired the instant `wait_until_drained`
+        // commits to its blocking wait — see
+        // `shutdown_and_wait_awaits_an_already_in_flight_accept_call`'s
+        // matching comment for why this replaces a fixed `yield_now()` count.
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.probe.notified())
+            .await
+            .expect("shutdown_and_wait must have reached wait_until_drained's blocking wait");
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must still be waiting on the in-flight accept call"

@@ -12,6 +12,21 @@
 //! `dispatch_started`, `attempt`, `success`, `retry_scheduled`,
 //! `terminal_failed`, `deduplicated`, `executor_missing`, `queue_depth`,
 //! `oldest_pending_age`, `drain_incomplete`.
+//!
+//! CORE-027 flaky-triage note: the per-effect signals' field construction and
+//! redaction (`effect_fields`) is a pure, deterministic function, kept
+//! separate from the `tracing::info!`/`warn!` calls that emit it. This lets
+//! the correctness bar (redaction, no payload leak, correct values) be
+//! asserted directly, without depending on `tracing-core`'s process-wide
+//! per-callsite interest cache — which under a full-crate parallel test
+//! sweep can race against unrelated tests exercising these same production
+//! callsites with no subscriber installed, silently dropping a captured
+//! event. The `log_*` functions' `tracing::info!`/`warn!` calls remain
+//! compile-time-checked wiring only (the macro fixes field names/values at
+//! the call site); no test captures through `tracing`'s dispatch machinery
+//! anymore, since that capturing test was itself shown to still flake under
+//! the same race and added no coverage beyond what the macro already
+//! guarantees at compile time.
 
 use std::time::Duration;
 
@@ -35,15 +50,38 @@ pub(crate) fn hashed_key(key: &str) -> String {
     digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The correlation fields shared by every per-effect signal (spec:
+/// "Observability Signals"). Computed once, deterministically, so redaction
+/// and field-shape can be asserted directly in tests without emitting
+/// through `tracing` at all.
+struct EffectFields {
+    effect_id: String,
+    effect_type: String,
+    destination: String,
+    tenant: String,
+    idempotency_key_hash: String,
+}
+
+fn effect_fields(effect: &AcceptedEffect) -> EffectFields {
+    EffectFields {
+        effect_id: effect.id.to_string(),
+        effect_type: effect.description.effect_type.clone(),
+        destination: effect.description.destination.clone(),
+        tenant: effect.tenant.as_str().to_string(),
+        idempotency_key_hash: hashed_key(effect.description.idempotency_key.as_str()),
+    }
+}
+
 /// `accepted`: the effect was recorded by the runtime after its command's
 /// commit succeeded, before it ever reaches the admission queue.
 pub(crate) fn log_accepted(effect: &AcceptedEffect) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         "accepted"
     );
 }
@@ -51,12 +89,13 @@ pub(crate) fn log_accepted(effect: &AcceptedEffect) {
 /// `dispatch_started`: the delivery runner has begun processing one accepted
 /// effect (design.md §9: "runner pre-execute").
 pub(crate) fn log_dispatch_started(effect: &AcceptedEffect) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         "dispatch_started"
     );
 }
@@ -64,12 +103,13 @@ pub(crate) fn log_dispatch_started(effect: &AcceptedEffect) {
 /// `attempt`: one executor invocation is about to run; `attempt` is the
 /// 1-based attempt number handed to the executor's `EffectContext`.
 pub(crate) fn log_attempt(effect: &AcceptedEffect, attempt: u32) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         attempt,
         "attempt"
     );
@@ -78,12 +118,13 @@ pub(crate) fn log_attempt(effect: &AcceptedEffect, attempt: u32) {
 /// `success`: the executor reported `AttemptOutcome::Success` for this
 /// attempt.
 pub(crate) fn log_success(effect: &AcceptedEffect) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         "success"
     );
 }
@@ -91,12 +132,13 @@ pub(crate) fn log_success(effect: &AcceptedEffect) {
 /// `retry_scheduled`: a `RetryableFailure` is being re-enqueued after
 /// `backoff`, as attempt `next_attempt`.
 pub(crate) fn log_retry_scheduled(effect: &AcceptedEffect, next_attempt: u32, backoff: Duration) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         next_attempt,
         backoff_ms = backoff.as_millis() as u64,
         "retry_scheduled"
@@ -106,12 +148,13 @@ pub(crate) fn log_retry_scheduled(effect: &AcceptedEffect, next_attempt: u32, ba
 /// `terminal_failed`: the effect will never be retried again; `reason` is a
 /// short, human-readable explanation — never the payload.
 pub(crate) fn log_terminal_failed(effect: &AcceptedEffect, reason: &str) {
+    let f = effect_fields(effect);
     warn!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         reason,
         "terminal_failed"
     );
@@ -120,12 +163,13 @@ pub(crate) fn log_terminal_failed(effect: &AcceptedEffect, reason: &str) {
 /// `deduplicated`: the scoped idempotency key was already reserved with an
 /// identical fingerprint — this attempt is a logical duplicate.
 pub(crate) fn log_deduplicated(effect: &AcceptedEffect) {
+    let f = effect_fields(effect);
     info!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         "deduplicated"
     );
 }
@@ -134,12 +178,13 @@ pub(crate) fn log_deduplicated(effect: &AcceptedEffect) {
 /// effect's `effect_type` — fail-closed, loud (spec: "Backward
 /// Compatibility").
 pub(crate) fn log_executor_missing(effect: &AcceptedEffect) {
+    let f = effect_fields(effect);
     warn!(
-        effect_id = %effect.id,
-        effect_type = %effect.description.effect_type,
-        destination = %effect.description.destination,
-        tenant = %effect.tenant.as_str(),
-        idempotency_key_hash = %hashed_key(effect.description.idempotency_key.as_str()),
+        effect_id = %f.effect_id,
+        effect_type = %f.effect_type,
+        destination = %f.destination,
+        tenant = %f.tenant,
+        idempotency_key_hash = %f.idempotency_key_hash,
         "executor_missing"
     );
 }
@@ -150,11 +195,18 @@ pub(crate) fn log_queue_depth(depth: usize) {
     info!(queue_depth = depth, "queue_depth");
 }
 
+/// Computes the millisecond value logged for `oldest_pending_age` — pulled
+/// out of `log_oldest_pending_age` so the `None` → `0` mapping is directly
+/// testable without emitting through `tracing`.
+fn oldest_pending_age_ms(age: Option<Duration>) -> u64 {
+    age.map(|a| a.as_millis() as u64).unwrap_or(0)
+}
+
 /// `oldest_pending_age`: how long the oldest still-queued effect has been
 /// waiting; `None` when nothing is queued.
 pub(crate) fn log_oldest_pending_age(age: Option<Duration>) {
     info!(
-        oldest_pending_age_ms = age.map(|a| a.as_millis() as u64).unwrap_or(0),
+        oldest_pending_age_ms = oldest_pending_age_ms(age),
         "oldest_pending_age"
     );
 }
@@ -183,65 +235,7 @@ mod tests {
     use super::*;
     use crate::effects::store::EffectId;
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default, Clone, Debug)]
-    struct CapturedEvent {
-        fields: HashMap<String, String>,
-    }
-
-    struct FieldRecorder<'a>(&'a mut HashMap<String, String>);
-
-    impl tracing::field::Visit for FieldRecorder<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name().to_string(), format!("{value:?}"));
-        }
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.insert(field.name().to_string(), value.to_string());
-        }
-    }
-
-    struct TestSubscriber {
-        events: Arc<Mutex<Vec<CapturedEvent>>>,
-    }
-
-    impl tracing::Subscriber for TestSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut fields = HashMap::new();
-            event.record(&mut FieldRecorder(&mut fields));
-            self.events.lock().unwrap().push(CapturedEvent { fields });
-        }
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    /// Runs `f` under a subscriber that records every emitted event's fields,
-    /// returning them all — lets a test assert on the exact fields a `log_*`
-    /// call actually produced, not just that it compiles.
-    fn capture_events(f: impl FnOnce()) -> Vec<CapturedEvent> {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = TestSubscriber {
-            events: events.clone(),
-        };
-        tracing::subscriber::with_default(subscriber, f);
-        Arc::try_unwrap(events).unwrap().into_inner().unwrap()
-    }
-
-    fn find_message<'a>(events: &'a [CapturedEvent], message: &str) -> &'a CapturedEvent {
-        events
-            .iter()
-            .find(|e| e.fields.get("message").map(|m| m.as_str()) == Some(message))
-            .unwrap_or_else(|| panic!("no captured event with message {message:?}"))
-    }
+    use std::sync::Arc;
 
     const DISTINCTIVE_PAYLOAD_MARKER: &str = "PAYLOAD-MUST-NEVER-LEAK-3f9a";
 
@@ -273,79 +267,47 @@ mod tests {
     }
 
     #[test]
-    fn accepted_signal_carries_required_correlation_fields() {
+    fn effect_fields_carries_required_correlation_values() {
         let effect = sample_effect();
-        let events = capture_events(|| log_accepted(&effect));
+        let f = effect_fields(&effect);
 
-        let event = find_message(&events, "accepted");
-        assert_eq!(event.fields.get("effect_id").map(String::as_str), Some(effect.id.to_string()).as_deref());
-        assert_eq!(event.fields.get("effect_type").map(String::as_str), Some("invoice.created"));
-        assert_eq!(event.fields.get("destination").map(String::as_str), Some("https://example.com"));
-        assert_eq!(event.fields.get("tenant").map(String::as_str), Some("tenant-a"));
-        assert!(event.fields.contains_key("idempotency_key_hash"));
+        assert_eq!(f.effect_id, effect.id.to_string());
+        assert_eq!(f.effect_type, "invoice.created");
+        assert_eq!(f.destination, "https://example.com");
+        assert_eq!(f.tenant, "tenant-a");
+        assert_eq!(f.idempotency_key_hash, hashed_key("uow-1:0"));
     }
 
     #[test]
-    fn every_signal_redacts_the_idempotency_key_and_never_carries_the_raw_key_or_payload() {
+    fn effect_fields_never_leaks_the_payload_or_the_raw_idempotency_key() {
         let effect = sample_effect();
-        let events = capture_events(|| {
-            log_accepted(&effect);
-            log_dispatch_started(&effect);
-            log_attempt(&effect, 1);
-            log_success(&effect);
-            log_retry_scheduled(&effect, 2, Duration::from_millis(100));
-            log_terminal_failed(&effect, "attempt cap exceeded");
-            log_deduplicated(&effect);
-            log_executor_missing(&effect);
-            log_queue_depth(3);
-            log_oldest_pending_age(Some(Duration::from_secs(1)));
-            log_drain_incomplete(1);
-        });
+        let f = effect_fields(&effect);
 
-        assert_eq!(events.len(), 11, "every log_* call must emit exactly one event");
-
-        for event in &events {
-            for (field, value) in &event.fields {
-                assert!(
-                    !value.contains(DISTINCTIVE_PAYLOAD_MARKER),
-                    "field {field:?} leaked the payload: {value:?}"
-                );
-                assert!(
-                    field != "idempotency_key_hash" || value != "uow-1:0",
-                    "idempotency_key_hash must never equal the raw key"
-                );
-                assert_ne!(
-                    value, "uow-1:0",
-                    "field {field:?} must never carry the raw idempotency key verbatim"
-                );
-            }
-        }
-
-        // Every per-effect signal carries the id/effect_type/destination/
-        // tenant/hashed-key correlation set (spec: "Observability Signals").
-        for message in [
-            "accepted",
-            "dispatch_started",
-            "attempt",
-            "success",
-            "retry_scheduled",
-            "terminal_failed",
-            "deduplicated",
-            "executor_missing",
+        for value in [
+            &f.effect_id,
+            &f.effect_type,
+            &f.destination,
+            &f.tenant,
+            &f.idempotency_key_hash,
         ] {
-            let event = find_message(&events, message);
-            for required in [
-                "effect_id",
-                "effect_type",
-                "destination",
-                "tenant",
-                "idempotency_key_hash",
-            ] {
-                assert!(
-                    event.fields.contains_key(required),
-                    "{message} signal is missing required field {required}"
-                );
-            }
+            assert!(
+                !value.contains(DISTINCTIVE_PAYLOAD_MARKER),
+                "field {value:?} leaked the payload"
+            );
+            assert_ne!(
+                value, "uow-1:0",
+                "field {value:?} must never carry the raw idempotency key verbatim"
+            );
         }
+    }
+
+    #[test]
+    fn oldest_pending_age_ms_maps_none_to_zero() {
+        assert_eq!(oldest_pending_age_ms(None), 0);
+    }
+
+    #[test]
+    fn oldest_pending_age_ms_converts_some_duration_to_milliseconds() {
+        assert_eq!(oldest_pending_age_ms(Some(Duration::from_secs(1))), 1000);
     }
 }

@@ -240,6 +240,21 @@ mod tests {
     /// test]`'s default current-thread flavor (single OS thread, no task
     /// migration across the `.await` below), so the thread-local default
     /// subscriber set by `set_default` reliably covers the whole future.
+    ///
+    /// CORE-027 flaky-triage fix: previously extracted the recorded events
+    /// via `Arc::try_unwrap(events).unwrap()`, asserting exclusive ownership
+    /// of the `Arc` at that point. Under a full-crate parallel sweep
+    /// (`--test-threads=64`, dozens of `tracing` dispatchers being installed
+    /// and torn down across threads concurrently), that `try_unwrap`
+    /// intermittently panicked — `tracing_core`'s global per-callsite
+    /// interest cache transiently holds an extra `Dispatch` clone while
+    /// rebuilding under contention, which briefly bumps this subscriber's
+    /// `Arc` strong count above 1 even though `guard` has already restored
+    /// the prior default and no further events can route into `self.0`.
+    /// Exclusive ownership was never actually required — only the recorded
+    /// data is — so this reads the `Vec` out through the `Mutex` instead,
+    /// which is correct regardless of how many (harmless) extra clones of
+    /// the `Arc` transiently exist.
     async fn capture_events<Fut>(f: Fut) -> Vec<CapturedEvent>
     where
         Fut: std::future::Future<Output = ()>,
@@ -251,7 +266,8 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
         f.await;
         drop(guard);
-        Arc::try_unwrap(events).unwrap().into_inner().unwrap()
+        let recorded = events.lock().unwrap().clone();
+        recorded
     }
 
     fn find_message(events: &[CapturedEvent], message: &str) -> CapturedEvent {
