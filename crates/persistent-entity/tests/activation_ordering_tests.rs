@@ -288,9 +288,10 @@ async fn test_no_double_spawn_concurrent() {
     );
 
     // Reset the idle timer immediately before checking `active_count()` — see
-    // `send_with_retry_on_mailbox_closed`'s doc comment (`test_activation_mutex_serializes`)
-    // for why an unguarded check here races the same passivation timer under
-    // contention, and why this must resolve a FRESH `entity_ref` (retried on
+    // the anchor comment in `test_activation_mutex_serializes` for why an
+    // unguarded check here races the same passivation timer under
+    // contention (including its noted, accepted, non-blocking residual
+    // risk), and why this must resolve a FRESH `entity_ref` (retried on
     // `MailboxClosed`) rather than reuse the one captured before passivation
     // above, whose mailbox is the original (now-closed) actor's.
     send_with_retry_on_mailbox_closed(&runtime, "entity-5", &h)
@@ -379,16 +380,26 @@ async fn test_activation_mutex_serializes() {
         reactivation_load_calls
     );
 
-    // Reset the idle timer right before checking `active_count()`, closing
-    // (not just narrowing) the second real race this file's own comment on
-    // `build_fast_passivation_runtime_with_counter` already flagged: the
-    // reactivated entity's idle timer starts counting from whichever burst
-    // command it processed last, so an unrelated gap between "burst done"
-    // and "active_count() checked" is itself racing the same 500ms timeout
-    // under contention. One more awaited command immediately beforehand
-    // guarantees the timer's last reset is this line, not the burst's last
-    // command — an explicit synchronization anchor, not a wider guessed
-    // margin.
+    // Reset the idle timer right before checking `active_count()`, narrowing
+    // (not eliminating — see the residual-risk note below) the second real
+    // race this file's own comment on `build_fast_passivation_runtime_with_counter`
+    // already flagged: the reactivated entity's idle timer starts counting
+    // from whichever burst command it processed last, so an unrelated gap
+    // between "burst done" and "active_count() checked" is itself racing
+    // the same 500ms timeout under contention. One more awaited command
+    // immediately beforehand guarantees the timer's last reset is this
+    // line, not the burst's last command — an explicit synchronization
+    // anchor, not a wider guessed margin.
+    //
+    // Residual risk (non-blocking, PR #186 re-review): the `active_count()`
+    // check a few lines below still races the same 500ms timeout across the
+    // (normally sub-millisecond) gap between this anchor command returning
+    // and that check running — if the test's own task is descheduled for
+    // longer than the configured timeout in exactly that window, the
+    // assertion could still see `0`. Accepted as a real but extremely
+    // narrow ceiling for this fix; closing it fully would mean moving this
+    // test onto virtual/paused time or an explicit lifecycle-completion
+    // signal instead of a real-clock `active_count()` read.
     send_with_retry_on_mailbox_closed(&runtime, "entity-6", &h)
         .await
         .expect("idle-timer-resetting command must succeed");
