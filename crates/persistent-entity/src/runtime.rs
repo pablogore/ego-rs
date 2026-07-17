@@ -23,13 +23,25 @@ use crate::snapshot::SnapshotStrategy;
 ///
 /// Controls mailbox capacity, concurrency budget, passivation timeout,
 /// and tenant isolation settings.
+///
+/// **`passivation_timeout_secs` is a whole-seconds JSON/kit-config-facing
+/// value, not necessarily what the runtime actually uses.** When a
+/// sub-second [`crate::builder::EntityRuntimeBuilder::passivation_timeout`]
+/// is configured directly (not via JSON), this field is populated by
+/// rounding *up* to the nearest whole second purely for this struct's own
+/// informational/serializable representation — it is never truncated down
+/// to `0`, which would misleadingly read as "passivates instantly." For the
+/// exact `Duration` actors are actually spawned with, use
+/// [`EntityRuntime::passivation_timeout`], not this field or
+/// [`Self::passivation_timeout`].
 #[derive(serde::Deserialize)]
 pub struct RuntimeConfig {
     /// Maximum number of commands queued per mailbox.
     pub mailbox_capacity: usize,
     /// Maximum number of concurrently active actors.
     pub concurrency_budget: usize,
-    /// Seconds of inactivity before entity passivation.
+    /// Seconds of inactivity before entity passivation — rounded up from any
+    /// sub-second value (see this struct's doc comment); not the ground truth.
     pub passivation_timeout_secs: u64,
     /// When true, all entities share the default tenant scope.
     pub single_tenant_mode: bool,
@@ -38,7 +50,10 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Returns the passivation timeout as a [`std::time::Duration`].
+    /// Returns `passivation_timeout_secs` as a [`std::time::Duration`] —
+    /// this struct's own whole-seconds approximation (see its doc comment),
+    /// not necessarily the exact value actors are spawned with. Prefer
+    /// [`EntityRuntime::passivation_timeout`] for that.
     pub fn passivation_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.passivation_timeout_secs)
     }
@@ -242,6 +257,16 @@ where
     /// Returns the number of passivated entities.
     pub fn passivated_count(&self) -> usize {
         self.registry.passivated_count()
+    }
+
+    /// Returns the exact, full-precision idle duration actors spawned by
+    /// [`Self::entity_ref`] are actually configured with — the ground truth,
+    /// unlike `self.config.passivation_timeout()` (whole seconds only,
+    /// rounded up, purely informational; see [`RuntimeConfig`]'s doc
+    /// comment). Introspection code (monitoring, logging) should read this,
+    /// not `config`.
+    pub fn passivation_timeout(&self) -> std::time::Duration {
+        self.passivation_timeout
     }
 }
 
