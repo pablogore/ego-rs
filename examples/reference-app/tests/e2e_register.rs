@@ -5,7 +5,6 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use ego_transport::AppState;
@@ -42,7 +41,7 @@ async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operati
     let config = AppConfig::default();
     let BuiltRuntime { app, authn, read_side: read_side_handles } =
         build_runtime(&config).expect("build_runtime succeeds");
-    let state = AppState::new(Arc::new(app.runtime()), authn);
+    let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, read_side_handles.query.clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,7 +82,7 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let read_side_runtime = read_side_handles.spawn();
     app.register_shutdown(read_side_runtime.stop());
 
-    let state = AppState::new(Arc::new(app.runtime()), authn);
+    let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, query);
 
     let running = app.start().await.expect("App::start succeeds (no effects registered)");

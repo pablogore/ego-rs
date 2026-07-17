@@ -418,11 +418,13 @@ impl Default for RuntimeBuilder {
 /// A configured runtime handle wrapping shared [`RuntimeInner`] state.
 ///
 /// `Clone` (CORE-028 Stage 1 PR2): cheap — clones only the inner `Arc`, the
-/// same shared state. Needed so `App::runtime()` can hand a caller (e.g. a
-/// transport layer's `AppState`, which predates `App`/`AppBuilder` and needs
-/// direct `Runtime` access for its own generic per-request resolution) a
-/// handle without giving up `App`'s own ownership needed to later call
-/// `App::start()`.
+/// same shared state. This is the full infra-level handle — every direct
+/// consumer of [`RuntimeBuilder`] (tests, low-level hosts) is expected to use
+/// it, lifecycle methods included (AD-1/G2: `RuntimeBuilder`/`Runtime` is the
+/// infrastructure API). A caller that only needs per-request resolution
+/// (e.g. a transport layer's `AppState`) should hold a [`RuntimeResolver`]
+/// (via [`Runtime::resolver`]) instead, not this type — see `RuntimeResolver`
+/// for why.
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
@@ -636,6 +638,48 @@ impl Runtime {
             Some(e) => Err(e),
             None => sync_result,
         }
+    }
+
+    /// Returns a [`RuntimeResolver`] — a resolution-only view onto this
+    /// `Runtime` (CORE-028 Stage 1 PR2 review). Deliberately narrower than
+    /// handing out this `Runtime` itself: `start_effects`/`shutdown_async`/
+    /// `register_async_teardown` are the lifecycle surface `App`/`RunningApp`
+    /// own, and a caller that only resolves services per request (e.g. a
+    /// transport layer) has no legitimate reason to reach them through a
+    /// side channel.
+    pub fn resolver(&self) -> RuntimeResolver {
+        RuntimeResolver { runtime: self.clone() }
+    }
+}
+
+/// A resolution-only handle into a [`Runtime`] (CORE-028 Stage 1 PR2 review
+/// finding, HIGH): `App::runtime()` used to hand out a full `Runtime`, which
+/// let a transport-layer caller call `start_effects`/`shutdown_async`/
+/// `register_async_teardown` directly — bypassing the `App`/`RunningApp`
+/// typestate Stage 1 introduced specifically to make those lifecycle
+/// transitions type-checked. `RuntimeResolver` exposes only what
+/// `ego_transport::AppState`'s per-request dispatch actually needs
+/// (`resolve`, `logger`) and nothing from the lifecycle surface. Cheap to
+/// clone — wraps a `Runtime`, which itself only clones an `Arc`.
+#[derive(Clone)]
+pub struct RuntimeResolver {
+    runtime: Runtime,
+}
+
+impl RuntimeResolver {
+    /// Resolves `Tag` to its concrete macro-generated proxy — identical to
+    /// [`Runtime::resolve`], the only difference is what else is (not)
+    /// reachable from this handle.
+    pub fn resolve<Tag>(&self) -> Result<Tag::Proxy, RuntimeError>
+    where
+        Tag: Resolvable + 'static,
+    {
+        self.runtime.resolve::<Tag>()
+    }
+
+    /// Returns the registered logger, if any — identical to [`Runtime::logger`].
+    pub fn logger(&self) -> Option<&Arc<KITLogger>> {
+        self.runtime.logger()
     }
 }
 

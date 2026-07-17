@@ -32,8 +32,6 @@
 //! that failure and "shutdown complete" is never printed, instead of
 //! silently reporting success for a shutdown that didn't actually drain.
 
-use std::sync::Arc;
-
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
 use reference_app::{build_runtime, AppConfig, BuiltRuntime};
@@ -51,11 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exactly as stage 0's spec requires.
     app.register_shutdown(read_side_runtime.stop());
 
-    // `App::runtime()` (Stage 1 PR2): `AppState` predates `App`/`AppBuilder`
-    // and needs direct `Runtime` access for its own generic per-request
-    // `resolve::<Tag>()` dispatch — a legitimate integration seam, not a
-    // reach into composition internals.
-    let state = AppState::new(Arc::new(app.runtime()), authn);
+    // `App::resolver()` (Stage 1 PR2, narrowed after review): `AppState`
+    // predates `App`/`AppBuilder` and needs resolution access for its own
+    // generic per-request `resolve::<Tag>()` dispatch — a legitimate
+    // integration seam, but only for resolution, not the full `Runtime`
+    // lifecycle surface `App`/`RunningApp` own.
+    let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, query);
 
     // `App::start()` (AD-2/AD-6): starts effects (none registered here —

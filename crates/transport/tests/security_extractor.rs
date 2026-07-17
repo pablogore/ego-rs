@@ -32,8 +32,8 @@ fn make_state() -> AppState {
         resolver,
         Arc::new(SystemClock),
     ));
-    let rt = Arc::new(RuntimeBuilder::new().build());
-    AppState::new(rt, provider)
+    let rt = RuntimeBuilder::new().build();
+    AppState::new(rt.resolver(), provider)
 }
 
 fn make_token(sub: &str, tenant_id: Option<&str>) -> String {

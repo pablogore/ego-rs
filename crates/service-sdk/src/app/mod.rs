@@ -59,7 +59,7 @@ use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 
 use crate::di::{AdapterRef, ConfigValue, Injectable};
-use crate::runtime::{Resolvable, Runtime, RuntimeBuilder, RuntimeInner};
+use crate::runtime::{Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver};
 
 pub use error::CompositionError;
 
@@ -120,18 +120,20 @@ impl App {
         AppBuilder::new()
     }
 
-    /// Returns a handle to the underlying [`Runtime`] (Stage 1 PR2 — found
-    /// during the reference-app migration). `App` deliberately doesn't
-    /// expose composition/lifecycle internals, but a transport layer built
-    /// against the lower-level `Runtime` API (e.g. `ego_transport::AppState`,
-    /// which predates `App`/`AppBuilder` and needs `Runtime` directly for
-    /// its own generic per-request `resolve::<Tag>()` dispatch) is a
-    /// legitimate, expected integration point, not something `App` should
-    /// reinvent. Cheap — `Runtime` clones only its inner `Arc`. Callable
-    /// before [`App::start`] since request-time resolution doesn't depend
-    /// on whether effects have started.
-    pub fn runtime(&self) -> Runtime {
-        self.runtime.clone()
+    /// Returns a [`RuntimeResolver`] — a resolution-only handle (Stage 1 PR2
+    /// — found during the reference-app migration; narrowed after review).
+    /// A transport layer built against the lower-level `Runtime` API (e.g.
+    /// `ego_transport::AppState`, which predates `App`/`AppBuilder` and
+    /// needs direct resolution for its own generic per-request
+    /// `resolve::<Tag>()` dispatch) is a legitimate, expected integration
+    /// point — but handing out the full `Runtime` would leak `start_effects`/
+    /// `shutdown_async`/`register_async_teardown`, the exact lifecycle
+    /// surface `App`/`RunningApp`'s typestate exists to gate. `RuntimeResolver`
+    /// exposes only `resolve`/`logger`. Cheap — wraps a `Runtime`, itself only
+    /// an `Arc` clone. Callable before [`App::start`] since request-time
+    /// resolution doesn't depend on whether effects have started.
+    pub fn resolver(&self) -> RuntimeResolver {
+        self.runtime.resolver()
     }
 
     /// Resolves `Tag` to its generated proxy — a thin pass-through to
@@ -187,8 +189,21 @@ impl App {
     /// transport future and awaits none — the host sequences its own
     /// workload between this and [`RunningApp::shutdown`]. Requires an
     /// active Tokio runtime (delegates to `Runtime::start_effects`).
+    ///
+    /// **On failure (Stage 1 PR2 review, MEDIUM):** a caller may have already
+    /// registered shutdown participants via [`App::register_shutdown`] (e.g.
+    /// a read-side scheduler the host already spawned) before calling
+    /// `start()`. If `start_effects` then fails, there is no [`RunningApp`]
+    /// to call `shutdown` on — without a rollback here, every hook already
+    /// registered would leak instead of draining. `start()` runs
+    /// `shutdown_async` on the failed attempt before returning, so a failed
+    /// start leaves nothing running; the cleanup's own result is best-effort
+    /// (the original startup error is what the caller needs to act on).
     pub async fn start(self) -> Result<RunningApp, CompositionError> {
-        self.runtime.start_effects().await.map_err(CompositionError::Startup)?;
+        if let Err(startup_err) = self.runtime.start_effects().await {
+            let _ = self.runtime.shutdown_async().await;
+            return Err(CompositionError::Startup(startup_err));
+        }
         Ok(RunningApp { runtime: self.runtime })
     }
 }
@@ -669,19 +684,24 @@ mod tests {
         );
     }
 
-    // Stage 1 PR2 (found during reference-app migration): `App::runtime()`
-    // hands out a working `Runtime` handle usable exactly like the
-    // production `resolve` path — proves it isn't a dead/disconnected clone.
+    // Stage 1 PR2 (found during reference-app migration, narrowed after
+    // review — HIGH: the original `App::runtime()` handed out a full
+    // `Runtime`, letting a transport-layer caller reach `start_effects`/
+    // `shutdown_async`/`register_async_teardown` directly, bypassing the
+    // `App`/`RunningApp` typestate. `App::resolver()` hands out a
+    // `RuntimeResolver` instead — this proves it's a live, connected view
+    // (not a dead clone) while only exposing `resolve`/`logger`.
     #[test]
-    fn app_runtime_resolves_a_registered_adapter_identically_to_app_resolve_adapter() {
+    fn app_resolver_sees_the_same_registered_logger_as_the_underlying_runtime() {
         let app = App::builder()
-            .adapter(Arc::new(StubAdapter(7)))
+            .logger(Arc::new(KITLogger::default()))
             .build()
             .expect("build succeeds");
 
-        let via_runtime = app.runtime().inner().resolve_adapter::<StubAdapter>().unwrap();
-        let via_app = app.resolve_adapter::<StubAdapter>().unwrap();
-        assert_eq!(*via_runtime, *via_app);
+        let resolver = app.resolver();
+        let via_resolver = resolver.logger().unwrap();
+        let via_runtime = app.runtime.logger().unwrap();
+        assert!(Arc::ptr_eq(via_resolver, via_runtime), "resolver() must see the same registered logger");
     }
 
     // -- Phase 3: runtime lifecycle (App::start / RunningApp::shutdown) ----
