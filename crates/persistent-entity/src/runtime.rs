@@ -117,11 +117,46 @@ where
 {
     /// Creates a new [`EntityRuntime`] with the given components.
     ///
-    /// `passivation_timeout` is the full-precision idle duration actually
-    /// used when spawning actors — see the field's doc comment for why this
-    /// is threaded separately from `config.passivation_timeout_secs`.
+    /// Preserved for source compatibility (review F1) — any existing caller
+    /// of this 8-argument signature keeps compiling. It reconstructs
+    /// `passivation_timeout` from `config.passivation_timeout_secs` the same
+    /// (lossy, sub-second-truncating) way this crate always did before this
+    /// fix; only [`crate::builder::EntityRuntimeBuilder`] — the sole
+    /// in-repo caller — was updated to call
+    /// [`Self::new_with_passivation_timeout`] instead, which is what
+    /// actually carries the fix. A caller who wants the fix directly should
+    /// migrate to that constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        registry: Arc<EntityRegistry>,
+        scheduler: Arc<Scheduler>,
+        persistence: Arc<PersistenceFacade<E>>,
+        publisher: Arc<dyn EventPublisher<E>>,
+        config: RuntimeConfig,
+        snapshot_strategy: Arc<dyn SnapshotStrategy>,
+        event_sender: SchedulerEventSender,
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    ) -> Self {
+        let passivation_timeout = config.passivation_timeout();
+        Self::new_with_passivation_timeout(
+            registry,
+            scheduler,
+            persistence,
+            publisher,
+            config,
+            snapshot_strategy,
+            event_sender,
+            effect_acceptor,
+            passivation_timeout,
+        )
+    }
+
+    /// Creates a new [`EntityRuntime`], accepting the full-precision idle
+    /// `Duration` actually used when spawning actors directly (review F1) —
+    /// see [`EntityRuntime`]'s `passivation_timeout` field doc comment for
+    /// why this is threaded separately from `config.passivation_timeout_secs`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_passivation_timeout(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
         persistence: Arc<PersistenceFacade<E>>,

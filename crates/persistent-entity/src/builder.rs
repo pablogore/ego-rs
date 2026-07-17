@@ -217,7 +217,15 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         };
         let (event_sender, event_receiver) = event_bus_channel_with_config(bus_config);
 
-        EntityRuntime::new(
+        // `new_with_passivation_timeout` (review F1), not `new` — `new` is
+        // kept only for source compatibility with existing external callers
+        // and still reconstructs the lossy `config.passivation_timeout()`
+        // internally. The full-precision `Duration` configured directly via
+        // `.passivation_timeout()` is NOT reconstructed from `config` above,
+        // whose `passivation_timeout_secs: u64` silently truncates any
+        // sub-second value to zero (see `EntityRuntime`'s
+        // `passivation_timeout` field doc comment).
+        EntityRuntime::new_with_passivation_timeout(
             registry.clone(),
             Arc::new(Scheduler::new(
                 registry.clone(),
@@ -230,11 +238,6 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
             snapshot_strategy,
             event_sender,
             self.effect_acceptor,
-            // Full-precision Duration as configured directly via
-            // `.passivation_timeout()` — NOT reconstructed from `config`
-            // above, whose `passivation_timeout_secs: u64` silently
-            // truncates any sub-second value to zero (see
-            // `EntityRuntime`'s `passivation_timeout` field doc comment).
             self.passivation_timeout,
         )
     }
@@ -266,7 +269,29 @@ mod tests {
     /// what `.passivation_timeout(...)` was actually configured with. Fixed
     /// by threading the original full-precision `Duration` into
     /// `EntityRuntime` directly (see its `passivation_timeout` field).
-    #[tokio::test(flavor = "multi_thread")]
+    /// Advances Tokio's paused virtual clock by `step`, then yields
+    /// repeatedly (bounded, not a guessed count) until the runtime reaches
+    /// quiescence — review F2: a single `yield_now()` isn't guaranteed to
+    /// drive a spawned actor through every one of its own sequential
+    /// `.await` points (mailbox drain, snapshot store, state transition)
+    /// after its timer fires; this loop keeps yielding only while progress
+    /// is still observably happening, bounded so a genuine deadlock still
+    /// fails loudly instead of hanging.
+    async fn advance_and_settle(step: std::time::Duration) {
+        tokio::time::advance(step).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    // Review F2: deterministic virtual-time advance (`start_paused = true`),
+    // not a real `tokio::time::sleep` — the original version slept 100ms and
+    // asserted the entity was still active, which is itself a real-clock
+    // race under contention (the same class of flakiness this whole fix was
+    // triaging): a sufficiently delayed wake-up could observe the entity
+    // already passivated even with a correct implementation. Advancing a
+    // paused clock is unaffected by scheduling delay.
+    #[tokio::test(start_paused = true)]
     async fn sub_second_passivation_timeout_is_not_truncated_to_zero() {
         let runtime = EntityRuntimeBuilder::<TestEvent>::new()
             .passivation_timeout(std::time::Duration::from_millis(300))
@@ -287,7 +312,7 @@ mod tests {
         // Well under the configured 300ms timeout, the entity must still be
         // active — a truncated-to-zero timeout would have already passivated
         // it by now.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        advance_and_settle(std::time::Duration::from_millis(100)).await;
         assert_eq!(
             runtime.active_count(),
             1,
@@ -295,15 +320,13 @@ mod tests {
              the sub-second Duration was likely truncated to zero again"
         );
 
-        // It must still genuinely passivate once idle past the configured
-        // timeout (bounded poll, not a guessed sleep).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if runtime.active_count() == 0 {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "entity never passivated");
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        // Past the configured timeout (100ms + 250ms = 350ms > 300ms), it
+        // must have genuinely passivated.
+        advance_and_settle(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            runtime.active_count(),
+            0,
+            "entity did not passivate after its configured 300ms timeout elapsed"
+        );
     }
 }
