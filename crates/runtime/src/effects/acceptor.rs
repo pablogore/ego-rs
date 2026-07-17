@@ -50,6 +50,15 @@ struct LifecycleGate {
     /// sent value regardless of exactly when they are called relative to the
     /// send, so there is no equivalent lost-wakeup window.
     in_flight: watch::Sender<u64>,
+    /// Test-only: fires the instant [`Self::wait_until_drained`] commits to
+    /// its blocking wait (i.e. it found a nonzero in-flight count and is
+    /// about to await `in_flight_rx.changed()`), so a test can await this
+    /// signal instead of a fixed `yield_now()` count — `tokio::task::
+    /// yield_now`'s own docs explicitly disclaim any scheduling-order
+    /// guarantee, so a bounded-yield loop cannot reliably prove this point
+    /// was reached (CORE-027 flaky-triage review).
+    #[cfg(test)]
+    probe: tokio::sync::Notify,
 }
 
 enum LifecycleState {
@@ -78,6 +87,8 @@ impl LifecycleGate {
         Arc::new(Self {
             state: StdMutex::new(LifecycleState::Running),
             in_flight,
+            #[cfg(test)]
+            probe: tokio::sync::Notify::new(),
         })
     }
 
@@ -129,6 +140,8 @@ impl LifecycleGate {
             if *in_flight_rx.borrow() == 0 {
                 return;
             }
+            #[cfg(test)]
+            self.probe.notify_one();
             tokio::select! {
                 result = in_flight_rx.changed() => {
                     if result.is_err() {
@@ -419,6 +432,15 @@ pub struct RuntimeEffectAcceptor {
     /// `std::sync::Mutex` is enough since `start` only ever takes the
     /// receiver out synchronously, once.
     deferred_receiver: Option<StdMutex<Option<EffectQueueReceiver>>>,
+    /// Test-only: fires immediately before `Inline` mode's `accept_one`
+    /// attempts `inline_receiver.lock().await`, so a test can await this
+    /// signal instead of a fixed `yield_now()` count to prove a concurrent
+    /// `accept()` call has genuinely reached (and is blocked on) capacity
+    /// acquisition, not merely "hasn't finished yet for any reason"
+    /// (CORE-027 flaky-triage review — `yield_now`'s docs explicitly
+    /// disclaim any scheduling-order guarantee).
+    #[cfg(test)]
+    probe_before_inline_lock: tokio::sync::Notify,
     /// Shared with the spawned `Deferred` runner's own drain loop
     /// ([`Self::start`]) — flips to `true` the moment
     /// [`EffectRuntimeHandle::shutdown_and_wait`] begins, telling that loop
@@ -483,6 +505,8 @@ impl RuntimeEffectAcceptor {
             runner_mode: config.runner_mode,
             inline_receiver,
             deferred_receiver,
+            #[cfg(test)]
+            probe_before_inline_lock: tokio::sync::Notify::new(),
             shutdown_rx,
             shutdown_tx,
             deadline_rx,
@@ -636,6 +660,8 @@ impl RuntimeEffectAcceptor {
         match self.runner_mode {
             RunnerMode::Deferred => self.send_to_queue(effect, index).await,
             RunnerMode::Inline => {
+                #[cfg(test)]
+                self.probe_before_inline_lock.notify_one();
                 let mut receiver = self
                     .inline_receiver
                     .as_ref()
@@ -1107,24 +1133,19 @@ mod tests {
             })
         };
         // `second` cannot reach the executor's gate until `first` releases
-        // capacity, so there is no "entered" event to await here yet — just
-        // give the scheduler a bounded, non-time-based chance to actually
-        // poll it and observe it blocking on capacity rather than refusing.
-        //
-        // This is not a race with a false-positive window: `#[tokio::test]`
-        // defaults to the current-thread runtime, where `yield_now` hands
-        // control back to one single-threaded cooperative scheduler that
-        // deterministically advances every other ready task's turn — there
-        // is no separate OS thread that could simply never get around to
-        // polling `second`. If `second` were buggy and refused/completed
-        // synchronously instead of blocking, it would finish within the
-        // first yield or two and `is_finished()` below would correctly
-        // observe that and fail (verified empirically: a same-shaped
-        // immediately-completing task is reliably `is_finished() == true`
-        // after far fewer than 32 yields on this runtime flavor).
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        // capacity, so there is no "entered" event to await here yet —
+        // instead, await the test-only probe fired immediately before
+        // `second`'s `accept_one` attempts `inline_receiver.lock().await`,
+        // proving it has genuinely reached (and is blocked on) capacity
+        // acquisition, not merely "hasn't finished yet for some other
+        // reason" (`yield_now`'s own docs disclaim any scheduling-order
+        // guarantee, so a bounded-yield loop cannot prove this).
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            acceptor.probe_before_inline_lock.notified(),
+        )
+        .await
+        .expect("second must have attempted to acquire inline capacity");
         assert!(
             !second.is_finished(),
             "second accept must block awaiting capacity, never refuse or drop the effect"
@@ -1649,17 +1670,17 @@ mod tests {
             .await
             .expect("the accept call must have already entered the gated store.accept");
 
+        let lifecycle = handle.lifecycle.clone();
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        // Nothing signals "shutdown_and_wait has reached its blocking wait"
-        // without touching production code, so give the scheduler a
-        // bounded, non-time-based chance to actually poll it forward first —
-        // deterministic on this test's current-thread runtime, not a race
-        // (see `accept_awaits_capacity_never_refusing_in_inline_mode`'s
-        // matching comment for why).
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        // Await the test-only probe fired the instant `wait_until_drained`
+        // commits to its blocking wait, instead of a fixed `yield_now()`
+        // count — `yield_now`'s own docs disclaim any scheduling-order
+        // guarantee, so a bounded-yield loop cannot prove this point was
+        // reached.
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.probe.notified())
+            .await
+            .expect("shutdown_and_wait must have reached wait_until_drained's blocking wait");
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must not return while the already-in-flight accept call is \
@@ -1745,19 +1766,16 @@ mod tests {
             .await
             .expect("the accept call must have already entered the gated store.accept");
 
+        let lifecycle = handle.lifecycle.clone();
         let shutdown_task = tokio::spawn(handle.shutdown_and_wait(Duration::from_secs(5)));
 
-        // Give shutdown_and_wait a bounded, non-time-based head start: under
-        // the pre-fix ordering it sends `shutdown=true` (and the runner
-        // stops consuming) essentially immediately; under the fix, it is
-        // still blocked inside `wait_until_drained` this whole time, since
-        // the in-flight accept hasn't finished yet. Deterministic on this
-        // test's current-thread runtime, not a race (see
-        // `accept_awaits_capacity_never_refusing_in_inline_mode`'s matching
-        // comment for why).
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        // Await the test-only probe fired the instant `wait_until_drained`
+        // commits to its blocking wait — see
+        // `shutdown_and_wait_awaits_an_already_in_flight_accept_call`'s
+        // matching comment for why this replaces a fixed `yield_now()` count.
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.probe.notified())
+            .await
+            .expect("shutdown_and_wait must have reached wait_until_drained's blocking wait");
         assert!(
             !shutdown_task.is_finished(),
             "shutdown_and_wait must still be waiting on the in-flight accept call"
