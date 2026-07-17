@@ -24,7 +24,7 @@ use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
 /// which would misleadingly read as "passivates instantly."
 fn ceil_secs(d: std::time::Duration) -> u64 {
     if d.subsec_nanos() > 0 {
-        d.as_secs() + 1
+        d.as_secs().saturating_add(1)
     } else {
         d.as_secs()
     }
@@ -372,6 +372,11 @@ mod tests {
             ceil_secs(std::time::Duration::from_millis(1500)),
             2,
             "any remainder past a whole second rounds up to the next one"
+        );
+        assert_eq!(
+            ceil_secs(std::time::Duration::MAX),
+            u64::MAX,
+            "rounding up must saturate at u64::MAX, never overflow/panic on an extreme Duration"
         );
     }
 
