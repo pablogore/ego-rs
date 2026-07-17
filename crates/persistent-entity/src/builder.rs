@@ -19,9 +19,18 @@ use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
 /// `RuntimeConfig.passivation_timeout_secs`'s own whole-seconds
 /// informational representation (see that struct's doc comment); the
 /// `EntityRuntime` actors actually spawn with `d` itself, unrounded.
-/// `Duration::ZERO` stays `0` (that genuinely means "no idle period"); any
-/// other sub-second remainder rounds up rather than truncating to `0`,
-/// which would misleadingly read as "passivates instantly."
+///
+/// **`Duration::ZERO` is not special-cased and is NOT "disabled" or "no
+/// timeout"** — per `TokioPassivationSignal`, a zero-duration passivation
+/// timeout genuinely means the actor idles out on its very first check
+/// (confirmed by `passivation_signal.rs`'s
+/// `tokio_signal_zero_duration_resolves_immediately`), i.e. "passivate
+/// (near-)instantly." Rounding `0` up to `1` here would misrepresent that
+/// real, intentional behavior as a full second of idle tolerance, so `0`
+/// stays `0`. Every OTHER sub-second remainder still rounds up rather than
+/// truncating down to `0`, which would misleadingly suggest the same
+/// instant-passivation behavior for a timeout that was actually configured
+/// to allow some idle time (review PR #186 finding 3).
 fn ceil_secs(d: std::time::Duration) -> u64 {
     if d.subsec_nanos() > 0 {
         d.as_secs().saturating_add(1)
@@ -361,7 +370,12 @@ mod tests {
     // the actual ground-truth accessor.
     #[test]
     fn ceil_secs_rounds_up_but_never_truncates_a_nonzero_duration_to_zero() {
-        assert_eq!(ceil_secs(std::time::Duration::ZERO), 0, "zero genuinely means zero");
+        assert_eq!(
+            ceil_secs(std::time::Duration::ZERO),
+            0,
+            "zero is genuinely an instant/near-immediate passivation timeout, not \"disabled\" \
+             — it must not be rounded up to a misleading 1-second tolerance"
+        );
         assert_eq!(
             ceil_secs(std::time::Duration::from_millis(300)),
             1,

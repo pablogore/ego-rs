@@ -170,8 +170,17 @@ where
     /// `Duration` actually used when spawning actors directly (review F1) —
     /// see [`EntityRuntime`]'s `passivation_timeout` field doc comment for
     /// why this is threaded separately from `config.passivation_timeout_secs`.
+    ///
+    /// `pub(crate)`, not `pub` (review PR #186 finding 1): nothing enforces
+    /// that a caller's `config.passivation_timeout_secs` and its separate
+    /// `passivation_timeout: Duration` argument actually agree — an external
+    /// caller could construct a runtime whose reported config timeout and
+    /// actual actor behavior silently contradict each other.
+    /// [`crate::builder::EntityRuntimeBuilder`] (the sole caller, same
+    /// crate) is what keeps the two in sync via `ceil_secs`; it is the only
+    /// sanctioned way to reach this constructor.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_passivation_timeout(
+    pub(crate) fn new_with_passivation_timeout(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
         persistence: Arc<PersistenceFacade<E>>,
