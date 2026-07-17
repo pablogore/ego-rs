@@ -35,5 +35,5 @@ utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 ego-testkit = { path = "../../crates/testkit" }
