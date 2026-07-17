@@ -21,8 +21,12 @@
 //! per-callsite interest cache — which under a full-crate parallel test
 //! sweep can race against unrelated tests exercising these same production
 //! callsites with no subscriber installed, silently dropping a captured
-//! event. See `tests::dispatch_started_actually_emits_via_tracing` for the
-//! one remaining test that exercises the real `tracing` wiring.
+//! event. The `log_*` functions' `tracing::info!`/`warn!` calls remain
+//! compile-time-checked wiring only (the macro fixes field names/values at
+//! the call site); no test captures through `tracing`'s dispatch machinery
+//! anymore, since that capturing test was itself shown to still flake under
+//! the same race and added no coverage beyond what the macro already
+//! guarantees at compile time.
 
 use std::time::Duration;
 

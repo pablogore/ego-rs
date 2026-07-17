@@ -1110,6 +1110,18 @@ mod tests {
         // capacity, so there is no "entered" event to await here yet — just
         // give the scheduler a bounded, non-time-based chance to actually
         // poll it and observe it blocking on capacity rather than refusing.
+        //
+        // This is not a race with a false-positive window: `#[tokio::test]`
+        // defaults to the current-thread runtime, where `yield_now` hands
+        // control back to one single-threaded cooperative scheduler that
+        // deterministically advances every other ready task's turn — there
+        // is no separate OS thread that could simply never get around to
+        // polling `second`. If `second` were buggy and refused/completed
+        // synchronously instead of blocking, it would finish within the
+        // first yield or two and `is_finished()` below would correctly
+        // observe that and fail (verified empirically: a same-shaped
+        // immediately-completing task is reliably `is_finished() == true`
+        // after far fewer than 32 yields on this runtime flavor).
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
@@ -1641,7 +1653,10 @@ mod tests {
 
         // Nothing signals "shutdown_and_wait has reached its blocking wait"
         // without touching production code, so give the scheduler a
-        // bounded, non-time-based chance to actually poll it forward first.
+        // bounded, non-time-based chance to actually poll it forward first —
+        // deterministic on this test's current-thread runtime, not a race
+        // (see `accept_awaits_capacity_never_refusing_in_inline_mode`'s
+        // matching comment for why).
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
@@ -1736,7 +1751,10 @@ mod tests {
         // the pre-fix ordering it sends `shutdown=true` (and the runner
         // stops consuming) essentially immediately; under the fix, it is
         // still blocked inside `wait_until_drained` this whole time, since
-        // the in-flight accept hasn't finished yet.
+        // the in-flight accept hasn't finished yet. Deterministic on this
+        // test's current-thread runtime, not a race (see
+        // `accept_awaits_capacity_never_refusing_in_inline_mode`'s matching
+        // comment for why).
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
