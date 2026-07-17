@@ -22,7 +22,7 @@ Illustrative only (final surface is spec/design work):
 
 ```rust
 let app = App::builder()
-    .service::<RegisterUserImpl, RegisterUserTag>()
+    .service::<RegisterUserImpl, RegisterUserTag>(|arc| arc)
     .adapter(postgres)
     .config(app_config)
     .security(authn, authz)
@@ -33,10 +33,18 @@ let running = app.start().await?;   // starts effects; App owns no transport
 running.shutdown().await?;          // owns the two-phase shutdown ordering
 ```
 
-`.service::<S, Tag>()` is illustrative only; the two-parameter form reflects
-design.md's resolved observable contract (AD-3) — future macro work may
-collapse this to `.service::<S>()` alone once `#[service]` can carry the
+`.service::<S, Tag>(...)` is illustrative only; the two-parameter form
+reflects design.md's resolved observable contract (AD-3) — future macro work
+may collapse this to `.service::<S>()` alone once `#[service]` can carry the
 service/tag binding itself (see AD-3 "Known limitation / technical debt").
+**Formalized decision (review F2):** the trailing `fn(Arc<S>) -> Arc<Tag::Service>`
+coercion closure (typically `|arc| arc`) is also part of this interim shape —
+Rust has no way to bound a type parameter against "whichever trait underlies
+this associated type" (confirmed via `rustc` `E0405`), so the call site must
+supply that coercion explicitly. This was reviewed and accepted as explicit,
+documented DX debt for this stage (no new macro work, per non-goals) rather
+than silently shipped as if `.service::<S, Tag>()` alone were the final
+shape — see design.md AD-3.
 
 ## Scope
 
@@ -56,9 +64,21 @@ service/tag binding itself (see AD-3 "Known limitation / technical debt").
   sync `TeardownStack`). The host still owns transport serve/drain, sequencing
   it between `start()` and `shutdown()` — `App` receives and awaits no
   transport future.
-- App absorbing the kit-config → logger pipeline (boilerplate b), while
-  preserving the CORE-016 frozen constraint: `RuntimeBuilder` still receives
-  only pre-materialized values.
+- **Scope correction (found during PR1 review, F1/logger gap):** `App`
+  does **not** absorb the kit-config → `ConfigurationProvider` → `build_logger`
+  pipeline itself — `.logger(Arc<KITLogger>)` is a thin pass-through
+  accepting an already-built `KITLogger`, exactly mirroring `.config()`'s
+  shape. The host still runs the kit-config pipeline before calling it,
+  preserving the CORE-016 frozen constraint (`RuntimeBuilder` — and now
+  `AppBuilder` — only ever receives pre-materialized values). Running that
+  pipeline internally would be new scope, not decided by any AD in
+  design.md; reduced here to match what was actually built.
+- `.observability()`, `.effect_executor()`, `.data_provider()` — thin
+  pass-throughs to `RuntimeBuilder::with_observability`/
+  `register_effect_executor`/`register_data_provider` (added per review F1:
+  `CompositionError` already had `EffectExecutor`/`DataProvider` variants and
+  `App::start()` already claimed to start effects, but no public registration
+  method could ever produce the application that claim describes).
 - A composition error type distinct from `RuntimeError`/`RegistryError`,
   aggregating today's builder-time `Result`s (`RegistryError`,
   `DuplicateEffectType`, `DuplicateProviderId`, `try_build`'s `RuntimeError`,
@@ -96,9 +116,10 @@ service/tag binding itself (see AD-3 "Known limitation / technical debt").
 |---|---|---|
 | User of the API | App developers; `RuntimeBuilder` remains the public infra/test path | Settled |
 | `AppBuilder` ↔ `RuntimeBuilder` | Delegation, never reimplementation (FixtureBuilder precedent) | Settled direction |
-| `.service::<S, Tag>()` meaning | Construction through the existing `Injectable` contract (`Injectable::validate`+`build`), registered resolvable under `Tag` — the same construction path production/testkit already use (explore.md #4–#5, #13). The two-parameter form is required only because `#[service]` doesn't link `S` to its generated `Tag` today; flagged in design.md as technical debt, not the intended long-term shape (`.service::<S>()` alone, once macro metadata allows it) | Settled per design.md (AD-3); construction mechanism itself left to tasks |
-| `.adapter()` duplicates | Delegates to `with_adapter`; whether App surfaces duplicates instead of silent last-write-wins | **Open → design.md** |
+| `.service::<S, Tag>(...)` meaning | Construction through the existing `Injectable` contract (`Injectable::validate`+`build`), registered resolvable under `Tag` — the same construction path production/testkit already use (explore.md #4–#5, #13). The two-parameter form AND the trailing coercion closure are required only because `#[service]` doesn't link `S` to its generated `Tag` today; flagged in design.md as technical debt, not the intended long-term shape (`.service::<S>()` alone, once macro metadata allows it) | Settled per design.md (AD-3); closure formally accepted as interim DX debt (review F2), not silent — construction mechanism itself left to tasks |
+| `.adapter()` duplicates | Delegates to `with_adapter`; fail-closed with `CompositionError::DuplicateAdapter`, explicit `.replace_adapter()` escape hatch | Settled per design.md (AD-4) |
 | `.security()` | Pass-through of pre-constructed providers, both-or-nothing preserved; provider *construction* stays application code | Settled |
+| `.observability()`/`.effect_executor()`/`.data_provider()` | Thin pass-throughs to `RuntimeBuilder::with_observability`/`register_effect_executor`/`register_data_provider` — added per review F1 so the app `App::start()` claims to administer (effects) is actually reachable through the public composition API | Settled (added post-review) |
 | build/start/shutdown split | Build never starts tasks; `start()` starts effects, `shutdown()` owns the async-hooks-then-sync-stack ordering; `App` owns no transport future | Settled per design.md; exact identifiers (`RunningApp`, method names) **open → tasks.md** |
 | Shutdown ownership | `RunningApp::shutdown()` owns the ordering hosts hand-sequence today; `App` owns no transport — the host sequences transport serve/drain between `start()` and `shutdown()`; read-side handle stays app-spawned, its stop registered via existing `register_async_teardown` | Outcome settled per design.md; hand-off ergonomics **open → tasks.md** |
 | Error model | New composition error, distinct from runtime errors | Settled; shape **open → design.md** |
@@ -134,8 +155,11 @@ unwind.
 
 ## Success Criteria
 
-- [ ] Reference-app composes via `App`; boilerplate items (a-pass-through, b,
-      d-teardown, e) disappear from `build_runtime`/`main.rs`.
+- [ ] Reference-app composes via `App`; boilerplate items (a-pass-through,
+      d-teardown, e) disappear from `build_runtime`/`main.rs`. Item (b) is
+      reduced, not eliminated: the kit-config→`build_logger` pipeline itself
+      still runs in the host (scope correction above); only the final
+      `RuntimeBuilder::with_logger(...)` call moves to `.logger(...)`.
 - [ ] `App::build()` constructs + validates with no Tokio runtime and no
       started tasks; existing `RuntimeBuilder` tests pass unchanged.
 - [ ] Shutdown ordering (async hooks → sync stack) is framework-executed via

@@ -108,10 +108,18 @@ use (explore.md #13), with **no second, parallel construction path**. The
 resulting service is made resolvable under its `Tag`. Missing dependencies
 surface with the **same attribution `try_build` already provides**: the missing
 type plus the requesting service (explore.md #1, test line 995) — satisfying
-the spec's attribution requirement. This document commits only to that
-observable contract; the concrete construction mechanism that satisfies it is
-deferred to the implementation/tasks phase (see "Possible implementation
-approach" below).
+the spec's attribution requirement. **(Review F3)** This attribution applies
+uniformly to a `DependencyNotFound` surfacing from either `Injectable::validate`
+*or* `Injectable::build` — a hand-rolled `Injectable` with an incomplete
+`dependencies()` list (so `validate()`'s presence check never catches it) but
+whose `build()` still fails resolving an unregistered dependency must be
+named identically to one caught by `validate()`. The observable contract does
+not distinguish "caught by validate" from "caught by build"; a single shared
+attribution step, applied to both error paths, is what the implementation
+must guarantee (not two independently-maintained copies that could diverge).
+This document commits only to that observable contract; the concrete
+construction mechanism that satisfies it is deferred to the
+implementation/tasks phase (see "Possible implementation approach" below).
 
 **Known limitation / technical debt (G3):** the two-type-parameter form
 `.service::<S, Tag>()` leaks an SDK-internal detail into the primary DX-facing
@@ -410,19 +418,37 @@ impl App {
     pub fn builder() -> AppBuilder;
 }
 impl AppBuilder {
-    // Two type params required today only because #[service] does not link S to its
-    // Tag — see AD-3 "Known limitation / technical debt"; future macro work could
-    // collapse this to `.service::<S>()`.
-    pub fn service<S, Tag>(self) -> Self where S: Injectable + Tag::Service, Tag: Resolvable;
+    // Two type params AND the trailing coercion closure are required today
+    // only because #[service] does not link S to its Tag — see AD-3 "Known
+    // limitation / technical debt", formally accepted as interim DX debt
+    // after review F2 (not a silent implementation detail); future macro
+    // work could collapse this to `.service::<S>()` alone.
+    pub fn service<S, Tag>(self, to_trait_object: fn(Arc<S>) -> Arc<Tag::Service>) -> Self
+        where S: Injectable, Tag: Resolvable;
     pub fn service_instance<Tag: Resolvable>(self, svc: Arc<Tag::Service>) -> Self; // escape hatch, AD-3 flag
     pub fn adapter<A: Send + Sync + 'static>(self, a: Arc<A>) -> Self;      // dup-guarded, AD-4
     pub fn replace_adapter<A: Send + Sync + 'static>(self, a: Arc<A>) -> Self;
     pub fn config<C: Send + Sync + 'static>(self, c: Arc<C>) -> Self;
-    pub fn logger(self, logger: Arc<KITLogger>) -> Self;                    // thin delegation, found missing during PR1 implementation review — proposal.md/spec.md require it, this sketch had silently dropped it
+    pub fn logger(self, logger: Arc<KITLogger>) -> Self;                    // thin delegation over an already-built logger — the host still runs the kit-config pipeline (scope correction, review F1's logger gap)
     pub fn security(self, authn: Arc<dyn AuthenticationProvider>, authz: Arc<dyn AuthorizationProvider>) -> Self;
+    // Added post-review (F1): CompositionError already had EffectExecutor/
+    // DataProvider variants and App::start() already claimed to start
+    // effects, but nothing in AppBuilder could register one — these close
+    // that gap with the same thin-delegation shape as everything above.
+    pub fn observability(self, obs: Arc<dyn Observability>) -> Self;
+    pub fn effect_executor(self, effect_types: impl IntoIterator<Item = impl Into<String>>, executor: Arc<dyn ExternalEffectExecutor>) -> Self; // fails closed via CompositionError::EffectExecutor
+    pub fn data_provider(self, provider_id: impl Into<String>, provider: Arc<dyn ExternalDataProvider>) -> Self; // fails closed via CompositionError::DataProvider
     pub fn build(self) -> Result<App, CompositionError>;                    // no Tokio, starts nothing
 }
 impl App {
+    // A constructed-but-not-started App is directly resolvable/assertable
+    // (spec: "An Application Is Testable Without Running"). Added post-review
+    // (F4): only `resolve<Tag>` existed before; an external caller had no
+    // public way to check an adapter/config was registered without reaching
+    // into the private `runtime` field.
+    pub fn resolve<Tag: Resolvable>(&self) -> Result<Tag::Proxy, RuntimeError>;
+    pub fn resolve_adapter<A: Send + Sync + 'static>(&self) -> Result<AdapterRef<A>, RuntimeError>;
+    pub fn resolve_config<C: Send + Sync + 'static>(&self) -> Result<ConfigValue<C>, RuntimeError>;
     // App owns the RUNTIME lifecycle only. It receives NO transport/serve future
     // and awaits none (AD-6). Requires an active Tokio runtime (start_effects).
     pub async fn start(self) -> Result<RunningApp, CompositionError>;       // starts effects

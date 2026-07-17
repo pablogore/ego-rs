@@ -51,11 +51,14 @@ use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use ego_domain::Observability;
+use ego_runtime::effects::ExternalEffectExecutor;
+use ego_runtime::providers::ExternalDataProvider;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 
-use crate::di::Injectable;
+use crate::di::{AdapterRef, ConfigValue, Injectable};
 use crate::runtime::{Resolvable, Runtime, RuntimeBuilder, RuntimeInner};
 
 pub use error::CompositionError;
@@ -66,6 +69,23 @@ pub use error::CompositionError;
 /// heterogeneous `Vec` of them.
 type ServiceRegistrar =
     Box<dyn FnOnce(&RuntimeInner, RuntimeBuilder) -> Result<RuntimeBuilder, CompositionError>>;
+
+/// Fills in `DependencyNotFound`'s `service_name` with `S`'s type name if it
+/// isn't already set (review F3) — a single helper shared by both
+/// `Injectable::validate` and `Injectable::build`'s error paths in
+/// [`AppBuilder::service`], so the two routes can't independently diverge on
+/// attribution.
+fn attribute_to<S: 'static>(err: crate::runtime::RuntimeError) -> crate::runtime::RuntimeError {
+    match err {
+        crate::runtime::RuntimeError::DependencyNotFound { type_name, service_name: None } => {
+            crate::runtime::RuntimeError::DependencyNotFound {
+                type_name,
+                service_name: Some(std::any::type_name::<S>()),
+            }
+        }
+        other => other,
+    }
+}
 
 /// Builder for an [`App`] — the application-facing composition root (AD-1,
 /// G2). Delegates every registration to an internal `RuntimeBuilder`; never
@@ -110,6 +130,26 @@ impl App {
         Tag: Resolvable + 'static,
     {
         self.runtime.resolve::<Tag>()
+    }
+
+    /// Resolves a registered adapter directly (review F4) — the same
+    /// production resolution path `Injectable::build`-generated fields use.
+    /// Lets a constructed-but-not-started application (or an external
+    /// integration test) verify an adapter was registered without reaching
+    /// into any private field (spec: "An Application Is Testable Without
+    /// Running").
+    pub fn resolve_adapter<A: Send + Sync + 'static>(
+        &self,
+    ) -> Result<AdapterRef<A>, crate::runtime::RuntimeError> {
+        self.runtime.inner().resolve_adapter::<A>()
+    }
+
+    /// Resolves a registered config value directly (review F4) — the public
+    /// counterpart to [`Self::resolve_adapter`], for the same reason.
+    pub fn resolve_config<C: Send + Sync + 'static>(
+        &self,
+    ) -> Result<ConfigValue<C>, crate::runtime::RuntimeError> {
+        self.runtime.inner().resolve_config::<C>()
     }
 
     /// Registers a shutdown participant — e.g. a spawned read-side
@@ -241,6 +281,77 @@ impl AppBuilder {
         self
     }
 
+    /// Registers an observability hook — thin delegation to
+    /// [`RuntimeBuilder::with_observability`] (review F1). Reuses the
+    /// existing hook rather than inventing a second one (spec: "Config,
+    /// Security, Logging, And Observability Reuse Existing Abstractions").
+    pub fn observability(mut self, obs: Arc<dyn Observability>) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        self.runtime_builder = self.runtime_builder.with_observability(obs);
+        self
+    }
+
+    /// Registers an external-effect executor — thin delegation to
+    /// [`RuntimeBuilder::register_effect_executor`] (review F1). This is
+    /// what makes [`App::start`] actually have effects to start:
+    /// `CompositionError::EffectExecutor` already existed for this path but
+    /// had no public registration method to produce it until this one.
+    /// Fails closed on a duplicate `effect_type`, matching
+    /// `register_effect_executor`'s own contract exactly — no second dup-guard
+    /// is layered on top, unlike `.adapter()`'s (AD-4), because the
+    /// underlying registry already fails closed here.
+    pub fn effect_executor(
+        mut self,
+        effect_types: impl IntoIterator<Item = impl Into<String>>,
+        executor: Arc<dyn ExternalEffectExecutor>,
+    ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        // Clone-then-call (not move-then-restore): `register_effect_executor`
+        // consumes `RuntimeBuilder` by value, but `self.runtime_builder` must
+        // stay intact on the error path — cloning first means it's never
+        // taken out of `self` at all, so there's nothing to restore.
+        let registration = self.runtime_builder.clone().register_effect_executor(effect_types, executor);
+        match registration {
+            Ok(builder) => {
+                self.runtime_builder = builder;
+                self
+            }
+            Err(err) => {
+                self.pending_error = Some(CompositionError::EffectExecutor(err));
+                self
+            }
+        }
+    }
+
+    /// Registers an external data provider — thin delegation to
+    /// [`RuntimeBuilder::register_data_provider`] (review F1). Fails closed
+    /// on a duplicate `provider_id`, matching `register_data_provider`'s own
+    /// contract exactly.
+    pub fn data_provider(
+        mut self,
+        provider_id: impl Into<String>,
+        provider: Arc<dyn ExternalDataProvider>,
+    ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        // Same clone-then-call reasoning as `.effect_executor()` above.
+        match self.runtime_builder.clone().register_data_provider(provider_id, provider) {
+            Ok(builder) => {
+                self.runtime_builder = builder;
+                self
+            }
+            Err(err) => {
+                self.pending_error = Some(CompositionError::DataProvider(err));
+                self
+            }
+        }
+    }
+
     /// Records `S` for construction through the existing `Injectable`
     /// contract at [`Self::build`] (AD-3) — `Injectable::validate` then
     /// `Injectable::build`, the same construction path production and
@@ -272,22 +383,25 @@ impl AppBuilder {
     {
         self.service_registrars.push(Box::new(move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
             // Same attribution `RuntimeBuilder::try_build` already provides
-            // (AD-3/AD-7): `Injectable::validate`'s generic default leaves
-            // `service_name: None` (it doesn't know who's asking); fill it in
-            // with the requesting service's type name here, exactly as
-            // `try_build`'s validator loop does for `with_injectable`.
-            S::validate(scratch).map_err(|err| {
-                CompositionError::Validation(match err {
-                    crate::runtime::RuntimeError::DependencyNotFound { type_name, .. } => {
-                        crate::runtime::RuntimeError::DependencyNotFound {
-                            type_name,
-                            service_name: Some(std::any::type_name::<S>()),
-                        }
-                    }
-                    other => other,
-                })
-            })?;
-            let instance = S::build(scratch).map_err(CompositionError::Validation)?;
+            // (AD-3/AD-7): a `DependencyNotFound` reaching here has
+            // `service_name: None` (nothing below this closure knows who's
+            // asking); fill it in with the requesting service's type name
+            // here, exactly as `try_build`'s validator loop does for
+            // `with_injectable`.
+            //
+            // Applied to BOTH `S::validate` and `S::build`'s errors (review
+            // F3): a hand-rolled `Injectable` with an incomplete
+            // `dependencies()` list, conditional resolution, or any other
+            // `DependencyNotFound` surfacing only during `build()` (not
+            // caught by `validate()`'s presence check) must still name the
+            // requesting service — the observable contract doesn't
+            // distinguish "caught by validate" from "caught by build".
+            S::validate(scratch)
+                .map_err(attribute_to::<S>)
+                .map_err(CompositionError::Validation)?;
+            let instance = S::build(scratch)
+                .map_err(attribute_to::<S>)
+                .map_err(CompositionError::Validation)?;
             let arc = to_trait_object(Arc::new(instance));
             builder.with_service::<Tag>(arc).map_err(CompositionError::Service)
         }));
@@ -371,8 +485,11 @@ mod tests {
             .adapter(Arc::new(OtherAdapter(2)))
             .build()
             .expect("distinct adapter types must not collide");
-        assert!(app.runtime.inner().resolve_adapter::<StubAdapter>().is_ok());
-        assert!(app.runtime.inner().resolve_adapter::<OtherAdapter>().is_ok());
+        // Review F4: resolved via the public `App::resolve_adapter`, not
+        // `app.runtime.inner()` — the same check an external integration
+        // test (outside this module) can now perform.
+        assert!(app.resolve_adapter::<StubAdapter>().is_ok());
+        assert!(app.resolve_adapter::<OtherAdapter>().is_ok());
     }
 
     // AD-4 escape hatch: `.replace_adapter()` deliberately bypasses the
@@ -384,7 +501,7 @@ mod tests {
             .replace_adapter(Arc::new(StubAdapter(2)))
             .build()
             .expect("replace_adapter must not be treated as a duplicate");
-        let resolved = app.runtime.inner().resolve_adapter::<StubAdapter>().unwrap();
+        let resolved = app.resolve_adapter::<StubAdapter>().unwrap();
         assert_eq!(*resolved, StubAdapter(2));
     }
 
@@ -401,7 +518,9 @@ mod tests {
             .build()
             .expect("build succeeds");
 
-        let resolved = app.runtime.inner().resolve_config::<StubConfig>();
+        // Review F4: `App::resolve_config`, the public counterpart to
+        // `resolve_adapter`.
+        let resolved = app.resolve_config::<StubConfig>();
         assert!(resolved.is_ok());
         assert_eq!(*resolved.unwrap(), StubConfig("hello".to_string()));
     }
@@ -462,6 +581,67 @@ mod tests {
         assert!(app.runtime.logger().is_some(), "the registered logger must be present");
     }
 
+    // Review F1: `.observability()` is a thin `AppBuilder` pass-through for
+    // `RuntimeBuilder::with_observability` — reuses the existing hook rather
+    // than inventing a second one.
+    #[test]
+    fn registered_observability_hook_does_not_prevent_build() {
+        use crate::test_support::RecordingObservability;
+
+        let app = App::builder()
+            .observability(Arc::new(RecordingObservability::new()))
+            .build();
+        assert!(app.is_ok(), "build must succeed with an observability hook registered");
+    }
+
+    // Review F1: `.effect_executor()` fails closed on a duplicate
+    // `effect_type`, matching `RuntimeBuilder::register_effect_executor`'s
+    // own contract exactly (no silent last-write-wins).
+    #[test]
+    fn duplicate_effect_type_registration_is_rejected() {
+        let result = App::builder()
+            .effect_executor(["dup.effect"], Arc::new(StubExecutor))
+            .effect_executor(["dup.effect"], Arc::new(StubExecutor))
+            .build();
+        match result {
+            Err(CompositionError::EffectExecutor(_)) => {}
+            Err(other) => panic!("expected CompositionError::EffectExecutor, got {other:?}"),
+            Ok(_) => panic!("expected duplicate effect_type registration to fail"),
+        }
+    }
+
+    // Review F1: `.data_provider()` is a thin `AppBuilder` pass-through for
+    // `RuntimeBuilder::register_data_provider`, fails closed on a duplicate
+    // `provider_id` matching the underlying registry's own contract.
+    #[test]
+    fn data_provider_registers_and_rejects_duplicate_ids() {
+        use async_trait::async_trait;
+        use persistent_entity::data_provider_access::{DataProviderError, DataRequest, DataResponse};
+
+        struct StubProvider;
+        #[async_trait]
+        impl ExternalDataProvider for StubProvider {
+            async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
+                Ok(DataResponse { payload: request.payload, cache_hit: false })
+            }
+        }
+
+        let ok = App::builder()
+            .data_provider("provider-a", Arc::new(StubProvider))
+            .build();
+        assert!(ok.is_ok(), "a single data provider registration must succeed");
+
+        let dup = App::builder()
+            .data_provider("provider-b", Arc::new(StubProvider))
+            .data_provider("provider-b", Arc::new(StubProvider))
+            .build();
+        match dup {
+            Err(CompositionError::DataProvider(_)) => {}
+            Err(other) => panic!("expected CompositionError::DataProvider, got {other:?}"),
+            Ok(_) => panic!("expected duplicate provider_id registration to fail"),
+        }
+    }
+
     // Task 1.8 (RED/GREEN): constructing an application starts nothing —
     // `build()` succeeds with no active Tokio runtime, and no effect
     // acceptor was started (spec "Constructing an application starts
@@ -496,18 +676,20 @@ mod tests {
         }
     }
 
+    // Review F1: `.effect_executor()` is the public `AppBuilder` pass-through
+    // for `RuntimeBuilder::register_effect_executor` — an external consumer
+    // (or this test) can now build the kind of application `App::start()`
+    // actually administers through the public API alone, no private-field
+    // construction required.
+    //
     // Task 3.1 (RED): `App::start()` starts effects — `effect_acceptor()` is
-    // `Some` post-start when an executor was registered. Constructs `App`
-    // directly (white-box, private field — AppBuilder exposes no
-    // `register_effect_executor` pass-through in Stage 1's scope) purely to
-    // prove `App::start`'s wiring to `Runtime::start_effects`.
+    // `Some` post-start when an executor was registered.
     #[tokio::test]
     async fn start_starts_effects_when_an_executor_was_registered() {
-        let runtime = RuntimeBuilder::new()
-            .register_effect_executor(["test.effect"], Arc::new(StubExecutor))
-            .expect("registration succeeds")
-            .build();
-        let app = App { runtime };
+        let app = App::builder()
+            .effect_executor(["test.effect"], Arc::new(StubExecutor))
+            .build()
+            .expect("build succeeds");
         assert!(app.runtime.effect_acceptor().is_none(), "not started yet");
 
         let running = app.start().await.expect("start succeeds");

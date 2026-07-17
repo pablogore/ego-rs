@@ -98,6 +98,60 @@ fn missing_dependency_names_both_type_and_requester() {
     }
 }
 
+/// Review F3: a hand-rolled `Injectable` whose `dependencies()` is
+/// incomplete (doesn't declare the adapter it actually needs) — so
+/// `Injectable::validate`'s presence check never catches the missing
+/// dependency — but whose `build()` tries to resolve it anyway and fails.
+/// Before the F3 fix, this `DependencyNotFound` reached `AppBuilder::service`
+/// with `service_name: None` (only `validate()`'s error path was
+/// attributed); this proves `build()`'s path is now attributed identically.
+struct MisdeclaredGreetingServiceImpl {
+    adapter: AdapterRef<GreeterAdapter>,
+}
+
+impl Injectable for MisdeclaredGreetingServiceImpl {
+    fn dependencies() -> Vec<DepKey> {
+        Vec::new() // intentionally incomplete — doesn't declare GreeterAdapter
+    }
+
+    fn build(rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            adapter: rt.resolve_adapter::<GreeterAdapter>()?,
+        })
+    }
+}
+
+#[async_trait]
+impl GreetingService for MisdeclaredGreetingServiceImpl {
+    async fn greet(&self, _ctx: ServiceContext, name: String) -> Result<String, ServiceError> {
+        Ok(format!("{}, {name}", self.adapter.0))
+    }
+}
+
+#[test]
+fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() {
+    let result = App::builder()
+        .service::<MisdeclaredGreetingServiceImpl, GreetingServiceTag>(|arc| arc)
+        .build();
+
+    match result {
+        Ok(_) => panic!("expected build to fail — GreeterAdapter was never registered"),
+        Err(ego_service_sdk::app::CompositionError::Validation(RuntimeError::DependencyNotFound {
+            type_name,
+            service_name,
+        })) => {
+            assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
+            assert_eq!(
+                service_name,
+                Some(std::any::type_name::<MisdeclaredGreetingServiceImpl>()),
+                "a DependencyNotFound surfacing only from build() (not caught by validate()'s \
+                 incomplete dependencies() list) must still name the requesting service"
+            );
+        }
+        Err(other) => panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Task 2.6: `.service_instance::<Tag>()` — pre-built escape hatch (AD-3 flag)
 // ---------------------------------------------------------------------------
