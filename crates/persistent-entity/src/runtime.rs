@@ -23,13 +23,25 @@ use crate::snapshot::SnapshotStrategy;
 ///
 /// Controls mailbox capacity, concurrency budget, passivation timeout,
 /// and tenant isolation settings.
+///
+/// **`passivation_timeout_secs` is a whole-seconds JSON/kit-config-facing
+/// value, not necessarily what the runtime actually uses.** When a
+/// sub-second [`crate::builder::EntityRuntimeBuilder::passivation_timeout`]
+/// is configured directly (not via JSON), this field is populated by
+/// rounding *up* to the nearest whole second purely for this struct's own
+/// informational/serializable representation — it is never truncated down
+/// to `0`, which would misleadingly read as "passivates instantly." For the
+/// exact `Duration` actors are actually spawned with, use
+/// [`EntityRuntime::passivation_timeout`], not this field or
+/// [`Self::passivation_timeout`].
 #[derive(serde::Deserialize)]
 pub struct RuntimeConfig {
     /// Maximum number of commands queued per mailbox.
     pub mailbox_capacity: usize,
     /// Maximum number of concurrently active actors.
     pub concurrency_budget: usize,
-    /// Seconds of inactivity before entity passivation.
+    /// Seconds of inactivity before entity passivation — rounded up from any
+    /// sub-second value (see this struct's doc comment); not the ground truth.
     pub passivation_timeout_secs: u64,
     /// When true, all entities share the default tenant scope.
     pub single_tenant_mode: bool,
@@ -38,7 +50,10 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Returns the passivation timeout as a [`std::time::Duration`].
+    /// Returns `passivation_timeout_secs` as a [`std::time::Duration`] —
+    /// this struct's own whole-seconds approximation (see its doc comment),
+    /// not necessarily the exact value actors are spawned with. Prefer
+    /// [`EntityRuntime::passivation_timeout`] for that.
     pub fn passivation_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.passivation_timeout_secs)
     }
@@ -99,6 +114,15 @@ pub struct EntityRuntime<E> {
     /// every spawned actor's `effect_acceptor` at `None`, preserving today's
     /// fail-closed-if-effects-described behavior unchanged.
     pub effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    /// Full-precision passivation timeout, as configured directly via
+    /// [`crate::builder::EntityRuntimeBuilder::passivation_timeout`] — kept
+    /// separate from `config.passivation_timeout_secs` (whole seconds only,
+    /// intentional for that JSON/kit-config-facing schema) because rounding a
+    /// sub-second `Duration` through `.as_secs()` silently truncates it to
+    /// zero, making every spawned actor passivate almost immediately instead
+    /// of after the configured idle period. This field is what
+    /// [`Self::entity_ref`] actually uses.
+    passivation_timeout: std::time::Duration,
     _event: PhantomData<E>,
 }
 
@@ -107,6 +131,17 @@ where
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
 {
     /// Creates a new [`EntityRuntime`] with the given components.
+    ///
+    /// Preserved for source compatibility (review F1) — any existing caller
+    /// of this 8-argument signature keeps compiling. It reconstructs
+    /// `passivation_timeout` from `config.passivation_timeout_secs` the same
+    /// (lossy, sub-second-truncating) way this crate always did before this
+    /// fix; only [`crate::builder::EntityRuntimeBuilder`] — the sole
+    /// in-repo caller — was updated to call
+    /// [`Self::new_with_passivation_timeout`] instead, which is what
+    /// actually carries the fix. A caller who wants the fix directly should
+    /// migrate to that constructor.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Arc<EntityRegistry>,
         scheduler: Arc<Scheduler>,
@@ -117,6 +152,45 @@ where
         event_sender: SchedulerEventSender,
         effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
     ) -> Self {
+        let passivation_timeout = config.passivation_timeout();
+        Self::new_with_passivation_timeout(
+            registry,
+            scheduler,
+            persistence,
+            publisher,
+            config,
+            snapshot_strategy,
+            event_sender,
+            effect_acceptor,
+            passivation_timeout,
+        )
+    }
+
+    /// Creates a new [`EntityRuntime`], accepting the full-precision idle
+    /// `Duration` actually used when spawning actors directly (review F1) —
+    /// see [`EntityRuntime`]'s `passivation_timeout` field doc comment for
+    /// why this is threaded separately from `config.passivation_timeout_secs`.
+    ///
+    /// `pub(crate)`, not `pub` (review PR #186 finding 1): nothing enforces
+    /// that a caller's `config.passivation_timeout_secs` and its separate
+    /// `passivation_timeout: Duration` argument actually agree — an external
+    /// caller could construct a runtime whose reported config timeout and
+    /// actual actor behavior silently contradict each other.
+    /// [`crate::builder::EntityRuntimeBuilder`] (the sole caller, same
+    /// crate) is what keeps the two in sync via `ceil_secs`; it is the only
+    /// sanctioned way to reach this constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_passivation_timeout(
+        registry: Arc<EntityRegistry>,
+        scheduler: Arc<Scheduler>,
+        persistence: Arc<PersistenceFacade<E>>,
+        publisher: Arc<dyn EventPublisher<E>>,
+        config: RuntimeConfig,
+        snapshot_strategy: Arc<dyn SnapshotStrategy>,
+        event_sender: SchedulerEventSender,
+        effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+        passivation_timeout: std::time::Duration,
+    ) -> Self {
         EntityRuntime {
             registry,
             scheduler,
@@ -126,6 +200,7 @@ where
             snapshot_strategy,
             event_sender,
             effect_acceptor,
+            passivation_timeout,
             _event: PhantomData,
         }
     }
@@ -178,7 +253,7 @@ where
             entity_handler,
             self.event_sender.clone(),
             self.config.mailbox_capacity,
-            self.config.passivation_timeout(),
+            self.passivation_timeout,
             self.effect_acceptor.clone(),
         )
     }
@@ -191,6 +266,16 @@ where
     /// Returns the number of passivated entities.
     pub fn passivated_count(&self) -> usize {
         self.registry.passivated_count()
+    }
+
+    /// Returns the exact, full-precision idle duration actors spawned by
+    /// [`Self::entity_ref`] are actually configured with — the ground truth,
+    /// unlike `self.config.passivation_timeout()` (whole seconds only,
+    /// rounded up, purely informational; see [`RuntimeConfig`]'s doc
+    /// comment). Introspection code (monitoring, logging) should read this,
+    /// not `config`.
+    pub fn passivation_timeout(&self) -> std::time::Duration {
+        self.passivation_timeout
     }
 }
 

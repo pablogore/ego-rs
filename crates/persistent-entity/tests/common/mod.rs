@@ -11,6 +11,16 @@ use persistent_entity::testing::{InMemoryEventStore, TestCommand, TestEvent, Tes
 
 /// Send `count` concurrent Increment commands to an entity.
 /// Spawns one tokio task per command, each creating its own EntityRef.
+///
+/// Retries on `EntityError::MailboxClosed` with a fresh `entity_ref()` —
+/// per `openspec/changes/archive/2026-07-07-activation-authority/design.md`'s
+/// documented contract, `MailboxClosed` is "a distinct, caller-retryable
+/// terminal error; caller may re-`entity_ref()`", not a hard failure. A
+/// concurrent caller can legitimately be routed to a just-closed mailbox
+/// during the (real, intentional) close→remove teardown window before its
+/// registry entry is removed; without retrying, a burst racing that window
+/// is flaky under CPU contention even though nothing is actually broken —
+/// see `entity_ref_tokio.rs`'s `mailbox_closed_in_teardown_window_is_retried_to_a_fresh_actor`.
 pub async fn spawn_concurrent_commands(
     count: usize,
     runtime: Arc<EntityRuntime<TestEvent>>,
@@ -20,17 +30,26 @@ pub async fn spawn_concurrent_commands(
 ) -> Vec<Result<CommandResult<TestEvent, TestState>, EntityError>> {
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
-        let ctx = CommandContext::new(entity_type.to_string());
         let command = TestCommand::Increment((i + 1) as u64);
         let h = handler.clone();
         let rt = runtime.clone();
 
         handles.push(tokio::spawn(async move {
-            let entity_ref =
-                rt.entity_ref::<TestCommand, TestState>(entity_type, entity_id, h).unwrap();
-            let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-                entity_ref.send_command(command, ctx).await;
-            result
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let entity_ref = rt
+                    .entity_ref::<TestCommand, TestState>(entity_type, entity_id, h.clone())
+                    .unwrap();
+                let ctx = CommandContext::new(entity_type.to_string());
+                let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
+                    entity_ref.send_command(command.clone(), ctx).await;
+                match result {
+                    Err(EntityError::MailboxClosed) if std::time::Instant::now() < deadline => {
+                        continue
+                    }
+                    other => break other,
+                }
+            }
         }));
     }
 

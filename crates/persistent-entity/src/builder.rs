@@ -15,6 +15,30 @@ use crate::scheduler_event::{event_bus_channel_with_config, SchedulerEventBusCon
 use crate::scheduler_policy::RoundRobinPolicy;
 use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
 
+/// Rounds `d` up to the nearest whole second — never down. Used only for
+/// `RuntimeConfig.passivation_timeout_secs`'s own whole-seconds
+/// informational representation (see that struct's doc comment); the
+/// `EntityRuntime` actors actually spawn with `d` itself, unrounded.
+///
+/// **`Duration::ZERO` is not special-cased and is NOT "disabled" or "no
+/// timeout"** — per `TokioPassivationSignal`, a zero-duration passivation
+/// timeout genuinely means the actor idles out on its very first check
+/// (confirmed by `passivation_signal.rs`'s
+/// `tokio_signal_zero_duration_resolves_immediately`), i.e. "passivate
+/// (near-)instantly." Rounding `0` up to `1` here would misrepresent that
+/// real, intentional behavior as a full second of idle tolerance, so `0`
+/// stays `0`. Every OTHER sub-second remainder still rounds up rather than
+/// truncating down to `0`, which would misleadingly suggest the same
+/// instant-passivation behavior for a timeout that was actually configured
+/// to allow some idle time (review PR #186 finding 3).
+fn ceil_secs(d: std::time::Duration) -> u64 {
+    if d.subsec_nanos() > 0 {
+        d.as_secs().saturating_add(1)
+    } else {
+        d.as_secs()
+    }
+}
+
 pub struct EntityRuntimeBuilder<
     E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
 > {
@@ -191,7 +215,11 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         let config = RuntimeConfig {
             mailbox_capacity: self.mailbox_capacity,
             concurrency_budget: self.concurrency_budget,
-            passivation_timeout_secs: self.passivation_timeout.as_secs(),
+            // Rounded UP (never truncated down to 0) — see RuntimeConfig's
+            // doc comment. `EntityRuntime::passivation_timeout()` carries
+            // the exact value; this field is only this struct's own
+            // whole-seconds informational approximation.
+            passivation_timeout_secs: ceil_secs(self.passivation_timeout),
             single_tenant_mode: self.single_tenant_mode,
             tenant_id: self.tenant_id,
         };
@@ -217,7 +245,15 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
         };
         let (event_sender, event_receiver) = event_bus_channel_with_config(bus_config);
 
-        EntityRuntime::new(
+        // `new_with_passivation_timeout` (review F1), not `new` — `new` is
+        // kept only for source compatibility with existing external callers
+        // and still reconstructs the lossy `config.passivation_timeout()`
+        // internally. The full-precision `Duration` configured directly via
+        // `.passivation_timeout()` is NOT reconstructed from `config` above,
+        // whose `passivation_timeout_secs: u64` silently truncates any
+        // sub-second value to zero (see `EntityRuntime`'s
+        // `passivation_timeout` field doc comment).
+        EntityRuntime::new_with_passivation_timeout(
             registry.clone(),
             Arc::new(Scheduler::new(
                 registry.clone(),
@@ -230,6 +266,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
             snapshot_strategy,
             event_sender,
             self.effect_acceptor,
+            self.passivation_timeout,
         )
     }
 }
@@ -239,5 +276,139 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_context::CommandContext;
+    use crate::entity_ref::EntityRef;
+    use crate::persistent_entity::{CommandResult, PersistentEntity};
+    use crate::snapshot::NoSnapshot;
+    use crate::test_entity::TestEntity;
+    use crate::testing::{TestCommand, TestEvent, TestState};
+
+    /// Advances Tokio's paused virtual clock by `step`, then yields
+    /// repeatedly (bounded, not a guessed count) until the runtime reaches
+    /// quiescence — review F2: a single `yield_now()` isn't guaranteed to
+    /// drive a spawned actor through every one of its own sequential
+    /// `.await` points (mailbox drain, snapshot store, state transition)
+    /// after its timer fires; this loop keeps yielding only while progress
+    /// is still observably happening, bounded so a genuine deadlock still
+    /// fails loudly instead of hanging.
+    async fn advance_and_settle(step: std::time::Duration) {
+        tokio::time::advance(step).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Regression test for a bug found during CORE-028 Stage-1 flaky-test
+    /// triage: `build()` used to reconstruct the actor-facing passivation
+    /// timeout from `RuntimeConfig.passivation_timeout_secs: u64`, whose
+    /// `.as_secs()` silently truncates any sub-second `Duration` to `0` —
+    /// making every spawned actor passivate almost immediately regardless of
+    /// what `.passivation_timeout(...)` was actually configured with. Fixed
+    /// by threading the original full-precision `Duration` into
+    /// `EntityRuntime` directly (see its `passivation_timeout` field).
+    ///
+    /// Review F2: uses deterministic virtual-time advance
+    /// (`start_paused = true`), not a real `tokio::time::sleep` — the
+    /// original version slept 100ms and asserted the entity was still
+    /// active, which is itself a real-clock race under contention (the same
+    /// class of flakiness this whole fix was triaging): a sufficiently
+    /// delayed wake-up could observe the entity already passivated even
+    /// with a correct implementation. Advancing a paused clock is
+    /// unaffected by scheduling delay.
+    #[tokio::test(start_paused = true)]
+    async fn sub_second_passivation_timeout_is_not_truncated_to_zero() {
+        let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+            .passivation_timeout(std::time::Duration::from_millis(300))
+            .snapshot_strategy(Arc::new(NoSnapshot))
+            .build();
+        let handler: Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> =
+            Arc::new(TestEntity::new());
+
+        let entity_ref = runtime
+            .entity_ref::<TestCommand, TestState>("test", "regression-entity", handler)
+            .unwrap();
+        let _: CommandResult<TestEvent, TestState> = entity_ref
+            .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(runtime.active_count(), 1, "freshly activated entity must be active");
+
+        // Well under the configured 300ms timeout, the entity must still be
+        // active — a truncated-to-zero timeout would have already passivated
+        // it by now.
+        advance_and_settle(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            runtime.active_count(),
+            1,
+            "entity passivated in well under its configured 300ms timeout — \
+             the sub-second Duration was likely truncated to zero again"
+        );
+
+        // Past the configured timeout (100ms + 250ms = 350ms > 300ms), it
+        // must have genuinely passivated.
+        advance_and_settle(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            runtime.active_count(),
+            0,
+            "entity did not passivate after its configured 300ms timeout elapsed"
+        );
+    }
+
+    // Follow-up gotcha found by this repo's own pre-commit review after the
+    // F1/F2 fixes above: `EntityRuntime.config.passivation_timeout_secs` is
+    // still populated via a `Duration`-to-`u64`-seconds conversion, so it
+    // could still silently read `0` for a sub-second-configured runtime —
+    // moving the same truncation bug from actor behavior to a public
+    // introspection field. Fixed by rounding up (`ceil_secs`) instead of
+    // truncating, and by adding `EntityRuntime::passivation_timeout()` as
+    // the actual ground-truth accessor.
+    #[test]
+    fn ceil_secs_rounds_up_but_never_truncates_a_nonzero_duration_to_zero() {
+        assert_eq!(
+            ceil_secs(std::time::Duration::ZERO),
+            0,
+            "zero is genuinely an instant/near-immediate passivation timeout, not \"disabled\" \
+             — it must not be rounded up to a misleading 1-second tolerance"
+        );
+        assert_eq!(
+            ceil_secs(std::time::Duration::from_millis(300)),
+            1,
+            "a sub-second nonzero duration must round up to 1, never truncate to 0"
+        );
+        assert_eq!(ceil_secs(std::time::Duration::from_secs(1)), 1, "an exact second stays exact");
+        assert_eq!(
+            ceil_secs(std::time::Duration::from_millis(1500)),
+            2,
+            "any remainder past a whole second rounds up to the next one"
+        );
+        assert_eq!(
+            ceil_secs(std::time::Duration::MAX),
+            u64::MAX,
+            "rounding up must saturate at u64::MAX, never overflow/panic on an extreme Duration"
+        );
+    }
+
+    #[test]
+    fn entity_runtime_passivation_timeout_is_the_exact_configured_value() {
+        let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+            .passivation_timeout(std::time::Duration::from_millis(300))
+            .snapshot_strategy(Arc::new(NoSnapshot))
+            .build();
+
+        assert_eq!(
+            runtime.passivation_timeout(),
+            std::time::Duration::from_millis(300),
+            "EntityRuntime::passivation_timeout() must be the exact configured Duration"
+        );
+        assert_eq!(
+            runtime.config.passivation_timeout_secs, 1,
+            "the informational config field must round up (never read a misleading 0)"
+        );
     }
 }

@@ -71,6 +71,48 @@ async fn wait_for_passivation(runtime: &persistent_entity::runtime::EntityRuntim
     }
 }
 
+/// Sends a command, retrying on `MailboxClosed` with a fresh `entity_ref()`.
+///
+/// Root-cause note (not a production bug): `active_count() == 0`
+/// (`wait_for_passivation`'s signal) only means the old actor's published
+/// state left `Active` — it does NOT mean the registry entry routing to it
+/// has been removed yet. `EntityActor::passivate` closes the mailbox before
+/// the state transition, and `TeardownGuard` (whose `Drop` removes the
+/// registry entry) only runs after `run()` fully returns — so there is a
+/// real, documented window where a concurrent caller can still be routed to
+/// the old, closed mailbox. This is the exact ADR-008/FR-010 contract
+/// (`openspec/changes/archive/2026-07-07-activation-authority/design.md`:
+/// "MailboxClosed is a distinct, caller-retryable terminal error; caller may
+/// re-`entity_ref()`"), already covered at the unit level by
+/// `entity_ref_tokio.rs`'s `mailbox_closed_in_teardown_window_is_retried_to_a_fresh_actor`.
+/// This integration test previously sent once and asserted success
+/// unconditionally, which made it flaky under CPU contention (a wider,
+/// more probable teardown window) — treating a documented, retryable
+/// outcome as a hard failure. Retrying here, exactly as the contract
+/// requires, is the fix; no production code changes.
+async fn send_with_retry_on_mailbox_closed(
+    runtime: &Arc<persistent_entity::runtime::EntityRuntime<TestEvent>>,
+    entity_id: &'static str,
+    handler: &Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>>,
+) -> Result<CommandResult<TestEvent, TestState>, EntityError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let entity_ref = runtime
+            .entity_ref::<TestCommand, TestState>("test", entity_id, handler.clone())
+            .unwrap();
+        let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+            .send_command(
+                TestCommand::Increment(1),
+                CommandContext::new("test".to_string()),
+            )
+            .await;
+        match result {
+            Err(EntityError::MailboxClosed) if std::time::Instant::now() < deadline => continue,
+            other => return other,
+        }
+    }
+}
+
 // ============================================================================
 // User Story 1 — Activation Ordering
 // ============================================================================
@@ -233,6 +275,41 @@ async fn test_no_double_spawn_concurrent() {
         "all concurrent commands should succeed"
     );
 
+    // NFR-002: the 20-caller burst against the passivated entity must have
+    // triggered exactly one genuine reactivation attempt (recovery `load()`
+    // call), not merely produced one surviving `active_count()` entry.
+    // Captured now, before the idle-timer-resetting command below, so that
+    // command can never itself count as a second "reactivation" here.
+    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
+    assert_eq!(
+        reactivation_load_calls, 1,
+        "single-flight must coalesce the 20-caller burst into exactly one reactivation attempt, got {}",
+        reactivation_load_calls
+    );
+
+    // Reset the idle timer immediately before checking `active_count()` — see
+    // the anchor comment in `test_activation_mutex_serializes` for why an
+    // unguarded check here races the same passivation timer under
+    // contention (including its noted, accepted, non-blocking residual
+    // risk), and why this must resolve a FRESH `entity_ref` (retried on
+    // `MailboxClosed`) rather than reuse the one captured before passivation
+    // above, whose mailbox is the original (now-closed) actor's.
+    send_with_retry_on_mailbox_closed(&runtime, "entity-5", &h)
+        .await
+        .expect("idle-timer-resetting command must succeed");
+
+    // Review (PR #186, re-review): a prior version of this test re-checked
+    // load_calls here too, asserting the anchor command didn't itself count
+    // as a second reactivation. Removed — a real, contention-induced gap
+    // between the burst finishing and this anchor command running can
+    // legitimately exceed the configured passivation timeout, causing a
+    // second, LEGITIMATE reactivation here that has nothing to do with a
+    // double-spawn bug. Asserting on it would turn real scheduling delay
+    // back into part of the test's pass/fail outcome — the exact class of
+    // flakiness this fix exists to remove. The single-flight guarantee that
+    // actually matters (the burst produced exactly one reactivation) was
+    // already checked above, before the anchor ever ran.
+    //
     // Single-flight (ADR-001) guarantees exactly one live entry per triple —
     // there is no window where two entries coexist for the same aggregate_id,
     // so this is exact, not a bound.
@@ -241,16 +318,6 @@ async fn test_no_double_spawn_concurrent() {
         active_count, 1,
         "single-flight guarantees exactly one active entity, got {}",
         active_count
-    );
-
-    // NFR-002: the 20-caller burst against the passivated entity must have
-    // triggered exactly one genuine reactivation attempt (recovery `load()`
-    // call), not merely produced one surviving `active_count()` entry.
-    let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
-    assert_eq!(
-        reactivation_load_calls, 1,
-        "single-flight must coalesce the 20-caller burst into exactly one reactivation attempt, got {}",
-        reactivation_load_calls
     );
 }
 
@@ -281,21 +348,17 @@ async fn test_activation_mutex_serializes() {
 
     let load_calls_before_burst = load_calls.load(Ordering::SeqCst);
 
-    // Spawn 10 concurrent tasks — all should succeed with no duplicate spawns
+    // Spawn 10 concurrent tasks — all should succeed with no duplicate spawns.
+    // Each retries on `MailboxClosed` (ADR-008/FR-010's documented,
+    // caller-retryable teardown-window outcome) rather than treating it as a
+    // hard failure — see `send_with_retry_on_mailbox_closed`'s doc comment.
     let n = 10;
     let mut handles = Vec::with_capacity(n);
     for _ in 0..n {
         let rt = runtime.clone();
         let h = h.clone();
         handles.push(tokio::spawn(async move {
-            let ref_ = rt.entity_ref::<TestCommand, TestState>("test", "entity-6", h).unwrap();
-            let result: Result<CommandResult<TestEvent, TestState>, EntityError> = ref_
-                .send_command(
-                    TestCommand::Increment(1),
-                    CommandContext::new("test".to_string()),
-                )
-                .await;
-            result
+            send_with_retry_on_mailbox_closed(&rt, "entity-6", &h).await
         }));
     }
 
@@ -305,20 +368,59 @@ async fn test_activation_mutex_serializes() {
         assert!(result.is_ok(), "concurrent command should succeed");
     }
 
-    let active = runtime.active_count();
-    assert_eq!(
-        active, 1,
-        "single-flight guarantees exactly one active entity, got {}",
-        active
-    );
-
     // NFR-002: the 10-caller burst against the passivated entity must have
-    // triggered exactly one genuine reactivation attempt.
+    // triggered exactly one genuine reactivation attempt. Captured now,
+    // before the idle-timer-resetting command below, so that command can
+    // never itself count as a second "reactivation" against this assertion
+    // even in the (much narrower) case where it races its own passivation.
     let reactivation_load_calls = load_calls.load(Ordering::SeqCst) - load_calls_before_burst;
     assert_eq!(
         reactivation_load_calls, 1,
         "single-flight must serialize the 10-caller burst into exactly one reactivation attempt, got {}",
         reactivation_load_calls
+    );
+
+    // Reset the idle timer right before checking `active_count()`, narrowing
+    // (not eliminating — see the residual-risk note below) the second real
+    // race this file's own comment on `build_fast_passivation_runtime_with_counter`
+    // already flagged: the reactivated entity's idle timer starts counting
+    // from whichever burst command it processed last, so an unrelated gap
+    // between "burst done" and "active_count() checked" is itself racing
+    // the same 500ms timeout under contention. One more awaited command
+    // immediately beforehand guarantees the timer's last reset is this
+    // line, not the burst's last command — an explicit synchronization
+    // anchor, not a wider guessed margin.
+    //
+    // Residual risk (non-blocking, PR #186 re-review): the `active_count()`
+    // check a few lines below still races the same 500ms timeout across the
+    // (normally sub-millisecond) gap between this anchor command returning
+    // and that check running — if the test's own task is descheduled for
+    // longer than the configured timeout in exactly that window, the
+    // assertion could still see `0`. Accepted as a real but extremely
+    // narrow ceiling for this fix; closing it fully would mean moving this
+    // test onto virtual/paused time or an explicit lifecycle-completion
+    // signal instead of a real-clock `active_count()` read.
+    send_with_retry_on_mailbox_closed(&runtime, "entity-6", &h)
+        .await
+        .expect("idle-timer-resetting command must succeed");
+
+    // Review (PR #186, re-review): a prior version of this test re-checked
+    // load_calls here too, asserting the anchor command didn't itself count
+    // as a second reactivation. Removed — a real, contention-induced gap
+    // between the burst finishing and this anchor command running can
+    // legitimately exceed the configured passivation timeout, causing a
+    // second, LEGITIMATE reactivation here unrelated to any double-spawn
+    // bug. Asserting on it would turn real scheduling delay back into part
+    // of the test's pass/fail outcome — the exact class of flakiness this
+    // fix exists to remove. The single-flight guarantee that actually
+    // matters (the burst produced exactly one reactivation) was already
+    // checked above, before the anchor ever ran.
+
+    let active = runtime.active_count();
+    assert_eq!(
+        active, 1,
+        "single-flight guarantees exactly one active entity, got {}",
+        active
     );
 }
 
