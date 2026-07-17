@@ -255,34 +255,10 @@ mod tests {
     /// data is — so this reads the `Vec` out through the `Mutex` instead,
     /// which is correct regardless of how many (harmless) extra clones of
     /// the `Arc` transiently exist.
-    /// See `effects::observability::tests::ensure_interest_cache_race_immune`
-    /// for the actual CORE-027 flaky-triage root cause and fix (a
-    /// process-wide `tracing-core` interest-cache poisoning race against
-    /// unrelated tests calling shared production `log_*`/`fetch` callsites
-    /// with no subscriber installed — not a race between this file's and
-    /// `effects::observability`'s own `capture_events` calls, which a
-    /// per-file and then crate-shared mutex both failed to fix). This
-    /// crate's callsites (this file's `log_*` fetch signals) are guarded by
-    /// that exact same fix, since it's process-wide, not per-callsite.
-    ///
-    /// The mutex below is kept only as a defense against the documented
-    /// `Arc::try_unwrap` transient-strong-count hazard, shared with
-    /// `effects::observability`'s `capture_events` via
-    /// `CAPTURE_EVENTS_GUARD` — not a substitute for the fix above. The
-    /// race window this guard covers spans the whole
-    /// `set_default(..)..drop(guard)` region (including the `f.await` in
-    /// between), so the guard is held across the `.await` here. This is
-    /// safe only because `capture_events` is awaited directly inside a
-    /// `#[tokio::test]` current-thread future rather than `tokio::spawn`ed,
-    /// so the resulting future never needs to be `Send`.
     async fn capture_events<Fut>(f: Fut) -> Vec<CapturedEvent>
     where
         Fut: std::future::Future<Output = ()>,
     {
-        crate::effects::observability::tests::ensure_interest_cache_race_immune();
-        let _guard = crate::effects::observability::tests::CAPTURE_EVENTS_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = TestSubscriber {
             events: events.clone(),

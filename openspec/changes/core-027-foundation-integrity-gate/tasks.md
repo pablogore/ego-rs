@@ -166,12 +166,16 @@ Spec ref: FR-007 (resolved verdicts). Design ref: §4 protocol.
   `effects::runner`/`effects::acceptor`'s own tests, which call the same
   production `log_*` functions directly), the callsite permanently caches
   "no one's listening", so a later `capture_events` call can silently miss
-  it. Fixed in `effects::observability::tests::ensure_interest_cache_race_immune`:
-  installs one real, always-enabled subscriber as `tracing`'s global default
-  via the public `tracing::subscriber::set_global_default`, once, before any
-  test runs — no undocumented internals, no leaked guards. Re-verified: 5x
-  clean `--test-threads=64` full-crate sweeps plus the full 50-sweep
-  protocol (see `flaky-triage.md`).
+  it. A first fix attempt (`ensure_interest_cache_race_immune` +
+  `set_global_default`, called lazily from `capture_events`) was rejected on
+  PR review: it didn't actually run before unrelated tests could hit the
+  same callsites first (F-01), and silently ignored failure to install
+  (F-02). Real fix: stopped depending on `tracing`'s dispatch/interest-cache
+  for correctness at all — each signal's field construction/redaction
+  (`effect_fields`) is now a pure, deterministic function tested directly,
+  with no subscriber, no global state, and no harness-ordering dependency.
+  Re-verified: 5x clean `--test-threads=64` full-crate sweeps plus the full
+  50-sweep protocol (see `flaky-triage.md`).
 
 ## Phase 6: Final Verification
 

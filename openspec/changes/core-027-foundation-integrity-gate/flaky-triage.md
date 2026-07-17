@@ -74,30 +74,53 @@ miss that event even with its own subscriber active. A per-file mutex around
 `capture_events`'s own `with_default` calls cannot reach this, since the
 other side of the race is unrelated test code with no subscriber at all.
 
-**Fix:** `ensure_interest_cache_race_immune()` in
-`effects::observability::tests` installs one real, always-enabled subscriber
-as `tracing`'s process-wide default via `tracing::subscriber::set_global_default`
-(the public, documented mechanism for "the process always has a default
-subscriber"), once, before any test runs. A callsite's first hit then always
-resolves to "someone's interested", so `event()` always fires — delivered
-harmlessly to this global default when no test-local subscriber is active,
-or correctly overridden by a thread's own `with_default` during a capture
-window (thread-local always wins over the global default on that thread).
-`providers::access`'s `capture_events` calls the same fixed function, since
-the fix is process-wide, not per-file.
+**First fix attempt (rejected on review, both blocking):** `ensure_interest_cache_race_immune()`
+in `effects::observability::tests` tried installing one always-enabled
+subscriber as `tracing`'s process-wide default via
+`tracing::subscriber::set_global_default`, called lazily from inside
+`capture_events`. Review caught two real problems:
 
-An earlier attempt at this fix relied on an undocumented internal
-`tracing-core` field (`has_just_one`) and deliberately leaked (`mem::forget`)
-two thread-local dispatch guards to flip it — rejected during review: it
-depends on non-contractual internal behavior that could silently break on
-any `tracing-core` patch release, and permanently altering global dispatch
-state via a leak has a much larger blast radius than a test-scoped fix
-should. `set_global_default` achieves the identical effect through tracing's
-actual public API, with no leaks.
+- **F-01 (blocking):** the doc comment claimed this installs "before any test
+  runs", but it only ran the first time *some* `capture_events` call fired —
+  `effects::runner`'s and `effects::acceptor`'s own tests call the same
+  production `log_*` callsites directly with no subscriber at all, and
+  nothing ordered those ahead of or behind the lazy install. A prior attempt
+  at this same fix additionally relied on an undocumented internal
+  `tracing-core` field (`has_just_one`) and leaked (`mem::forget`) dispatch
+  guards to flip it — also rejected, for depending on non-contractual
+  internal behavior.
+- **F-02 (non-blocking but real):** `let _ = set_global_default(...)` silently
+  ignored failure — if anything else had already installed a global default
+  first, the fix would report as "applied" without actually having installed
+  the always-on subscriber, and the calling code had no way to know.
 
-**Re-verified:** `cargo test -p ego-runtime` green (141+3+2 tests); 5x
-`--test-threads=64` full-crate sweeps clean; full 50-sweep protocol result
-below.
+**Actual fix:** stopped depending on `tracing`'s dispatch/interest-cache
+machinery for correctness at all. Each per-effect signal's field
+construction and redaction (`effect_fields`, in `effects::observability`) is
+now a pure, deterministic function, called by both the `log_*` functions
+(which pass its output straight into `tracing::info!`/`warn!`) and by tests
+directly — so redaction, payload-absence, and correct values are asserted
+by calling `effect_fields`/`oldest_pending_age_ms` directly, never by
+capturing through a subscriber. This closes F-01 by removing its
+precondition entirely (correctness no longer depends on harness ordering)
+and closes F-02 by removing `set_global_default` (and
+`ensure_interest_cache_race_immune`, and the shared `CAPTURE_EVENTS_GUARD`)
+outright — there is no global state left to install or silently fail to
+install. `providers::access`'s `capture_events` reverted to its simpler,
+already-correct pre-investigation form (Mutex-read, no shared guard).
+
+A small `tracing`-capturing "wiring" test was tried as a belt-and-braces
+smoke test alongside the deterministic tests, then deliberately deleted: 5x
+`--test-threads=64` sweeps showed it still flaked (1/5) via the exact same
+interest-cache race, since it necessarily still called a shared `log_*`
+callsite through `with_default`. It added no coverage beyond what
+`tracing`'s own macro-expansion already guarantees at compile time (the
+field names/values passed to `info!`/`warn!` match what was computed), so
+removing it was strictly better than chasing its last flake.
+
+**Re-verified:** `cargo test -p ego-runtime` green (144 tests); 5x
+`--test-threads=64` full-crate sweeps clean, zero flakes; full 50-sweep
+protocol result below.
 
 ## Full-crate sweep (all four fixes in place)
 
