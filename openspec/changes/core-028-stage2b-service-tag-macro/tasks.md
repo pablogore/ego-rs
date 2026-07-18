@@ -46,6 +46,7 @@ Chain strategy: pending
 - [x] 3.3 GREEN: add `pub fn service<S>(mut self) -> Self where S: Injectable + HasServiceTag + 'static`, reusing the registrar path (`S::into_service`, `S::Tag`)
 - [x] 3.4 GREEN: migrated the 4 existing `AppBuilder` two-generic call sites in `app_composition.rs` to `service_with_tag` — did NOT touch `ServiceTestFixture::builder().service::<LimitServiceImpl>()` (a different builder, out of scope)
 - [x] 3.5 confirmed 3.1's scenario now compiles and passes; full `cargo test -p ego-service-sdk` green (7 tests in `app_composition.rs`)
+- [x] 3.6 updated `compile_fail/service_without_tag.rs` to pin the observable contract at the real public API (`App::builder().service::<UnlinkedService>()`) now that it exists, instead of the `HasServiceTag` bound checked in isolation (PR1-era placeholder, `.stderr` regenerated via `TRYBUILD=overwrite`)
 
 ## Phase 4: Documentation
 
