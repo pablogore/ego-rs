@@ -88,6 +88,19 @@ dependencies.
 - THEN it fails with `DependencyNotFound` naming both the missing
   projection type and the requesting service, and no `Runtime` is produced
 
+### Requirement: App Exposes A Projection Resolution Accessor
+
+`App` MUST provide a read-only `resolve_projection::<P>()` accessor, symmetric
+with the existing `App::resolve_adapter()`/`App::resolve_config()`
+accessors, so a caller holding a built `App` (not just a service resolved
+through it) can resolve a registered projection.
+
+#### Scenario: A built App resolves a registered projection through the accessor
+- GIVEN an `App` built with a projection registered via
+  `AppBuilder::projection(...)`
+- WHEN `App::resolve_projection::<P>()` is called for that projection's type
+- THEN it returns the registered instance as `ProjectionRef<P>`
+
 ## Non-Goals
 
 - `.entity::<E>()` / any per-aggregate entity registration — still blocked

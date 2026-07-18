@@ -68,6 +68,12 @@ it reopens this decision rather than pre-building for it.
 
 **Rationale**: the one reference-app service, `RegisterUserImpl`, is registered via `.service_instance()` *because it cannot cheaply be `Injectable`* (Stage 1 AD-3 FLAG, confirmed lib.rs:241-250: its `EntityRuntime`s and hand-wired sink aren't DI-resolvable). It is the *write* service and has no reason to hold a *read* query handle. Injecting `UsersByTenantStore` into it would misrepresent the architecture just to trigger resolution. Registration through the public facade proves the path is real and reachable in production wiring; resolution is proved where it belongs — in-crate tests mirroring today's `NeedsAdapter`/`NeedsConfig` fixtures (builder.rs:982-1017). This is the same proof split Stage 1 used. The registered value is a clone of `ReadSideHandles.query` that shares the engine-fed store, so the read-side engine keeps producing into it unchanged (out of scope, untouched).
 
+### AD-6 — `App::resolve_projection()` is deliberate public API, added during implementation
+
+**Decision**: `App` gains `pub fn resolve_projection<P: Send + Sync + 'static>(&self) -> Result<ProjectionRef<P>, RuntimeError>`, symmetric with the existing `App::resolve_adapter()`/`App::resolve_config()`. This was not in this document's original File Changes/Interfaces (below, now updated) — it surfaced during apply because the external `reference-app` test crate has no other way to reach projection resolution (its `RuntimeResolver` only exposes `resolve`/`logger`, and `App`'s `runtime` field is private). Retroactively reviewed post-implementation (PR #190 review) and kept rather than removed.
+
+**Rationale**: the two options were (A) keep it and document it as deliberate public surface, or (B) strip it and prove reachability only through the pre-existing `RuntimeResolver`/internal path. (A) was chosen: `App::resolve_adapter()`/`App::resolve_config()` already establish the precedent that `App` exposes read-only resolution accessors for registered dependencies, so `resolve_projection()` completes that symmetry rather than introducing a new kind of surface. It is a 2-line, read-only, `Result`-returning accessor with no side effects — it does not widen the write/registration surface this slice deliberately keeps narrow (AD-1/AD-2).
+
 ## Data Flow
 
     RuntimeBuilder::with_projection::<P>(Arc<P>)  ──fail-closed on dup──▶ projections: HashMap<TypeId, Arc<dyn Any>>
@@ -89,7 +95,7 @@ it reopens this decision rather than pre-building for it.
 | `crates/service-sdk/src/di/mod.rs` | Modify | New `DuplicateProjection { type_name }` error beside `ProjectionRef` (AD-1) |
 | `crates/service-sdk/src/runtime/builder.rs` | Modify | `projections` field + `with_projection` method; thread map into `build()` (AD-1) |
 | `crates/service-sdk/src/runtime/runtime_builder.rs` | Modify | `DependencyTable::with_registrations` accepts `projections` instead of hardcoding empty |
-| `crates/service-sdk/src/app/mod.rs` | Modify | `.projection()` facade, effect-executor pattern (AD-3) |
+| `crates/service-sdk/src/app/mod.rs` | Modify | `.projection()` facade, effect-executor pattern (AD-3); `App::resolve_projection()` accessor (AD-6) |
 | `crates/service-sdk/src/app/error.rs` | Modify | `CompositionError::Projection(#[from] DuplicateProjection)` (AD-4) |
 | `crates/service-sdk/src/lib.rs` | Modify | Re-export `DuplicateProjection` (public error surface) |
 | `examples/reference-app/src/lib.rs` | Modify | Register `UsersByTenantStore` via `.projection()` (AD-5) |
@@ -108,6 +114,9 @@ pub fn with_projection<P: Send + Sync + 'static>(
 
 // AppBuilder
 pub fn projection<P: Send + Sync + 'static>(self, projection: Arc<P>) -> Self; // dup → CompositionError::Projection at build()
+
+// App (AD-6)
+pub fn resolve_projection<P: Send + Sync + 'static>(&self) -> Result<ProjectionRef<P>, RuntimeError>;
 ```
 
 ## Testing Strategy

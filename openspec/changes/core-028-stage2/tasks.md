@@ -68,6 +68,11 @@ Chain strategy: pending
 - [x] 6.2 Run `cargo test -p ego-service-sdk` (full crate) and `cargo test --workspace` — confirm 0 failures, matching Stage 1's PR2 regression-check precedent.
 - [x] 6.3 Update proposal.md's Success Criteria checkboxes once all four are demonstrably true by the tests above.
 
+## Post-PR-review fixes (PR #190)
+
+- [x] 6.4 `App::resolve_projection()` was added during apply but wasn't in this document's original File Changes/Interfaces — documented as deliberate public API in design.md AD-6 and specs/service-sdk/spec.md's new "App Exposes A Projection Resolution Accessor" requirement, rather than removed.
+- [x] 6.5 Strengthened `resolve_projection_unregistered_returns_dependency_not_found` (2.3) to assert the `DependencyNotFound` error's `type_name` field, matching the spec's "naming that projection type" requirement — it previously only matched the error variant.
+
 ## Threat Matrix
 
 N/A — in-memory `HashMap` insertion guarded by a `TypeId` presence check; no routing, shell, subprocess, or process-integration boundary (design.md).

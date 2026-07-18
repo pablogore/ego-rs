@@ -950,8 +950,17 @@ mod tests {
     #[test]
     fn resolve_projection_unregistered_returns_dependency_not_found() {
         let rt = RuntimeBuilder::new().build();
-        let result = rt.inner().resolve_projection::<StubProjection>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        let err = rt
+            .inner()
+            .resolve_projection::<StubProjection>()
+            .err()
+            .expect("unregistered projection must fail to resolve");
+        match err {
+            RuntimeError::DependencyNotFound { type_name, .. } => {
+                assert_eq!(type_name, std::any::type_name::<StubProjection>());
+            }
+            other => panic!("expected DependencyNotFound naming StubProjection, got {other:?}"),
+        }
     }
 
     // -- CORE-120: chained registration --------------------------------------
