@@ -1,0 +1,7 @@
+error: #[service] `impl_of` is only valid on a struct annotation (links the struct to the trait's resolution Tag) — it has no effect on a trait annotation
+  --> tests/compile_fail/service_impl_of_on_trait.rs:10:1
+   |
+10 | #[service(impl_of = SomeOtherTrait)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

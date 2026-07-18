@@ -15,4 +15,5 @@ fn service_tag_codegen_compile_fail() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/service_without_tag.rs");
     t.compile_fail("tests/compile_fail/service_wrong_impl_of.rs");
+    t.compile_fail("tests/compile_fail/service_impl_of_on_trait.rs");
 }

@@ -67,6 +67,13 @@ already fails at compile time with "the trait `Trait` is not implemented for `S`
 when the struct doesn't implement the named trait — it names both types and is
 near-zero-cost inherent. An added `const _: fn()` assert would be redundant.
 
+**Note**: this deferral is scoped to `impl_of` naming the wrong trait on a
+*struct* annotation. `impl_of` written on a *trait* annotation instead of a
+struct annotation is a distinct misuse (the argument has no receiver to attach
+to) and is rejected with an explicit spanned macro error in
+`expand_service_trait`, not left to `E0277` — see
+`tests/compile_fail/service_impl_of_on_trait.rs`.
+
 ## Data Flow
 
     #[service(impl_of=T)] struct S  ──macro──▶  impl Injectable + impl HasServiceTag<Tag={T}Tag>

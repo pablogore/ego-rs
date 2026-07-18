@@ -110,6 +110,15 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> TokenStream {
+    if service_args.impl_of.is_some() {
+        let err = syn::Error::new(
+            Span::call_site(),
+            "#[service] `impl_of` is only valid on a struct annotation (links the struct to the trait's resolution Tag) — it has no effect on a trait annotation",
+        )
+        .to_compile_error();
+        return TokenStream::from(err);
+    }
+
     let trait_name = &input_trait.ident;
     let tag_name = Ident::new(&format!("{}Tag", trait_name), trait_name.span());
     let ref_name = Ident::new(&format!("{}Ref", trait_name), trait_name.span());

@@ -37,6 +37,7 @@ Chain strategy: pending
 - [x] 2.5 GREEN: regenerate `service_without_tag.rs.stderr` (+ `service_wrong_impl_of.rs.stderr`) via `TRYBUILD=overwrite cargo test -p ego-service-sdk --test service_tag_codegen` — did not hand-author stderr text
 - [x] 2.6 RED→GREEN: added trybuild PASS fixture `crates/service-sdk/tests/compile_pass/service_impl_of_with_version.rs` — `#[service(version = "1.0.0", impl_of = GreetingService)] struct GreetingServiceImpl;` — proves the real macro expansion (not just `ServiceArgs` parsing in 2.1) doesn't let the new `impl_of` codegen interfere with existing `version` semantics
 - [x] 2.7 REFACTOR: confirmed 2.1 unit tests, 2.2 fail-fixture, and 2.6 pass-fixture all pass; added `service_wrong_impl_of.rs` fixture — `impl_of` naming a trait the struct doesn't implement fails with ordinary `E0277` (no custom diagnostic)
+- [x] 2.8 GREEN: `#[service(impl_of = Trait)]` on a `trait` annotation (instead of `struct`) was silently discarded in `expand_service_trait` — added a spanned `syn::Error` guard at the top of `expand_service_trait` (lib.rs) plus `service_impl_of_on_trait.rs` compile_fail fixture; regenerated its `.stderr` via `TRYBUILD=overwrite`
 
 ## Phase 3: AppBuilder Wiring (RED → GREEN)
 
