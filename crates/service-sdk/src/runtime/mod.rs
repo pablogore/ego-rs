@@ -7,7 +7,7 @@ mod resolvable;
 mod runtime_builder;
 mod tenant;
 
-pub use builder::{Runtime, RuntimeBuilder};
+pub use builder::{Runtime, RuntimeBuilder, RuntimeResolver};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
 pub use error::RuntimeInfraError;
 pub use logger::build_logger;

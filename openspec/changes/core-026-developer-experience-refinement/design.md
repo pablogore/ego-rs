@@ -449,8 +449,30 @@ impl App {
     pub fn resolve<Tag: Resolvable>(&self) -> Result<Tag::Proxy, RuntimeError>;
     pub fn resolve_adapter<A: Send + Sync + 'static>(&self) -> Result<AdapterRef<A>, RuntimeError>;
     pub fn resolve_config<C: Send + Sync + 'static>(&self) -> Result<ConfigValue<C>, RuntimeError>;
+    // Found during Phase 5 (reference-app migration, PR2): ego_transport::AppState
+    // predates App/AppBuilder and needs runtime access for its own generic
+    // per-request resolve::<Tag>() dispatch — a legitimate integration seam, not
+    // a reach into composition internals. Callable pre-start() like
+    // resolve_adapter/resolve_config.
+    //
+    // Corrected after PR2 review (HIGH): an earlier version of this method
+    // was named `runtime()` and returned `Runtime` itself, which let any
+    // holder call `Runtime::start_effects`/`shutdown_async`/
+    // `register_async_teardown` directly — the exact lifecycle surface
+    // App::start()/RunningApp::shutdown()'s typestate exists to gate.
+    // `resolver()` returns `RuntimeResolver` instead: a narrower type
+    // exposing only `resolve`/`logger`, nothing from the lifecycle surface.
+    // `Runtime` itself stays `Clone` and fully public — it remains the infra
+    // API for direct RuntimeBuilder consumers (AD-1/G2); only App's own
+    // accessor was narrowed.
+    pub fn resolver(&self) -> RuntimeResolver;
     // App owns the RUNTIME lifecycle only. It receives NO transport/serve future
     // and awaits none (AD-6). Requires an active Tokio runtime (start_effects).
+    // Corrected after PR2 review (MEDIUM): if start_effects fails, start()
+    // now runs shutdown_async on the failed attempt before returning, so a
+    // shutdown participant registered via register_shutdown before this call
+    // (e.g. an already-spawned read-side scheduler) is drained instead of
+    // leaked when there is no RunningApp to call shutdown() on.
     pub async fn start(self) -> Result<RunningApp, CompositionError>;       // starts effects
 }
 impl RunningApp {
@@ -459,6 +481,17 @@ impl RunningApp {
     pub async fn shutdown(self) -> Result<(), CompositionError>;
 }
 // Host sequences its own transport/workload between start() and shutdown().
+//
+// RuntimeResolver (PR2 review correction): a resolution-only view onto a
+// Runtime, obtainable via App::resolver() or Runtime::resolver() (so direct
+// RuntimeBuilder consumers outside App can build one too, e.g.
+// ego_transport's own tests). ego_transport::AppState's `runtime` field is
+// RuntimeResolver, not Arc<Runtime> — the transport layer never had a
+// legitimate reason to reach Runtime's lifecycle methods.
+// impl RuntimeResolver {
+//     pub fn resolve<Tag: Resolvable>(&self) -> Result<Tag::Proxy, RuntimeError>;
+//     pub fn logger(&self) -> Option<&Arc<KITLogger>>;
+// }
 // Identifiers (RunningApp, start/shutdown) are non-binding — see Open Questions.
 ```
 

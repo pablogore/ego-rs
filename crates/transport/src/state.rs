@@ -1,33 +1,38 @@
 //! Generic axum application state (AD-1, AD-2).
 //!
-//! `AppState` carries only what any axum handler needs: the DI runtime to
-//! resolve services through, and the authentication provider used to build
-//! a `SecurityContext` from an incoming request. It knows nothing about any
-//! concrete route or service type — those belong to the application that
-//! mounts this crate's router.
+//! `AppState` carries only what any axum handler needs: a resolution handle
+//! to resolve services through, and the authentication provider used to
+//! build a `SecurityContext` from an incoming request. It knows nothing
+//! about any concrete route or service type — those belong to the
+//! application that mounts this crate's router.
 //!
 //! Per design.md's corrected AD-3: `authn` is carried directly here,
 //! constructed by the caller, rather than fished from `Runtime` internals.
-
-use std::sync::Arc;
+//!
+//! `runtime` is a [`RuntimeResolver`] (CORE-028 Stage 1 PR2 review, HIGH),
+//! not the full `Runtime` — a per-request HTTP handler only ever resolves
+//! services or reads the logger; it has no legitimate reason to reach
+//! `Runtime::start_effects`/`shutdown_async`, the lifecycle surface
+//! `App`/`RunningApp` own.
 
 use ego_security_sdk::AuthenticationProvider;
-use ego_service_sdk::runtime::Runtime;
+use ego_service_sdk::runtime::RuntimeResolver;
+use std::sync::Arc;
 
 /// Shared axum application state. `Clone` is cheap — both fields are
-/// `Arc`-backed.
+/// `Arc`-backed (`RuntimeResolver` wraps a `Runtime`, itself an `Arc` clone).
 #[derive(Clone)]
 pub struct AppState {
-    /// The DI runtime handlers resolve services through.
-    pub runtime: Arc<Runtime>,
+    /// The resolution handle handlers resolve services through.
+    pub runtime: RuntimeResolver,
     /// The authentication provider used to authenticate incoming credentials.
     pub authn: Arc<dyn AuthenticationProvider>,
 }
 
 impl AppState {
-    /// Builds a new `AppState` from an already-constructed runtime and
-    /// authentication provider.
-    pub fn new(runtime: Arc<Runtime>, authn: Arc<dyn AuthenticationProvider>) -> Self {
+    /// Builds a new `AppState` from a resolution handle and authentication
+    /// provider.
+    pub fn new(runtime: RuntimeResolver, authn: Arc<dyn AuthenticationProvider>) -> Self {
         Self { runtime, authn }
     }
 }
@@ -90,7 +95,7 @@ mod tests {
             .expect("registers cleanly")
             .build();
 
-        let state = AppState::new(Arc::new(rt), Arc::new(StubAuthn));
+        let state = AppState::new(rt.resolver(), Arc::new(StubAuthn));
 
         let proxy = state
             .runtime
