@@ -244,6 +244,34 @@ parallel test-construction path is introduced.
   construction path production composition uses — not a second, separate
   test-only construction mechanism
 
+### Requirement: Projection Registration Facade
+
+`AppBuilder` MUST provide a `.projection(...)` registration method that is a thin pass-through to the completed `RuntimeBuilder` projection-registration path (Stage 1 facade precedent: `.adapter()`/`.service()`) — no parallel registration or resolution mechanism is introduced. A projection registered through `AppBuilder::projection(...)` MUST be resolvable exactly as if it had been registered directly on `RuntimeBuilder`.
+
+#### Scenario: A projection registered via AppBuilder resolves after build
+- GIVEN a projection instance registered via `AppBuilder::projection(...)`
+- WHEN the application is built
+- THEN a service declaring a dependency on that projection type resolves it successfully
+
+#### Scenario: Registration is equivalent whether performed via RuntimeBuilder or AppBuilder
+- GIVEN two otherwise-identical applications, one composed by registering a projection directly on `RuntimeBuilder` and one by registering the same projection via `AppBuilder::projection(...)`
+- WHEN each is built
+- THEN both expose the same resolvable projection dependency, with no observable difference in outcome
+
+#### Scenario: No internal runtime type is required to register a projection
+- GIVEN a developer composing an application through `AppBuilder`
+- WHEN they register a projection using only `.projection(...)`
+- THEN they never construct or reach into `RuntimeBuilder` or any other internal runtime state to complete that registration
+
+### Requirement: Duplicate Projection Registration Through AppBuilder Fails Closed
+
+Registering a second projection of the same type through `AppBuilder::projection(...)` MUST fail the same way the underlying `RuntimeBuilder` projection registration already fails closed (see the `service-sdk` capability spec's "Duplicate Projection Registration Fails Closed" requirement) — surfaced through `AppBuilder::build()`'s existing composition-error reporting, never a silent replacement.
+
+#### Scenario: Duplicate projection registration surfaces at build, not silently replaced
+- GIVEN `AppBuilder::projection(...)` called twice for the same projection type
+- WHEN `AppBuilder::build()` is called
+- THEN construction fails with a composition error identifying the duplicate registration, and the first-registered projection instance is what would have resolved had construction succeeded
+
 ## Non-Goals
 
 - `.entity::<E>()` / any per-aggregate entity registration — no stable
