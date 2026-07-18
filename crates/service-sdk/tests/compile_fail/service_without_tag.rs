@@ -1,17 +1,14 @@
-// Fixture: a bare `#[service]` struct (no `impl_of` link) fails the
-// `HasServiceTag` bound (CORE-028 Stage 2B, design.md's marker-trait
-// decision). Checked directly against the bound here — `AppBuilder::
-// service::<S>()` itself is bounded on `HasServiceTag` too, but lands in a
-// later, stacked PR (this PR's work unit is self-contained, no `AppBuilder`
-// change).
-use ego_service_sdk::runtime::HasServiceTag;
+// Fixture: a bare `#[service]` struct (no `impl_of` link) fails the real
+// public macro-linked registration call, `AppBuilder::service::<S>()`
+// (CORE-028 Stage 2B) — not just the underlying `HasServiceTag` bound in
+// isolation, so the fixture pins the observable contract at the actual API
+// surface a caller would hit.
+use ego_service_sdk::app::App;
 use ego_service_sdk_macros::service;
 
 #[service]
 struct UnlinkedService;
 
-fn requires_service_tag<S: HasServiceTag>() {}
-
 fn main() {
-    requires_service_tag::<UnlinkedService>();
+    let _ = App::builder().service::<UnlinkedService>();
 }

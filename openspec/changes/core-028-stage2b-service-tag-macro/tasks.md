@@ -41,14 +41,15 @@ Chain strategy: pending
 
 ## Phase 3: AppBuilder Wiring (RED → GREEN)
 
-- [ ] 3.1 RED: add scenario to `crates/service-sdk/tests/app_composition.rs` using `#[service(impl_of = GreetingService)]` + `.service::<S>()`, expecting it to resolve identically to the two-generic form — fails to compile (method absent)
-- [ ] 3.2 GREEN: rename `pub fn service<S, Tag>` at `crates/service-sdk/src/app/mod.rs:446` to `service_with_tag`
-- [ ] 3.3 GREEN: add `pub fn service<S>(mut self) -> Self where S: Injectable + HasServiceTag + 'static`, reusing the registrar path (`S::into_service`, `S::Tag`)
-- [ ] 3.4 GREEN: migrate the 4 existing `AppBuilder` two-generic call sites (app_composition.rs lines 68, 85, 134, 228) to `service_with_tag` — do NOT touch line 242 (`ServiceTestFixture::builder().service::<LimitServiceImpl>()`, a different builder, out of scope)
-- [ ] 3.5 confirm 3.1's scenario now compiles and passes; run full `cargo test -p ego-service-sdk`
+- [x] 3.1 RED: add scenario to `crates/service-sdk/tests/app_composition.rs` using `#[service(impl_of = GreetingService)]` + `.service::<S>()`, expecting it to resolve identically to the two-generic form — confirmed RED (E0107/E0061, wrong arity) before GREEN
+- [x] 3.2 GREEN: rename `pub fn service<S, Tag>` at `crates/service-sdk/src/app/mod.rs:446` to `service_with_tag`
+- [x] 3.3 GREEN: add `pub fn service<S>(mut self) -> Self where S: Injectable + HasServiceTag + 'static`, reusing the registrar path (`S::into_service`, `S::Tag`)
+- [x] 3.4 GREEN: migrated the 4 existing `AppBuilder` two-generic call sites in `app_composition.rs` to `service_with_tag` — did NOT touch `ServiceTestFixture::builder().service::<LimitServiceImpl>()` (a different builder, out of scope)
+- [x] 3.5 confirmed 3.1's scenario now compiles and passes; full `cargo test -p ego-service-sdk` green (7 tests in `app_composition.rs`)
+- [x] 3.6 updated `compile_fail/service_without_tag.rs` to pin the observable contract at the real public API (`App::builder().service::<UnlinkedService>()`) now that it exists, instead of the `HasServiceTag` bound checked in isolation (PR1-era placeholder, `.stderr` regenerated via `TRYBUILD=overwrite`)
 
 ## Phase 4: Documentation
 
-- [ ] 4.1 Update COOKBOOK illustrative snippet(s) to show `impl_of` + `.service::<S>()` as the primary form
-- [ ] 4.2 Update README composition example if it shows the two-generic form
-- [ ] 4.3 Update PRD/ARCHITECTURE illustrative snippets per the proposal's affected-areas table; note `service_with_tag` as the permanent hand-rolled-`Injectable` path
+- [x] 4.1 Checked COOKBOOK for an `App`/`AppBuilder`/two-generic `.service::<S, Tag>(closure)` illustrative snippet to update — none exists (COOKBOOK documents `RuntimeBuilder`/`with_service::<Tag>` and testkit's unrelated `ServiceTestFixture::service::<S: Injectable>()`, neither touched by this change). No edit made — nothing to update.
+- [x] 4.2 Checked README for the same — no `App::builder()`/`AppBuilder` content exists there either (README shows the lower-level `RuntimeBuilder::with_service` form only, unaffected by this change). No edit made.
+- [x] 4.3 Checked PRD.md/ARCHITECTURE.md for the same (`rg -i "App::builder|AppBuilder"` across all repo `.md` files) — zero matches in either file; Stage 1/2A never added `AppBuilder` illustrative content to these docs. No edit made.

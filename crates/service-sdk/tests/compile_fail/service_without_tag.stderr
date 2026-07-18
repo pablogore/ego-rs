@@ -1,16 +1,21 @@
 error[E0277]: the trait bound `UnlinkedService: HasServiceTag` is not satisfied
-  --> tests/compile_fail/service_without_tag.rs:16:28
+  --> tests/compile_fail/service_without_tag.rs:13:38
    |
-16 |     requires_service_tag::<UnlinkedService>();
-   |                            ^^^^^^^^^^^^^^^ unsatisfied trait bound
+13 |     let _ = App::builder().service::<UnlinkedService>();
+   |                            -------   ^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |                            |
+   |                            required by a bound introduced by this call
    |
 help: the trait `HasServiceTag` is not implemented for `UnlinkedService`
-  --> tests/compile_fail/service_without_tag.rs:11:1
+  --> tests/compile_fail/service_without_tag.rs:10:1
    |
-11 | struct UnlinkedService;
+10 | struct UnlinkedService;
    | ^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `requires_service_tag`
-  --> tests/compile_fail/service_without_tag.rs:13:28
+note: required by a bound in `AppBuilder::service`
+  --> src/app/mod.rs
    |
-13 | fn requires_service_tag<S: HasServiceTag>() {}
-   |                            ^^^^^^^^^^^^^ required by this bound in `requires_service_tag`
+   |     pub fn service<S>(mut self) -> Self
+   |            ------- required by a bound in this associated function
+   |     where
+   |         S: Injectable + HasServiceTag + 'static,
+   |                         ^^^^^^^^^^^^^ required by this bound in `AppBuilder::service`

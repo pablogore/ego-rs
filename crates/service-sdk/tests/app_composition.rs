@@ -20,7 +20,8 @@ use ego_service_sdk::runtime::RuntimeError;
 use ego_service_sdk_macros::{operation, service};
 
 // ---------------------------------------------------------------------------
-// Task 2.2/2.4: `.service::<S, Tag>()` — real Injectable + Tag + Resolvable
+// Task 2.2/2.4: `.service_with_tag::<S, Tag>()` (CORE-028 Stage 2B rename) —
+// real Injectable + Tag + Resolvable
 // ---------------------------------------------------------------------------
 
 #[service(version = "1.0.0")]
@@ -30,9 +31,9 @@ pub trait GreetingService {
 }
 
 /// A concrete `GreetingService` impl that is ALSO `Injectable`, hand-rolled
-/// (mirrors testkit's `HandRolledService` pattern) so `.service::<S, Tag>()`
-/// can construct it through the real `Injectable::build` path rather than
-/// requiring a pre-built instance.
+/// (mirrors testkit's `HandRolledService` pattern) so `.service_with_tag::<S,
+/// Tag>()` can construct it through the real `Injectable::build` path rather
+/// than requiring a pre-built instance.
 struct GreetingServiceImpl {
     adapter: AdapterRef<GreeterAdapter>,
 }
@@ -65,7 +66,7 @@ impl GreetingService for GreetingServiceImpl {
 async fn registered_service_with_satisfied_dependencies_resolves() {
     let app = App::builder()
         .adapter(Arc::new(GreeterAdapter("hello".to_string())))
-        .service::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
+        .service_with_tag::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build()
         .expect("all dependencies satisfied, build must succeed");
 
@@ -82,7 +83,7 @@ async fn registered_service_with_satisfied_dependencies_resolves() {
 #[test]
 fn missing_dependency_names_both_type_and_requester() {
     let result = App::builder()
-        .service::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
+        .service_with_tag::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build();
 
     match result {
@@ -131,7 +132,7 @@ impl GreetingService for MisdeclaredGreetingServiceImpl {
 #[test]
 fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() {
     let result = App::builder()
-        .service::<MisdeclaredGreetingServiceImpl, GreetingServiceTag>(|arc| arc)
+        .service_with_tag::<MisdeclaredGreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build();
 
     match result {
@@ -150,6 +151,44 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
         }
         Err(other) => panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CORE-028 Stage 2B (task 3.1): `.service::<S>()` — single-type-parameter
+// registration for a macro-linked (`impl_of`) service struct. No Tag
+// parameter, no coercion closure; must resolve identically to the
+// two-generic form above (spec.md "A macro-linked service registers with a
+// single type parameter and no closure").
+// ---------------------------------------------------------------------------
+
+#[service(impl_of = GreetingService)]
+struct LinkedGreetingServiceImpl {
+    adapter: AdapterRef<GreeterAdapter>,
+}
+
+#[async_trait]
+impl GreetingService for LinkedGreetingServiceImpl {
+    async fn greet(&self, _ctx: ServiceContext, name: String) -> Result<String, ServiceError> {
+        Ok(format!("{}, {name}", self.adapter.0))
+    }
+}
+
+#[tokio::test]
+async fn macro_linked_service_registers_with_single_type_parameter_and_resolves_identically() {
+    let app = App::builder()
+        .adapter(Arc::new(GreeterAdapter("hello".to_string())))
+        .service::<LinkedGreetingServiceImpl>()
+        .build()
+        .expect("all dependencies satisfied, build must succeed");
+
+    let proxy = app
+        .resolve::<GreetingServiceTag>()
+        .expect("registered service must resolve via its Tag");
+    let out = proxy
+        .greet(ServiceContext::new(), "world".to_string())
+        .await
+        .expect("invocation succeeds");
+    assert_eq!(out, "hello, world");
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +264,7 @@ impl LimitService for LimitServiceImpl {
 async fn app_and_fixture_builder_resolve_the_same_service_identically() {
     let app = App::builder()
         .config(Arc::new(10u32))
-        .service::<LimitServiceImpl, LimitServiceTag>(|arc| arc)
+        .service_with_tag::<LimitServiceImpl, LimitServiceTag>(|arc| arc)
         .build()
         .expect("build succeeds");
     let via_app = app
