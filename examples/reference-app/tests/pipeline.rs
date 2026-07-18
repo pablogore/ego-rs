@@ -2,6 +2,7 @@
 //! service construction -> RuntimeBuilder pipeline (see design.md "Data Flow").
 
 use ego_domain::Validate;
+use reference_app::read_side::UsersByTenantStore;
 use reference_app::{build_runtime, AppConfig};
 
 #[test]
@@ -36,6 +37,23 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
     assert!(
         pipeline_err.is_err(),
         "build_runtime must return Err before constructing any service"
+    );
+}
+
+// CORE-028 Stage 2 (task 5.2, design.md Testing Strategy): the design doc's
+// own test plan for this feature is exactly this cheap, non-async assertion
+// — the query handle `build_runtime`'s `.projection(...)` call registers
+// must be resolvable through the DI path. `e2e_register.rs` separately
+// proves the resolved handle observes live engine writes, which needs the
+// full HTTP/JWT stack; reachability alone does not.
+#[test]
+fn build_runtime_registers_the_read_model_as_a_resolvable_projection() {
+    let config = AppConfig::default();
+
+    let runtime = build_runtime(&config).expect("build_runtime succeeds");
+    assert!(
+        runtime.app.resolve_projection::<UsersByTenantStore>().is_ok(),
+        "UsersByTenantStore must be resolvable via the projection DI path after build"
     );
 }
 

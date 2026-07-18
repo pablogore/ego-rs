@@ -11,6 +11,16 @@ use std::any::TypeId;
 use std::ops::Deref;
 use std::sync::Arc;
 
+/// Registering a second projection instance for a type that already has one
+/// registered (CORE-028 Stage 2 design.md AD-1/AD-2). Strictly fail-closed —
+/// there is no override; the first registration is left untouched.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("projection already registered for type `{type_name}`")]
+pub struct DuplicateProjection {
+    /// The concrete projection type name that was already registered.
+    pub type_name: &'static str,
+}
+
 /// A reference to a read-model projection.
 pub struct ProjectionRef<P> {
     inner: Arc<P>,
@@ -134,5 +144,15 @@ mod tests {
         assert_ne!(projection_key, adapter_key);
         assert_ne!(projection_key, config_key);
         assert_ne!(adapter_key, config_key);
+    }
+
+    // CORE-028 Stage 2 (task 1.1): `DuplicateProjection` carries the concrete
+    // type name, mirroring `CompositionError::DuplicateAdapter`'s shape
+    // (`duplicate_adapter_carries_type_name`).
+    #[test]
+    fn duplicate_projection_carries_type_name() {
+        let err = DuplicateProjection { type_name: "MyProjection" };
+        assert_eq!(err.type_name, "MyProjection");
+        assert!(err.to_string().contains("MyProjection"));
     }
 }

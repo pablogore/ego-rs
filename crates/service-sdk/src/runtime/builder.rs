@@ -20,7 +20,7 @@ use persistent_entity::data_provider_access::DataProviderAccess;
 use persistent_entity::effect_acceptor::EffectAcceptor;
 
 use crate::contract::{ServiceContract, VersionConstraint};
-use crate::di::Injectable;
+use crate::di::{DuplicateProjection, Injectable};
 use crate::interceptor::InterceptorChain;
 use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
@@ -72,6 +72,10 @@ pub struct RuntimeBuilder {
     logger: Option<Arc<KITLogger>>,
     adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Projections registered via [`RuntimeBuilder::with_projection`]
+    /// (CORE-028 Stage 2). Fail-closed on a duplicate type — unlike
+    /// `adapters`/`configs`'s last-write-wins semantics (AD-1/AD-2).
+    projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     tenant_enforcement_mode: TenantEnforcementMode,
     /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
     /// Read only by `try_build()`; has no effect on `build()` (AD-3).
@@ -117,6 +121,7 @@ impl RuntimeBuilder {
             logger: None,
             adapters: HashMap::new(),
             configs: HashMap::new(),
+            projections: HashMap::new(),
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             validators: Vec::new(),
             observability: None,
@@ -170,6 +175,28 @@ impl RuntimeBuilder {
     pub fn with_config<C: Send + Sync + 'static>(mut self, value: Arc<C>) -> Self {
         self.configs.insert(TypeId::of::<C>(), value as Arc<dyn Any + Send + Sync>);
         self
+    }
+
+    /// Registers a projection instance, resolvable via
+    /// `RuntimeInner::resolve_projection::<P>()` (CORE-028 Stage 2 design.md
+    /// AD-1). Fails closed on a duplicate registration for the same concrete
+    /// type `P` — mirroring `register_effect_executor`/`register_data_provider`'s
+    /// fallible, dedicated-error contract, not `with_adapter`/`with_config`'s
+    /// last-write-wins. The first registration is left untouched on `Err`;
+    /// there is no `replace_projection` escape hatch (AD-2) — a duplicate is
+    /// always a bootstrap bug, never an intended override.
+    pub fn with_projection<P: Send + Sync + 'static>(
+        mut self,
+        projection: Arc<P>,
+    ) -> Result<Self, DuplicateProjection> {
+        let type_id = TypeId::of::<P>();
+        if self.projections.contains_key(&type_id) {
+            return Err(DuplicateProjection {
+                type_name: std::any::type_name::<P>(),
+            });
+        }
+        self.projections.insert(type_id, projection as Arc<dyn Any + Send + Sync>);
+        Ok(self)
     }
 
     /// Registers a service implementation under `Tag`, resolvable later via
@@ -353,7 +380,7 @@ impl RuntimeBuilder {
                 self.registry,
                 self.interceptor_chain,
                 security_providers,
-                DependencyTable::with_registrations(self.adapters, self.configs),
+                DependencyTable::with_registrations(self.adapters, self.configs, self.projections),
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
@@ -884,6 +911,58 @@ mod tests {
         assert_eq!(*resolved, StubConfig("second".to_string()));
     }
 
+    // -- CORE-028 Stage 2: RuntimeBuilder::with_projection -------------------
+
+    #[derive(Debug, PartialEq)]
+    struct StubProjection(u32);
+
+    #[test]
+    fn with_projection_registers_and_resolves() {
+        let rt = RuntimeBuilder::new()
+            .with_projection(Arc::new(StubProjection(7)))
+            .unwrap()
+            .build();
+
+        let resolved = rt.inner().resolve_projection::<StubProjection>();
+        assert!(resolved.is_ok());
+        assert_eq!(*resolved.unwrap(), StubProjection(7));
+    }
+
+    #[test]
+    fn with_projection_rejects_duplicate_and_retains_first() {
+        let builder = RuntimeBuilder::new()
+            .with_projection(Arc::new(StubProjection(1)))
+            .unwrap();
+
+        let err = match builder.clone().with_projection(Arc::new(StubProjection(2))) {
+            Err(e) => e,
+            Ok(_) => panic!("a second registration for the same projection type must fail closed"),
+        };
+        assert_eq!(err.type_name, std::any::type_name::<StubProjection>());
+
+        // The runtime built from the ORIGINAL (first-registration) builder
+        // must still resolve the first value — no replacement occurred.
+        let rt = builder.build();
+        let resolved = rt.inner().resolve_projection::<StubProjection>().unwrap();
+        assert_eq!(*resolved, StubProjection(1));
+    }
+
+    #[test]
+    fn resolve_projection_unregistered_returns_dependency_not_found() {
+        let rt = RuntimeBuilder::new().build();
+        let err = rt
+            .inner()
+            .resolve_projection::<StubProjection>()
+            .err()
+            .expect("unregistered projection must fail to resolve");
+        match err {
+            RuntimeError::DependencyNotFound { type_name, .. } => {
+                assert_eq!(type_name, std::any::type_name::<StubProjection>());
+            }
+            other => panic!("expected DependencyNotFound naming StubProjection, got {other:?}"),
+        }
+    }
+
     // -- CORE-120: chained registration --------------------------------------
 
     #[derive(Debug, PartialEq)]
@@ -976,7 +1055,7 @@ mod tests {
 
     use std::any::TypeId;
 
-    use crate::di::{AdapterRef, ConfigValue, DepKey, Injectable};
+    use crate::di::{AdapterRef, ConfigValue, DepKey, Injectable, ProjectionRef};
     use crate::runtime::RuntimeInner;
 
     struct NeedsAdapter {
@@ -1032,6 +1111,59 @@ mod tests {
 
         fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
             Ok(Self { limit: rt.resolve_config::<u32>()? })
+        }
+    }
+
+    // -- CORE-028 Stage 2 Phase 3: Injectable integration proof for
+    // projections (mirrors NeedsAdapter/NeedsConfig above) --------------------
+
+    struct NeedsProjection {
+        #[allow(dead_code)]
+        projection: ProjectionRef<StubProjection>,
+    }
+
+    impl Injectable for NeedsProjection {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Projection(
+                TypeId::of::<StubProjection>(),
+                std::any::type_name::<StubProjection>(),
+            )]
+        }
+
+        fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(Self {
+                projection: rt.resolve_projection::<StubProjection>()?,
+            })
+        }
+    }
+
+    #[test]
+    fn try_build_succeeds_when_declared_projection_dependency_is_registered() {
+        let rt = RuntimeBuilder::new()
+            .with_projection(Arc::new(StubProjection(9)))
+            .unwrap()
+            .with_injectable::<NeedsProjection>()
+            .try_build()
+            .expect("declared projection dependency is registered, try_build must succeed");
+
+        let svc = NeedsProjection::build(rt.inner())
+            .expect("build() succeeds using the same registered projection try_build validated");
+        assert_eq!(*svc.projection, StubProjection(9));
+    }
+
+    #[test]
+    fn try_build_fails_before_startup_when_declared_projection_dependency_is_missing() {
+        let err = match RuntimeBuilder::new().with_injectable::<NeedsProjection>().try_build() {
+            Err(e) => e,
+            Ok(_) => panic!("try_build must fail fast when the declared projection dependency is missing"),
+        };
+
+        match err {
+            RuntimeError::DependencyNotFound { type_name, service_name } => {
+                assert_eq!(type_name, std::any::type_name::<StubProjection>());
+                assert_eq!(service_name, Some(std::any::type_name::<NeedsProjection>()));
+            }
+            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
         }
     }
 

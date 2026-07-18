@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
+use reference_app::read_side::UsersByTenantStore;
 use reference_app::{build_runtime, AppConfig, BuiltRuntime};
 use support::make_token;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,6 +83,13 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let read_side_runtime = read_side_handles.spawn();
     app.register_shutdown(read_side_runtime.stop());
 
+    // CORE-028 Stage 2 (task 5.2): the query handle registered via
+    // `build_runtime`'s `.projection(...)` call is resolvable through the DI
+    // path, not just the hand-wired `read_side_handles.query` above.
+    let projected = app
+        .resolve_projection::<UsersByTenantStore>()
+        .expect("UsersByTenantStore is resolvable via the projection DI path");
+
     let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, query);
 
@@ -103,6 +111,21 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let response = http_post(addr, Some(&format!("Bearer {token}")), &body).await;
     assert!(response.contains("201"), "expected 201, got: {response}");
     assert!(response.contains("\"user_id\":\"user-1\""), "expected body to echo user_id: {response}");
+
+    // The DI-resolved handle observes the read-side engine's writes — proof
+    // it shares live state with `read_side_handles.query`, not a frozen
+    // snapshot taken at registration time (design.md AD-5).
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let view = projected.view("tenant-a");
+            if view.org_name.as_deref() == Some("Acme") && !view.users.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the read-side engine must eventually project into the DI-resolved handle");
 
     shutdown_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(2), server)

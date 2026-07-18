@@ -238,6 +238,13 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let register_user = Arc::new(RegisterUserImpl::new(org_runtime, user_runtime, None).with_read_side_sink(read_side_sink));
 
     let mut builder = App::builder().security(authn.clone(), authz);
+    // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
+    // query-side `UsersByTenantStore` — distinct from the untouched read-side
+    // *engine* path above (`ReadSideHandles`/`TagSchedulerImpl::spawn_projection`,
+    // which keeps producing into it). `UsersByTenantStore` is `Clone` over an
+    // internal `Arc<RwLock<_>>` (read_side/projection.rs), so this clone
+    // shares live state with the engine-fed store, not a frozen snapshot.
+    builder = builder.projection(Arc::new(read_side_handles.query.clone()));
     // FLAG (design.md AD-3, task 5.1): `RegisterUserImpl` does not — and, as
     // built today, cannot cheaply — implement `Injectable`. Its two
     // `EntityRuntime`s aren't `AdapterRef`/`ConfigValue`-resolvable (no
