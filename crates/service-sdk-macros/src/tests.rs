@@ -49,4 +49,68 @@ mod tests {
         // Verify the trait is parsed correctly
         assert!(!service_trait.is_empty());
     }
+
+    // -------------------------------------------------------------------
+    // CORE-028 Stage 2B (task 2.1) — `ServiceArgs` gains an `impl_of`
+    // field. These reference `crate::ServiceArgs::impl_of` and
+    // `crate::tag_path_from_impl_of`, neither of which exist yet — RED.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn service_args_parses_bare_ident_impl_of() {
+        let args: crate::ServiceArgs = parse_quote! { impl_of = MyTrait };
+        assert!(args.version.is_none());
+        let path = args.impl_of.expect("impl_of must parse");
+        assert_eq!(path.segments.len(), 1);
+        assert_eq!(path.segments.last().unwrap().ident, "MyTrait");
+    }
+
+    #[test]
+    fn service_args_parses_path_qualified_impl_of() {
+        let args: crate::ServiceArgs = parse_quote! { impl_of = crate::foo::MyTrait };
+        let path = args.impl_of.expect("impl_of must parse");
+        assert_eq!(path.segments.len(), 3);
+        assert_eq!(path.segments[0].ident, "crate");
+        assert_eq!(path.segments[1].ident, "foo");
+        assert_eq!(path.segments.last().unwrap().ident, "MyTrait");
+    }
+
+    #[test]
+    fn service_args_parses_version_and_impl_of_combined() {
+        let args: crate::ServiceArgs = parse_quote! { version = "1.2.3", impl_of = MyTrait };
+        assert_eq!(args.version.as_deref(), Some("1.2.3"));
+        assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
+    }
+
+    #[test]
+    fn service_args_parses_impl_of_before_version() {
+        let args: crate::ServiceArgs = parse_quote! { impl_of = MyTrait, version = "2.0.0" };
+        assert_eq!(args.version.as_deref(), Some("2.0.0"));
+        assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
+    }
+
+    // Tag ident derives from the final path segment (`MyTraitTag`) while the
+    // trait reference itself preserves the full module path — the two
+    // things `impl_of`'s codegen must get right independently (task 2.1).
+    #[test]
+    fn tag_path_derives_final_segment_ident_and_preserves_module_path() {
+        let path: syn::Path = parse_quote! { crate::foo::MyTrait };
+        let tag_path = crate::tag_path_from_impl_of(&path);
+
+        assert_eq!(tag_path.segments.last().unwrap().ident, "MyTraitTag");
+        assert_eq!(tag_path.segments.len(), 3, "module path segments must be preserved");
+        assert_eq!(tag_path.segments[0].ident, "crate");
+        assert_eq!(tag_path.segments[1].ident, "foo");
+
+        // The original path (used for the `dyn Trait` reference) is untouched.
+        assert_eq!(path.segments.last().unwrap().ident, "MyTrait");
+    }
+
+    #[test]
+    fn tag_path_for_bare_ident_impl_of() {
+        let path: syn::Path = parse_quote! { MyTrait };
+        let tag_path = crate::tag_path_from_impl_of(&path);
+        assert_eq!(tag_path.segments.len(), 1);
+        assert_eq!(tag_path.segments.last().unwrap().ident, "MyTraitTag");
+    }
 }

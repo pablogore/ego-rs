@@ -38,21 +38,56 @@ use syn::{parse_macro_input, Ident, ItemFn, ItemStruct, ItemTrait, TraitItem};
 #[derive(Debug)]
 struct ServiceArgs {
     version: Option<String>,
+    /// CORE-028 Stage 2B: names the trait a `#[service]` struct implements,
+    /// linking it to that trait's resolution Tag (`impl_of = Trait` or
+    /// `impl_of = crate::path::Trait`). `None` on trait annotations and on
+    /// struct annotations with no trait link (unchanged pre-Stage-2B
+    /// behavior).
+    impl_of: Option<syn::Path>,
 }
 
 impl Parse for ServiceArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut version = None;
-        if input.peek(syn::Ident) {
+        let mut impl_of = None;
+        while !input.is_empty() {
             let ident: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
             if ident == "version" {
-                input.parse::<syn::Token![=]>()?;
                 let version_lit: syn::LitStr = input.parse()?;
                 version = Some(version_lit.value());
+            } else if ident == "impl_of" {
+                let path: syn::Path = input.parse()?;
+                impl_of = Some(path);
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("unknown #[service] argument `{ident}` — expected `version` or `impl_of`"),
+                ));
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
             }
         }
-        Ok(ServiceArgs { version })
+        Ok(ServiceArgs { version, impl_of })
     }
+}
+
+/// Derives the resolution-Tag path from an `impl_of` trait path (CORE-028
+/// Stage 2B, task 2.1/2.4): the ident portion is the final path segment plus
+/// `Tag` (`Trait` -> `TraitTag`), while any module-path prefix is preserved
+/// unchanged — the generated `Tag` type lives in the same module the trait
+/// macro expanded it into, so a path-qualified `impl_of` must stay
+/// path-qualified to resolve. The original `path` argument (used for the
+/// `dyn Trait` coercion target) is never mutated by this function.
+fn tag_path_from_impl_of(path: &syn::Path) -> syn::Path {
+    let mut tag_path = path.clone();
+    let last = tag_path
+        .segments
+        .last_mut()
+        .expect("a parsed syn::Path always has at least one segment");
+    last.ident = format_ident!("{}Tag", last.ident);
+    tag_path
 }
 
 /// Declares a service contract on a trait (generates Tag, Ref, ServiceContract) or on a struct (generates Injectable).
@@ -63,7 +98,7 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
     if let Ok(input_trait) = syn::parse::<ItemTrait>(input.clone()) {
         expand_service_trait(input_trait, service_args)
     } else if let Ok(input_struct) = syn::parse::<ItemStruct>(input.clone()) {
-        expand_service_struct(input_struct)
+        expand_service_struct(input_struct, service_args)
     } else {
         let err = syn::Error::new(
             Span::call_site(),
@@ -75,6 +110,15 @@ pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> TokenStream {
+    if service_args.impl_of.is_some() {
+        let err = syn::Error::new(
+            Span::call_site(),
+            "#[service] `impl_of` is only valid on a struct annotation (links the struct to the trait's resolution Tag) — it has no effect on a trait annotation",
+        )
+        .to_compile_error();
+        return TokenStream::from(err);
+    }
+
     let trait_name = &input_trait.ident;
     let tag_name = Ident::new(&format!("{}Tag", trait_name), trait_name.span());
     let ref_name = Ident::new(&format!("{}Ref", trait_name), trait_name.span());
@@ -551,7 +595,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
     TokenStream::from(expanded)
 }
 
-fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
+fn expand_service_struct(input_struct: ItemStruct, service_args: ServiceArgs) -> TokenStream {
     let struct_name = &input_struct.ident;
 
     let mut dep_keys: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -573,6 +617,33 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
         }
     }
 
+    // CORE-028 Stage 2B (tasks 2.3/2.4): `impl_of = Trait` generates the
+    // link from this struct to `Trait`'s resolution Tag, plus the concrete
+    // `Arc<Self> -> Arc<dyn Trait>` coercion the marker trait's contract
+    // requires. Absent, this is a no-op — a bare `#[service]` struct is
+    // unaffected (spec.md "Bare `#[service]` struct usage is unaffected").
+    let has_service_tag_impl = service_args.impl_of.map(|trait_path| {
+        let tag_path = tag_path_from_impl_of(&trait_path);
+        quote! {
+            impl ego_service_sdk::runtime::HasServiceTag for #struct_name {
+                type Tag = #tag_path;
+
+                // Written as a literal `dyn Trait` (not the trait's abstract
+                // `<Self::Tag as Resolvable>::Service` projection) — this is
+                // what makes the coercion an ordinary concrete unsize
+                // coercion rather than the invalid generic bound design.md's
+                // E0405 spike ruled out. `<#tag_path as Resolvable>::Service`
+                // normalizes to this exact `dyn #trait_path` at the trait's
+                // own expansion site, so the impl still satisfies the
+                // trait's abstract signature (design.md's associated-type
+                // projection-equality decision).
+                fn into_service(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn #trait_path> {
+                    self
+                }
+            }
+        }
+    });
+
     let expanded = quote! {
         #input_struct
 
@@ -590,6 +661,8 @@ fn expand_service_struct(input_struct: ItemStruct) -> TokenStream {
                 })
             }
         }
+
+        #has_service_tag_impl
     };
 
     TokenStream::from(expanded)

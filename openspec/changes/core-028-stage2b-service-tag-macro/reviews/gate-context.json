@@ -1,0 +1,9 @@
+{
+  "lineage": "core-028-stage2b-service-tag-macro",
+  "expected_pr1_head": "ffb443d1e514d3632fa8b3c738dd70b209a44977",
+  "expected_pr2_head": "3aa70f17a1c9c4490a34b289b8ef3c59c6e0b8e0",
+  "expected_base": "cc310863b0a96d02b03e56aa10055eb763ca42c1",
+  "genesis": "review/start(core-028-stage2b-service-tag-macro)",
+  "note": "expected_pr1_head is the last code-bearing commit reviewed (ffb443d). A subsequent docs-only commit persisting these review reports to the branch does not change bound code content.",
+  "instruction": "Pre-commit/pre-push/pre-PR gates for this change must confirm the branches are still at the expected heads above before treating receipt.json as valid; any new commit invalidates it and requires explicit maintainer action (scope-changed), not a silent re-review."
+}

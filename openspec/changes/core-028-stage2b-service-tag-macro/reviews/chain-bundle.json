@@ -1,0 +1,11 @@
+{
+  "note": "Non-authoritative OpenSpec mirror of the review chain (no CAS store configured for this repo). Authoritative state is this directory's ledger.json/receipt.json plus the actual git commits referenced below.",
+  "lineage": "core-028-stage2b-service-tag-macro",
+  "chain": [
+    { "event": "review/start", "target": "PR1+PR2 combined diff vs develop", "lens": "review-reliability" },
+    { "event": "findings_frozen", "findings": ["RELIABILITY-001", "RELIABILITY-002"] },
+    { "event": "correction", "work_unit": 1, "fix_commit": "ffb443d1e514d3632fa8b3c738dd70b209a44977" },
+    { "event": "scoped_fix_validation", "outcome": "approve" },
+    { "event": "final", "status": "approved" }
+  ]
+}
