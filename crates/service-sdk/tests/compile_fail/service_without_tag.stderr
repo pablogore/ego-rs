@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `UnlinkedService: HasServiceTag` is not satisfied
+  --> tests/compile_fail/service_without_tag.rs:16:28
+   |
+16 |     requires_service_tag::<UnlinkedService>();
+   |                            ^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `HasServiceTag` is not implemented for `UnlinkedService`
+  --> tests/compile_fail/service_without_tag.rs:11:1
+   |
+11 | struct UnlinkedService;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `requires_service_tag`
+  --> tests/compile_fail/service_without_tag.rs:13:28
+   |
+13 | fn requires_service_tag<S: HasServiceTag>() {}
+   |                            ^^^^^^^^^^^^^ required by this bound in `requires_service_tag`
