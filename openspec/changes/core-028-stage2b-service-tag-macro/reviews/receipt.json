@@ -1,0 +1,17 @@
+{
+  "lineage": "core-028-stage2b-service-tag-macro",
+  "status": "approved",
+  "bound_content": {
+    "pr1_branch": "opsx/core-028-stage2b-pr1-service-tag-trait",
+    "pr1_sha": "ffb443d1e514d3632fa8b3c738dd70b209a44977",
+    "pr2_branch": "opsx/core-028-stage2b-pr2-appbuilder-service",
+    "pr2_sha": "3aa70f17a1c9c4490a34b289b8ef3c59c6e0b8e0",
+    "base_branch": "develop",
+    "base_sha": "cc310863b0a96d02b03e56aa10055eb763ca42c1"
+  },
+  "policy_ref": "openspec/changes/core-028-stage2b-service-tag-macro/reviews/policy.md",
+  "ledger_ref": "openspec/changes/core-028-stage2b-service-tag-macro/reviews/ledger.json",
+  "open_severe_findings": 0,
+  "summary": "1 lens (review-reliability) run on the combined PR1+PR2 diff. 1 CRITICAL deterministic finding (RELIABILITY-001) corroborated, fixed in commit ffb443d, scoped fix-delta validator approved. 1 WARNING finding (RELIABILITY-002) recorded as non-blocking info. No open severe findings remain.",
+  "note": "Any new commit on either branch after ffb443d/3aa70f1 changes bound_content and invalidates this receipt for pre-commit/pre-push/pre-PR validation."
+}

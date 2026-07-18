@@ -1,0 +1,20 @@
+{
+  "lineage": "core-028-stage2b-service-tag-macro",
+  "mode": "openspec-mirror",
+  "genesis": {
+    "base_branch": "develop",
+    "base_sha": "cc310863b0a96d02b03e56aa10055eb763ca42c1",
+    "pr1_branch": "opsx/core-028-stage2b-pr1-service-tag-trait",
+    "pr2_branch": "opsx/core-028-stage2b-pr2-appbuilder-service"
+  },
+  "initial_lens_sweeps": 1,
+  "correction_transactions": 1,
+  "correction_work_units": 1,
+  "scoped_fix_validators": 1,
+  "refuter_batches": 0,
+  "final_state": "approved",
+  "final_snapshot": {
+    "pr1_sha": "ffb443d1e514d3632fa8b3c738dd70b209a44977",
+    "pr2_sha": "3aa70f17a1c9c4490a34b289b8ef3c59c6e0b8e0"
+  }
+}

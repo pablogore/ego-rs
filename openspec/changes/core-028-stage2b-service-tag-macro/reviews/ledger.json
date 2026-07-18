@@ -1,0 +1,34 @@
+{
+  "lineage": "core-028-stage2b-service-tag-macro",
+  "findings": [
+    {
+      "id": "RELIABILITY-001",
+      "lens": "reliability",
+      "location": "crates/service-sdk-macros/src/lib.rs:112-142",
+      "severity": "CRITICAL",
+      "claim": "#[service(impl_of = Trait)] on a trait annotation parsed successfully but was silently discarded by expand_service_trait, producing no error/warning/effect.",
+      "evidence_class": "deterministic",
+      "proof_refs": [
+        "crates/service-sdk-macros/src/lib.rs:117 (only read of service_args.version in expand_service_trait, no read of impl_of)",
+        "crates/service-sdk-macros/src/lib.rs:616 (impl_of only consulted in expand_service_struct)"
+      ],
+      "status": "fixed",
+      "fix_commit": "ffb443d1e514d3632fa8b3c738dd70b209a44977",
+      "fix_branch": "opsx/core-028-stage2b-pr1-service-tag-trait",
+      "scoped_validator_outcome": "approve"
+    },
+    {
+      "id": "RELIABILITY-002",
+      "lens": "reliability",
+      "location": "crates/service-sdk/tests/service_tag_codegen.rs:7-18, crates/service-sdk-macros/src/tests.rs:68-107",
+      "severity": "WARNING",
+      "claim": "Path-qualified impl_of (e.g. crate::foo::Trait) is verified only at the string/AST-transform level, never through a real cross-module macro expansion + compile.",
+      "evidence_class": "deterministic",
+      "proof_refs": [
+        "crates/service-sdk-macros/src/tests.rs:68-76,96-107 (unit-level path transform only)",
+        "crates/service-sdk/tests/compile_pass/service_impl_of_with_version.rs:15-22 (same-module/bare-ident only)"
+      ],
+      "status": "info"
+    }
+  ]
+}
