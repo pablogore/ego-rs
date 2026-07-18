@@ -58,7 +58,7 @@ use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 
-use crate::di::{AdapterRef, ConfigValue, Injectable};
+use crate::di::{AdapterRef, ConfigValue, Injectable, ProjectionRef};
 use crate::runtime::{Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver};
 
 pub use error::CompositionError;
@@ -166,6 +166,18 @@ impl App {
         &self,
     ) -> Result<ConfigValue<C>, crate::runtime::RuntimeError> {
         self.runtime.inner().resolve_config::<C>()
+    }
+
+    /// Resolves a registered projection directly (CORE-028 Stage 2) — the
+    /// same production resolution path `Injectable::build`-generated fields
+    /// use, mirroring [`Self::resolve_adapter`]/[`Self::resolve_config`]
+    /// (review F4 pattern) for the same reason: proving a projection
+    /// registered via [`AppBuilder::projection`] is reachable without
+    /// requiring a fabricated `Injectable` consumer.
+    pub fn resolve_projection<P: Send + Sync + 'static>(
+        &self,
+    ) -> Result<ProjectionRef<P>, crate::runtime::RuntimeError> {
+        self.runtime.inner().resolve_projection::<P>()
     }
 
     /// Registers a shutdown participant — e.g. a spawned read-side
@@ -278,6 +290,32 @@ impl AppBuilder {
         }
         self.runtime_builder = self.runtime_builder.with_config(value);
         self
+    }
+
+    /// Registers a projection instance — thin delegation to
+    /// [`RuntimeBuilder::with_projection`] (CORE-028 Stage 2 design.md AD-3),
+    /// following the exact clone-then-call + `pending_error` shape
+    /// `.effect_executor()`/`.data_provider()` already use. Fail-closed on a
+    /// duplicate registration for the same concrete type is already enforced
+    /// by `RuntimeBuilder` (AD-1/AD-2) — this facade never adds a second
+    /// guard. A `.projection(...)`-registered value never requires the
+    /// caller to construct or reach into `RuntimeBuilder` — this signature
+    /// is the whole proof (spec: "No internal runtime type is required to
+    /// register a projection").
+    pub fn projection<P: Send + Sync + 'static>(mut self, projection: Arc<P>) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        match self.runtime_builder.clone().with_projection(projection) {
+            Ok(builder) => {
+                self.runtime_builder = builder;
+                self
+            }
+            Err(err) => {
+                self.pending_error = Some(CompositionError::Projection(err));
+                self
+            }
+        }
     }
 
     /// Registers a pre-initialized logger — thin delegation to
@@ -669,6 +707,65 @@ mod tests {
             Err(other) => panic!("expected CompositionError::DataProvider, got {other:?}"),
             Ok(_) => panic!("expected duplicate provider_id registration to fail"),
         }
+    }
+
+    // -- CORE-028 Stage 2 Phase 4: AppBuilder::projection() facade ----------
+
+    #[derive(Debug, PartialEq)]
+    struct StubProjection(u32);
+
+    // Task 4.1 (RED): `.projection(...)` registers and resolves after
+    // `build()` (spec "A projection registered via AppBuilder resolves after
+    // build").
+    #[test]
+    fn projection_registers_and_resolves() {
+        let app = App::builder()
+            .projection(Arc::new(StubProjection(7)))
+            .build()
+            .expect("build succeeds");
+
+        let resolved = app.resolve_projection::<StubProjection>();
+        assert!(resolved.is_ok());
+        assert_eq!(*resolved.unwrap(), StubProjection(7));
+    }
+
+    // Task 4.2 (RED): a second registration for the same type surfaces at
+    // `.build()` as `CompositionError::Projection`, never silently replaced
+    // (spec "Duplicate ... fails closed", "surfaced through `build()`").
+    #[test]
+    fn projection_rejects_duplicate_registration_at_build() {
+        let result = App::builder()
+            .projection(Arc::new(StubProjection(1)))
+            .projection(Arc::new(StubProjection(2)))
+            .build();
+
+        match result {
+            Err(CompositionError::Projection(_)) => {}
+            Err(other) => panic!("expected CompositionError::Projection, got {other:?}"),
+            Ok(_) => panic!("expected duplicate projection registration to fail"),
+        }
+    }
+
+    // Task 4.4 (RED/GREEN): registering the same projection directly on
+    // `RuntimeBuilder` vs. through `AppBuilder::projection(...)` must be
+    // observably equivalent (spec "Registration is equivalent whether
+    // performed via RuntimeBuilder or AppBuilder").
+    #[test]
+    fn runtimebuilder_and_appbuilder_projection_registration_are_equivalent() {
+        let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_projection(Arc::new(StubProjection(42)))
+            .unwrap()
+            .build();
+        let resolved_via_runtime_builder =
+            via_runtime_builder.inner().resolve_projection::<StubProjection>().unwrap();
+
+        let via_app_builder = App::builder()
+            .projection(Arc::new(StubProjection(42)))
+            .build()
+            .expect("build succeeds");
+        let resolved_via_app_builder = via_app_builder.resolve_projection::<StubProjection>().unwrap();
+
+        assert_eq!(*resolved_via_runtime_builder, *resolved_via_app_builder);
     }
 
     // Task 1.8 (RED/GREEN): constructing an application starts nothing —

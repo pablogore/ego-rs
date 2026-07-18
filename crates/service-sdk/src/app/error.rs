@@ -10,6 +10,7 @@
 use ego_runtime::effects::DuplicateEffectType;
 use ego_runtime::providers::DuplicateProviderId;
 
+use crate::di::DuplicateProjection;
 use crate::registry::RegistryError;
 use crate::runtime::{RuntimeError, RuntimeInfraError};
 
@@ -40,6 +41,10 @@ pub enum CompositionError {
     /// A data provider registration was rejected (duplicate provider id).
     #[error("data provider registration failed: {0}")]
     DataProvider(#[from] DuplicateProviderId),
+    /// A projection registration was rejected (duplicate projection type,
+    /// CORE-028 Stage 2 AD-4).
+    #[error("projection registration failed: {0}")]
+    Projection(#[from] DuplicateProjection),
     /// The config-to-logger pipeline failed during initialization.
     #[error("logger initialization failed: {0}")]
     Logger(RuntimeInfraError),
@@ -99,5 +104,21 @@ mod tests {
     fn validation_wraps_service_not_found_variant_too() {
         let err: CompositionError = RuntimeError::ServiceNotFound.into();
         assert!(matches!(err, CompositionError::Validation(RuntimeError::ServiceNotFound)));
+    }
+
+    // Task 1.4: `CompositionError::Projection` round-trips a `DuplicateProjection`
+    // via `.into()`, mirroring `validation_wraps_service_not_found_variant_too`.
+    #[test]
+    fn projection_wraps_duplicate_projection_variant() {
+        use crate::di::DuplicateProjection;
+
+        let inner = DuplicateProjection { type_name: "MyProjection" };
+        let err: CompositionError = inner.into();
+        match err {
+            CompositionError::Projection(DuplicateProjection { type_name }) => {
+                assert_eq!(type_name, "MyProjection");
+            }
+            other => panic!("expected Projection(DuplicateProjection), got {other:?}"),
+        }
     }
 }

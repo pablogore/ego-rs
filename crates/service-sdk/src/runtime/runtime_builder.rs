@@ -64,14 +64,17 @@ impl DependencyTable {
         }
     }
 
-    /// Builds a table from host-registered adapters/configs (`RuntimeBuilder`),
-    /// with no registered projections. Takes both maps as named parameters so
-    /// they can't be silently transposed at the call site.
+    /// Builds a table from host-registered adapters/configs/projections
+    /// (`RuntimeBuilder`). Takes all three maps as named parameters so they
+    /// can't be silently transposed at the call site (CORE-028 Stage 2: was
+    /// `with_registrations(adapters, configs)`, always hardcoding an empty
+    /// `projections` map — now threaded through from `RuntimeBuilder::with_projection`).
     pub(super) fn with_registrations(
         adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
         configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+        projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     ) -> Self {
-        Self { projections: HashMap::new(), adapters, configs }
+        Self { projections, adapters, configs }
     }
 
     fn resolve_projection<T: 'static + Send + Sync>(
@@ -550,7 +553,7 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             None,
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
@@ -571,7 +574,7 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             None,
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
@@ -594,7 +597,7 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((Arc::new(NoopTestAuthn) as Arc<dyn AuthenticationProvider>, provider)),
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
@@ -1219,7 +1222,7 @@ mod tests {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((authn, authz)),
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
