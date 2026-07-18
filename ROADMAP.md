@@ -1,0 +1,1054 @@
+# ego.rs Roadmap
+
+> Updated: 2026-07-18
+> Status: Active
+> Source of truth: current `develop` branch, archived OpenSpec changes, and living specs.
+
+## 1. Vision
+
+ego.rs is a Rust framework for building reliable, secure, multi-tenant, event-driven services with a strong developer experience.
+
+The framework combines:
+
+* Actor-based execution
+* Persistent entities
+* Event sourcing
+* CQRS read-side projections
+* Typed dependency injection
+* Authentication and authorization
+* Tenant isolation
+* Reliable external effects
+* External data providers
+* Application composition
+* Test infrastructure
+* Explicit architectural boundaries
+
+The next evolution focuses on four areas:
+
+1. Finalize the high-level developer API.
+2. Add reliable distributed messaging and integration patterns.
+3. Add durable workflow orchestration.
+4. Harden the framework for production operation and multi-node deployments.
+
+---
+
+# 2. Current State
+
+## 2.1 Completed Foundation
+
+The following capabilities are implemented and considered complete or archived.
+
+### Runtime and Persistence
+
+* [x] CORE-002 — Actor Model
+* [x] CORE-003 — Runtime Execution
+* [x] CORE-005 — CQRS Read Side
+* [x] CORE-006 — Persistent Entity Runtime
+* [x] CORE-006A — Activation Authority
+
+### Security and Multi-Tenancy
+
+* [x] CORE-008A — Tenant Enforcement
+* [x] CORE-008B — Runtime Cleanup
+* [x] CORE-011A — Key Resolver Architecture
+* [x] CORE-012A — Security Observability
+* [x] CORE-013 — JWT Providers
+* [x] CORE-014 — Authorization Providers
+* [x] CORE-015 — Declarative Authorization
+* [x] CORE-021 — API Key Authentication
+* [x] CORE-024 — Validate Tenant Once
+
+### Configuration and Runtime Infrastructure
+
+* [x] CORE-016 — Application Configuration Model
+* [x] CORE-017 — Runtime Infrastructure Integration
+* [x] CORE-018A — Host Configuration Example
+* [x] CORE-018B — Runtime Construction Restriction
+* [x] CORE-018 — Production-Shaped Reference Service
+
+### Service Developer Experience
+
+* [x] CORE-022 — TestKit
+* [x] CORE-025 — Service SDK Ergonomics
+* [x] CORE-027 — Foundation Integrity Gate
+
+### External Integration
+
+* [x] CORE-019 — Reliable External Effects
+* [x] CORE-019A — External Data Providers
+
+---
+
+# 3. CORE-028 — Developer Experience
+
+CORE-028 evolves ego.rs from a collection of runtime builders and infrastructure APIs into a coherent application-level developer experience.
+
+The target is a composition model where application code declares what it needs while ego.rs owns construction, validation, lifecycle, and shutdown.
+
+Target direction:
+
+```rust
+let app = App::builder()
+    .adapter(postgres)
+    .config(config)
+    .entity::<OrderEntity>(...)
+    .projection(orders_by_customer)
+    .service::<OrderService>()
+    .security(authn, authz)
+    .build()?;
+
+let running = app.start().await?;
+
+running.shutdown().await?;
+```
+
+---
+
+## 3.1 CORE-028 Stage 1 — Application Composition
+
+Status: COMPLETE
+
+Delivered:
+
+* [x] `App`
+* [x] `AppBuilder`
+* [x] `RunningApp`
+* [x] `CompositionError`
+* [x] Adapter registration
+* [x] Typed configuration registration
+* [x] Logger registration
+* [x] Authentication and authorization registration
+* [x] Observability registration
+* [x] External effect executor registration
+* [x] External data provider registration
+* [x] Service registration
+* [x] Service instance escape hatch
+* [x] Build validation
+* [x] Application startup
+* [x] Shutdown lifecycle
+* [x] Runtime resolution facade
+* [x] Reference application migration
+* [x] End-to-end verification
+* [x] OpenSpec archive
+
+`AppBuilder` remains a thin composition facade over the lower-level runtime infrastructure.
+
+Transport ownership remains outside `App`.
+
+---
+
+## 3.2 CORE-028 Stage 2A — Projection Registration
+
+Status: COMPLETE
+
+Delivered:
+
+* [x] `RuntimeBuilder::with_projection(...)`
+* [x] `AppBuilder::projection(...)`
+* [x] `App::resolve_projection(...)`
+* [x] `ProjectionRef<P>`
+* [x] Projection dependency injection
+* [x] Duplicate projection detection
+* [x] Fail-closed registration
+* [x] RuntimeBuilder/AppBuilder behavioral equivalence
+* [x] Reference application proof
+* [x] Living spec synchronization
+* [x] OpenSpec archive
+
+This slice adds projection registration and resolution without changing the existing read-side execution engine.
+
+---
+
+## 3.3 CORE-028 Stage 2B — Service-to-Tag Binding
+
+Status: COMPLETE
+
+Goal:
+
+Remove unnecessary service registration boilerplate.
+
+Previous shape:
+
+```rust
+.service::<OrderServiceImpl, OrderServiceTag>(|service| service)
+```
+
+Delivered shape:
+
+```rust
+.service::<OrderServiceImpl>()
+```
+
+The generated service metadata provides the relationship between:
+
+```text
+Service implementation
+        │
+        ▼
+Service contract
+        │
+        ▼
+Generated ServiceTag
+```
+
+Delivered:
+
+* [x] `#[service(impl_of = Trait)]` macro argument — links a struct annotation to its service trait
+* [x] `HasServiceTag` marker trait (assoc `Tag`, `into_service` coercion) generated by the macro
+* [x] `AppBuilder::service::<S>()` — single type parameter, no coercion closure
+* [x] Old two-generic form renamed `service_with_tag::<S, Tag>(closure)`, kept permanently as the
+      explicit-Tag escape hatch for hand-rolled `Injectable` structs with no macro link
+* [x] Typed DI preserved — same `Injectable::validate`/`build` construction path
+* [x] Duplicate/registration protection preserved (unchanged from Stage 1)
+* [x] `service_instance` escape hatch preserved, untouched
+* [x] Compile-fail coverage — unlinked type, wrong `impl_of` target, `impl_of` misapplied to a
+      trait annotation, all pinned against the real public API
+* [x] Reference application migration (no `AppBuilder::service` usage existed to migrate; verified)
+* [x] Living specs updated (`application-composition`, `service-sdk`)
+
+Non-goals (held):
+
+* Runtime service discovery
+* Reflection
+* Dynamic service loading
+* String-based service registration
+
+Delivered via two chained PRs: PR #192 (macro/`HasServiceTag` layer, merged to `develop` at
+`2606ef0`) and PR #193 (`AppBuilder` wiring + call-site migration, rebased clean onto `develop`
+after #192, `cargo test --workspace` green, ready to merge).
+
+Backlog (non-blocking, deferred): `#[service]`'s argument parser currently allows duplicate keys
+(`impl_of`/`version` repeated) with silent last-write-wins — a future hardening item, not a Stage
+2B requirement.
+
+---
+
+## 3.4 CORE-028 Stage 2C — Entity Composition
+
+Status: PLANNED
+
+Goal:
+
+Make persistent entities first-class application composition units.
+
+Target direction:
+
+```rust
+App::builder()
+    .entity::<OrderEntity>(...)
+    .service::<OrderService>()
+    .build()?;
+```
+
+Scope:
+
+* [ ] Define stable entity registration contract
+* [ ] Add entity registration to application composition
+* [ ] Integrate `EntityRuntimeBuilder<E>`
+* [ ] Wire persistence dependencies
+* [ ] Wire snapshot storage
+* [ ] Wire external effect acceptor
+* [ ] Define entity runtime lifecycle ownership
+* [ ] Integrate startup
+* [ ] Integrate shutdown
+* [ ] Define entity handle resolution
+* [ ] Support entity dependencies from services
+* [ ] Preserve runtime abstraction
+* [ ] Add reference application proof
+* [ ] Add end-to-end lifecycle tests
+
+Open design question:
+
+Entity composition must not leak Tokio-specific runtime behavior into `AppBuilder`.
+
+The design must first establish the minimum stable contract between application composition and `EntityRuntimeBuilder<E>`.
+
+---
+
+## 3.5 CORE-028 Stage 2D — Final Application DX
+
+Status: PLANNED
+
+After service and entity composition stabilize:
+
+* [ ] Review complete public application API
+* [ ] Reduce generic boilerplate
+* [ ] Improve composition error diagnostics
+* [ ] Improve startup diagnostics
+* [ ] Improve duplicate-registration diagnostics
+* [ ] Review projection spawning ergonomics
+* [ ] Review application module/bundle composition
+* [ ] Update Quick Start to use `App::builder()`
+* [ ] Move `RuntimeBuilder` documentation to advanced usage
+* [ ] Final reference application dogfood
+* [ ] Archive CORE-028 Stage 2
+
+---
+
+# 4. Distributed Messaging
+
+Distributed messaging must remain infrastructure-neutral.
+
+The ego.rs runtime must not depend directly on Kafka, NATS, Iggy, Kubernetes, Consul, or etcd.
+
+Concrete infrastructure integrations are adapters behind stable framework contracts.
+
+---
+
+## 4.1 CORE-032 — Distributed Messaging SPI
+
+Status: PLANNED
+
+Goal:
+
+Define the infrastructure-neutral contract for distributed messaging.
+
+Potential abstractions:
+
+```rust
+trait MessagePublisher;
+trait MessageConsumer;
+trait MessageSubscription;
+trait DeliveryContext;
+```
+
+Required semantics:
+
+* [ ] Message envelope
+* [ ] Message identity
+* [ ] Tenant metadata
+* [ ] Correlation ID
+* [ ] Causation ID
+* [ ] Schema/version metadata
+* [ ] At-least-once delivery
+* [ ] Acknowledgement
+* [ ] Negative acknowledgement
+* [ ] Redelivery
+* [ ] Consumer groups
+* [ ] Topics/subjects/streams abstraction
+* [ ] Ordering contract
+* [ ] Partitioning contract
+* [ ] Backpressure
+* [ ] Replay
+* [ ] Dead-letter handling
+* [ ] Graceful shutdown
+* [ ] Health/readiness
+* [ ] Observability
+
+The SPI must avoid pretending that Kafka partitions and NATS subjects have identical semantics.
+
+Common capabilities should be abstracted; broker-specific capabilities should remain accessible through adapter-specific extensions when necessary.
+
+---
+
+## 4.2 CORE-033 — Kafka Adapter
+
+Status: PLANNED
+
+Primary use cases:
+
+* Integration events
+* Event streaming
+* CDC
+* Replay
+* Analytics pipelines
+* Enterprise integration
+
+Scope:
+
+* [ ] Producer
+* [ ] Consumer
+* [ ] Consumer groups
+* [ ] Manual acknowledgement/offset management
+* [ ] Partitioning strategy
+* [ ] Tenant/correlation headers
+* [ ] Retry strategy
+* [ ] Dead-letter strategy
+* [ ] Consumer lag metrics
+* [ ] Health/readiness
+* [ ] Graceful shutdown
+
+Evaluate transactional and idempotent producer support where required.
+
+---
+
+## 4.3 CORE-034 — NATS JetStream Adapter
+
+Status: PLANNED
+
+Primary use cases:
+
+* Internal service messaging
+* Commands
+* Workflows
+* Low-latency messaging
+* Durable work queues
+
+Scope:
+
+* [ ] Streams
+* [ ] Durable consumers
+* [ ] Pull consumers
+* [ ] Ack/Nack
+* [ ] Redelivery
+* [ ] Deduplication
+* [ ] Subject conventions
+* [ ] Tenant metadata
+* [ ] Maximum delivery policy
+* [ ] Dead-letter handling
+* [ ] Backpressure
+* [ ] Health/readiness
+* [ ] Observability
+* [ ] Graceful shutdown
+
+---
+
+## 4.4 CORE-035 — Iggy Adapter
+
+Status: OPTIONAL / EXPERIMENTAL
+
+Iggy may be evaluated after the messaging SPI is stable and at least one production-grade broker adapter has been completed.
+
+It must remain an optional adapter and must not influence the core messaging abstraction unless justified by general-purpose capabilities.
+
+---
+
+# 5. Reliable Integration
+
+## 5.1 CORE-030 — Transactional Outbox
+
+Status: PLANNED
+
+Goal:
+
+Guarantee reliable publication of integration events without a database/broker dual-write window.
+
+Target model:
+
+```text
+Application transaction
+        │
+        ├── Domain/Event Store write
+        │
+        └── Outbox write
+                │
+                ▼
+        Outbox Publisher
+                │
+                ▼
+        Messaging SPI
+                │
+        ┌───────┴────────┐
+        │                │
+      Kafka            NATS
+```
+
+Scope:
+
+* [ ] Outbox record model
+* [ ] Atomic persistence contract
+* [ ] Outbox repository SPI
+* [ ] PostgreSQL implementation
+* [ ] Publisher lifecycle
+* [ ] Claiming
+* [ ] Leases
+* [ ] Crash recovery
+* [ ] Retry
+* [ ] Batching
+* [ ] Ordering
+* [ ] Publication status
+* [ ] Cleanup
+* [ ] Poison message handling
+* [ ] Metrics
+* [ ] Graceful shutdown
+
+Delivery guarantee:
+
+At-least-once publication with idempotent consumers.
+
+Exactly-once claims must not be made across arbitrary external systems.
+
+---
+
+## 5.2 CORE-031 — CDC Integration
+
+Status: PLANNED
+
+ego.rs will not implement its own CDC engine.
+
+The framework will define contracts and adapters for integrating existing CDC infrastructure.
+
+Potential integrations:
+
+```text
+PostgreSQL WAL
+      │
+   Debezium
+      │
+    Kafka
+```
+
+or:
+
+```text
+PostgreSQL Logical Replication
+      │
+   pgoutput
+      │
+ ego.rs CDC Adapter
+```
+
+Scope:
+
+* [ ] CDC envelope
+* [ ] Source identity
+* [ ] Source position/offset
+* [ ] Schema version
+* [ ] Tenant metadata
+* [ ] Correlation metadata
+* [ ] Replay semantics
+* [ ] Deduplication boundary
+* [ ] Snapshot/bootstrap semantics
+* [ ] Failure recovery contract
+
+CDC remains optional.
+
+Transactional Outbox is the default mechanism for application-owned integration events.
+
+CDC is primarily intended for database change streams, legacy integration, and external data synchronization.
+
+---
+
+# 6. Durable Workflows
+
+## 6.1 CORE-029 — Saga / Process Manager
+
+Status: PLANNED
+
+Goal:
+
+Provide durable orchestration for long-running business processes spanning multiple entities, services, or external systems.
+
+Scope:
+
+* [ ] Saga identity
+* [ ] Saga state
+* [ ] Saga repository SPI
+* [ ] PostgreSQL implementation
+* [ ] Correlation
+* [ ] Event consumption
+* [ ] Command emission
+* [ ] State transitions
+* [ ] Compensation
+* [ ] Retry
+* [ ] Durable timeout
+* [ ] Resume after process crash
+* [ ] Idempotency
+* [ ] Concurrency control
+* [ ] Observability
+* [ ] TestKit support
+
+Saga must not be required for every multi-step operation.
+
+Use Saga/Process Manager when the business process requires durable coordination or compensation across independent consistency boundaries.
+
+---
+
+# 7. Production Readiness
+
+## 7.1 PROD-001 — Mandatory CI Gates
+
+Priority: P0
+
+Required pipeline:
+
+```bash
+cargo fmt --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --workspace --doc
+
+cargo run -p xtask -- verify-layers
+cargo run -p xtask -- verify-isolation
+cargo run -p xtask -- verify-hygiene
+```
+
+Additional gates:
+
+* [ ] Dependency vulnerability audit
+* [ ] License validation
+* [ ] MSRV validation
+* [ ] Release build
+* [ ] Parallel stress tests
+* [ ] Migration validation
+
+---
+
+## 7.2 PROD-002 — Durable External Effect Store
+
+Priority: P0
+
+CORE-019 provides the execution model.
+
+Production requires durable implementations of:
+
+* [ ] `EffectStateStore`
+* [ ] `EffectDedupStore`
+* [ ] PostgreSQL persistence
+* [ ] Atomic state transitions
+* [ ] Claim ownership
+* [ ] Lease/fencing semantics
+* [ ] Retry persistence
+* [ ] Crash recovery
+* [ ] Stale claim recovery
+* [ ] Cleanup
+
+---
+
+## 7.3 PROD-003 — Production Observability
+
+Priority: P0
+
+Scope:
+
+* [ ] OpenTelemetry integration
+* [ ] OTLP traces
+* [ ] Metrics
+* [ ] Structured logs
+* [ ] Correlation propagation
+* [ ] Tenant-safe telemetry
+* [ ] Actor lifecycle metrics
+* [ ] Entity activation/passivation metrics
+* [ ] Projection lag
+* [ ] External effect metrics
+* [ ] Outbox metrics
+* [ ] Saga metrics
+* [ ] Broker lag
+* [ ] Cardinality policy
+* [ ] Sensitive-data redaction policy
+
+---
+
+## 7.4 PROD-004 — Production Security Profile
+
+Priority: P0
+
+Scope:
+
+* [ ] External secret management
+* [ ] Key rotation
+* [ ] OIDC/JWKS production configuration
+* [ ] Issuer validation
+* [ ] Audience validation
+* [ ] TLS
+* [ ] Trusted proxy configuration
+* [ ] Environment validation
+* [ ] Removal of development credentials from production paths
+
+---
+
+## 7.5 PROD-005 — Health, Readiness and Startup
+
+Priority: P0
+
+Standard endpoints:
+
+```text
+/live
+/ready
+/startup
+```
+
+Readiness may include:
+
+* Database
+* Migrations
+* Runtime
+* Authentication providers
+* Authorization providers
+* Required external data providers
+* External effect runtime
+* Outbox publisher
+* Messaging broker
+* Critical projections
+* Saga runtime
+
+Optional dependencies must support degraded-mode semantics where appropriate.
+
+---
+
+## 7.6 PROD-006 — HTTP Hardening
+
+Priority: P1
+
+Scope:
+
+* [ ] Request timeout
+* [ ] Response timeout
+* [ ] Request body limit
+* [ ] Concurrency limit
+* [ ] Rate limiting
+* [ ] Panic recovery
+* [ ] Security headers
+* [ ] Configurable CORS
+* [ ] Request IDs
+* [ ] Trusted proxies
+* [ ] Compression
+* [ ] Graceful drain timeout
+* [ ] Production OpenAPI policy
+
+---
+
+## 7.7 PROD-007 — Production Reference Deployment
+
+Priority: P1
+
+The reference application should eventually demonstrate:
+
+```text
+AppBuilder
+    +
+PostgreSQL
+    +
+Persistent Entities
+    +
+Read Side
+    +
+Durable External Effects
+    +
+Transactional Outbox
+    +
+Messaging Broker
+    +
+Production Authentication
+    +
+OTLP Observability
+    +
+Health / Readiness
+    +
+Graceful Shutdown
+    +
+Restart Recovery
+```
+
+The reference deployment is the production integration proof for the framework.
+
+---
+
+## 7.8 PROD-008 — Crash and Recovery Integration Suite
+
+Priority: P0
+
+Required scenarios:
+
+* [ ] Process kill
+* [ ] Restart
+* [ ] Persistent entity recovery
+* [ ] External effect recovery
+* [ ] Stale effect reclaim
+* [ ] Outbox recovery
+* [ ] Duplicate message delivery
+* [ ] Saga recovery
+* [ ] Database disconnect/reconnect
+* [ ] Broker disconnect/reconnect
+* [ ] Consumer rebalance
+* [ ] Partial batch failure
+* [ ] Migration compatibility
+
+---
+
+## 7.9 PROD-009 — Multi-Node Runtime Contract
+
+Priority: P1 after single-node production readiness
+
+ego.rs must support deployment without requiring a specific infrastructure platform.
+
+The framework must not require Kubernetes, Consul, etcd, or another coordinator.
+
+Potential capabilities:
+
+* [ ] Node identity
+* [ ] Membership provider contract
+* [ ] Entity ownership
+* [ ] Entity placement
+* [ ] Distributed activation authority
+* [ ] Lease abstraction
+* [ ] Fencing tokens
+* [ ] Failover
+* [ ] Rebalancing
+* [ ] Partition ownership
+* [ ] Single-node provider
+* [ ] Kubernetes integration provider
+* [ ] Consul integration provider
+* [ ] External coordination provider
+
+Broker-based messaging and cluster membership remain separate concerns.
+
+Kafka or NATS alone must not implicitly become the cluster ownership authority unless explicitly designed and proven.
+
+---
+
+## 7.10 PROD-010 — Release Engineering
+
+Priority: P2
+
+Scope:
+
+* [ ] Publishable crate policy
+* [ ] Semantic Versioning
+* [ ] MSRV policy
+* [ ] Changelog
+* [ ] Automated releases
+* [ ] crates.io publication
+* [ ] API compatibility checks
+* [ ] SBOM
+* [ ] Build provenance
+* [ ] Artifact signing
+* [ ] Reproducible builds
+
+---
+
+## 7.11 PROD-011 — Performance and Capacity
+
+Priority: P2
+
+Benchmarks:
+
+* [ ] Actor throughput
+* [ ] Mailbox latency
+* [ ] Entity activation latency
+* [ ] Entity passivation behavior
+* [ ] Entity recovery latency
+* [ ] Large event-stream recovery
+* [ ] Projection throughput
+* [ ] Projection lag
+* [ ] External effect throughput
+* [ ] Outbox throughput
+* [ ] Broker throughput
+* [ ] Saga throughput
+* [ ] Memory per active entity
+* [ ] Graceful shutdown under load
+
+Operational limits and recommended defaults must be documented.
+
+---
+
+# 8. Documentation and Governance
+
+## DOC-001 — Architecture Synchronization
+
+Update `ARCHITECTURE.md` to reflect:
+
+* CORE-027 foundation integrity tooling
+* Complete `layers.toml`
+* `xtask` enforcement
+* `App` / `AppBuilder`
+* Projection registration
+* External effects
+* External data providers
+* Current distributed-system boundaries
+
+---
+
+## DOC-002 — Developer Documentation
+
+Update README and Quick Start after CORE-028 Stage 2.
+
+Primary developer path:
+
+```rust
+App::builder()
+```
+
+Advanced infrastructure path:
+
+```rust
+RuntimeBuilder
+```
+
+---
+
+## DOC-003 — Product Roadmap Synchronization
+
+Keep PRD and roadmap aligned with:
+
+* Application Composition
+* Distributed Messaging
+* Transactional Outbox
+* CDC
+* Saga
+* Production Readiness
+* Multi-node evolution
+
+---
+
+## DOC-004 — GitHub Backlog
+
+Create milestones and issues for planned work.
+
+Suggested milestones:
+
+```text
+v0.1 — Final Developer API
+v0.2 — Reliable Distributed Integration
+v0.3 — Durable Workflows
+v0.4 — Production Ready Single Node
+v0.5 — Multi-Node Runtime
+v1.0 — Stable Production Framework
+```
+
+---
+
+# 9. Execution Order
+
+## Phase 1 — Final Developer Experience
+
+```text
+CORE-028 Stage 2B — Service-to-Tag Binding (shipped)
+CORE-028 Stage 2C — Entity Composition
+CORE-028 Stage 2D — Final DX
+DOC-001/002/003 — Documentation synchronization
+```
+
+## Phase 2 — Production Foundation
+
+```text
+PROD-001 — Mandatory CI
+PROD-003 — Production Observability
+PROD-004 — Production Security Profile
+PROD-005 — Health / Readiness / Startup
+```
+
+## Phase 3 — Distributed Messaging
+
+```text
+CORE-032 — Distributed Messaging SPI
+CORE-033 — Kafka Adapter
+and/or
+CORE-034 — NATS JetStream Adapter
+```
+
+At least one broker adapter must reach production quality before building higher-level distributed guarantees on top of the messaging SPI.
+
+## Phase 4 — Reliable Integration
+
+```text
+CORE-030 — Transactional Outbox
+PROD-002 — Durable External Effect Store
+CORE-031 — CDC Integration
+```
+
+CDC is optional and does not block Outbox.
+
+## Phase 5 — Durable Workflows
+
+```text
+CORE-029 — Saga / Process Manager
+```
+
+Saga builds on stable persistence and messaging primitives where distributed coordination is required.
+
+## Phase 6 — Production Proof
+
+```text
+PROD-006 — HTTP Hardening
+PROD-007 — Production Reference Deployment
+PROD-008 — Crash / Recovery Integration Suite
+```
+
+At the end of this phase ego.rs should be considered production-ready for an explicitly supported single-node deployment model.
+
+## Phase 7 — Multi-Node
+
+```text
+PROD-009 — Multi-Node Runtime Contract
+```
+
+Only after single-node production guarantees are proven.
+
+## Phase 8 — Distribution and Stability
+
+```text
+PROD-010 — Release Engineering
+PROD-011 — Performance and Capacity
+CORE-035 — Iggy Adapter, if justified
+```
+
+---
+
+# 10. Production Readiness Definition
+
+ego.rs is considered production-ready for single-node deployments when:
+
+* [ ] Mandatory CI gates pass
+* [ ] Persistent entities recover after restart
+* [ ] External effects survive restart
+* [ ] Integration events use reliable publication
+* [ ] At least one production messaging adapter exists
+* [ ] Authentication and authorization use production-safe configuration
+* [ ] Secrets are externalized
+* [ ] OTLP observability is available
+* [ ] Health and readiness are implemented
+* [ ] HTTP boundaries are hardened
+* [ ] Crash/recovery scenarios pass
+* [ ] Reference deployment proves the complete architecture
+* [ ] Operational limits are documented
+
+Multi-node support is a separate production milestone.
+
+---
+
+# 11. Current Priority
+
+The immediate execution path is:
+
+```text
+CORE-028 Stage 2B  ✅ shipped (PR #192 merged to develop; PR #193 rebased, green, mergeable)
+        │
+        ▼
+CORE-028 Stage 2C  ← current priority (blocked until CORE-006 entity ownership/lifecycle questions
+        │            are resolved for application-composition integration)
+        ▼
+CORE-028 Stage 2D
+        │
+        ▼
+Documentation Sync
+        │
+        ▼
+Mandatory CI + Production Foundation
+        │
+        ▼
+Distributed Messaging SPI
+        │
+        ▼
+Kafka and/or NATS
+        │
+        ▼
+Transactional Outbox
+        │
+        ├──────────────► CDC
+        │
+        ▼
+Durable Effects
+        │
+        ▼
+Saga / Process Manager
+        │
+        ▼
+Production Reference Deployment
+        │
+        ▼
+Crash / Recovery Proof
+        │
+        ▼
+Single-Node Production Ready
+        │
+        ▼
+Multi-Node Runtime
+```
+
+**CORE-028 Stage 2B — Service-to-Tag Binding** has shipped. The current priority is
+**CORE-028 Stage 2C — Entity Composition**, which stays blocked until CORE-006's entity
+ownership/lifecycle questions are resolved before any application-composition integration work
+begins.
