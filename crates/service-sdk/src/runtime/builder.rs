@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ego_domain::event::DomainEvent;
 use ego_domain::Observability;
 use ego_runtime::effects::{
     DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
@@ -18,13 +19,15 @@ use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 use persistent_entity::data_provider_access::DataProviderAccess;
 use persistent_entity::effect_acceptor::EffectAcceptor;
+use persistent_entity::persistent_entity::PersistentEntity;
+use persistent_entity::runtime::EntityRuntime;
 
 use crate::contract::{ServiceContract, VersionConstraint};
-use crate::di::{DuplicateProjection, Injectable};
+use crate::di::{DuplicateEntity, DuplicateProjection, Injectable};
 use crate::interceptor::InterceptorChain;
 use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
-use crate::runtime::runtime_builder::{DependencyTable, RuntimeError, RuntimeInner};
+use crate::runtime::runtime_builder::{DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner};
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 
@@ -76,6 +79,11 @@ pub struct RuntimeBuilder {
     /// (CORE-028 Stage 2). Fail-closed on a duplicate type — unlike
     /// `adapters`/`configs`'s last-write-wins semantics (AD-1/AD-2).
     projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Entity runtimes registered via [`RuntimeBuilder::with_entity`]
+    /// (CORE-028 Stage 2C), keyed by the aggregate type `E`, never `E::Event`
+    /// (design.md AD-1). Fail-closed on a duplicate type, same posture as
+    /// `projections` (AD-4).
+    entities: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     tenant_enforcement_mode: TenantEnforcementMode,
     /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
     /// Read only by `try_build()`; has no effect on `build()` (AD-3).
@@ -122,6 +130,7 @@ impl RuntimeBuilder {
             adapters: HashMap::new(),
             configs: HashMap::new(),
             projections: HashMap::new(),
+            entities: HashMap::new(),
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             validators: Vec::new(),
             observability: None,
@@ -196,6 +205,35 @@ impl RuntimeBuilder {
             });
         }
         self.projections.insert(type_id, projection as Arc<dyn Any + Send + Sync>);
+        Ok(self)
+    }
+
+    /// Registers a host-constructed entity runtime, resolvable via
+    /// `RuntimeInner::resolve_entity::<E>()` as `EntityRuntimeRef<E>`
+    /// (CORE-028 Stage 2C design.md AD-2). The framework constructs
+    /// nothing — `runtime` must already be built via the existing,
+    /// unchanged `EntityRuntimeBuilder`. Keyed by the aggregate type `E`,
+    /// never `E::Event` (AD-1): two distinct aggregates sharing one event
+    /// type register and resolve independently. Fails closed on a
+    /// duplicate registration for the same aggregate type — mirroring
+    /// `with_projection`'s fail-closed contract exactly (AD-4); the first
+    /// registration is left untouched on `Err`, and there is no
+    /// `replace_entity` escape hatch.
+    pub fn with_entity<E>(
+        mut self,
+        runtime: Arc<EntityRuntime<E::Event>>,
+    ) -> Result<Self, DuplicateEntity>
+    where
+        E: PersistentEntity + 'static,
+        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<E>();
+        if self.entities.contains_key(&type_id) {
+            return Err(DuplicateEntity {
+                type_name: std::any::type_name::<E>(),
+            });
+        }
+        self.entities.insert(type_id, runtime as Arc<dyn Any + Send + Sync>);
         Ok(self)
     }
 
@@ -380,7 +418,12 @@ impl RuntimeBuilder {
                 self.registry,
                 self.interceptor_chain,
                 security_providers,
-                DependencyTable::with_registrations(self.adapters, self.configs, self.projections),
+                DependencyTable::with_registrations(RegisteredDependencies {
+                    adapters: self.adapters,
+                    configs: self.configs,
+                    projections: self.projections,
+                    entities: self.entities,
+                }),
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
@@ -963,6 +1006,153 @@ mod tests {
         }
     }
 
+    // -- CORE-028 Stage 2C: RuntimeBuilder::with_entity ----------------------
+
+    use persistent_entity::builder::EntityRuntimeBuilder;
+    use persistent_entity::test_entity::TestEntity;
+    use persistent_entity::testing::{TestCommand, TestEvent, TestState};
+
+    #[test]
+    fn with_entity_registers_and_resolves() {
+        let entity_runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let rt = RuntimeBuilder::new()
+            .with_entity::<TestEntity>(entity_runtime)
+            .unwrap()
+            .build();
+
+        let resolved = rt.inner().resolve_entity::<TestEntity>();
+        assert!(resolved.is_ok());
+    }
+
+    #[test]
+    fn with_entity_rejects_duplicate_and_retains_first() {
+        let first = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let second = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+
+        let builder = RuntimeBuilder::new().with_entity::<TestEntity>(first.clone()).unwrap();
+
+        let err = match builder.clone().with_entity::<TestEntity>(second.clone()) {
+            Err(e) => e,
+            Ok(_) => panic!("a second registration for the same aggregate type must fail closed"),
+        };
+        assert_eq!(err.type_name, std::any::type_name::<TestEntity>());
+
+        // The runtime built from the ORIGINAL (first-registration) builder
+        // must still resolve — and `second` must never have been stored
+        // anywhere (AD-4, no replace_entity escape hatch).
+        let rt = builder.build();
+        assert!(rt.inner().resolve_entity::<TestEntity>().is_ok());
+        assert_eq!(
+            Arc::strong_count(&second),
+            1,
+            "the rejected second registration must never be stored"
+        );
+        assert!(
+            Arc::strong_count(&first) > 1,
+            "the first registration must still be held by the built runtime"
+        );
+    }
+
+    #[test]
+    fn resolve_entity_unregistered_returns_dependency_not_found_naming_aggregate() {
+        let rt = RuntimeBuilder::new().build();
+        let err = rt
+            .inner()
+            .resolve_entity::<TestEntity>()
+            .err()
+            .expect("unregistered entity must fail to resolve");
+        match err {
+            RuntimeError::DependencyNotFound { type_name, .. } => {
+                assert_eq!(type_name, std::any::type_name::<TestEntity>());
+            }
+            other => panic!("expected DependencyNotFound naming TestEntity, got {other:?}"),
+        }
+    }
+
+    /// A second test-only aggregate whose `Event` is the SAME
+    /// `persistent_entity::testing::TestEvent` `TestEntity` already uses —
+    /// proves AD-1's actual claim (identity keyed on the aggregate `E`, not
+    /// `E::Event`), not just that the error message names the right type.
+    #[derive(Debug, Clone)]
+    struct TestEntity2;
+
+    #[async_trait::async_trait]
+    impl persistent_entity::persistent_entity::PersistentEntity for TestEntity2 {
+        type Command = TestCommand;
+        type Event = TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> Self::State {
+            TestState { value: 0, version: 0 }
+        }
+
+        async fn handle_command(
+            &self,
+            _command: &Self::Command,
+            _state: &Self::State,
+            _context: &persistent_entity::command_context::CommandContext,
+        ) -> Result<Vec<Self::Event>, persistent_entity::error::EntityError> {
+            Ok(vec![])
+        }
+
+        async fn apply_event(
+            &self,
+            state: &Self::State,
+            _event: &Self::Event,
+        ) -> Result<Self::State, persistent_entity::error::EntityError> {
+            Ok(state.clone())
+        }
+
+        async fn apply_events(
+            &self,
+            state: &Self::State,
+            _events: &[Self::Event],
+        ) -> Result<Self::State, persistent_entity::error::EntityError> {
+            Ok(state.clone())
+        }
+    }
+
+    #[test]
+    fn two_aggregates_sharing_an_event_type_register_and_resolve_without_collision() {
+        let runtime_a = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let runtime_b = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+
+        let expected_a = EntityRuntimeRef::<TestEntity>::new(runtime_a.clone());
+        let expected_b = EntityRuntimeRef::<TestEntity2>::new(runtime_b.clone());
+
+        let rt = RuntimeBuilder::new()
+            .with_entity::<TestEntity>(runtime_a)
+            .unwrap()
+            .with_entity::<TestEntity2>(runtime_b)
+            .unwrap()
+            .build();
+
+        let resolved_a = rt
+            .inner()
+            .resolve_entity::<TestEntity>()
+            .expect("TestEntity must resolve its own registered runtime");
+        let resolved_b = rt
+            .inner()
+            .resolve_entity::<TestEntity2>()
+            .expect(
+                "TestEntity2 must resolve its own registered runtime, unaffected by \
+                 sharing an event type with TestEntity",
+            );
+
+        // `.is_ok()` alone would still pass if a keying bug stored `runtime_a`
+        // under both TypeIds — both share the same erased `Arc<EntityRuntime<TestEvent>>`
+        // shape, so only comparing the resolved Arc's identity against the
+        // Arc each aggregate was actually registered with falsifies that bug.
+        assert!(
+            resolved_a.ptr_eq(&expected_a),
+            "TestEntity must resolve the exact runtime it was registered with, not TestEntity2's"
+        );
+        assert!(
+            resolved_b.ptr_eq(&expected_b),
+            "TestEntity2 must resolve the exact runtime it was registered with, not TestEntity's"
+        );
+    }
+
     // -- CORE-120: chained registration --------------------------------------
 
     #[derive(Debug, PartialEq)]
@@ -1162,6 +1352,64 @@ mod tests {
             RuntimeError::DependencyNotFound { type_name, service_name } => {
                 assert_eq!(type_name, std::any::type_name::<StubProjection>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsProjection>()));
+            }
+            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+        }
+    }
+
+    // -- CORE-028 Stage 2C Phase 4: Injectable integration proof for
+    // entities (AD-7 item 1 — mirrors NeedsProjection above) -----------------
+
+    use crate::di::EntityRuntimeRef;
+
+    struct NeedsEntity {
+        #[allow(dead_code)]
+        entity: EntityRuntimeRef<TestEntity>,
+    }
+
+    impl Injectable for NeedsEntity {
+        fn dependencies() -> Vec<DepKey> {
+            vec![DepKey::Entity(
+                TypeId::of::<TestEntity>(),
+                std::any::type_name::<TestEntity>(),
+            )]
+        }
+
+        fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
+            Ok(Self { entity: rt.resolve_entity::<TestEntity>()? })
+        }
+    }
+
+    #[test]
+    fn try_build_succeeds_when_declared_entity_dependency_is_registered() {
+        let entity_runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let rt = RuntimeBuilder::new()
+            .with_entity::<TestEntity>(entity_runtime)
+            .unwrap()
+            .with_injectable::<NeedsEntity>()
+            .try_build()
+            .expect("declared entity dependency is registered, try_build must succeed");
+
+        // Proves the built service's field holds the registered runtime
+        // (mirrors `try_build_succeeds_when_declared_projection_dependency_is_registered`).
+        // Does not call `entity.entity_ref(...)` here — that spawns a real
+        // Tokio actor (`TokioEntityRef::new`), out of scope for a plain
+        // `#[test]`; resolution success alone is what this proof needs.
+        let _svc = NeedsEntity::build(rt.inner())
+            .expect("build() succeeds using the same registered entity runtime try_build validated");
+    }
+
+    #[test]
+    fn try_build_fails_before_startup_when_declared_entity_dependency_is_missing() {
+        let err = match RuntimeBuilder::new().with_injectable::<NeedsEntity>().try_build() {
+            Err(e) => e,
+            Ok(_) => panic!("try_build must fail fast when the declared entity dependency is missing"),
+        };
+
+        match err {
+            RuntimeError::DependencyNotFound { type_name, service_name } => {
+                assert_eq!(type_name, std::any::type_name::<TestEntity>());
+                assert_eq!(service_name, Some(std::any::type_name::<NeedsEntity>()));
             }
             other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
         }

@@ -235,7 +235,9 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let read_side_sink = ReadSideSink::new(read_side_store.clone());
     let read_side_handles = ReadSideHandles::new(read_side_store).with_logger(logger.clone());
 
-    let register_user = Arc::new(RegisterUserImpl::new(org_runtime, user_runtime, None).with_read_side_sink(read_side_sink));
+    let register_user = Arc::new(
+        RegisterUserImpl::new(org_runtime, user_runtime.clone(), None).with_read_side_sink(read_side_sink),
+    );
 
     let mut builder = App::builder().security(authn.clone(), authz);
     // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
@@ -245,6 +247,13 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     // internal `Arc<RwLock<_>>` (read_side/projection.rs), so this clone
     // shares live state with the engine-fed store, not a frozen snapshot.
     builder = builder.projection(Arc::new(read_side_handles.query.clone()));
+    // CORE-028 Stage 2C (AD-7 item 2): registers the entity-runtime DI path
+    // for `UserEntity` through the composition API, as production proof of
+    // `.entity::<E>()`/`App::resolve_entity`. Deliberately does NOT migrate
+    // `RegisterUserImpl` off its hand-threaded `.service_instance()` wiring
+    // below (AD-9 non-goal) — that migration is still blocked by
+    // `ReadSideSink`'s hand-wiring, not by entity resolution.
+    builder = builder.entity::<crate::domain::user::UserEntity>(user_runtime.clone());
     // FLAG (design.md AD-3, task 5.1): `RegisterUserImpl` does not — and, as
     // built today, cannot cheaply — implement `Injectable`. Its two
     // `EntityRuntime`s aren't `AdapterRef`/`ConfigValue`-resolvable (no
