@@ -10,7 +10,7 @@
 use ego_runtime::effects::DuplicateEffectType;
 use ego_runtime::providers::DuplicateProviderId;
 
-use crate::di::DuplicateProjection;
+use crate::di::{DuplicateEntity, DuplicateProjection};
 use crate::registry::RegistryError;
 use crate::runtime::{RuntimeError, RuntimeInfraError};
 
@@ -45,6 +45,10 @@ pub enum CompositionError {
     /// CORE-028 Stage 2 AD-4).
     #[error("projection registration failed: {0}")]
     Projection(#[from] DuplicateProjection),
+    /// An entity runtime registration was rejected (duplicate aggregate
+    /// type, CORE-028 Stage 2C AD-4).
+    #[error("entity registration failed: {0}")]
+    Entity(#[from] DuplicateEntity),
     /// The config-to-logger pipeline failed during initialization.
     #[error("logger initialization failed: {0}")]
     Logger(RuntimeInfraError),
@@ -119,6 +123,23 @@ mod tests {
                 assert_eq!(type_name, "MyProjection");
             }
             other => panic!("expected Projection(DuplicateProjection), got {other:?}"),
+        }
+    }
+
+    // Task 1.4 (CORE-028 Stage 2C): `CompositionError::Entity` round-trips a
+    // `DuplicateEntity` via `.into()`, mirroring
+    // `projection_wraps_duplicate_projection_variant`.
+    #[test]
+    fn entity_wraps_duplicate_entity_variant() {
+        use crate::di::DuplicateEntity;
+
+        let inner = DuplicateEntity { type_name: "MyEntity" };
+        let err: CompositionError = inner.into();
+        match err {
+            CompositionError::Entity(DuplicateEntity { type_name }) => {
+                assert_eq!(type_name, "MyEntity");
+            }
+            other => panic!("expected Entity(DuplicateEntity), got {other:?}"),
         }
     }
 }

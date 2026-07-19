@@ -336,12 +336,48 @@ Registering a second projection of the same type through `AppBuilder::projection
 - WHEN `AppBuilder::build()` is called
 - THEN construction fails with a composition error identifying the duplicate registration, and the first-registered projection instance is what would have resolved had construction succeeded
 
+### Requirement: Entity Runtime Registration Facade
+
+`AppBuilder` MUST provide an `.entity::<E>(...)` registration method that is a thin pass-through to the completed `RuntimeBuilder` entity-registration path (Stage 2A facade precedent: `.projection()`) — no parallel registration or resolution mechanism is introduced. An entity runtime registered through `AppBuilder::entity::<E>(...)` MUST be resolvable exactly as if it had been registered directly on `RuntimeBuilder`.
+
+#### Scenario: An entity runtime registered via AppBuilder resolves after build
+- GIVEN a host-constructed entity runtime registered for aggregate type `E` via `AppBuilder::entity::<E>(...)`
+- WHEN the application is built
+- THEN a service declaring a dependency on that entity type resolves it successfully
+
+#### Scenario: Registration is equivalent whether performed via RuntimeBuilder or AppBuilder
+- GIVEN two otherwise-identical applications, one composed by registering an entity runtime directly on `RuntimeBuilder` and one by registering the same entity runtime via `AppBuilder::entity::<E>(...)`
+- WHEN each is built
+- THEN both expose the same resolvable entity dependency, with no observable difference in outcome
+
+#### Scenario: No internal runtime type is required to register an entity runtime
+- GIVEN a developer composing an application through `AppBuilder`
+- WHEN they register an entity runtime using only `.entity::<E>(...)`
+- THEN they never construct or reach into `RuntimeBuilder` or any other internal runtime state to complete that registration
+
+### Requirement: Duplicate Entity Registration Through AppBuilder Fails Closed
+
+Registering a second entity runtime for the same aggregate/entity type through `AppBuilder::entity::<E>(...)` MUST fail the same way the underlying `RuntimeBuilder` entity registration already fails closed (see the `service-sdk` capability spec's "Duplicate Entity Registration Fails Closed" requirement) — surfaced through `AppBuilder::build()`'s existing composition-error reporting, never a silent replacement.
+
+#### Scenario: Duplicate entity registration surfaces at build, not silently replaced
+- GIVEN `AppBuilder::entity::<E>(...)` called twice for the same aggregate type
+- WHEN `AppBuilder::build()` is called
+- THEN construction fails with a composition error identifying the duplicate registration and the aggregate type involved, and the first-registered entity runtime is what would have resolved had construction succeeded
+
 ## Non-Goals
 
-- `.entity::<E>()` / any per-aggregate entity registration — no stable
-  entity contract exists to delegate to (deferred to CORE-006). Stage 2B
-  further specifies: no entity registration coupling to the service
-  trait-link mechanism introduced by this stage.
+- Framework-owned construction of the entity runtime itself (activation,
+  passivation, config folding, or any change to `EntityRuntimeBuilder` or
+  `EntityRegistry`) — `.entity::<E>()` only registers a host-constructed
+  runtime; it constructs nothing.
+- Entity lifecycle ownership (spawn/stop) in the composition API — entity
+  actors are unaffected by this capability's registration or teardown
+  handling.
+- No entity registration coupling to the service trait-link mechanism
+  introduced by Stage 2B.
+- Migrating any existing hand-threaded entity dependency off
+  `.service_instance()` — proof-of-use is tracked by CORE-028 Stage 2C's
+  tasks, not a requirement of this spec.
 - Unifying `RuntimeBuilder`'s config, the kit-config subtree, and
   `EntityRuntimeBuilder::from_value` into one config object.
 - Trait-bound or multi-implementation adapter binding/selection (see

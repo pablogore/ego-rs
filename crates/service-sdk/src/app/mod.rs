@@ -51,6 +51,7 @@ use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use ego_domain::event::DomainEvent;
 use ego_domain::Observability;
 use ego_runtime::effects::ExternalEffectExecutor;
 use ego_runtime::providers::ExternalDataProvider;
@@ -58,7 +59,10 @@ use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
 use kitlogger::KITLogger;
 
-use crate::di::{AdapterRef, ConfigValue, Injectable, ProjectionRef};
+use persistent_entity::persistent_entity::PersistentEntity;
+use persistent_entity::runtime::EntityRuntime;
+
+use crate::di::{AdapterRef, ConfigValue, EntityRuntimeRef, Injectable, ProjectionRef};
 use crate::runtime::{HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver};
 
 pub use error::CompositionError;
@@ -178,6 +182,17 @@ impl App {
         &self,
     ) -> Result<ProjectionRef<P>, crate::runtime::RuntimeError> {
         self.runtime.inner().resolve_projection::<P>()
+    }
+
+    /// Resolves a registered entity runtime as `EntityRuntimeRef<E>`
+    /// (CORE-028 Stage 2C design.md AD-8) — read-only, symmetric with
+    /// [`Self::resolve_adapter`]/[`Self::resolve_config`]/[`Self::resolve_projection`].
+    pub fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, crate::runtime::RuntimeError>
+    where
+        E: PersistentEntity + 'static,
+        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    {
+        self.runtime.inner().resolve_entity::<E>()
     }
 
     /// Registers a shutdown participant — e.g. a spawned read-side
@@ -313,6 +328,32 @@ impl AppBuilder {
             }
             Err(err) => {
                 self.pending_error = Some(CompositionError::Projection(err));
+                self
+            }
+        }
+    }
+
+    /// Registers a host-constructed entity runtime — thin delegation to
+    /// [`RuntimeBuilder::with_entity`] (CORE-028 Stage 2C design.md AD-5),
+    /// following the exact clone-then-call + `pending_error` shape
+    /// [`Self::projection`] already uses. Fail-closed on a duplicate
+    /// registration for the same aggregate type is already enforced by
+    /// `RuntimeBuilder` (AD-1/AD-4) — this facade never adds a second guard.
+    pub fn entity<E>(mut self, runtime: Arc<EntityRuntime<E::Event>>) -> Self
+    where
+        E: PersistentEntity + 'static,
+        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        match self.runtime_builder.clone().with_entity::<E>(runtime) {
+            Ok(builder) => {
+                self.runtime_builder = builder;
+                self
+            }
+            Err(err) => {
+                self.pending_error = Some(CompositionError::Entity(err));
                 self
             }
         }
@@ -795,6 +836,87 @@ mod tests {
         let resolved_via_app_builder = via_app_builder.resolve_projection::<StubProjection>().unwrap();
 
         assert_eq!(*resolved_via_runtime_builder, *resolved_via_app_builder);
+    }
+
+    // -- CORE-028 Stage 2C Phase 5: AppBuilder::entity() facade -------------
+
+    use persistent_entity::builder::EntityRuntimeBuilder;
+    use persistent_entity::test_entity::TestEntity;
+    use persistent_entity::testing::TestEvent;
+
+    // Task 5.1 (RED): `.entity::<TestEntity>(...)` registers and resolves
+    // after `build()` (spec "A registered entity runtime resolves after
+    // build"), mirroring `projection_registers_and_resolves`.
+    #[test]
+    fn entity_registers_and_resolves() {
+        let runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let app = App::builder()
+            .entity::<TestEntity>(runtime)
+            .build()
+            .expect("build succeeds");
+
+        assert!(app.resolve_entity::<TestEntity>().is_ok());
+    }
+
+    // Task 5.2 (RED): a second registration for the same aggregate type
+    // surfaces at `.build()` as `CompositionError::Entity`, never silently
+    // replaced.
+    #[test]
+    fn entity_rejects_duplicate_registration_at_build() {
+        let runtime_a = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let runtime_b = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+
+        let result = App::builder()
+            .entity::<TestEntity>(runtime_a)
+            .entity::<TestEntity>(runtime_b)
+            .build();
+
+        match result {
+            Err(CompositionError::Entity(_)) => {}
+            Err(other) => panic!("expected CompositionError::Entity, got {other:?}"),
+            Ok(_) => panic!("expected duplicate entity registration to fail"),
+        }
+    }
+
+    // Task 5.5 (RED/GREEN): registering the same entity runtime directly on
+    // `RuntimeBuilder` vs. through `AppBuilder::entity(...)` must be
+    // observably equivalent (mirrors
+    // `runtimebuilder_and_appbuilder_projection_registration_are_equivalent`).
+    #[test]
+    fn runtimebuilder_and_appbuilder_entity_registration_are_equivalent() {
+        let via_runtime_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_entity::<TestEntity>(via_runtime_builder_rt.clone())
+            .unwrap()
+            .build();
+        let resolved_via_runtime_builder = via_runtime_builder
+            .inner()
+            .resolve_entity::<TestEntity>()
+            .expect("registered via RuntimeBuilder must resolve");
+        let expected_via_runtime_builder = EntityRuntimeRef::<TestEntity>::new(via_runtime_builder_rt);
+        // review fix (reliability): `.is_ok()` alone doesn't prove either path
+        // resolved to the runtime it was actually registered with, unlike the
+        // sibling projection test above which asserts value equality — an
+        // `EntityRuntimeRef` has no meaningful `PartialEq`, so the same-instance
+        // proof goes through `ptr_eq` (test-only) instead.
+        assert!(
+            resolved_via_runtime_builder.ptr_eq(&expected_via_runtime_builder),
+            "RuntimeBuilder-registered entity must resolve to the identical Arc it was registered with"
+        );
+
+        let via_app_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
+        let via_app_builder = App::builder()
+            .entity::<TestEntity>(via_app_builder_rt.clone())
+            .build()
+            .expect("build succeeds");
+        let resolved_via_app_builder = via_app_builder
+            .resolve_entity::<TestEntity>()
+            .expect("registered via AppBuilder must resolve");
+        let expected_via_app_builder = EntityRuntimeRef::<TestEntity>::new(via_app_builder_rt);
+        assert!(
+            resolved_via_app_builder.ptr_eq(&expected_via_app_builder),
+            "AppBuilder-registered entity must resolve to the identical Arc it was registered with"
+        );
     }
 
     // Task 1.8 (RED/GREEN): constructing an application starts nothing —

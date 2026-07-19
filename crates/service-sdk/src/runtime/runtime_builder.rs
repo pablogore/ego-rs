@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_domain::context::TenantId;
+use ego_domain::event::DomainEvent;
 use ego_domain::{Observability, SemanticEvent};
 use crate::runtime::error::RuntimeInfraError;
 use ego_runtime::effects::RuntimeEffectAcceptor;
@@ -29,8 +30,11 @@ use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 use persistent_entity::data_provider_access::DataProviderAccess;
 
+use persistent_entity::persistent_entity::PersistentEntity;
+use persistent_entity::runtime::EntityRuntime;
+
 use crate::context::ServiceContext;
-use crate::di::{AdapterRef, ConfigValue, DepKey, ProjectionRef};
+use crate::di::{AdapterRef, ConfigValue, DepKey, EntityRuntimeRef, ProjectionRef};
 use crate::interceptor::InterceptorChain;
 use crate::registry::ServiceRegistry;
 use super::logger::TeardownStack;
@@ -52,6 +56,26 @@ pub(super) struct DependencyTable {
     projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Entity runtimes registered via `RuntimeBuilder::with_entity`
+    /// (CORE-028 Stage 2C), keyed by the aggregate type `E`, never
+    /// `E::Event` (design.md AD-1).
+    entities: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+/// The four host-registered dependency maps `RuntimeBuilder::build` hands to
+/// [`DependencyTable::with_registrations`], bundled as named fields (code
+/// review fix, CORE-028 Stage 2C): the previous four-positional-parameter
+/// signature had all four maps at the identical type
+/// `HashMap<TypeId, Arc<dyn Any + Send + Sync>>`, so a transposed call site
+/// (e.g. `adapters` and `configs` swapped) compiled cleanly and would only
+/// surface as a runtime `DependencyNotFound`. Named fields make that a
+/// compile error instead — a swapped field name at a construction site is
+/// caught by the type checker, not discovered by a test.
+pub(super) struct RegisteredDependencies {
+    pub(super) adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    pub(super) configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    pub(super) projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    pub(super) entities: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl DependencyTable {
@@ -61,20 +85,21 @@ impl DependencyTable {
             projections: HashMap::new(),
             adapters: HashMap::new(),
             configs: HashMap::new(),
+            entities: HashMap::new(),
         }
     }
 
-    /// Builds a table from host-registered adapters/configs/projections
-    /// (`RuntimeBuilder`). Takes all three maps as named parameters so they
-    /// can't be silently transposed at the call site (CORE-028 Stage 2: was
-    /// `with_registrations(adapters, configs)`, always hardcoding an empty
-    /// `projections` map — now threaded through from `RuntimeBuilder::with_projection`).
-    pub(super) fn with_registrations(
-        adapters: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
-        configs: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
-        projections: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
-    ) -> Self {
-        Self { projections, adapters, configs }
+    /// Builds a table from host-registered adapters/configs/projections/entities
+    /// (`RuntimeBuilder`). Takes a single [`RegisteredDependencies`] value
+    /// with named fields so the four identically-typed maps can't be
+    /// silently transposed at the call site — a mismatched field name is a
+    /// compile error, unlike four positional parameters of the same type
+    /// (CORE-028 Stage 2: was `with_registrations(adapters, configs)`,
+    /// always hardcoding an empty `projections` map — now also threaded
+    /// through from `RuntimeBuilder::with_entity`, CORE-028 Stage 2C).
+    pub(super) fn with_registrations(registered: RegisteredDependencies) -> Self {
+        let RegisteredDependencies { adapters, configs, projections, entities } = registered;
+        Self { projections, adapters, configs, entities }
     }
 
     fn resolve_projection<T: 'static + Send + Sync>(
@@ -85,6 +110,21 @@ impl DependencyTable {
             .and_then(|arc| arc.clone().downcast::<T>().ok())
             .map(ProjectionRef::new)
             .ok_or_else(dependency_not_found::<T>)
+    }
+
+    /// Resolves a registered entity runtime as `EntityRuntimeRef<E>`, keyed
+    /// by the aggregate type `E` (design.md AD-1) — never `E::Event`.
+    /// Mirrors `resolve_projection`'s downcast-and-wrap shape exactly.
+    fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, RuntimeError>
+    where
+        E: PersistentEntity + 'static,
+        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    {
+        self.entities
+            .get(&TypeId::of::<E>())
+            .and_then(|arc| arc.clone().downcast::<EntityRuntime<E::Event>>().ok())
+            .map(EntityRuntimeRef::new)
+            .ok_or_else(dependency_not_found::<E>)
     }
 
     fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
@@ -346,6 +386,19 @@ impl RuntimeInner {
         self.resolved.resolve_projection::<T>()
     }
 
+    /// Resolves a registered entity runtime as `EntityRuntimeRef<E>`, keyed
+    /// by the aggregate type `E` (CORE-028 Stage 2C design.md AD-1/AD-8).
+    ///
+    /// Returns `DependencyNotFound` naming `E` (never `E::Event`) if no
+    /// entity runtime was registered for `E`.
+    pub fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, RuntimeError>
+    where
+        E: PersistentEntity + 'static,
+        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    {
+        self.resolved.resolve_entity::<E>()
+    }
+
     /// Resolves a registered `AdapterRef<A>` by type.
     ///
     /// Returns `DependencyNotFound` if no instance was registered for `A`.
@@ -365,13 +418,14 @@ impl RuntimeInner {
     /// constructs nothing (AD-3 / OQ-2). Used by `Injectable::validate()`'s
     /// generic default.
     ///
-    /// `DepKey::Entity` unconditionally returns `Err`: no entity table exists
-    /// yet (CORE-006 is not landed), so a declared `Entity` dependency must
-    /// not silently pass validation — this is the same blind spot `build()`'s
-    /// resolution path already has, not a regression introduced here.
+    /// `DepKey::Entity` is a real presence check against the `entities`
+    /// table (CORE-028 Stage 2C design.md AD-1/AD-7) — mirroring the
+    /// `Projection` arm exactly. Before this change, `Entity` unconditionally
+    /// returned `Err` regardless of table state (no entity table existed);
+    /// that fail-safe stub is retired now that entity registration exists.
     pub(crate) fn check_dependency(&self, dep: &DepKey) -> Result<(), RuntimeError> {
         let (present, type_name) = match dep {
-            DepKey::Entity(_, name) => (false, *name),
+            DepKey::Entity(id, name) => (self.resolved.entities.contains_key(id), *name),
             DepKey::Projection(id, name) => (self.resolved.projections.contains_key(id), *name),
             DepKey::Adapter(id, name) => (self.resolved.adapters.contains_key(id), *name),
             DepKey::Config(id, name) => (self.resolved.configs.contains_key(id), *name),
@@ -553,7 +607,12 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             None,
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(RegisteredDependencies {
+                adapters: HashMap::new(),
+                configs: HashMap::new(),
+                projections: HashMap::new(),
+                entities: HashMap::new(),
+            }),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
@@ -574,7 +633,12 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             None,
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(RegisteredDependencies {
+                adapters: HashMap::new(),
+                configs: HashMap::new(),
+                projections: HashMap::new(),
+                entities: HashMap::new(),
+            }),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
@@ -597,7 +661,12 @@ impl RuntimeInner {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((Arc::new(NoopTestAuthn) as Arc<dyn AuthenticationProvider>, provider)),
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(RegisteredDependencies {
+                adapters: HashMap::new(),
+                configs: HashMap::new(),
+                projections: HashMap::new(),
+                entities: HashMap::new(),
+            }),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
@@ -665,6 +734,7 @@ mod tests {
         assert!(t.projections.is_empty());
         assert!(t.adapters.is_empty());
         assert!(t.configs.is_empty());
+        assert!(t.entities.is_empty());
     }
 
     // -- Missing registration (TypeId not found) ----------------------------
@@ -1085,10 +1155,25 @@ mod tests {
         assert_dependency_not_found_named(rt.check_dependency(&dep), "MyProjection");
     }
 
+    // CORE-028 Stage 2C (task 3.6/3.8): `DepKey::Entity` is now a real
+    // presence check against the `entities` table — replaces the retired
+    // `check_dependency_entity_is_always_err_regardless_of_table_state`
+    // pinning test (there was no entity table before this change).
+
     #[test]
-    fn check_dependency_entity_is_always_err_regardless_of_table_state() {
-        // No entity table exists yet (CORE-006) — Entity must be a fail-safe
-        // always-Err, never silently Ok, regardless of what else is resolved.
+    fn check_dependency_entity_present_is_ok() {
+        let mut rt = RuntimeInner::for_test();
+        let instance = Arc::new(MyProjection(3)) as Arc<dyn Any + Send + Sync>;
+        rt.resolved
+            .entities
+            .insert(TypeId::of::<MyProjection>(), instance);
+
+        let dep = DepKey::Entity(TypeId::of::<MyProjection>(), "MyProjection");
+        assert!(rt.check_dependency(&dep).is_ok());
+    }
+
+    #[test]
+    fn check_dependency_entity_missing_is_err_named() {
         let rt = RuntimeInner::for_test();
         let dep = DepKey::Entity(TypeId::of::<MyProjection>(), "MyProjection");
         assert_dependency_not_found_named(rt.check_dependency(&dep), "MyProjection");
@@ -1222,7 +1307,12 @@ mod tests {
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
             Some((authn, authz)),
-            DependencyTable::with_registrations(HashMap::new(), HashMap::new(), HashMap::new()),
+            DependencyTable::with_registrations(RegisteredDependencies {
+                adapters: HashMap::new(),
+                configs: HashMap::new(),
+                projections: HashMap::new(),
+                entities: HashMap::new(),
+            }),
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
