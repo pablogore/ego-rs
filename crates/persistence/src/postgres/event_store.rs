@@ -10,6 +10,8 @@ use tokio::runtime::Handle;
 use ego_domain::event::DomainEvent;
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
+use crate::postgres::resolve_tenant;
+
 /// Row returned from the events table.
 #[derive(FromRow)]
 #[expect(dead_code)]
@@ -66,11 +68,7 @@ where
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
         let pool = self.pool.clone();
         let aggregate_id = aggregate_id.to_string();
 
@@ -140,11 +138,7 @@ where
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         let rows: Vec<EventRow> = self
             .block_on(async {
@@ -178,11 +172,7 @@ where
     }
 
     fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         let rows: Vec<(String,)> = self
             .block_on(async {

@@ -8,6 +8,8 @@ use tokio::runtime::Handle;
 
 use ego_domain::persistence::{PersistenceError, Repository};
 
+use crate::postgres::resolve_tenant;
+
 /// Row returned from the aggregates table.
 #[derive(FromRow)]
 #[expect(dead_code)]
@@ -63,11 +65,7 @@ where
         tenant_id: Option<&str>,
         expected_version: i64,
     ) -> Result<i64, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
         let payload = serde_json::to_value(&aggregate).map_err(|e| {
             PersistenceError::Internal(format!("failed to serialize aggregate: {}", e))
         })?;
@@ -128,11 +126,7 @@ where
     }
 
     fn load(&self, aggregate_id: &str, tenant_id: Option<&str>) -> Result<A, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         let row: AggregateRow = self
             .block_on(async {
@@ -160,11 +154,7 @@ where
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<(), PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         let deleted = self
             .block_on(async {
