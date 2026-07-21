@@ -16,11 +16,11 @@ type TagStream = Vec<EventStreamElement<serde_json::Value>>;
 ///
 /// Stores events per tag with offset-based pagination.
 ///
-/// `ReadSideStore::fetch` (CORE-005) takes only a tag — no separate tenant
-/// parameter — so this reference implementation cannot enforce tenant
-/// isolation on its own. Callers that need per-tenant scoping either fold
-/// the tenant into the tag value or rely on `EventStreamElement::tenant_id`
-/// downstream in their handler.
+/// `ReadSideStore::fetch` takes an explicit `tenant` parameter, so this
+/// reference implementation enforces tenant isolation at the store level:
+/// `fetch` only ever returns events whose `tenant_id` matches the requested
+/// tenant, independent of how the tag was constructed. An empty tenant
+/// returns nothing (fail closed).
 pub struct InMemoryReadSideStore {
     /// Events indexed by tag, sorted by `event_version` ascending.
     streams: BTreeMap<String, TagStream>,
@@ -92,24 +92,39 @@ impl Default for InMemoryReadSideStore {
 /// `std::sync::MutexGuard` without an `.await` in scope — a `MutexGuard` is
 /// `!Send`, so holding one across an await point would break a `Send`-bound
 /// async trait future; this function never awaits, so that's never a risk.
+///
+/// Also enforces tenant isolation: only events whose `tenant_id` equals
+/// `tenant` are returned, and an empty `tenant` returns nothing (fail closed)
+/// so a missing tenant can never surface another tenant's events.
 pub fn paginate<'a>(
     events: impl Iterator<Item = &'a EventStreamElement<serde_json::Value>>,
+    tenant: &str,
     offset: Option<&Offset>,
     batch_size: usize,
 ) -> Vec<EventStreamElement<serde_json::Value>> {
+    // Fail closed: an empty tenant is treated as "no tenant" and never
+    // matches any event, instead of degrading into an unscoped scan.
+    if tenant.trim().is_empty() {
+        return Vec::new();
+    }
     let after = offset.and_then(Offset::as_sequence).unwrap_or(0);
-    events.filter(|e| e.event_version > after).take(batch_size).cloned().collect()
+    events
+        .filter(|e| e.tenant_id() == tenant && e.event_version > after)
+        .take(batch_size)
+        .cloned()
+        .collect()
 }
 
 #[async_trait::async_trait]
 impl ReadSideStore<serde_json::Value> for InMemoryReadSideStore {
     async fn fetch(
         &self,
+        tenant: &str,
         tag: &EventTag,
         offset: Option<&Offset>,
         batch_size: usize,
     ) -> Result<Vec<EventStreamElement<serde_json::Value>>, ReadSideStoreError> {
-        Ok(paginate(self.events_for_tag(tag.value()), offset, batch_size))
+        Ok(paginate(self.events_for_tag(tag.value()), tenant, offset, batch_size))
     }
 }
 
@@ -120,10 +135,14 @@ mod tests {
     use super::*;
 
     fn element(tag: &str, version: i64) -> EventStreamElement<serde_json::Value> {
+        element_for("tenant-a", tag, version)
+    }
+
+    fn element_for(tenant: &str, tag: &str, version: i64) -> EventStreamElement<serde_json::Value> {
         EventStreamElement::new(
             format!("evt-{version}"),
             "agg-1",
-            "tenant-a",
+            tenant,
             "TestEvent",
             serde_json::json!({ "v": version }),
             version,
@@ -140,7 +159,7 @@ mod tests {
         }
 
         let tag = EventTag::new("order");
-        let page = store.fetch(&tag, Some(&Offset::sequence(2)), 2).await.unwrap();
+        let page = store.fetch("tenant-a", &tag, Some(&Offset::sequence(2)), 2).await.unwrap();
 
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].event_version, 3);
@@ -154,7 +173,7 @@ mod tests {
         store.insert(element("order", 2));
 
         let tag = EventTag::new("order");
-        let page = store.fetch(&tag, None, 10).await.unwrap();
+        let page = store.fetch("tenant-a", &tag, None, 10).await.unwrap();
 
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].event_version, 1);
@@ -165,8 +184,43 @@ mod tests {
         let store = InMemoryReadSideStore::new();
         let tag = EventTag::new("unknown");
 
-        let page = store.fetch(&tag, None, 10).await.unwrap();
+        let page = store.fetch("tenant-a", &tag, None, 10).await.unwrap();
         assert!(page.is_empty());
+    }
+
+    // Security: tenant isolation is enforced at the store level, not left to
+    // the convention of folding the tenant into the tag. Two tenants share a
+    // single tag stream here; `fetch` must still only ever return the
+    // requested tenant's events.
+    #[tokio::test]
+    async fn fetch_only_returns_events_for_the_requested_tenant() {
+        let mut store = InMemoryReadSideStore::new();
+        store.insert(element_for("tenant-a", "order", 1));
+        store.insert(element_for("tenant-b", "order", 2));
+        store.insert(element_for("tenant-a", "order", 3));
+
+        let tag = EventTag::new("order");
+
+        let a = store.fetch("tenant-a", &tag, None, 10).await.unwrap();
+        assert_eq!(a.len(), 2, "only tenant-a's events");
+        assert!(a.iter().all(|e| e.tenant_id() == "tenant-a"));
+
+        let b = store.fetch("tenant-b", &tag, None, 10).await.unwrap();
+        assert_eq!(b.len(), 1, "only tenant-b's events");
+        assert!(b.iter().all(|e| e.tenant_id() == "tenant-b"));
+    }
+
+    // Fail closed: an empty tenant must never surface another tenant's data,
+    // even when the tag stream is non-empty.
+    #[tokio::test]
+    async fn fetch_with_empty_tenant_returns_empty_fail_closed() {
+        let mut store = InMemoryReadSideStore::new();
+        store.insert(element_for("tenant-a", "order", 1));
+        store.insert(element_for("tenant-b", "order", 2));
+
+        let tag = EventTag::new("order");
+        let page = store.fetch("", &tag, None, 10).await.unwrap();
+        assert!(page.is_empty(), "empty tenant must return no events");
     }
 
     #[test]

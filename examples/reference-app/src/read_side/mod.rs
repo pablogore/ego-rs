@@ -48,6 +48,17 @@ pub(crate) fn tenant_tag(tenant_id: &str) -> EventTag {
     EventTag::new(format!("{PROJECTION_TAG}:{tenant_id}"))
 }
 
+/// The tenant encoded in a `tenant_tag`-shaped tag, i.e. the `{tenant_id}`
+/// part of `"{PROJECTION_TAG}:{tenant_id}"`. Returns `None` for any tag not
+/// produced by [`tenant_tag`]. This is the authoritative tenant for a fetch
+/// in this app: the read-side engine threads a single bookkeeping scope
+/// (`BOOKKEEPING_SCOPE`) as the session tenant for every tag, so the real
+/// per-fetch tenant must be recovered from the tag, which is already
+/// tenant-scoped (one tag stream per tenant).
+pub(crate) fn tenant_from_tag(tag: &EventTag) -> Option<&str> {
+    tag.value().strip_prefix(&format!("{PROJECTION_TAG}:")).filter(|t| !t.is_empty())
+}
+
 /// Bookkeeping-only scope passed to `OffsetStore`/`DedupStore`. CORE-005
 /// keys those per `(projection_id, tag, tenant)`, and tenants are already
 /// isolated at the store level via `tenant_tag` (one tag stream per

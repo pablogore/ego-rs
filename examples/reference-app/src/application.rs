@@ -191,11 +191,19 @@ impl RegisterUser for RegisterUserImpl {
         // authenticated caller from tenant A could submit `tenant_id:
         // "tenant-B"` and write into tenant B. Reject the request outright
         // rather than trusting `input.tenant_id` as the write-tenant.
-        if let Some(resolved) = ctx.canonical_tenant().and_then(|c| c.tenant_id()) {
-            if resolved.as_str() != input.tenant_id {
+        //
+        // Fail closed: a resolved canonical tenant that equals `input.tenant_id`
+        // is the ONLY accepted case. A missing canonical tenant (`None` — e.g.
+        // a direct `RegisterUserImpl::register` call that bypassed the
+        // `#[tenant_scoped]` macro proxy, so `enforce_tenant` never ran) must
+        // deny too, never fall through to using the client-controlled
+        // `input.tenant_id` as the write-tenant unchecked.
+        match ctx.canonical_tenant().and_then(|c| c.tenant_id()) {
+            Some(resolved) if resolved.as_str() == input.tenant_id => {}
+            _ => {
                 return Err(RegisterUserError::Security(SecurityError::AuthorizationDenied {
                     reason: format!(
-                        "request tenant_id {:?} does not match the authenticated tenant",
+                        "request tenant_id {:?} does not match a resolved authenticated tenant",
                         input.tenant_id
                     ),
                 }));

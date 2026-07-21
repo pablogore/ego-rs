@@ -308,6 +308,7 @@ mod tests {
     impl ReadSideStore<serde_json::Value> for FakeStore {
         async fn fetch(
             &self,
+            _tenant: &str,
             tag: &EventTag,
             _offset: Option<&Offset>,
             _batch_size: usize,

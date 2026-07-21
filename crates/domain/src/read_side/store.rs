@@ -24,12 +24,22 @@ pub enum ReadSideStoreError {
 /// Separate from `EventStore`. Fetches events by tag with offset-based pagination.
 #[async_trait]
 pub trait ReadSideStore<E> {
-    /// Fetches up to `batch_size` events for a tag starting after `offset`.
+    /// Fetches up to `batch_size` events for `tenant` under `tag`, starting
+    /// after `offset`.
     ///
     /// Returns events with `event_version > offset` in ascending version order.
     /// If offset is `None`, returns from the beginning (used in replay).
     ///
+    /// Tenant isolation is type-enforced by this parameter rather than left to
+    /// the convention of folding the tenant into `tag`: an implementation MUST
+    /// only return events whose `tenant_id` equals `tenant`, regardless of how
+    /// `tag` was constructed. An empty `tenant` MUST return no events (fail
+    /// closed) — a missing tenant must never silently surface another tenant's
+    /// data.
+    ///
     /// # Arguments
+    /// * `tenant` - The tenant to scope the fetch to. Empty means "no tenant",
+    ///   which returns nothing.
     /// * `tag` - The tag to fetch events for
     /// * `offset` - Optional offset (last processed event_version). `None` means from beginning.
     /// * `batch_size` - Maximum number of events to return
@@ -38,6 +48,7 @@ pub trait ReadSideStore<E> {
     /// A vector of `EventStreamElement` sorted by `event_version` ascending.
     async fn fetch(
         &self,
+        tenant: &str,
         tag: &EventTag,
         offset: Option<&Offset>,
         batch_size: usize,
