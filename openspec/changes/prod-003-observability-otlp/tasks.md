@@ -39,14 +39,14 @@ Chain strategy: pending
 
 ## Phase 2: ServiceContext Trace-Context Threading
 
-- [ ] TASK-008 RED: failing tests in `context/mod.rs` for `with_trace_context`/`trace_context()` round-trip, flat `trace_id` mirror, `correlation_id` unaffected. No `with_span` test (removed from v1).
-- [ ] TASK-009 GREEN: add `trace_context: Option<TraceContext>` field + accessors to `ServiceContext`; flat `trace_id` becomes read-through mirror. AC: TASK-008 green; existing context tests unaffected; no `with_span` method exists.
+- [x] TASK-008 RED: failing tests in `context/mod.rs` for `with_trace_context`/`trace_context()` round-trip, flat `trace_id` mirror, `correlation_id` unaffected. No `with_span` test (removed from v1).
+- [x] TASK-009 GREEN: add `trace_context: Option<TraceContext>` field + accessors to `ServiceContext`; flat `trace_id` becomes read-through mirror. AC: TASK-008 green; existing context tests unaffected; no `with_span` method exists.
 
 ## Phase 3: TracingInterceptor
 
-- [ ] TASK-010 RED: failing tests in new `interceptor/builtin/tracing.rs` with a spy `Tracer`: `on_request` starts span (handle == `ctx.trace_context().span_id()`), `on_response` ends `Ok`, `on_error` ends `Error{status_message}` (redaction-safe), double-end race resolves to one close.
-- [ ] TASK-011 GREEN: implement `TracingInterceptor { tracer: Arc<dyn Tracer> }` impl `Interceptor`; no `TraceContext::child()` call. AC: TASK-010 green.
-- [ ] TASK-012: unstub `builtin/mod.rs` (`pub mod tracing; pub use tracing::TracingInterceptor;`). AC: crate compiles, symbol exported.
+- [x] TASK-010 RED: failing tests in new `interceptor/builtin/tracing.rs` with a spy `Tracer`: `on_request` starts span (handle == `ctx.trace_context().span_id()`), `on_response` ends `Ok`, `on_error` ends `Error{status_message}` (redaction-safe), double-end race resolves to one close.
+- [x] TASK-011 GREEN: implement `TracingInterceptor { tracer: Arc<dyn Tracer> }` impl `Interceptor`; no `TraceContext::child()` call. AC: TASK-010 green.
+- [x] TASK-012: unstub `builtin/mod.rs` (`pub mod tracing; pub use tracing::TracingInterceptor;`). AC: crate compiles, symbol exported.
 
 ## Phase 4: Runtime Wiring
 

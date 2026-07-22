@@ -8,6 +8,7 @@ use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
 use ego_domain::context::TenantId;
+use ego_domain::TraceContext;
 
 use crate::runtime::{CanonicalTenant, CrossTenantGrant, CrossTenantPermit};
 
@@ -66,6 +67,13 @@ pub struct ServiceContext {
     /// The correlation ID.
     pub correlation_id: Option<String>,
     /// The trace ID.
+    ///
+    /// PROD-003 (ADR-4): once [`ServiceContext::with_trace_context`] is used,
+    /// this field is kept as a read-through mirror of
+    /// `trace_context().trace_id()` (rendered as W3C hex) — it carries no
+    /// independent value of its own in that case. It remains directly
+    /// settable via [`ServiceContext::with_trace_id`] only for source
+    /// compatibility with call sites that predate `TraceContext`.
     pub trace_id: Option<String>,
     /// The deadline.
     pub deadline: Option<SystemTime>,
@@ -93,6 +101,11 @@ pub struct ServiceContext {
     /// Set ONLY via [`ServiceContext::set_resolved_tenant`] (`pub(crate)`,
     /// called by `RuntimeInner::enforce_tenant`) — there is no public setter.
     resolved_tenant: Option<CanonicalTenant>,
+    /// The explicit distributed-tracing value (PROD-003 ADR-1/ADR-4), carried
+    /// by value — never via ambient/task-local state. Set via
+    /// [`ServiceContext::with_trace_context`], read via
+    /// [`ServiceContext::trace_context`].
+    trace_context: Option<TraceContext>,
 }
 
 impl ServiceContext {
@@ -113,6 +126,7 @@ impl ServiceContext {
             security: None,
             logger: None,
             resolved_tenant: None,
+            trace_context: None,
         }
     }
 
@@ -149,6 +163,29 @@ impl ServiceContext {
     /// A new `ServiceContext` with the trace ID set
     pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
         self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Sets the explicit distributed-tracing value (PROD-003 ADR-1/ADR-4).
+    ///
+    /// This is the sole way trace identity travels between the point it is
+    /// originated (HTTP ingress: `TraceContext::root()`/`from_inbound`) and
+    /// any point it is later needed — no ambient/thread-local/task-local
+    /// lookup exists. The flat [`ServiceContext::trace_id`] field/accessor is
+    /// kept as a read-through mirror of `trace_context.trace_id()` (rendered
+    /// as W3C hex) for source compatibility; it carries no independent value
+    /// once this is set. `correlation_id` is a distinct business-causal
+    /// concept and is unaffected.
+    ///
+    /// # Arguments
+    /// * `trace_context` - The `TraceContext` to attach
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the trace-context set (and `trace_id`
+    /// mirrored)
+    pub fn with_trace_context(mut self, trace_context: TraceContext) -> Self {
+        self.trace_id = Some(trace_context.trace_id().to_hex());
+        self.trace_context = Some(trace_context);
         self
     }
 
@@ -359,6 +396,15 @@ impl ServiceContext {
         self.trace_id.as_deref()
     }
 
+    /// Gets the explicit distributed-tracing value, if set (PROD-003).
+    ///
+    /// # Returns
+    /// The `TraceContext` if set via [`ServiceContext::with_trace_context`],
+    /// or `None` if not set
+    pub fn trace_context(&self) -> Option<&TraceContext> {
+        self.trace_context.as_ref()
+    }
+
     /// Requires that security be enabled in the runtime.
     ///
     /// This method should be called by service handlers that need to ensure
@@ -398,6 +444,7 @@ impl std::fmt::Debug for ServiceContext {
             .field("security", &self.security)
             .field("logger", &self.logger.is_some())
             .field("resolved_tenant", &self.resolved_tenant)
+            .field("trace_context", &self.trace_context)
             .finish()
     }
 }
@@ -572,6 +619,45 @@ mod tests {
             .expect("AllowSystemInternal + hint resolves");
 
         assert!(ctx.canonical_tenant().is_some());
+    }
+
+    // -- PROD-003 Phase 2 (TASK-008): explicit trace-context threading --
+
+    #[test]
+    fn with_trace_context_round_trips() {
+        use ego_domain::TraceContext;
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new().with_trace_context(tc);
+
+        assert_eq!(ctx.trace_context(), Some(&tc));
+    }
+
+    #[test]
+    fn flat_trace_id_mirrors_trace_context_trace_id() {
+        use ego_domain::TraceContext;
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new().with_trace_context(tc);
+
+        assert_eq!(ctx.trace_id(), Some(tc.trace_id().to_hex().as_str()));
+    }
+
+    #[test]
+    fn correlation_id_is_unaffected_by_trace_context() {
+        use ego_domain::TraceContext;
+
+        let ctx = ServiceContext::new()
+            .with_correlation_id("corr-1")
+            .with_trace_context(TraceContext::root());
+
+        assert_eq!(ctx.correlation_id(), Some("corr-1"));
+    }
+
+    #[test]
+    fn trace_context_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert_eq!(ctx.trace_context(), None);
     }
 
     // FR-010: with_tenant_id() only ever writes tenant_id, never

@@ -1,5 +1,4 @@
 //! Built-in interceptors for service invocation.
 
-// pub use tracing::TracingInterceptor;
-
-// mod tracing;
+pub mod tracing;
+pub use tracing::TracingInterceptor;
