@@ -2,17 +2,8 @@ error[E0277]: the trait bound `NotImplementingStruct: UnrelatedTrait` is not sat
   --> tests/compile_fail/service_wrong_impl_of.rs:11:1
    |
 11 | #[service(impl_of = UnrelatedTrait)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `UnrelatedTrait` is not implemented for `NotImplementingStruct`
    |
-help: the trait `UnrelatedTrait` is not implemented for `NotImplementingStruct`
-  --> tests/compile_fail/service_wrong_impl_of.rs:12:1
-   |
-12 | struct NotImplementingStruct;
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-help: the trait `UnrelatedTrait` is implemented for `UnrelatedTraitRef`
-  --> tests/compile_fail/service_wrong_impl_of.rs:8:1
-   |
- 8 | #[service]
-   | ^^^^^^^^^^
+   = help: the trait `UnrelatedTrait` is implemented for `UnrelatedTraitRef`
    = note: required for the cast from `Arc<NotImplementingStruct>` to `Arc<(dyn UnrelatedTrait + 'static)>`
    = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
