@@ -42,16 +42,36 @@ be ignored (with a warning) rather than overwrite the existing entry.
 - THEN the existing table entry for `S` is unchanged and a warning is
   emitted
 
-### Requirement: Shutdown Flushes Pending Spans And Clears The Table
+### Requirement: Lifecycle Is A Separate Concern From The Tracing Port
 
-`Tracer::shutdown()` MUST flush all pending (unended) spans and MUST clear
-the span table afterward. Orphaned spans MUST be bounded, not accumulate
-unbounded.
+`shutdown` MUST NOT be a method on the `Tracer` port. It MUST live on a
+separate `TracerLifecycle` trait, so `NoopTracer`, test spies, and future
+tracers are not forced to implement an exporter/operational concern. The
+runtime MUST own the `TracerLifecycle` (when present) and MUST call
+`shutdown()` on teardown. `TracerLifecycle::shutdown()` MUST flush all
+pending (unended) spans and MUST clear the span table afterward.
 
 #### Scenario: shutdown exports orphaned spans and empties the table
 - GIVEN spans started but never ended remain in the span table
-- WHEN `shutdown()` is called
+- WHEN `TracerLifecycle::shutdown()` is called
 - THEN each pending span is flushed/exported and the table is empty
+
+#### Scenario: a plain Tracer implementation need not know about shutdown
+- GIVEN a tracer implementation (e.g. `NoopTracer` or a test spy) that implements only `Tracer`
+- THEN it MUST compile and be usable without implementing `TracerLifecycle`
+
+### Requirement: In-Flight Spans Are Bounded By A Configured Limit
+
+The live-span table MUST be bounded by a configured `max_in_flight_spans:
+usize`. When the table is at capacity and a new span is started, the
+implementation MUST **drop the new span and emit a diagnostic warning**. It
+MUST NOT evict a live span, overwrite an existing entry, or grow the table
+unbounded.
+
+#### Scenario: starting a span over the in-flight limit drops it with a warning
+- GIVEN the live-span table already holds `max_in_flight_spans` unended spans
+- WHEN a new span is started
+- THEN the new span is dropped, a diagnostic warning is emitted, and no existing live span is evicted or overwritten
   afterward
 
 ### Requirement: End Span With Error Records A Redaction-Safe Status Message
@@ -160,10 +180,10 @@ method, mirroring `Observability`'s non-blocking contract.
 
 ### Requirement: NoopTracer Is A Zero-Effect Default
 
-`ego-domain` MUST provide a `NoopTracer` implementation of `Tracer`.
-`start_span` MUST return `ctx.span_id()` with no observable side effect;
-`end_span` and `shutdown` MUST be no-ops. `NoopTracer` MUST be the default
-when no tracer is wired.
+`ego-domain` MUST provide a `NoopTracer` implementation of `Tracer` (it does
+NOT implement `TracerLifecycle`). `start_span` MUST return `ctx.span_id()`
+with no observable side effect; `end_span` MUST be a no-op. `NoopTracer` MUST
+be the default when no tracer is wired.
 
 #### Scenario: NoopTracer returns the context's span_id with no side effects
 - GIVEN a `NoopTracer` instance and a `TraceContext` `ctx`, with no tracer

@@ -20,7 +20,7 @@ Chain strategy: pending
 
 | Unit | Goal | Likely PR | Focused test command | Runtime harness | Rollback boundary |
 |---|---|---|---|---|---|
-| 1 | `Tracer`/`TraceContext`/`SpanAttributes`/`NoopTracer` in `ego-domain` | PR1 | `cargo test -p ego-domain tracer::` | N/A — pure domain unit, no runtime | Delete `tracer.rs`, revert `lib.rs` mod line |
+| 1 | `Tracer`/`TracerLifecycle`/`TraceContext`/`SpanAttributes`/`NoopTracer` in `ego-domain` | PR1 | `cargo test -p ego-domain tracer::` | N/A — pure domain unit, no runtime | Delete `tracer.rs`, revert `lib.rs` mod line |
 | 2 | `ServiceContext` trace-context + `TracingInterceptor` | PR2 | `cargo test -p ego-service-sdk context:: interceptor::builtin::tracing::` | N/A — interceptor not yet runtime-wired | Revert `context/mod.rs`; delete `builtin/tracing.rs`; re-stub `builtin/mod.rs` |
 | 3 | `RuntimeBuilder::with_tracer` wiring | PR3 | `cargo test -p ego-service-sdk runtime::builder::` | reference-app boot with `with_tracer(NoopTracer)` | Revert `builder.rs`/`runtime_builder.rs` tracer additions |
 | 4 | Outbound HTTP `traceparent` propagation helper + reference-app call site | PR4 | `cargo test -p ego-transport propagation:: && cargo test -p reference-app --test outbound_trace_propagation` | reference-app outbound call site test asserting injected header | Delete `transport/src/propagation.rs`; revert `transport/lib.rs` mod line; revert reference-app call site |
@@ -33,9 +33,9 @@ Chain strategy: pending
 - [ ] TASK-002 GREEN: implement `TraceContext`, `TraceId`, `SpanId` newtypes, `root()`/`from_inbound()`/`child()`. AC: TASK-001 green.
 - [ ] TASK-003 RED: failing tests for W3C `traceparent` parse/format round-trip incl. invalid-input error; `parse_traceparent` returns raw `(TraceId,SpanId)` only.
 - [ ] TASK-004 GREEN: implement `parse_traceparent`/`to_traceparent`/`TraceParseError`. AC: TASK-003 green.
-- [ ] TASK-005 RED: failing tests — `SpanAttributes` allow-list has no constructor/field for tenant id, credential, or arbitrary payload; `Tracer` trait + `NoopTracer` (zero observable effect, returns `ctx.span_id()`) + `SpanOutcome`.
-- [ ] TASK-006 GREEN: implement `SpanAttributes` (operation, tenant-present bool, duration), `SpanOutcome`, `Tracer` trait, `NoopTracer`. AC: TASK-005 green, no `opentelemetry` symbol in signatures.
-- [ ] TASK-007: wire `pub mod tracer;` + re-exports in `crates/domain/src/lib.rs`. AC: `ego_domain::{Tracer, TraceContext, SpanAttributes, NoopTracer, SpanOutcome}` importable.
+- [ ] TASK-005 RED: failing tests — `SpanAttributes` allow-list has no constructor/field for tenant id, credential, or arbitrary payload; `Tracer` trait (`start_span`/`end_span` only) + `NoopTracer` (zero observable effect, returns `ctx.span_id()`, implements `Tracer` ONLY — does not implement `TracerLifecycle`) + `SpanOutcome`.
+- [ ] TASK-006 GREEN: implement `SpanAttributes` (operation, tenant-present bool, duration), `SpanOutcome`, `Tracer` trait (`start_span`/`end_span`), a SEPARATE `TracerLifecycle` trait (`shutdown`, ADR-9), and `NoopTracer` (impl `Tracer` only). AC: TASK-005 green, no `opentelemetry` symbol in signatures.
+- [ ] TASK-007: wire `pub mod tracer;` + re-exports in `crates/domain/src/lib.rs`. AC: `ego_domain::{Tracer, TracerLifecycle, TraceContext, SpanAttributes, NoopTracer, SpanOutcome}` importable.
 
 ## Phase 2: ServiceContext Trace-Context Threading
 
@@ -51,7 +51,7 @@ Chain strategy: pending
 ## Phase 4: Runtime Wiring
 
 - [ ] TASK-013 RED: failing test — `RuntimeBuilder::with_tracer(Arc<dyn Tracer>)` registers `TracingInterceptor`; omitted ⇒ `NoopTracer` default, behavior byte-identical.
-- [ ] TASK-014 GREEN: implement `with_tracer` in `builder.rs` + thread `tracer` through `runtime_builder.rs` (mirror `with_observability`); call `tracer.shutdown()` on teardown. AC: TASK-013 green.
+- [ ] TASK-014 GREEN: implement `with_tracer` in `builder.rs` + thread `tracer` through `runtime_builder.rs` (mirror `with_observability`); the runtime owns an optional `Arc<dyn TracerLifecycle>` and calls `shutdown()` on teardown (not a `Tracer` method). AC: TASK-013 green.
 
 ## Phase 5: Outbound HTTP Propagation
 
@@ -63,8 +63,8 @@ Chain strategy: pending
 ## Phase 6: Infrastructure OTLP Adapter
 
 - [ ] TASK-019: add `opentelemetry`, `opentelemetry-otlp` to `crates/infrastructure/Cargo.toml` only. AC: `cargo build -p ego-infrastructure` succeeds; no other crate gains the dep.
-- [ ] TASK-020 RED: failing unit tests — `SpanId`-keyed span table bookkeeping; idempotent `end_span` (double-end = one close); duplicate `start_span` for a live `SpanId` ignored+warns; `shutdown()` flushes orphaned spans and clears table.
-- [ ] TASK-021 GREEN: implement `crates/infrastructure/src/tracing_otlp.rs`: `OtlpConfig { endpoint, protocol: Grpc|Http }`, `OtlpTracer` impl `Tracer`, maps already-safe `SpanAttributes` with no redaction step. AC: TASK-020 green.
+- [ ] TASK-020 RED: failing unit tests — `SpanId`-keyed span table bookkeeping; idempotent `end_span` (double-end = one close); duplicate `start_span` for a live `SpanId` ignored+warns; at `max_in_flight_spans` a new `start_span` is **dropped + warns** (no eviction/overwrite/unbounded growth); `TracerLifecycle::shutdown()` flushes orphaned spans and clears table.
+- [ ] TASK-021 GREEN: implement `crates/infrastructure/src/tracing_otlp.rs`: `OtlpConfig { endpoint, protocol: Grpc|Http, max_in_flight_spans: usize }`, `OtlpTracer` impl `Tracer` + `TracerLifecycle`, bounded span table with drop-new-on-overflow, maps already-safe `SpanAttributes` with no redaction step. AC: TASK-020 green.
 - [ ] TASK-022 RED: failing test — lossless `SpanId`/`TraceId` ↔ otel span/trace id conversion round-trip (encode then decode yields identical bytes).
 - [ ] TASK-023 GREEN: implement the conversion functions used by `OtlpTracer`. AC: TASK-022 green.
 - [ ] TASK-024 RED: failing `#[tokio::test]` integration tests — gRPC and HTTP export to a stub collector per `OtlpConfig.protocol`.

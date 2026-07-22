@@ -63,8 +63,11 @@ neither symbol appears outside the adapter module. Operational rules (also MUST 
 - `end_span` is **idempotent per `SpanId`**: first end wins; the `on_response`+`on_error`
   race resolves to a single close — the second call is a no-op.
 - A duplicate `start_span` for a still-live `SpanId` is **ignored with a warning**.
-- **Orphaned** spans (started, never ended) are bounded; `shutdown()` flushes pending
-  spans and clears the table.
+- **Orphaned** spans (started, never ended) are bounded by `OtlpConfig.max_in_flight_spans`
+  (a `usize` cap on the live-span table). On overflow, a new `start_span` **drops the new
+  span and emits a diagnostic warning** — it never evicts a live span, overwrites, or grows
+  unbounded. `TracerLifecycle::shutdown()` flushes the remaining pending spans and clears
+  the table.
 
 ### ADR-6: Redaction at the port boundary (not in the adapter)
 `start_span` takes a domain `SpanAttributes` — an allow-list of non-sensitive typed
@@ -106,6 +109,14 @@ new local span `222`, parent `111`; B `to_traceparent()` emits `AAA/222`. C `fro
 v1 is **always-on, no sampler** — a decided behavior, not an open question. Configurable
 ratio/parent-based sampling is an explicit deferred non-goal.
 
+### ADR-9: `shutdown` on a separate `TracerLifecycle` trait
+**Choice**: `Tracer` = `start_span`/`end_span` only; a separate `TracerLifecycle::shutdown()`.
+**Alternatives**: keep `shutdown` on `Tracer` (v1 simplification).
+**Rationale**: `shutdown` is exporter/implementor lifecycle, not a domain tracing operation.
+Splitting it means `NoopTracer`, test spies, and future tracer impls are not forced to know
+an OTLP operational concern. The runtime owns the lifecycle and calls `shutdown()` on
+teardown; the OTLP adapter implements both `Tracer` and `TracerLifecycle`.
+
 ## Data Flow
 
     remote traceparent? ─yes─▶ TraceContext::from_inbound(header)  ┐
@@ -138,10 +149,10 @@ ratio/parent-based sampling is an explicit deferred non-goal.
 | `crates/service-sdk/src/context/mod.rs` | Modify | `trace_context` field, `with_trace_context`, `trace_context()`; flat `trace_id` mirror (no `with_span`) |
 | `crates/service-sdk/src/interceptor/builtin/mod.rs` | Modify | Unstub; export `TracingInterceptor` |
 | `crates/service-sdk/src/interceptor/builtin/tracing.rs` | Create | `TracingInterceptor { tracer: Arc<dyn Tracer> }` start/end/error; `on_error` → redacted `status_message` |
-| `crates/service-sdk/src/runtime/builder.rs` | Modify | `with_tracer(Arc<dyn Tracer>)` registers the interceptor; `shutdown` wired |
+| `crates/service-sdk/src/runtime/builder.rs` | Modify | `with_tracer(Arc<dyn Tracer>)` registers the interceptor; runtime owns the optional `Arc<dyn TracerLifecycle>` and calls `shutdown()` on teardown |
 | `crates/transport/src/propagation.rs` | Create | Outbound `traceparent` header builder from an explicit `TraceContext` (HTTP injection point) |
 | `crates/transport/src/lib.rs` | Modify | `pub mod propagation;` |
-| `crates/infrastructure/src/tracing_otlp.rs` | Create | `OtlpTracer` (SpanId-keyed table, idempotent end, shutdown flush) + `OtlpConfig { endpoint, protocol: Grpc\|Http }` |
+| `crates/infrastructure/src/tracing_otlp.rs` | Create | `OtlpTracer` impl `Tracer` + `TracerLifecycle` (SpanId-keyed table, idempotent end, bounded by `max_in_flight_spans` → drop-new+warn, shutdown flush) + `OtlpConfig { endpoint, protocol: Grpc\|Http, max_in_flight_spans: usize }` |
 | `crates/infrastructure/Cargo.toml` | Modify | Add `opentelemetry`, `opentelemetry-otlp` (infra only) |
 
 ## Interfaces / Contracts
@@ -172,9 +183,14 @@ pub enum SpanOutcome { Ok, Error { status_message: String } } // status_message 
 pub trait Tracer: Send + Sync {                  // non-blocking, stateless-trait like Observability
     fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes) -> SpanId; // returns ctx.span_id()
     fn end_span(&self, span: SpanId, outcome: SpanOutcome);   // idempotent per SpanId
+}
+// Exporter/operational lifecycle — SEPARATE from the domain tracing calls (ADR-9) so
+// NoopTracer, test spies, and future tracers need not know an OTLP operational concern.
+// The runtime owns it and calls shutdown() on teardown; the OTLP adapter implements both.
+pub trait TracerLifecycle: Send + Sync {
     fn shutdown(&self);                                        // flush pending + clear table
 }
-pub struct NoopTracer;   // default; start_span returns ctx.span_id(), end/shutdown no-op
+pub struct NoopTracer;   // default; implements Tracer ONLY (start_span returns ctx.span_id(), end no-op)
 ```
 
 ## Testing Strategy
@@ -184,7 +200,7 @@ pub struct NoopTracer;   // default; start_span returns ctx.span_id(), end/shutd
 | Unit | `from_inbound` (new local span, parent = remote), `root`, `child`, `to_traceparent` round-trip; A→B→C parent linkage | domain tests |
 | Unit | `start_span` returns `ctx.span_id()`; `SpanAttributes` cannot carry tenant/credential/payload | domain tests |
 | Unit | `end_span` idempotent (double-end = one close); duplicate `start_span` warns; `SpanOutcome::Error{status_message}` redaction-safe | adapter tests |
-| Unit | `shutdown` flushes orphaned spans and clears table | adapter tests |
+| Unit | `TracerLifecycle::shutdown` flushes orphaned spans and clears table; at `max_in_flight_spans` a new span is dropped + warned (no eviction/overwrite/unbounded growth) | adapter tests |
 | Unit | `NoopTracer` no-ops; `TracingInterceptor` start/end/error via spy `Tracer`; no `with_span` | interceptor tests |
 | Unit | **Boundary lint**: no `Context::current()`/`Span::current()` outside adapter | source-scan test |
 | Integration | Outbound HTTP injects `traceparent`; OTLP gRPC & HTTP export to stub collector; disable ⇒ no-op | infra `#[tokio::test]` |
