@@ -55,11 +55,16 @@ impl TraceId {
         encode_hex(&self.0)
     }
 
-    /// Parse from 32 lowercase/uppercase hex characters.
+    /// Parse from 32 lowercase/uppercase hex characters (tolerant, internal).
     pub fn from_hex(s: &str) -> Result<Self, TraceParseError> {
         let mut bytes = [0u8; 16];
         decode_hex(s, &mut bytes)?;
         Ok(Self(bytes))
+    }
+
+    /// True if all 16 bytes are zero — W3C forbids an all-zero `trace-id`.
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 16]
     }
 }
 
@@ -86,11 +91,16 @@ impl SpanId {
         encode_hex(&self.0)
     }
 
-    /// Parse from 16 lowercase/uppercase hex characters.
+    /// Parse from 16 lowercase/uppercase hex characters (tolerant, internal).
     pub fn from_hex(s: &str) -> Result<Self, TraceParseError> {
         let mut bytes = [0u8; 8];
         decode_hex(s, &mut bytes)?;
         Ok(Self(bytes))
+    }
+
+    /// True if all 8 bytes are zero — W3C forbids an all-zero `parent-id`.
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 8]
     }
 }
 
@@ -209,9 +219,30 @@ pub fn parse_traceparent(s: &str) -> Result<(TraceId, SpanId), TraceParseError> 
     {
         return Err(TraceParseError::InvalidFormat);
     }
+    // W3C forbids version `ff`.
+    if version.eq_ignore_ascii_case("ff") {
+        return Err(TraceParseError::InvalidFormat);
+    }
+    // W3C v1 (version 00) mandates lowercase hex for the id/flags fields. Keep
+    // `from_hex` tolerant for internal use; enforce strictly at this inbound
+    // boundary so a non-conformant remote header cannot become an EGO identity.
+    if [trace_id_hex, span_id_hex, flags]
+        .iter()
+        .any(|f| f.bytes().any(|b| b.is_ascii_uppercase()))
+    {
+        return Err(TraceParseError::InvalidFormat);
+    }
 
     let trace_id = TraceId::from_hex(trace_id_hex)?;
+    // W3C forbids an all-zero trace-id.
+    if trace_id.is_zero() {
+        return Err(TraceParseError::InvalidFormat);
+    }
     let span_id = SpanId::from_hex(span_id_hex)?;
+    // W3C forbids an all-zero parent-id (span-id).
+    if span_id.is_zero() {
+        return Err(TraceParseError::InvalidFormat);
+    }
     Ok((trace_id, span_id))
 }
 
@@ -481,6 +512,51 @@ mod tests {
     fn from_inbound_rejects_invalid_traceparent() {
         let err = TraceContext::from_inbound("not-a-traceparent").unwrap_err();
         assert_eq!(err, TraceParseError::InvalidFormat);
+    }
+
+    // -----------------------------------------------------------------
+    // W3C-strict inbound validation (PR1 review): a remote header that
+    // W3C forbids must not become a valid EGO trace identity.
+    // -----------------------------------------------------------------
+
+    const W3C_VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    #[test]
+    fn parse_traceparent_accepts_valid_v00_header() {
+        assert!(parse_traceparent(W3C_VALID).is_ok());
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_all_zero_trace_id() {
+        let header = "00-00000000000000000000000000000000-00f067aa0ba902b7-01";
+        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        // from_inbound relies on the same parse — must also reject.
+        assert!(TraceContext::from_inbound(header).is_err());
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_all_zero_parent_id() {
+        let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01";
+        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_forbidden_version_ff() {
+        let header = "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_malformed_flags() {
+        let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz";
+        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_uppercase_ids_for_v00() {
+        // W3C v1 (version 00) mandates lowercase hex for the id/flags fields.
+        let header = "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01";
+        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
     }
 
     // -----------------------------------------------------------------
