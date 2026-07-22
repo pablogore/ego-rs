@@ -219,11 +219,14 @@ pub fn parse_traceparent(s: &str) -> Result<(TraceId, SpanId), TraceParseError> 
     {
         return Err(TraceParseError::InvalidFormat);
     }
-    // W3C forbids version `ff`.
-    if version.eq_ignore_ascii_case("ff") {
+    // EGO v1 supports exactly traceparent version `00` (the only version whose
+    // format it serializes). Anything else — the W3C-forbidden `ff`, other
+    // versions (`01`..`fe`), or uppercase (`0A`/`FF`) — is rejected rather than
+    // guessing a forward-compatible interpretation we do not yet need.
+    if version != "00" {
         return Err(TraceParseError::InvalidFormat);
     }
-    // W3C v1 (version 00) mandates lowercase hex for the id/flags fields. Keep
+    // Version 00 mandates lowercase hex for the id/flags fields. Keep
     // `from_hex` tolerant for internal use; enforce strictly at this inbound
     // boundary so a non-conformant remote header cannot become an EGO identity.
     if [trace_id_hex, span_id_hex, flags]
@@ -544,6 +547,21 @@ mod tests {
     fn parse_traceparent_rejects_forbidden_version_ff() {
         let header = "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+    }
+
+    #[test]
+    fn parse_traceparent_accepts_only_version_00() {
+        // EGO v1 supports exactly traceparent version `00` — no partial
+        // forward-compat for other versions (01, fe, ff) or uppercase (0A/FF).
+        for v in ["01", "fe", "ff", "FF", "0a", "0A"] {
+            let header = format!("{v}-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+            assert_eq!(
+                parse_traceparent(&header).unwrap_err(),
+                TraceParseError::InvalidFormat,
+                "version {v} must be rejected (EGO v1 accepts only version 00)"
+            );
+        }
+        assert!(parse_traceparent(W3C_VALID).is_ok(), "version 00 must be accepted");
     }
 
     #[test]
