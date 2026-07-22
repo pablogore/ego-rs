@@ -89,6 +89,31 @@ mod tests {
         assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
     }
 
+    // Duplicate keys must be rejected loudly rather than silently last-winning,
+    // mirroring `#[authorize]`'s duplicate-argument guards.
+
+    #[test]
+    fn service_args_rejects_duplicate_version() {
+        let err = syn::parse_str::<crate::ServiceArgs>("version = \"1.0.0\", version = \"2.0.0\"")
+            .expect_err("expected Err for duplicate version");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'version' argument"),
+            "duplicate version message mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn service_args_rejects_duplicate_impl_of() {
+        let err = syn::parse_str::<crate::ServiceArgs>("impl_of = Foo, impl_of = Bar")
+            .expect_err("expected Err for duplicate impl_of");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'impl_of' argument"),
+            "duplicate impl_of message mismatch: {msg}"
+        );
+    }
+
     // Tag ident derives from the final path segment (`MyTraitTag`) while the
     // trait reference itself preserves the full module path — the two
     // things `impl_of`'s codegen must get right independently (task 2.1).
@@ -112,5 +137,35 @@ mod tests {
         let tag_path = crate::tag_path_from_impl_of(&path);
         assert_eq!(tag_path.segments.len(), 1);
         assert_eq!(tag_path.segments.last().unwrap().ident, "MyTraitTag");
+    }
+
+    // -------------------------------------------------------------------
+    // CORE-028 Stage 2C DX follow-up — `#[service]` structs must
+    // auto-recognize an `EntityRuntimeRef<E>` field as an Entity DI
+    // dependency, exactly as they already do for `ProjectionRef<P>`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn classify_field_type_recognizes_entity_runtime_ref() {
+        let ty: syn::Type = parse_quote! { EntityRuntimeRef<SomeEntity> };
+        let dep_key = crate::classify_field_type(&ty)
+            .expect("EntityRuntimeRef<E> must classify as a DI dependency");
+        let rendered = dep_key.to_string();
+        assert!(
+            rendered.contains("DepKey") && rendered.contains("Entity"),
+            "expected a DepKey::Entity, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn classify_field_init_resolves_entity_runtime_ref() {
+        let ty: syn::Type = parse_quote! { EntityRuntimeRef<SomeEntity> };
+        let init = crate::classify_field_init(&ty)
+            .expect("EntityRuntimeRef<E> must produce a DI init expression");
+        let rendered = init.to_string();
+        assert!(
+            rendered.contains("resolve_entity"),
+            "expected a resolve_entity init, got: {rendered}"
+        );
     }
 }

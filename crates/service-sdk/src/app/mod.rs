@@ -74,17 +74,28 @@ pub use error::CompositionError;
 type ServiceRegistrar =
     Box<dyn FnOnce(&RuntimeInner, RuntimeBuilder) -> Result<RuntimeBuilder, CompositionError>>;
 
-/// Fills in `DependencyNotFound`'s `service_name` with `S`'s type name if it
+/// Stamps `S`'s type name onto an as-yet-unattributed resolution error if it
 /// isn't already set (review F3) — a single helper shared by both
 /// `Injectable::validate` and `Injectable::build`'s error paths in
 /// [`AppBuilder::service`], so the two routes can't independently diverge on
-/// attribution.
+/// attribution. Covers both `DependencyNotFound` (a missing adapter/config/
+/// projection/entity, preserving its `kind`) and `ServiceNotFound` (a missing
+/// service tag resolved by another service's construction), so a service that
+/// fails to build because a collaborator it needs is unregistered names both
+/// the missing tag and this requester.
 fn attribute_to<S: 'static>(err: crate::runtime::RuntimeError) -> crate::runtime::RuntimeError {
     match err {
-        crate::runtime::RuntimeError::DependencyNotFound { type_name, service_name: None } => {
+        crate::runtime::RuntimeError::DependencyNotFound { kind, type_name, service_name: None } => {
             crate::runtime::RuntimeError::DependencyNotFound {
+                kind,
                 type_name,
                 service_name: Some(std::any::type_name::<S>()),
+            }
+        }
+        crate::runtime::RuntimeError::ServiceNotFound { type_name, required_by: None } => {
+            crate::runtime::RuntimeError::ServiceNotFound {
+                type_name,
+                required_by: Some(std::any::type_name::<S>()),
             }
         }
         other => other,
@@ -590,6 +601,45 @@ mod tests {
 
     #[derive(Debug, PartialEq)]
     struct StubAdapter(u32);
+
+    // DX follow-up (Part C): `attribute_to` now stamps the requesting service
+    // onto a `ServiceNotFound` too (previously only `DependencyNotFound`), so a
+    // service that fails to build because a collaborator service is
+    // unregistered names both the missing tag and the requester.
+    #[test]
+    fn attribute_to_stamps_requester_onto_service_not_found() {
+        let err = crate::runtime::RuntimeError::ServiceNotFound {
+            type_name: "MissingTag",
+            required_by: None,
+        };
+        match attribute_to::<StubAdapter>(err) {
+            crate::runtime::RuntimeError::ServiceNotFound { type_name, required_by } => {
+                assert_eq!(type_name, "MissingTag", "the missing tag must be preserved");
+                assert_eq!(
+                    required_by,
+                    Some(std::any::type_name::<StubAdapter>()),
+                    "the requester must be stamped in"
+                );
+            }
+            other => panic!("expected ServiceNotFound, got {other:?}"),
+        }
+    }
+
+    // An already-attributed `ServiceNotFound` is left untouched — attribution
+    // is set-once, mirroring the `DependencyNotFound` path.
+    #[test]
+    fn attribute_to_leaves_an_already_attributed_service_not_found_untouched() {
+        let err = crate::runtime::RuntimeError::ServiceNotFound {
+            type_name: "MissingTag",
+            required_by: Some("OriginalRequester"),
+        };
+        match attribute_to::<StubAdapter>(err) {
+            crate::runtime::RuntimeError::ServiceNotFound { required_by, .. } => {
+                assert_eq!(required_by, Some("OriginalRequester"));
+            }
+            other => panic!("expected ServiceNotFound, got {other:?}"),
+        }
+    }
 
     // Task 1.4 (RED): registering an adapter twice for the same type returns
     // `CompositionError::DuplicateAdapter` (spec "Duplicate adapter

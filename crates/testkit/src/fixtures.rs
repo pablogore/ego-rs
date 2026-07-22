@@ -455,6 +455,6 @@ mod tests {
     fn fixture_resolve_unregistered_tag_fails_the_same_way_production_does() {
         let fixture = ServiceTestFixture::new();
         let result = fixture.resolve::<GreetingServiceTag>();
-        assert!(matches!(result, Err(RuntimeError::ServiceNotFound)));
+        assert!(matches!(result, Err(RuntimeError::ServiceNotFound { .. })));
     }
 }

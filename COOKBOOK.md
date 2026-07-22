@@ -201,15 +201,15 @@ flowchart LR
 
 ## 🚀 Quick Start
 
-The canonical, currently-working minimal example is `crates/service-sdk/examples/hello_service.rs` (verified to compile and run: `cargo run --example hello_service -p ego-service-sdk`). It uses the real `#[service]`/`#[operation]` macros plus the `RuntimeBuilder::with_service` / `Runtime::resolve` path — this is the CORE-025 canonical developer journey, **not** the old `ServiceDescriptor`/`Service::descriptor()`/`initialize()`/`shutdown()` pattern (that trait shape no longer exists — see [Service SDK](#-service-sdk)).
+The canonical, currently-working minimal example is `crates/service-sdk/examples/hello_service.rs` (verified to compile and run: `cargo run --example hello_service -p ego-service-sdk`). It uses the real `#[service]`/`#[operation]` macros plus the `App::builder().service_instance` / `App::resolve` path — this is the CORE-028 canonical developer journey, **not** the old `ServiceDescriptor`/`Service::descriptor()`/`initialize()`/`shutdown()` pattern (that trait shape no longer exists — see [Service SDK](#-service-sdk)). `App::builder()` is the composition entrypoint; it builds on the lower-level `RuntimeBuilder` primitive, which you rarely need directly.
 
 ```rust
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ego_service_sdk::app::App;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::ServiceError;
-use ego_service_sdk::runtime::RuntimeBuilder;
 use ego_service_sdk_macros::{operation, service};
 
 /// The service contract — defined with the real `#[service]`/`#[operation]`
@@ -232,15 +232,16 @@ impl HelloService for HelloServiceImpl {
 
 #[tokio::main]
 async fn main() {
-    // 1. Register the implementation under its generated tag — one call,
-    //    reusing the existing ServiceRegistry/Resolvable machinery.
-    let rt = RuntimeBuilder::new()
-        .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)
-        .expect("registration succeeds")
-        .build();
+    // 1. Register the pre-built implementation under its generated tag and
+    //    compose the app — the canonical `App::builder()` entrypoint.
+    let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
+    let app = App::builder()
+        .service_instance::<HelloServiceTag>(instance)
+        .build()
+        .expect("composition succeeds");
 
     // 2. Resolve the tag to its concrete, macro-generated, fully-guarded proxy.
-    let hello = rt.resolve::<HelloServiceTag>().expect("registered tag resolves");
+    let hello = app.resolve::<HelloServiceTag>().expect("registered tag resolves");
 
     // 3. Invoke it with an explicit ServiceContext — no hidden/ambient state.
     let out = hello

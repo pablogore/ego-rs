@@ -38,9 +38,9 @@ Define a service contract with the real macros, register it, resolve it, invoke 
 
 ```rust
 use std::sync::Arc;
+use ego_service_sdk::app::App;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::ServiceError;
-use ego_service_sdk::runtime::RuntimeBuilder;
 use ego_service_sdk_macros::{operation, service};
 
 #[service(version = "1.0.0")]
@@ -60,12 +60,13 @@ impl HelloService for HelloServiceImpl {
 
 #[tokio::main]
 async fn main() {
-    let rt = RuntimeBuilder::new()
-        .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)
-        .expect("registration succeeds")
-        .build();
+    let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
+    let app = App::builder()
+        .service_instance::<HelloServiceTag>(instance)
+        .build()
+        .expect("composition succeeds");
 
-    let hello = rt.resolve::<HelloServiceTag>().expect("registered tag resolves");
+    let hello = app.resolve::<HelloServiceTag>().expect("registered tag resolves");
     let out = hello.greet(ServiceContext::new(), "world".into()).await.unwrap();
     println!("{out}"); // hello, world
 }

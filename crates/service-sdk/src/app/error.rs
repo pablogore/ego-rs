@@ -85,6 +85,7 @@ mod tests {
     #[test]
     fn validation_wraps_runtime_error_preserving_type_and_service() {
         let inner = RuntimeError::DependencyNotFound {
+            kind: crate::runtime::DependencyKind::Adapter,
             type_name: "MyAdapter",
             service_name: Some("MyService"),
         };
@@ -93,6 +94,7 @@ mod tests {
             CompositionError::Validation(RuntimeError::DependencyNotFound {
                 type_name,
                 service_name,
+                ..
             }) => {
                 assert_eq!(type_name, "MyAdapter");
                 assert_eq!(service_name, Some("MyService"));
@@ -106,8 +108,12 @@ mod tests {
     // no fields still round-trips through the wrapper untouched.
     #[test]
     fn validation_wraps_service_not_found_variant_too() {
-        let err: CompositionError = RuntimeError::ServiceNotFound.into();
-        assert!(matches!(err, CompositionError::Validation(RuntimeError::ServiceNotFound)));
+        let err: CompositionError =
+            RuntimeError::ServiceNotFound { type_name: "MyTag", required_by: None }.into();
+        assert!(matches!(
+            err,
+            CompositionError::Validation(RuntimeError::ServiceNotFound { .. })
+        ));
     }
 
     // Task 1.4: `CompositionError::Projection` round-trips a `DuplicateProjection`

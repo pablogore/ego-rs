@@ -54,9 +54,21 @@ impl Parse for ServiceArgs {
             let ident: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             if ident == "version" {
+                if version.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "#[service] duplicate 'version' argument",
+                    ));
+                }
                 let version_lit: syn::LitStr = input.parse()?;
                 version = Some(version_lit.value());
             } else if ident == "impl_of" {
+                if impl_of.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "#[service] duplicate 'impl_of' argument",
+                    ));
+                }
                 let path: syn::Path = input.parse()?;
                 impl_of = Some(path);
             } else {
@@ -557,7 +569,10 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
             ) -> Result<Self::Proxy, ego_service_sdk::runtime::RuntimeError> {
                 let container = inner
                     .downcast::<ego_service_sdk::runtime::ResolvableContainer<dyn #trait_name>>()
-                    .map_err(|_| ego_service_sdk::runtime::RuntimeError::ServiceNotFound)?;
+                    .map_err(|_| ego_service_sdk::runtime::RuntimeError::ServiceNotFound {
+                        type_name: std::any::type_name::<#tag_name>(),
+                        required_by: None,
+                    })?;
                 Ok(#ref_name::new(container.0.clone(), chain, runtime))
             }
         }
@@ -676,6 +691,11 @@ fn classify_field_init(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
             if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
                 if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                     match ident_str.as_str() {
+                        "EntityRuntimeRef" => {
+                            return Some(quote! {
+                                rt.resolve_entity::<#inner_ty>()?
+                            });
+                        }
                         "ProjectionRef" => {
                             return Some(quote! {
                                 rt.resolve_projection::<#inner_ty>()?
@@ -708,6 +728,7 @@ fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
             if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
                 if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                     let variant = match ident_str.as_str() {
+                        "EntityRuntimeRef" => "Entity",
                         "ProjectionRef" => "Projection",
                         "AdapterRef" => "Adapter",
                         "ConfigValue" => "Config",

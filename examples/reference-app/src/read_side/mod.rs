@@ -23,8 +23,7 @@ use std::time::Duration;
 
 use ego_domain::read_side::config::ReadSideConfig;
 use ego_domain::read_side::event_tag::EventTag;
-use ego_domain::read_side::progress::NoopProgressReporter;
-use ego_runtime::read_side::scheduler::TagSchedulerImpl;
+use ego_runtime::read_side::scheduler::{ProjectionSpec, TagSchedulerImpl};
 use ego_runtime::read_side::ReadSideProjectionHandle;
 use kitlogger::KITLogger;
 use kitlogger_log_domain::Severity;
@@ -115,8 +114,8 @@ impl ReadSideHandles {
     }
 
     /// Spawns the background polling loop that drives CORE-005's real
-    /// `TagSchedulerImpl` via the framework's own
-    /// `TagSchedulerImpl::spawn_projection` spawn/stop lifecycle wrapper
+    /// `TagSchedulerImpl` via the framework's own `TagSchedulerImpl::spawn`
+    /// spawn/stop lifecycle wrapper, configured through a `ProjectionSpec`
     /// (CORE-026 Phase 3 — this module no longer wires the stop channel or
     /// the poll-loop wrapper itself). Must be called from inside a running
     /// Tokio runtime.
@@ -129,9 +128,9 @@ impl ReadSideHandles {
         let logger = self.logger;
 
         // Tags are discovered dynamically (one per tenant, see `tenant_tag`)
-        // on every poll via the `tag_provider` closure `spawn_projection`
-        // calls fresh each iteration, instead of a fixed list decided once —
-        // a tenant's tag only exists once its first event has been written.
+        // on every poll via the `tag_provider` closure the scheduler calls
+        // fresh each iteration, instead of a fixed list decided once — a
+        // tenant's tag only exists once its first event has been written.
         //
         // Each tag is paired with its own real tenant (decoded via
         // `tenant_from_tag`) so the scheduler threads the authoritative tenant
@@ -139,8 +138,13 @@ impl ReadSideHandles {
         // `(projection_id, tag, tenant)` stays unique per tag because the tag
         // itself already varies per tenant. Any tag that is not tenant-scoped
         // (no decodable tenant) is skipped: it is not part of this projection.
+        //
+        // `ProjectionSpec` groups the wiring and defaults the boilerplate: the
+        // progress reporter defaults to `NoopProgressReporter`, so it no longer
+        // appears here; only the interval and error logger are overridden.
         let store_for_provider = store.clone();
-        let handle = scheduler.spawn_projection(
+        let spec = ProjectionSpec::new(
+            PROJECTION_ID,
             move || {
                 store_for_provider
                     .known_tags()
@@ -150,19 +154,19 @@ impl ReadSideHandles {
                     })
                     .collect()
             },
-            POLL_INTERVAL,
-            PROJECTION_ID.to_string(),
             handler,
             store,
             dedup_store,
             offset_store,
-            NoopProgressReporter,
-            move |e| {
-                if let Some(logger) = &logger {
-                    let _ = logger.log(Severity::Error, &format!("read_side poll failed: {e}"));
-                }
-            },
-        );
+        )
+        .interval(POLL_INTERVAL)
+        .on_error(move |e| {
+            if let Some(logger) = &logger {
+                let _ = logger.log(Severity::Error, &format!("read_side poll failed: {e}"));
+            }
+        });
+
+        let handle = scheduler.spawn(spec);
 
         ReadSideRuntime { handle }
     }
