@@ -227,8 +227,9 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
         VerificationKey::Hmac(DEV_SIGNING_KEY.to_vec()),
     ));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let authn: Arc<dyn AuthenticationProvider> =
-        Arc::new(Hs256AuthenticationProvider::new(config.jwt.clone(), resolver, clock));
+    let authn: Arc<dyn AuthenticationProvider> = Arc::new(
+        Hs256AuthenticationProvider::try_new(config.jwt.clone(), resolver, clock)?,
+    );
     let authz: Arc<dyn AuthorizationProvider> = Arc::new(ReferenceAllowAllAuthorization);
 
     let _scheduler = SchedulerService(&config.scheduler);

@@ -38,7 +38,8 @@
 //!     expected_aud: Some(vec!["my-api".into()]),
 //!     leeway_seconds: None,
 //! };
-//! let auth = Hs256AuthenticationProvider::new(config, resolver, Arc::new(SystemClock));
+//! let auth = Hs256AuthenticationProvider::try_new(config, resolver, Arc::new(SystemClock))
+//!     .expect("valid JWT provider config");
 //! // let ctx = auth.authenticate(&Credential::Bearer(raw_token))?;
 //! ```
 //!

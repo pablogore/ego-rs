@@ -142,7 +142,7 @@ mod tests {
 
     use crate::config::{JwtAlgorithm, JwtProviderConfig};
     use crate::key_resolver::{LocalKeyResolver, VerificationKey};
-    use crate::test_helpers::fixed_clock;
+    use crate::test_helpers::{fixed_clock, TEST_AUD};
     use crate::{Rs256AuthenticationProvider};
 
     // -----------------------------------------------------------------------
@@ -174,6 +174,7 @@ mod tests {
         let claims = json!({
             "sub": sub,
             "iss": iss,
+            "aud": TEST_AUD,
             "exp": future_ts(3600),
         });
         encode(&header, &claims, &EncodingKey::from_rsa_pem(rs256_private_pem().as_bytes()).unwrap())
@@ -187,10 +188,13 @@ mod tests {
         ));
         let config = JwtProviderConfig {
             expected_iss: Some(iss.to_string()),
-            expected_aud: None,
+            expected_aud: Some(vec![TEST_AUD.to_string()]),
             leeway_seconds: None,
         };
-        Arc::new(Rs256AuthenticationProvider::new(config, resolver, fixed_clock(pinned_now())))
+        Arc::new(
+            Rs256AuthenticationProvider::try_new(config, resolver, fixed_clock(pinned_now()))
+                .expect("valid JWT provider config"),
+        )
     }
 
     fn build_multi_issuer(
@@ -314,14 +318,13 @@ mod tests {
             ));
             let config = JwtProviderConfig {
                 expected_iss: Some("https://issuer-a.example.com".to_string()),
-                expected_aud: None,
+                expected_aud: Some(vec![TEST_AUD.to_string()]),
                 leeway_seconds: None,
             };
-            Arc::new(Rs256AuthenticationProvider::new(
-                config,
-                resolver,
-                fixed_clock(pinned_now()),
-            )) as Arc<dyn AuthenticationProvider>
+            Arc::new(
+                Rs256AuthenticationProvider::try_new(config, resolver, fixed_clock(pinned_now()))
+                    .expect("valid JWT provider config"),
+            ) as Arc<dyn AuthenticationProvider>
         };
 
         let multi2 = build_multi_issuer(vec![
