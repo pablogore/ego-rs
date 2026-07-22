@@ -13,7 +13,7 @@ use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::handler::Handler;
 use ego_domain::read_side::offset::OffsetStore;
-use ego_domain::read_side::progress::ProgressReporter;
+use ego_domain::read_side::progress::{NoopProgressReporter, ProgressReporter};
 use ego_domain::read_side::scheduler::TagScheduler;
 use ego_domain::read_side::store::ReadSideStore;
 
@@ -133,6 +133,7 @@ where
     /// `on_error` receives every error `start_projection` returns, so
     /// callers can plug in their own logging/observability (this crate has
     /// no logger dependency of its own).
+    #[deprecated(note = "use TagSchedulerImpl::spawn with ProjectionSpec")]
     #[allow(clippy::too_many_arguments)]
     pub fn run_until_stopped<F, H, S, D, O, R>(
         mut self,
@@ -223,17 +224,152 @@ impl ReadSideProjectionHandle {
     }
 }
 
+/// Grouped configuration for spawning a projection poll loop, replacing the
+/// nine positional arguments of the deprecated
+/// [`TagSchedulerImpl::spawn_projection`] with a single builder (CORE-028 DX
+/// follow-up). The four boilerplate knobs are defaulted so the common case
+/// only names what it actually cares about:
+///
+/// - `reporter` defaults to [`NoopProgressReporter`] (the `R` type parameter's
+///   default), swappable via the type-changing [`ProjectionSpec::reporter`];
+/// - `interval` defaults to one second, overridable via
+///   [`ProjectionSpec::interval`];
+/// - `on_error` defaults to a no-op, overridable via
+///   [`ProjectionSpec::on_error`].
+///
+/// This is pure argument re-grouping — the spawned loop behaves identically to
+/// the positional API; see [`TagSchedulerImpl::spawn`].
+pub struct ProjectionSpec<F, H, S, D, O, R = NoopProgressReporter> {
+    tag_provider: F,
+    projection_id: String,
+    handler: H,
+    read_store: S,
+    dedup_store: D,
+    offset_store: O,
+    reporter: R,
+    interval: Duration,
+    on_error: Box<dyn Fn(Box<dyn std::error::Error>) + Send + Sync>,
+}
+
+impl<F, H, S, D, O> ProjectionSpec<F, H, S, D, O, NoopProgressReporter> {
+    /// Builds a spec with the required knobs, leaving the reporter
+    /// ([`NoopProgressReporter`]), poll `interval` (one second) and `on_error`
+    /// (no-op) at their defaults.
+    pub fn new(
+        projection_id: impl Into<String>,
+        tag_provider: F,
+        handler: H,
+        read_store: S,
+        dedup_store: D,
+        offset_store: O,
+    ) -> Self {
+        Self {
+            tag_provider,
+            projection_id: projection_id.into(),
+            handler,
+            read_store,
+            dedup_store,
+            offset_store,
+            reporter: NoopProgressReporter,
+            interval: Duration::from_secs(1),
+            on_error: Box::new(|_| {}),
+        }
+    }
+}
+
+impl<F, H, S, D, O, R> ProjectionSpec<F, H, S, D, O, R> {
+    /// Overrides the poll interval (default: one second).
+    pub fn interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// Swaps in a caller-supplied progress reporter, changing the spec's `R`
+    /// type parameter away from the default [`NoopProgressReporter`].
+    pub fn reporter<R2>(self, reporter: R2) -> ProjectionSpec<F, H, S, D, O, R2> {
+        ProjectionSpec {
+            tag_provider: self.tag_provider,
+            projection_id: self.projection_id,
+            handler: self.handler,
+            read_store: self.read_store,
+            dedup_store: self.dedup_store,
+            offset_store: self.offset_store,
+            reporter,
+            interval: self.interval,
+            on_error: self.on_error,
+        }
+    }
+
+    /// Overrides the poll-failure callback (default: no-op). Receives every
+    /// error the underlying `start_projection` returns.
+    pub fn on_error(
+        mut self,
+        on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_error = Box::new(on_error);
+        self
+    }
+}
+
 impl<E> TagSchedulerImpl<E>
 where
     E: Clone + Send + Sync + 'static,
 {
+    /// Spawn/stop lifecycle convenience wrapper driven by a [`ProjectionSpec`]:
+    /// creates the `watch` stop channel internally and spawns the same poll
+    /// loop as the deprecated [`spawn_projection`](Self::spawn_projection),
+    /// returning a single [`ReadSideProjectionHandle`]. This is the preferred
+    /// entry point — the spec groups the nine positional arguments and defaults
+    /// the boilerplate. Pure re-grouping: no behavior change.
+    #[allow(deprecated)]
+    pub fn spawn<F, H, S, D, O, R>(
+        self,
+        spec: ProjectionSpec<F, H, S, D, O, R>,
+    ) -> ReadSideProjectionHandle
+    where
+        F: Fn() -> Vec<(EventTag, String)> + Send + Sync + 'static,
+        H: Handler<E> + Clone + Send + Sync + 'static,
+        S: ReadSideStore<E> + Send + Sync + Clone + 'static,
+        D: DedupStore + Send + Sync + Clone + 'static,
+        O: OffsetStore + Send + Sync + Clone + 'static,
+        R: ProgressReporter + Clone + Send + Sync + 'static,
+    {
+        let ProjectionSpec {
+            tag_provider,
+            projection_id,
+            handler,
+            read_store,
+            dedup_store,
+            offset_store,
+            reporter,
+            interval,
+            on_error,
+        } = spec;
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let task = self.run_until_stopped(
+            tag_provider,
+            interval,
+            stop_rx,
+            projection_id,
+            handler,
+            read_store,
+            dedup_store,
+            offset_store,
+            reporter,
+            on_error,
+        );
+        ReadSideProjectionHandle { stop_tx, task }
+    }
+
     /// Spawn/stop lifecycle convenience wrapper for a projection poll loop:
     /// creates the `watch` stop channel internally and spawns
     /// `run_until_stopped`, returning a single [`ReadSideProjectionHandle`]
     /// instead of requiring the caller to wire the stop channel and keep the
     /// `JoinHandle` around itself. The caller still supplies its own dedup
     /// store, offset store, tag-discovery closure, and handler.
-    #[allow(clippy::too_many_arguments)]
+    #[deprecated(note = "use TagSchedulerImpl::spawn with ProjectionSpec")]
+    #[allow(clippy::too_many_arguments, deprecated)]
     pub fn spawn_projection<F, H, S, D, O, R>(
         self,
         tag_provider: F,
@@ -273,6 +409,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Several tests still exercise the deprecated `run_until_stopped` /
+    // `spawn_projection` shims on purpose, to prove the new `spawn` path stays
+    // behavior-compatible with them.
+    #![allow(deprecated)]
     use super::*;
     use ego_domain::read_side::event_stream::EventStreamElement;
     use ego_domain::read_side::offset::Offset;
@@ -650,6 +790,99 @@ mod tests {
         assert!(
             result.as_ref().is_err_and(|e| e.is_panic()),
             "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
+        );
+    }
+
+    /// CORE-028 DX follow-up: the `ProjectionSpec` builder groups the nine
+    /// positional `spawn_projection` args and defaults the boilerplate
+    /// (`NoopProgressReporter`, a no-op `on_error`, a 1s interval). Building a
+    /// spec with `ProjectionSpec::new` alone — touching none of the defaulted
+    /// fields — and driving it through `spawn` must exercise the exact same
+    /// poll loop: `tag_provider` is still called fresh each iteration and
+    /// `stop()` still drains gracefully, proving the default reporter/on_error
+    /// path is wired identically to the deprecated positional API.
+    #[tokio::test]
+    async fn spawn_with_default_spec_calls_tag_provider_and_stops_gracefully() {
+        let provider = CountingProvider::default();
+        let provider_for_closure = provider.clone();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        // Only the required args — reporter, on_error and interval are left at
+        // their spec defaults, then the interval is narrowed so the loop turns
+        // over several times within the test window.
+        let spec = ProjectionSpec::new(
+            "proj",
+            move || {
+                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            },
+            CountingHandler { handled: handled.clone() },
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(Duration::from_millis(5));
+
+        let handle = scheduler.spawn(spec);
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        handle.stop().await.expect("task joins cleanly");
+
+        assert!(
+            provider.calls() >= 3,
+            "expected several fresh tag_provider calls across multiple poll iterations, got {}",
+            provider.calls()
+        );
+    }
+
+    /// The `ProjectionSpec::reporter` type-changing builder swaps the default
+    /// `NoopProgressReporter` for a caller-supplied reporter, and `spawn` must
+    /// actually drive that reporter through the same session machinery — proven
+    /// by a recording reporter observing at least one completed batch for a
+    /// real (non-empty) tag stream.
+    #[tokio::test]
+    async fn spawn_with_custom_reporter_spec_drives_the_reporter() {
+        #[derive(Clone, Default)]
+        struct RecordingReporter {
+            reports: Arc<AtomicUsize>,
+        }
+
+        impl ProgressReporter for RecordingReporter {
+            fn on_batch_completed(
+                &self,
+                _projection_id: &str,
+                _tag: &EventTag,
+                _count: usize,
+                _offset: &Offset,
+            ) {
+                self.reports.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let reporter = RecordingReporter::default();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let spec = ProjectionSpec::new(
+            "proj",
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
+            CountingHandler { handled: handled.clone() },
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(Duration::from_millis(5))
+        .reporter(reporter.clone());
+
+        let handle = scheduler.spawn(spec);
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        handle.stop().await.expect("task joins cleanly");
+
+        assert!(
+            reporter.reports.load(Ordering::SeqCst) >= 1,
+            "the custom reporter supplied via ProjectionSpec::reporter must have been driven at least once"
         );
     }
 
