@@ -295,9 +295,13 @@ impl SpanAttributes {
         }
     }
 
-    /// Record only whether a tenant was present — never the tenant id
-    /// itself.
-    pub fn with_tenant_present(mut self, present: bool) -> Self {
+    /// Record only whether an inbound tenant *hint* was present — never the
+    /// tenant id itself, and never the resolved/canonical tenant.
+    ///
+    /// This is set at `on_request` (pre-enforcement) from
+    /// `ServiceContext::has_tenant_hint()`, so it reflects the caller-supplied
+    /// ingress hint, NOT the authoritative tenant produced by resolution.
+    pub fn with_tenant_hint_present(mut self, present: bool) -> Self {
         self.tenant_present = Some(present);
         self
     }
@@ -353,14 +357,23 @@ pub enum SpanOutcome {
 /// calls, lock contention) inside any method on this trait, mirroring
 /// `Observability`'s non-blocking contract.
 pub trait Tracer: Send + Sync {
-    /// Start a span for `ctx`. Returns a `SpanId` that IS the span handle
-    /// and MUST equal `ctx.span_id()` — there is no separate handle/token
-    /// type.
-    fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes) -> SpanId;
+    /// Start a span for `ctx`. Returns nothing: the authoritative span
+    /// identity is `ctx.span_id()` (`TraceContext::span_id()`), so there is
+    /// no separate returned handle/token. A previously-returned `SpanId`
+    /// would always equal `ctx.span_id()` and the stateless interceptor
+    /// discards it; `end_span` re-derives the id from `&ctx` instead.
+    fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes);
 
-    /// End the span identified by `span`. MUST be idempotent per `SpanId`:
-    /// the first call closes the span; any later call for the same
-    /// `SpanId` MUST be a no-op.
+    /// End the span identified by `span`.
+    ///
+    /// `end_span` MUST be idempotent per `SpanId`: after the first terminal
+    /// outcome, subsequent calls for the same `SpanId` MUST have no effect.
+    /// This is why the interceptor may safely call `end_span` on both
+    /// `on_response` and `on_error` for the same request boundary.
+    ///
+    /// The enforcing adapter contract test (an `OtlpTracer` that actually
+    /// closes-once and drops duplicate ends) lands in PR5 — this port only
+    /// states the normative contract; no adapter is implemented here.
     fn end_span(&self, span: SpanId, outcome: SpanOutcome);
 }
 
@@ -379,9 +392,9 @@ pub trait TracerLifecycle: Send + Sync {
 pub struct NoopTracer;
 
 impl Tracer for NoopTracer {
-    fn start_span(&self, ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) -> SpanId {
-        ctx.span_id()
-    }
+    // Zero-effect: no return, no side effect. The authoritative span identity
+    // remains `ctx.span_id()`, re-derived by callers when they end the span.
+    fn start_span(&self, _ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {}
 
     fn end_span(&self, _span: SpanId, _outcome: SpanOutcome) {}
 }
@@ -584,7 +597,7 @@ mod tests {
     #[test]
     fn span_attributes_allow_list_only_exposes_safe_scalars() {
         let attrs = SpanAttributes::new("op.execute")
-            .with_tenant_present(true)
+            .with_tenant_hint_present(true)
             .with_duration(Duration::from_millis(42));
 
         assert_eq!(attrs.operation(), "op.execute");
@@ -607,20 +620,27 @@ mod tests {
     }
 
     #[test]
-    fn noop_tracer_start_span_returns_ctx_span_id() {
+    fn noop_tracer_start_span_returns_nothing_authoritative_id_is_ctx_span_id() {
         let tracer = NoopTracer;
         let ctx = TraceContext::root();
 
-        let returned = tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
+        // start_span returns nothing (unit): the authoritative span identity
+        // is `TraceContext::span_id()`, which end_span re-derives from `&ctx`.
+        // The following line compiling as a statement (no binding, no `-> SpanId`)
+        // is itself the proof there is no redundant returned handle.
+        tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
 
-        assert_eq!(returned, ctx.span_id());
+        // The id used to end the span comes from the context, not a return value.
+        tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
     }
 
     #[test]
     fn noop_tracer_end_span_is_a_no_op() {
         let tracer = NoopTracer;
         let ctx = TraceContext::root();
-        let span = tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
+        tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
+        // The authoritative span id is carried by the context, not returned.
+        let span = ctx.span_id();
 
         // Must not panic; no observable side effect.
         tracer.end_span(span, SpanOutcome::Ok);

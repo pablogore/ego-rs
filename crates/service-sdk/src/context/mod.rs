@@ -66,15 +66,21 @@ pub struct ServiceContext {
     tenant_id: Option<String>,
     /// The correlation ID.
     pub correlation_id: Option<String>,
-    /// The trace ID.
+    /// The trace ID (legacy flat mirror).
     ///
-    /// PROD-003 (ADR-4): once [`ServiceContext::with_trace_context`] is used,
-    /// this field is kept as a read-through mirror of
-    /// `trace_context().trace_id()` (rendered as W3C hex) — it carries no
-    /// independent value of its own in that case. It remains directly
-    /// settable via [`ServiceContext::with_trace_id`] only for source
-    /// compatibility with call sites that predate `TraceContext`.
-    pub trace_id: Option<String>,
+    /// PROD-003 (ADR-4): `TraceContext` is authoritative over this legacy
+    /// field **by construction**. The field is PRIVATE so it can only be
+    /// mutated through the two builders that maintain the invariant:
+    /// [`ServiceContext::with_trace_context`] sets it to
+    /// `trace_context().trace_id()` (rendered as W3C hex), and
+    /// [`ServiceContext::with_trace_id`] writes the legacy value ONLY when no
+    /// `TraceContext` is present (otherwise the `TraceContext` wins and the
+    /// legacy setter is ignored). Because no external code can assign the
+    /// field directly, [`ServiceContext::trace_id`] is authoritative by
+    /// construction — it can never desync from `trace_context().trace_id()`.
+    /// Kept for source compatibility with call sites that predate
+    /// `TraceContext`.
+    trace_id: Option<String>,
     /// The deadline.
     pub deadline: Option<SystemTime>,
     /// The timeout.
@@ -154,15 +160,24 @@ impl ServiceContext {
         self
     }
 
-    /// Sets the trace ID.
+    /// Sets the legacy flat trace ID.
+    ///
+    /// PROD-003 (ADR-4): `TraceContext` is authoritative. This legacy setter
+    /// writes `trace_id` ONLY when no `TraceContext` has been attached; once
+    /// [`ServiceContext::with_trace_context`] is present the `TraceContext`
+    /// wins and this call is ignored, so `trace_id()` can never desync from
+    /// `trace_context().trace_id()`.
     ///
     /// # Arguments
     /// * `trace_id` - The trace identifier to set
     ///
     /// # Returns
-    /// A new `ServiceContext` with the trace ID set
+    /// A new `ServiceContext` with the legacy trace ID set when no
+    /// `TraceContext` is present; otherwise unchanged.
     pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
-        self.trace_id = Some(trace_id.into());
+        if self.trace_context.is_none() {
+            self.trace_id = Some(trace_id.into());
+        }
         self
     }
 
@@ -641,6 +656,43 @@ mod tests {
         let ctx = ServiceContext::new().with_trace_context(tc);
 
         assert_eq!(ctx.trace_id(), Some(tc.trace_id().to_hex().as_str()));
+    }
+
+    // PR2 review (P1): TraceContext is authoritative over the legacy flat
+    // `trace_id` BY CONSTRUCTION — the private field is maintained as a mirror
+    // by both builders, so the two can never desync regardless of call order.
+
+    #[test]
+    fn trace_context_wins_when_set_before_with_trace_id() {
+        use ego_domain::TraceContext;
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new()
+            .with_trace_context(tc)
+            .with_trace_id("x");
+
+        // with_trace_id is ignored once a TraceContext is present.
+        assert_eq!(ctx.trace_id(), Some(tc.trace_id().to_hex().as_str()));
+    }
+
+    #[test]
+    fn trace_context_wins_when_set_after_with_trace_id() {
+        use ego_domain::TraceContext;
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new()
+            .with_trace_id("x")
+            .with_trace_context(tc);
+
+        // with_trace_context overwrites the legacy mirror it does not own.
+        assert_eq!(ctx.trace_id(), Some(tc.trace_id().to_hex().as_str()));
+    }
+
+    #[test]
+    fn legacy_trace_id_is_returned_when_no_trace_context() {
+        let ctx = ServiceContext::new().with_trace_id("x");
+
+        assert_eq!(ctx.trace_id(), Some("x"));
     }
 
     #[test]

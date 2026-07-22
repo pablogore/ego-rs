@@ -10,25 +10,34 @@ OTLP-backed adapter in `infrastructure` (sole `opentelemetry` consumer).
 
 ## Requirements
 
-### Requirement: Start Span Returns The SpanId Already Carried By TraceContext
+### Requirement: Start Span Returns Nothing; TraceContext.span_id Is Authoritative
 
-`start_span(ctx: &TraceContext, name: &str, attrs: SpanAttributes) -> SpanId`
-MUST return a `SpanId` that IS the span handle and MUST equal
-`ctx.span_id()`. There is no separate handle/token type.
+`start_span(ctx: &TraceContext, name: &str, attrs: SpanAttributes)` MUST
+return nothing. The authoritative span identity is `TraceContext.span_id()`
+(`ctx.span_id()`); there is no separate returned handle/token type. A returned
+`SpanId` would always equal `ctx.span_id()` and a stateless interceptor would
+discard it, so the return is omitted to remove that contractual redundancy —
+`end_span` re-derives the id from `&ctx` when the span is closed.
 
-#### Scenario: Returned SpanId equals the context's span_id, re-derivable later
+#### Scenario: start_span returns no handle; the span id comes from the context
 - GIVEN a `TraceContext` `ctx` with `span_id` `S`
 - WHEN `start_span(&ctx, "op", attrs)` is called, then a later separate call
   site reads `ctx.span_id()` from the same `ServiceContext`
-- THEN both yield the identical `SpanId` `S`, with no stored guard or
-  ambient lookup involved
+- THEN `start_span` yields no value, and the id used to end the span is `S`
+  obtained from `ctx.span_id()`, with no stored guard or ambient lookup
+  involved
 
 ### Requirement: End Span Is Idempotent Per SpanId; Duplicate Start Is Ignored
 
-`end_span(SpanId, SpanOutcome)` MUST be idempotent per `SpanId`: the first
-call closes and exports the span; any later call for the same `SpanId` MUST
-be a no-op. A `start_span` for a `SpanId` still live in the span table MUST
-be ignored (with a warning) rather than overwrite the existing entry.
+`end_span(SpanId, SpanOutcome)` MUST be idempotent per `SpanId`: after the
+first terminal outcome, subsequent calls for the same `SpanId` MUST have no
+effect (the first call closes and exports the span; any later call for the
+same `SpanId` is a no-op). This is why the interceptor may safely call
+`end_span` on both `on_response` and `on_error`. A `start_span` for a
+`SpanId` still live in the span table MUST be ignored (with a warning) rather
+than overwrite the existing entry. The enforcing adapter contract test
+(`OtlpTracer`) lands in PR5; the port here only states the normative
+contract.
 
 #### Scenario: on_response and on_error race resolves to a single close
 - GIVEN a span started for `SpanId` `S`
@@ -37,8 +46,9 @@ be ignored (with a warning) rather than overwrite the existing entry.
   no-op
 
 #### Scenario: Duplicate start_span for a live SpanId is ignored
-- GIVEN `start_span` already returned `SpanId` `S`, still open
-- WHEN `start_span` is called again for the same `S`
+- GIVEN `start_span` was already called for a `TraceContext` whose
+  `span_id()` is `S`, and that span is still open in the table
+- WHEN `start_span` is called again for a context with the same `S`
 - THEN the existing table entry for `S` is unchanged and a warning is
   emitted
 
@@ -142,11 +152,14 @@ explicitly OUT OF SCOPE for outbound propagation (no gRPC client exists and
 ### Requirement: Span Attributes Are A Redaction-Safe Allow-List Enforced In Domain
 
 `start_span` MUST take a typed `SpanAttributes` value — an allow-list of
-non-sensitive scalars (operation name, tenant-hint presence boolean, outcome,
-duration) — never a free-form key/value map. Tenant ids, credentials,
-principal subject, and payload data MUST NOT be expressible as
-`SpanAttributes`. The `infrastructure` adapter MUST NOT redact; it only maps
-already-safe `SpanAttributes` to OTel key/values.
+non-sensitive scalars (operation name, tenant-hint presence boolean via
+`with_tenant_hint_present`, outcome, duration) — never a free-form key/value
+map. The tenant-hint-presence attribute reflects only the inbound
+caller-supplied hint (set pre-enforcement from `has_tenant_hint()`), NOT the
+resolved/canonical tenant. Tenant ids, credentials, principal subject, and
+payload data MUST NOT be expressible as `SpanAttributes`. The
+`infrastructure` adapter MUST NOT redact; it only maps already-safe
+`SpanAttributes` to OTel key/values.
 
 #### Scenario: SpanAttributes cannot carry a tenant id, credential, or payload
 - GIVEN the `SpanAttributes` builder's public API
@@ -155,7 +168,7 @@ already-safe `SpanAttributes` to OTel key/values.
 - THEN no such constructor or field exists — the value cannot be expressed
 
 #### Scenario: Adapter maps already-safe attributes without redacting
-- GIVEN `SpanAttributes::new(..).with_tenant_present(..).with_duration(..)`
+- GIVEN `SpanAttributes::new(..).with_tenant_hint_present(..).with_duration(..)`
 - WHEN the OTLP adapter exports the span
 - THEN it maps the given attributes directly to OTel key/values with no
   redaction step applied
@@ -181,16 +194,17 @@ method, mirroring `Observability`'s non-blocking contract.
 ### Requirement: NoopTracer Is A Zero-Effect Default
 
 `ego-domain` MUST provide a `NoopTracer` implementation of `Tracer` (it does
-NOT implement `TracerLifecycle`). `start_span` MUST return `ctx.span_id()`
-with no observable side effect; `end_span` MUST be a no-op. `NoopTracer` MUST
-be the default when no tracer is wired.
+NOT implement `TracerLifecycle`). `start_span` MUST return nothing and have no
+observable side effect; `end_span` MUST be a no-op. `NoopTracer` MUST be the
+default when no tracer is wired.
 
-#### Scenario: NoopTracer returns the context's span_id with no side effects
+#### Scenario: NoopTracer start_span is a no-op with no side effects
 - GIVEN a `NoopTracer` instance and a `TraceContext` `ctx`, with no tracer
   wired in a fresh runtime
-- WHEN `start_span(&ctx, ..)` then `end_span(..)` are called
-- THEN `start_span` returns `ctx.span_id()` with no exported/observable span
-  data, and the unwired runtime uses `NoopTracer` by default
+- WHEN `start_span(&ctx, ..)` then `end_span(ctx.span_id(), ..)` are called
+- THEN `start_span` returns nothing with no exported/observable span data,
+  the id passed to `end_span` is obtained from `ctx.span_id()`, and the
+  unwired runtime uses `NoopTracer` by default
 
 ### Requirement: OTLP Adapter Exports Spans Over A Configurable Transport
 

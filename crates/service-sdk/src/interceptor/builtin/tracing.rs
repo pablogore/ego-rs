@@ -2,11 +2,12 @@
 //! explicit `TraceContext` carried on `ServiceContext` (PROD-003).
 //!
 //! Exactly one span is owned per request boundary: `on_request` starts it,
-//! `on_response`/`on_error` end it. The returned `SpanId` handle IS
-//! `ctx.trace_context().span_id()` (ADR-3) — there is nothing stored between
-//! the separate `on_request`/`on_response`/`on_error` calls; each re-derives
-//! the same `SpanId` from `&ctx`. `TraceContext::child()` is never invoked
-//! here (v1 has no manual/nested spans).
+//! `on_response`/`on_error` end it. `start_span` returns nothing (ADR-3): the
+//! authoritative span identity is `ctx.trace_context().span_id()`. Nothing is
+//! stored between the separate `on_request`/`on_response`/`on_error` calls;
+//! each re-derives the same `SpanId` from `&ctx`, and `end_span` is called
+//! with that id. `TraceContext::child()` is never invoked here (v1 has no
+//! manual/nested spans).
 
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ impl Interceptor for TracingInterceptor {
     async fn on_request(&self, context: &ServiceContext) -> Result<(), ServiceError> {
         if let Some(trace_context) = context.trace_context() {
             let attrs = SpanAttributes::new(REQUEST_SPAN_NAME)
-                .with_tenant_present(context.has_tenant_hint());
+                .with_tenant_hint_present(context.has_tenant_hint());
             self.tracer
                 .start_span(trace_context, REQUEST_SPAN_NAME, attrs);
         }
@@ -113,9 +114,8 @@ mod tests {
     }
 
     impl Tracer for SpyTracer {
-        fn start_span(&self, ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) -> SpanId {
+        fn start_span(&self, ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {
             self.started.lock().unwrap().push(ctx.span_id());
-            ctx.span_id()
         }
 
         fn end_span(&self, span: SpanId, outcome: SpanOutcome) {
