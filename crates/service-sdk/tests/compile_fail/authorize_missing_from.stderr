@@ -2,25 +2,14 @@ error[E0277]: the trait bound `NoFromError: From<SecurityError>` is not satisfie
   --> tests/compile_fail/authorize_missing_from.rs:29:82
    |
 29 |     async fn get_order(&self, ctx: ServiceContext, id: String) -> Result<String, NoFromError>;
-   |                                                                                  ^^^^^^^^^^^ unsatisfied trait bound
-   |
-help: the trait `From<SecurityError>` is not implemented for `NoFromError`
-  --> tests/compile_fail/authorize_missing_from.rs:11:1
-   |
-11 | pub struct NoFromError(String);
-   | ^^^^^^^^^^^^^^^^^^^^^^
+   |                                                                                  ^^^^^^^^^^^ the trait `From<SecurityError>` is not implemented for `NoFromError`
 
 error[E0277]: the trait bound `NoFromError: From<SecurityError>` is not satisfied
   --> tests/compile_fail/authorize_missing_from.rs:29:82
    |
 29 |     async fn get_order(&self, ctx: ServiceContext, id: String) -> Result<String, NoFromError>;
-   |                                                                                  ^^^^^^^^^^^ unsatisfied trait bound
+   |                                                                                  ^^^^^^^^^^^ the trait `From<SecurityError>` is not implemented for `NoFromError`
    |
-help: the trait `From<SecurityError>` is not implemented for `NoFromError`
-  --> tests/compile_fail/authorize_missing_from.rs:11:1
-   |
-11 | pub struct NoFromError(String);
-   | ^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `assert_from`
   --> tests/compile_fail/authorize_missing_from.rs:25:1
    |
