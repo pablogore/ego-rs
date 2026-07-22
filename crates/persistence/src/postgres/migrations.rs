@@ -11,10 +11,6 @@ const MIGRATION_002_CREATE_AGGREGATES: &str = include_str!("migrations/002_creat
 /// Migration SQL for creating the snapshots table.
 const MIGRATION_003_CREATE_SNAPSHOTS: &str = include_str!("migrations/003_create_snapshots.sql");
 
-/// Migration SQL enforcing NOT NULL on every `tenant_id` column.
-const MIGRATION_007_TENANT_ID_NOT_NULL: &str =
-    include_str!("migrations/007_tenant_id_not_null.sql");
-
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -32,6 +28,5 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("001_create_events", MIGRATION_001_CREATE_EVENTS),
         ("002_create_aggregates", MIGRATION_002_CREATE_AGGREGATES),
         ("003_create_snapshots", MIGRATION_003_CREATE_SNAPSHOTS),
-        ("007_tenant_id_not_null", MIGRATION_007_TENANT_ID_NOT_NULL),
     ]
 }
