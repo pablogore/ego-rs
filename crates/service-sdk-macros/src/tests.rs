@@ -89,6 +89,31 @@ mod tests {
         assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
     }
 
+    // Duplicate keys must be rejected loudly rather than silently last-winning,
+    // mirroring `#[authorize]`'s duplicate-argument guards.
+
+    #[test]
+    fn service_args_rejects_duplicate_version() {
+        let err = syn::parse_str::<crate::ServiceArgs>("version = \"1.0.0\", version = \"2.0.0\"")
+            .expect_err("expected Err for duplicate version");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'version' argument"),
+            "duplicate version message mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn service_args_rejects_duplicate_impl_of() {
+        let err = syn::parse_str::<crate::ServiceArgs>("impl_of = Foo, impl_of = Bar")
+            .expect_err("expected Err for duplicate impl_of");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate 'impl_of' argument"),
+            "duplicate impl_of message mismatch: {msg}"
+        );
+    }
+
     // Tag ident derives from the final path segment (`MyTraitTag`) while the
     // trait reference itself preserves the full module path — the two
     // things `impl_of`'s codegen must get right independently (task 2.1).

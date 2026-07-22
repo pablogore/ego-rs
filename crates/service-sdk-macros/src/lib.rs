@@ -54,9 +54,21 @@ impl Parse for ServiceArgs {
             let ident: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             if ident == "version" {
+                if version.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "#[service] duplicate 'version' argument",
+                    ));
+                }
                 let version_lit: syn::LitStr = input.parse()?;
                 version = Some(version_lit.value());
             } else if ident == "impl_of" {
+                if impl_of.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "#[service] duplicate 'impl_of' argument",
+                    ));
+                }
                 let path: syn::Path = input.parse()?;
                 impl_of = Some(path);
             } else {
