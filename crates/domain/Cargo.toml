@@ -9,6 +9,7 @@ serde_json = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = { workspace = true }
+rand = "0.8"
 
 [dev-dependencies]
 mockall = { workspace = true }

@@ -61,6 +61,10 @@ pub mod persistence;
 /// CQRS query marker trait with typed Output.
 pub mod query;
 
+/// Tracer port — TraceContext, TraceId/SpanId, SpanAttributes, Tracer,
+/// TracerLifecycle, NoopTracer (PROD-003).
+pub mod tracer;
+
 /// Read side projection engine — processors, sessions, runners, and storage SPIs.
 pub mod read_side;
 
@@ -82,6 +86,10 @@ pub use event::DomainEvent;
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
+pub use tracer::{
+    parse_traceparent, NoopTracer, SpanAttributes, SpanId, SpanOutcome, TraceContext,
+    TraceId, TraceParseError, Tracer, TracerLifecycle,
+};
 pub use auth::{
     AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
     SystemClock,
