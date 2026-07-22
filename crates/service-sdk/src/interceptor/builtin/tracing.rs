@@ -46,7 +46,7 @@ impl TracingInterceptor {
 impl Interceptor for TracingInterceptor {
     async fn on_request(&self, context: &ServiceContext) -> Result<(), ServiceError> {
         if let Some(trace_context) = context.trace_context() {
-            let attrs = SpanAttributes::new(REQUEST_SPAN_NAME)
+            let attrs = SpanAttributes::new()
                 .with_tenant_hint_present(context.has_tenant_hint());
             self.tracer
                 .start_span(trace_context, REQUEST_SPAN_NAME, attrs);

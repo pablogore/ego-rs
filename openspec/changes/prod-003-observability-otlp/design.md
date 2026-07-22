@@ -81,8 +81,8 @@ neither symbol appears outside the adapter module. Operational rules (also MUST 
 
 ### ADR-6: Redaction at the port boundary (not in the adapter)
 `start_span` takes a domain `SpanAttributes` — an allow-list of non-sensitive typed
-scalars (operation name, tenant-hint **presence** bool, outcome, duration) — **not**
-free-form `&[(&str,&str)]`. Tenant ids, credentials, principal subject, and payloads
+scalars (tenant-hint **presence** bool, duration) — **not** free-form `&[(&str,&str)]`.
+The span's operation is its **name** (`start_span`'s `name` arg), not an attribute. Tenant ids, credentials, principal subject, and payloads
 **cannot be expressed** as `SpanAttributes`, so redaction is structurally enforced in the
 domain before anything reaches infra. The adapter no longer redacts — it maps
 already-safe attributes to otel key/values. Any redacting type attached renders the
@@ -184,7 +184,7 @@ pub fn parse_traceparent(s: &str) -> Result<(TraceId, SpanId), TraceParseError>;
 
 pub struct SpanAttributes;                       // allow-list of non-sensitive typed scalars
 impl SpanAttributes {                            // sensitive data is UNREPRESENTABLE here
-    pub fn new(operation: &str) -> Self;
+    pub fn new() -> Self;                           // empty; span operation is start_span's `name`
     pub fn with_tenant_hint_present(self, present: bool) -> Self; // inbound hint presence, NOT resolved tenant
     pub fn with_duration(self, d: std::time::Duration) -> Self;
 }

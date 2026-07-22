@@ -32,18 +32,26 @@ discard it, so the return is omitted to remove that contractual redundancy —
 `end_span(SpanId, SpanOutcome)` MUST be idempotent per `SpanId`: after the
 first terminal outcome, subsequent calls for the same `SpanId` MUST have no
 effect (the first call closes and exports the span; any later call for the
-same `SpanId` is a no-op). This is why the interceptor may safely call
-`end_span` on both `on_response` and `on_error`. A `start_span` for a
-`SpanId` still live in the span table MUST be ignored (with a warning) rather
-than overwrite the existing entry. The enforcing adapter contract test
-(`OtlpTracer`) lands in PR5; the port here only states the normative
-contract.
+same `SpanId` is a no-op). An `end_span` for a `SpanId` that was never
+started (unknown to the span table) MUST also be a no-op — the interceptor
+may call `end_span` even when `on_request` never opened a span (e.g. a
+failure earlier in the interceptor chain), and that MUST NOT raise or export
+anything. This is why the interceptor may safely call `end_span` on both
+`on_response` and `on_error`. A `start_span` for a `SpanId` still live in the
+span table MUST be ignored (with a warning) rather than overwrite the
+existing entry. The enforcing adapter contract test (`OtlpTracer`) lands in
+PR5; the port here only states the normative contract.
 
 #### Scenario: on_response and on_error race resolves to a single close
 - GIVEN a span started for `SpanId` `S`
 - WHEN `end_span(S, Ok)` and `end_span(S, Error{..})` are both invoked for `S`
 - THEN only the first call closes and exports the span; the second is a
   no-op
+
+#### Scenario: end_span for a never-started (unknown) SpanId is a no-op
+- GIVEN no span was ever started for `SpanId` `S` (the request failed before `on_request` opened one)
+- WHEN `end_span(S, ..)` is called
+- THEN it is a no-op — nothing is closed or exported, and no error is raised
 
 #### Scenario: Duplicate start_span for a live SpanId is ignored
 - GIVEN `start_span` was already called for a `TraceContext` whose
@@ -82,7 +90,6 @@ unbounded.
 - GIVEN the live-span table already holds `max_in_flight_spans` unended spans
 - WHEN a new span is started
 - THEN the new span is dropped, a diagnostic warning is emitted, and no existing live span is evicted or overwritten
-  afterward
 
 ### Requirement: End Span With Error Records A Redaction-Safe Status Message
 
@@ -152,9 +159,10 @@ explicitly OUT OF SCOPE for outbound propagation (no gRPC client exists and
 ### Requirement: Span Attributes Are A Redaction-Safe Allow-List Enforced In Domain
 
 `start_span` MUST take a typed `SpanAttributes` value — an allow-list of
-non-sensitive scalars (operation name, tenant-hint presence boolean via
-`with_tenant_hint_present`, outcome, duration) — never a free-form key/value
-map. The tenant-hint-presence attribute reflects only the inbound
+non-sensitive scalars (tenant-hint presence boolean via
+`with_tenant_hint_present`, duration) — never a free-form key/value map. The
+span's operation is its **name** (the `name` argument to `start_span`), not a
+`SpanAttributes` field. The tenant-hint-presence attribute reflects only the inbound
 caller-supplied hint (set pre-enforcement from `has_tenant_hint()`), NOT the
 resolved/canonical tenant. Tenant ids, credentials, principal subject, and
 payload data MUST NOT be expressible as `SpanAttributes`. The
@@ -168,7 +176,7 @@ payload data MUST NOT be expressible as `SpanAttributes`. The
 - THEN no such constructor or field exists — the value cannot be expressed
 
 #### Scenario: Adapter maps already-safe attributes without redacting
-- GIVEN `SpanAttributes::new(..).with_tenant_hint_present(..).with_duration(..)`
+- GIVEN `SpanAttributes::new().with_tenant_hint_present(..).with_duration(..)`
 - WHEN the OTLP adapter exports the span
 - THEN it maps the given attributes directly to OTel key/values with no
   redaction step applied

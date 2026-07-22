@@ -278,21 +278,18 @@ impl std::error::Error for TraceParseError {}
 /// data cannot be expressed as `SpanAttributes`, so redaction is enforced
 /// structurally at this type rather than by a runtime filter in the
 /// adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpanAttributes {
-    operation: String,
     tenant_present: Option<bool>,
     duration: Option<Duration>,
 }
 
 impl SpanAttributes {
-    /// Start a new attribute set for the given operation name.
-    pub fn new(operation: &str) -> Self {
-        Self {
-            operation: operation.to_string(),
-            tenant_present: None,
-            duration: None,
-        }
+    /// Start a new, empty attribute set. A span's operation is its **name**
+    /// (the `name` argument to [`Tracer::start_span`]) — not an attribute —
+    /// so no operation name is stored here.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Record only whether an inbound tenant *hint* was present — never the
@@ -310,11 +307,6 @@ impl SpanAttributes {
     pub fn with_duration(mut self, d: Duration) -> Self {
         self.duration = Some(d);
         self
-    }
-
-    /// The operation name this span was started for.
-    pub fn operation(&self) -> &str {
-        &self.operation
     }
 
     /// Whether a tenant was present, if recorded.
@@ -596,11 +588,10 @@ mod tests {
 
     #[test]
     fn span_attributes_allow_list_only_exposes_safe_scalars() {
-        let attrs = SpanAttributes::new("op.execute")
+        let attrs = SpanAttributes::new()
             .with_tenant_hint_present(true)
             .with_duration(Duration::from_millis(42));
 
-        assert_eq!(attrs.operation(), "op.execute");
         assert_eq!(attrs.tenant_present(), Some(true));
         assert_eq!(attrs.duration(), Some(Duration::from_millis(42)));
 
@@ -613,8 +604,7 @@ mod tests {
 
     #[test]
     fn span_attributes_without_optional_fields() {
-        let attrs = SpanAttributes::new("op.only");
-        assert_eq!(attrs.operation(), "op.only");
+        let attrs = SpanAttributes::new();
         assert_eq!(attrs.tenant_present(), None);
         assert_eq!(attrs.duration(), None);
     }
@@ -628,7 +618,7 @@ mod tests {
         // is `TraceContext::span_id()`, which end_span re-derives from `&ctx`.
         // The following line compiling as a statement (no binding, no `-> SpanId`)
         // is itself the proof there is no redundant returned handle.
-        tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
+        tracer.start_span(&ctx, "op.execute", SpanAttributes::new());
 
         // The id used to end the span comes from the context, not a return value.
         tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
@@ -638,7 +628,7 @@ mod tests {
     fn noop_tracer_end_span_is_a_no_op() {
         let tracer = NoopTracer;
         let ctx = TraceContext::root();
-        tracer.start_span(&ctx, "op.execute", SpanAttributes::new("op.execute"));
+        tracer.start_span(&ctx, "op.execute", SpanAttributes::new());
         // The authoritative span id is carried by the context, not returned.
         let span = ctx.span_id();
 
