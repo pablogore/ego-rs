@@ -18,13 +18,16 @@ pub trait TagScheduler<E>: Send + Sync
 where
     E: Clone + Send + Sync,
 {
-    /// Starts processing for a projection with the given tags.
+    /// Starts processing for a projection with the given `(tag, tenant)`
+    /// pairs. Each tag carries its own authoritative tenant, so a single
+    /// projection can process many tenants in one batch — every session
+    /// threads that pair's real tenant into `ReadSideStore::fetch` rather
+    /// than sharing one fixed tenant across all tags.
     #[allow(clippy::too_many_arguments)]
     async fn start_projection(
         &mut self,
         projection_id: String,
-        tags: Vec<EventTag>,
-        tenant: String,
+        tags: Vec<(EventTag, String)>,
         handler: impl Handler<E> + Clone,
         read_store: impl ReadSideStore<E> + Send + Sync + Clone,
         dedup_store: impl DedupStore + Send + Sync + Clone,

@@ -66,8 +66,7 @@ where
     async fn start_projection(
         &mut self,
         projection_id: String,
-        tags: Vec<EventTag>,
-        tenant: String,
+        tags: Vec<(EventTag, String)>,
         handler: impl Handler<E> + Clone,
         read_store: impl ReadSideStore<E> + Send + Sync + Clone,
         dedup_store: impl DedupStore + Send + Sync + Clone,
@@ -78,20 +77,20 @@ where
         self.active_projections.insert(
             projection_id.clone(),
             ProjectionState {
-                _active_tags: tags.clone(),
+                _active_tags: tags.iter().map(|(tag, _tenant)| tag.clone()).collect(),
                 _is_running: true,
             },
         );
 
-        // Process tags in parallel with backpressure
-        for tag in tags {
+        // Process each (tag, tenant) pair in parallel with backpressure
+        for (tag, tenant) in tags {
             // Check if we can process this tag (respect concurrency limits)
             if self.backpressure.can_process().await {
-                // Create a session for this tag
+                // Create a session for this tag, threading its own tenant
                 let session = ego_domain::read_side::session::ReadSideSession::new(
                     projection_id.clone(),
                     tag.clone(),
-                    tenant.clone(),
+                    tenant,
                     self.config.clone(),
                     handler.clone(),
                     read_store.clone(),
@@ -120,9 +119,11 @@ where
     /// otherwise have to hand-roll themselves.
     ///
     /// `tag_provider` is called fresh on every iteration rather than being
-    /// captured as a fixed `Vec<EventTag>` once — required for dynamic
-    /// per-tenant tag discovery, where a tenant's tag only exists once its
-    /// first event has been written.
+    /// captured as a fixed `Vec<(EventTag, String)>` once — required for
+    /// dynamic per-tenant tag discovery, where a tenant's tag only exists
+    /// once its first event has been written. Each yielded pair carries the
+    /// tag together with its own authoritative tenant, threaded straight
+    /// into that tag's session.
     ///
     /// On stop (`stop_signal` observes `true`), the loop finishes draining
     /// whatever batch is currently in flight before the returned
@@ -139,7 +140,6 @@ where
         interval: Duration,
         mut stop_signal: watch::Receiver<bool>,
         projection_id: String,
-        tenant: String,
         handler: H,
         read_store: S,
         dedup_store: D,
@@ -148,7 +148,7 @@ where
         on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
     ) -> tokio::task::JoinHandle<()>
     where
-        F: Fn() -> Vec<EventTag> + Send + Sync + 'static,
+        F: Fn() -> Vec<(EventTag, String)> + Send + Sync + 'static,
         H: Handler<E> + Clone + Send + Sync + 'static,
         S: ReadSideStore<E> + Send + Sync + Clone + 'static,
         D: DedupStore + Send + Sync + Clone + 'static,
@@ -166,7 +166,6 @@ where
                     .start_projection(
                         projection_id.clone(),
                         tags,
-                        tenant.clone(),
                         handler.clone(),
                         read_store.clone(),
                         dedup_store.clone(),
@@ -240,7 +239,6 @@ where
         tag_provider: F,
         interval: Duration,
         projection_id: String,
-        tenant: String,
         handler: H,
         read_store: S,
         dedup_store: D,
@@ -249,7 +247,7 @@ where
         on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
     ) -> ReadSideProjectionHandle
     where
-        F: Fn() -> Vec<EventTag> + Send + Sync + 'static,
+        F: Fn() -> Vec<(EventTag, String)> + Send + Sync + 'static,
         H: Handler<E> + Clone + Send + Sync + 'static,
         S: ReadSideStore<E> + Send + Sync + Clone + 'static,
         D: DedupStore + Send + Sync + Clone + 'static,
@@ -262,7 +260,6 @@ where
             interval,
             stop_rx,
             projection_id,
-            tenant,
             handler,
             read_store,
             dedup_store,
@@ -416,7 +413,6 @@ mod tests {
             Duration::from_millis(5),
             stop_rx,
             "proj".to_string(),
-            "all-tenants".to_string(),
             CountingHandler { handled: handled.clone() },
             FakeStore::default(),
             FakeDedup,
@@ -452,12 +448,11 @@ mod tests {
         let handle = scheduler.run_until_stopped(
             move || {
                 seen_tags_for_closure.lock().unwrap().push(());
-                vec![EventTag::new("tenant-a")]
+                vec![(EventTag::new("tenant-a"), "tenant-a".to_string())]
             },
             Duration::from_millis(5),
             stop_rx,
             "proj".to_string(),
-            "all-tenants".to_string(),
             CountingHandler { handled: handled.clone() },
             FakeStore {
                 fetch_delay: Duration::from_millis(60),
@@ -510,7 +505,6 @@ mod tests {
             Duration::from_millis(5),
             stop_rx,
             "proj".to_string(),
-            "all-tenants".to_string(),
             CountingHandler { handled: handled.clone() },
             FakeStore::default(),
             FakeDedup,
@@ -572,7 +566,6 @@ mod tests {
             },
             Duration::from_millis(5),
             "proj".to_string(),
-            "all-tenants".to_string(),
             CountingHandler { handled: handled.clone() },
             FakeStore::default(),
             FakeDedup,
@@ -601,10 +594,9 @@ mod tests {
         let handled = Arc::new(AtomicUsize::new(0));
 
         let handle = scheduler.spawn_projection(
-            || vec![EventTag::new("tenant-a")],
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
             Duration::from_millis(5),
             "proj".to_string(),
-            "all-tenants".to_string(),
             CountingHandler { handled: handled.clone() },
             FakeStore { fetch_delay: Duration::from_millis(60) },
             FakeDedup,
@@ -640,10 +632,9 @@ mod tests {
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
 
         let handle = scheduler.spawn_projection(
-            || vec![EventTag::new("tenant-a")],
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
             Duration::from_millis(5),
             "proj".to_string(),
-            "all-tenants".to_string(),
             PanickingHandler,
             FakeStore::default(),
             FakeDedup,
@@ -659,6 +650,68 @@ mod tests {
         assert!(
             result.as_ref().is_err_and(|e| e.is_panic()),
             "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
+        );
+    }
+
+    /// Store that records the `(tenant, tag)` every `fetch` receives, so a
+    /// test can prove which tenant the scheduler threads for each tag.
+    #[derive(Clone, Default)]
+    struct RecordingStore {
+        seen: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl ReadSideStore<serde_json::Value> for RecordingStore {
+        async fn fetch(
+            &self,
+            tenant: &str,
+            tag: &EventTag,
+            _offset: Option<&Offset>,
+            _batch_size: usize,
+        ) -> Result<Vec<EventStreamElement<serde_json::Value>>, ReadSideStoreError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), tag.value().to_string()));
+            Ok(Vec::new())
+        }
+    }
+
+    /// Each `(tag, tenant)` pair threads ITS OWN tenant into
+    /// `ReadSideStore::fetch` — the scheduler no longer collapses every tag
+    /// onto one shared tenant. Two different tenants in a single
+    /// `start_projection` batch must each reach the store paired with their
+    /// own tag.
+    #[tokio::test]
+    async fn start_projection_threads_each_pairs_tenant_into_fetch() {
+        let store = RecordingStore::default();
+        let mut scheduler =
+            TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+
+        scheduler
+            .start_projection(
+                "proj".to_string(),
+                vec![
+                    (EventTag::new("users-by-tenant:tenant-a"), "tenant-a".to_string()),
+                    (EventTag::new("users-by-tenant:tenant-b"), "tenant-b".to_string()),
+                ],
+                CountingHandler { handled: Arc::new(AtomicUsize::new(0)) },
+                store.clone(),
+                FakeDedup,
+                FakeOffset,
+                NoopProgressReporter,
+            )
+            .await
+            .expect("start_projection succeeds");
+
+        let seen = store.seen.lock().unwrap().clone();
+        assert!(
+            seen.contains(&("tenant-a".to_string(), "users-by-tenant:tenant-a".to_string())),
+            "tenant-a's tag must reach fetch paired with tenant-a, got: {seen:?}"
+        );
+        assert!(
+            seen.contains(&("tenant-b".to_string(), "users-by-tenant:tenant-b".to_string())),
+            "tenant-b's tag must reach fetch paired with tenant-b, got: {seen:?}"
         );
     }
 }
