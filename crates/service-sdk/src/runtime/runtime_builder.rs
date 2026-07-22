@@ -760,7 +760,7 @@ impl std::fmt::Display for DependencyKind {
 pub enum RuntimeError {
     /// The requested service was not found in the registry.
     #[error(
-        "service `{type_name}` not found{} — register it with .service::<{type_name}>() or .service_instance() before resolving",
+        "service `{type_name}` not found{} — register it with .service::<{type_name}>() or .service_instance::<{type_name}>(instance) before resolving",
         required_by.map(|s| format!(" (required by `{s}`)")).unwrap_or_default()
     )]
     ServiceNotFound {
@@ -1349,6 +1349,12 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("MyTag"), "must name the missing tag: {msg}");
         assert!(msg.contains(".service::<"), "must name the fix method: {msg}");
+        // The service_instance hint must show its full, copy-pasteable signature
+        // (`::<Tag>(instance)`), not a bare `.service_instance()` that won't compile.
+        assert!(
+            msg.contains(".service_instance::<"),
+            "must name the full service_instance signature: {msg}"
+        );
     }
 
     #[test]

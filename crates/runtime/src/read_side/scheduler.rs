@@ -227,7 +227,7 @@ impl ReadSideProjectionHandle {
 /// Grouped configuration for spawning a projection poll loop, replacing the
 /// nine positional arguments of the deprecated
 /// [`TagSchedulerImpl::spawn_projection`] with a single builder (CORE-028 DX
-/// follow-up). The four boilerplate knobs are defaulted so the common case
+/// follow-up). The three boilerplate knobs are defaulted so the common case
 /// only names what it actually cares about:
 ///
 /// - `reporter` defaults to [`NoopProgressReporter`] (the `R` type parameter's
