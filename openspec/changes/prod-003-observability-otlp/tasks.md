@@ -29,13 +29,13 @@ Chain strategy: pending
 
 ## Phase 1: Domain — Tracer Port, TraceContext, SpanAttributes
 
-- [ ] TASK-001 RED: failing tests for `TraceContext::root()`/`from_inbound()`/`child()` parent linkage incl. A→B→C chain.
-- [ ] TASK-002 GREEN: implement `TraceContext`, `TraceId`, `SpanId` newtypes, `root()`/`from_inbound()`/`child()`. AC: TASK-001 green.
-- [ ] TASK-003 RED: failing tests for W3C `traceparent` parse/format round-trip incl. invalid-input error; `parse_traceparent` returns raw `(TraceId,SpanId)` only.
-- [ ] TASK-004 GREEN: implement `parse_traceparent`/`to_traceparent`/`TraceParseError`. AC: TASK-003 green.
-- [ ] TASK-005 RED: failing tests — `SpanAttributes` allow-list has no constructor/field for tenant id, credential, or arbitrary payload; `Tracer` trait (`start_span`/`end_span` only) + `NoopTracer` (zero observable effect, returns `ctx.span_id()`, implements `Tracer` ONLY — does not implement `TracerLifecycle`) + `SpanOutcome`.
-- [ ] TASK-006 GREEN: implement `SpanAttributes` (operation, tenant-present bool, duration), `SpanOutcome`, `Tracer` trait (`start_span`/`end_span`), a SEPARATE `TracerLifecycle` trait (`shutdown`, ADR-9), and `NoopTracer` (impl `Tracer` only). AC: TASK-005 green, no `opentelemetry` symbol in signatures.
-- [ ] TASK-007: wire `pub mod tracer;` + re-exports in `crates/domain/src/lib.rs`. AC: `ego_domain::{Tracer, TracerLifecycle, TraceContext, SpanAttributes, NoopTracer, SpanOutcome}` importable.
+- [x] TASK-001 RED: failing tests for `TraceContext::root()`/`from_inbound()`/`child()` parent linkage incl. A→B→C chain.
+- [x] TASK-002 GREEN: implement `TraceContext`, `TraceId`, `SpanId` newtypes, `root()`/`from_inbound()`/`child()`. AC: TASK-001 green.
+- [x] TASK-003 RED: failing tests for W3C `traceparent` parse/format round-trip incl. invalid-input error; `parse_traceparent` returns raw `(TraceId,SpanId)` only.
+- [x] TASK-004 GREEN: implement `parse_traceparent`/`to_traceparent`/`TraceParseError`. AC: TASK-003 green.
+- [x] TASK-005 RED: failing tests — `SpanAttributes` allow-list has no constructor/field for tenant id, credential, or arbitrary payload; `Tracer` trait (`start_span`/`end_span` only) + `NoopTracer` (zero observable effect, returns `ctx.span_id()`, implements `Tracer` ONLY — does not implement `TracerLifecycle`) + `SpanOutcome`.
+- [x] TASK-006 GREEN: implement `SpanAttributes` (operation, tenant-present bool, duration), `SpanOutcome`, `Tracer` trait (`start_span`/`end_span`), a SEPARATE `TracerLifecycle` trait (`shutdown`, ADR-9), and `NoopTracer` (impl `Tracer` only). AC: TASK-005 green, no `opentelemetry` symbol in signatures.
+- [x] TASK-007: wire `pub mod tracer;` + re-exports in `crates/domain/src/lib.rs`. AC: `ego_domain::{Tracer, TracerLifecycle, TraceContext, SpanAttributes, NoopTracer, SpanOutcome}` importable.
 
 ## Phase 2: ServiceContext Trace-Context Threading
 
