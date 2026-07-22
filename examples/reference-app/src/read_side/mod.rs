@@ -48,14 +48,20 @@ pub(crate) fn tenant_tag(tenant_id: &str) -> EventTag {
     EventTag::new(format!("{PROJECTION_TAG}:{tenant_id}"))
 }
 
-/// Bookkeeping-only scope passed to `OffsetStore`/`DedupStore`. CORE-005
-/// keys those per `(projection_id, tag, tenant)`, and tenants are already
-/// isolated at the store level via `tenant_tag` (one tag stream per
-/// tenant, not a single shared stream) — so this constant is just the
-/// third component of that composite key, not a claim that tenants share
-/// bookkeeping state. A fixed value is correct here specifically because
-/// `tag` already varies per tenant; this string never needs to.
-const BOOKKEEPING_SCOPE: &str = "all-tenants";
+/// The tenant encoded in a `tenant_tag`-shaped tag, i.e. the `{tenant_id}`
+/// part of `"{PROJECTION_TAG}:{tenant_id}"`. Returns `None` for any tag not
+/// produced by [`tenant_tag`].
+///
+/// This is a *secondary* cross-check, not the authoritative tenant: per the
+/// `ReadSideStore::fetch` contract, the explicit `tenant` argument is always
+/// the real tenant and the tag may only ever narrow to that same tenant (see
+/// [`store::SharedReadSideStore::fetch`]). The scheduler pairs each tag with
+/// this decoded tenant when starting the projection, so `fetch` receives the
+/// authoritative tenant directly — `tenant_from_tag` merely re-derives it as
+/// a defense-in-depth mismatch check.
+pub(crate) fn tenant_from_tag(tag: &EventTag) -> Option<&str> {
+    tag.value().strip_prefix(&format!("{PROJECTION_TAG}:")).filter(|t| !t.is_empty())
+}
 
 /// Poll interval for the background scheduler loop. `TagSchedulerImpl`
 /// itself is not a persistent poller — `start_projection` processes one
@@ -126,12 +132,26 @@ impl ReadSideHandles {
         // on every poll via the `tag_provider` closure `spawn_projection`
         // calls fresh each iteration, instead of a fixed list decided once —
         // a tenant's tag only exists once its first event has been written.
+        //
+        // Each tag is paired with its own real tenant (decoded via
+        // `tenant_from_tag`) so the scheduler threads the authoritative tenant
+        // into `ReadSideStore::fetch` — the offset/dedup composite key
+        // `(projection_id, tag, tenant)` stays unique per tag because the tag
+        // itself already varies per tenant. Any tag that is not tenant-scoped
+        // (no decodable tenant) is skipped: it is not part of this projection.
         let store_for_provider = store.clone();
         let handle = scheduler.spawn_projection(
-            move || store_for_provider.known_tags(),
+            move || {
+                store_for_provider
+                    .known_tags()
+                    .into_iter()
+                    .filter_map(|tag| {
+                        tenant_from_tag(&tag).map(|tenant| (tag.clone(), tenant.to_string()))
+                    })
+                    .collect()
+            },
             POLL_INTERVAL,
             PROJECTION_ID.to_string(),
-            BOOKKEEPING_SCOPE.to_string(),
             handler,
             store,
             dedup_store,

@@ -79,17 +79,47 @@ pub const DEV_SIGNING_KEY: &[u8] = b"reference-app-development-signing-key-not-f
 /// only makes sense once `runtime` and `database` are both known.
 const MIN_MULTI_TENANT_CONNECTIONS: u32 = 5;
 
+/// Audience this application binds its JWTs to — the value `AppConfig`'s
+/// `jwt.expected_aud` requires and the exact `aud` claim tests must mint
+/// (see `tests/support::make_token`). `pub` so tests reference this single
+/// source of truth instead of duplicating the literal, mirroring
+/// [`DEV_SIGNING_KEY`].
+///
+/// `security_jwt::JwtProviderConfig::validate()` rejects a `None`/empty
+/// `expected_aud` (audience-confusion / token-reuse defense), so a real
+/// audience is mandatory — the reference app names itself as its own audience.
+pub const REFERENCE_APP_AUDIENCE: &str = "reference-app";
+
 /// Illustrative application root config. Real applications define their own
 /// type with their own name (spec.md: "The name is application-defined").
 // `RuntimeConfig` implements neither `Clone` nor `Debug`, so `AppConfig`
-// can't derive them either — Default is enough for this example.
-#[derive(Default)]
+// can't derive them either. `Default` is hand-written (not derived) because
+// `JwtProviderConfig`'s own default has `expected_aud: None`, which its
+// `validate()` now rejects — this app must pin a concrete audience.
 pub struct AppConfig {
     pub runtime: RuntimeConfig,
     pub jwt: JwtProviderConfig,
     pub scheduler: EventBusConfig,
     pub database: DatabaseConfig,
     pub transport: GrpcServerConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            runtime: RuntimeConfig::default(),
+            // Pin the audience so `jwt.validate()` passes and every minted
+            // token must carry a matching `aud` claim. All other JWT
+            // parameters keep their own defaults.
+            jwt: JwtProviderConfig {
+                expected_aud: Some(vec![REFERENCE_APP_AUDIENCE.to_string()]),
+                ..JwtProviderConfig::default()
+            },
+            scheduler: EventBusConfig::default(),
+            database: DatabaseConfig::default(),
+            transport: GrpcServerConfig::default(),
+        }
+    }
 }
 
 impl Validate for AppConfig {
@@ -197,8 +227,9 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
         VerificationKey::Hmac(DEV_SIGNING_KEY.to_vec()),
     ));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let authn: Arc<dyn AuthenticationProvider> =
-        Arc::new(Hs256AuthenticationProvider::new(config.jwt.clone(), resolver, clock));
+    let authn: Arc<dyn AuthenticationProvider> = Arc::new(
+        Hs256AuthenticationProvider::try_new(config.jwt.clone(), resolver, clock)?,
+    );
     let authz: Arc<dyn AuthorizationProvider> = Arc::new(ReferenceAllowAllAuthorization);
 
     let _scheduler = SchedulerService(&config.scheduler);

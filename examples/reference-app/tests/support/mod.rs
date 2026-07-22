@@ -21,7 +21,8 @@ use persistent_entity::runtime::EntityRuntime;
 use reference_app::application::{RegisterUser, RegisterUserImpl};
 use reference_app::domain::tenant_org::OrganizationEnsured;
 use reference_app::read_side::ReadSideSink;
-use reference_app::DEV_SIGNING_KEY;
+use reference_app::{DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
+use serde_json::Value;
 
 /// Builds a fresh `RegisterUserImpl` (two independent in-memory
 /// `EntityRuntime`s, AD-4) plus the org-side runtime, for callers that need
@@ -49,9 +50,15 @@ pub fn make_register_user(observability: Option<Arc<dyn Observability>>) -> Arc<
 
 /// Mints an Hs256 JWT that authenticates against `build_runtime`'s
 /// `Hs256AuthenticationProvider` (see `reference_app::DEV_SIGNING_KEY`).
+///
+/// The token carries an `aud` claim equal to
+/// [`reference_app::REFERENCE_APP_AUDIENCE`] — the audience `AppConfig`'s
+/// `jwt.expected_aud` now requires. Without it, validation would fail with an
+/// `aud` mismatch instead of authenticating.
 pub fn make_token(sub: &str, tenant_id: &str) -> String {
     TestJwtBuilder::new(DEV_SIGNING_KEY.to_vec())
         .subject(sub)
         .tenant_id(tenant_id)
+        .claim("aud", Value::from(REFERENCE_APP_AUDIENCE))
         .build()
 }

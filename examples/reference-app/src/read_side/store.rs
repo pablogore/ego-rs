@@ -50,14 +50,29 @@ impl SharedReadSideStore {
 
 #[async_trait]
 impl ReadSideStore<Value> for SharedReadSideStore {
-    async fn fetch(&self, tag: &EventTag, offset: Option<&Offset>, batch_size: usize) -> Result<Vec<EventStreamElement<Value>>, ReadSideStoreError> {
+    async fn fetch(&self, tenant: &str, tag: &EventTag, offset: Option<&Offset>, batch_size: usize) -> Result<Vec<EventStreamElement<Value>>, ReadSideStoreError> {
+        // The explicit `tenant` is authoritative: the scheduler threads each
+        // tag's real tenant into this call (see `super::tenant_from_tag` and
+        // `super::spawn`), so we paginate strictly by it. Our tags are
+        // tenant-scoped (see `super::tenant_tag`), so `tenant_from_tag` is a
+        // defense-in-depth cross-check — if the tag decodes to a *different*
+        // tenant than the caller asked for, that is a scoping error and we
+        // fail closed to empty rather than risk surfacing another tenant's
+        // stream.
+        if let Some(tag_tenant) = super::tenant_from_tag(tag) {
+            if tag_tenant != tenant {
+                return Ok(Vec::new());
+            }
+        }
         // No `.await` inside the lock scope — `paginate` is a plain
         // synchronous function (never yields), so locking a std `Mutex`
         // across it is never a footgun. Delegates to the same pagination
         // logic `InMemoryReadSideStore::fetch` uses, instead of cloning the
         // full tag history via `all_events` and re-filtering it here.
+        // `paginate` fails closed on an empty scope, so a fetch can never
+        // return unscoped data.
         let guard = self.0.lock().expect("SharedReadSideStore lock poisoned");
-        Ok(paginate(guard.events_for_tag(tag.value()), offset, batch_size))
+        Ok(paginate(guard.events_for_tag(tag.value()), tenant, offset, batch_size))
     }
 }
 
@@ -154,11 +169,11 @@ mod tests {
     // history at e5b4074) to tag-only, removing store-level tenant
     // isolation. `ReadSideSink::record` now tags each event with a
     // tenant-scoped tag (`tenant_tag`) instead of one shared constant tag,
-    // so isolation is structural again — a tag's stream can never contain
-    // another tenant's events, even under adversarial conditions (a
-    // hypothetical handler that ignored `EventStreamElement::tenant_id`
-    // entirely still could not see cross-tenant data, because `fetch` is
-    // scoped by tag alone).
+    // AND `ReadSideStore::fetch` now takes an explicit tenant that scopes the
+    // returned events by `tenant_id`, so isolation is both structural (per
+    // tag) and type-enforced (per fetch) — a tag's stream can never contain
+    // another tenant's events, and even if it did, `fetch` would filter them
+    // out.
     #[tokio::test]
     async fn tenants_are_structurally_isolated_at_the_store_level() {
         let store = SharedReadSideStore::new();
@@ -172,7 +187,11 @@ mod tests {
         assert_eq!(tags.len(), 2, "each tenant gets its own tag stream, not one shared tag");
 
         for tag in &tags {
-            let events = store.fetch(tag, None, 100).await.unwrap();
+            // `fetch` scopes by its explicit `tenant` argument (authoritative),
+            // and our tags are tenant-scoped, so pass the tag's own tenant to
+            // read that stream back.
+            let tenant = super::super::tenant_from_tag(tag).expect("tenant-scoped tag");
+            let events = store.fetch(tenant, tag, None, 100).await.unwrap();
             assert!(!events.is_empty());
             let tenants: HashSet<&str> = events.iter().map(|e| e.tenant_id()).collect();
             assert_eq!(
@@ -181,5 +200,38 @@ mod tests {
                 "a single tag's stream must contain exactly one tenant's events, got: {tenants:?}"
             );
         }
+    }
+
+    // The `tenant` argument is authoritative (see the `ReadSideStore::fetch`
+    // contract): the tag may only ever narrow to that same tenant, never pick
+    // a different one. A fetch whose explicit tenant disagrees with the
+    // tag-encoded tenant returns nothing (fail closed), while a matching pair
+    // returns exactly that tenant's events.
+    #[tokio::test]
+    async fn fetch_honors_explicit_tenant_over_tag() {
+        let store = SharedReadSideStore::new();
+        let sink = ReadSideSink::new(store.clone());
+
+        sink.record("tenant-a", "user-1", "UserRegistered", serde_json::json!({ "email": "a@example.com" }), Utc::now());
+        sink.record("tenant-b", "user-2", "UserRegistered", serde_json::json!({ "email": "b@example.com" }), Utc::now());
+
+        let tag_a = super::super::tenant_tag("tenant-a");
+        let tag_b = super::super::tenant_tag("tenant-b");
+
+        // Matching tenant + tag: returns exactly tenant-a's events.
+        let matched = store.fetch("tenant-a", &tag_a, None, 100).await.unwrap();
+        assert!(!matched.is_empty(), "matching tenant + tag must return events");
+        assert!(
+            matched.iter().all(|e| e.tenant_id() == "tenant-a"),
+            "only tenant-a events may be returned"
+        );
+
+        // Mismatched: explicit tenant-a but tenant-b's tag must return nothing —
+        // the tag may never override the explicit tenant.
+        let crossed = store.fetch("tenant-a", &tag_b, None, 100).await.unwrap();
+        assert!(
+            crossed.is_empty(),
+            "a tag for a different tenant must never surface that tenant's events, got: {crossed:?}"
+        );
     }
 }

@@ -95,10 +95,12 @@ where
             .await
             .map_err(|e| ProjectionError::transient(format!("read offset failed: {}", e)))?;
 
-        // Phase 1: Fetch events
+        // Phase 1: Fetch events. Tenant isolation is now passed explicitly to
+        // the store (type-enforced) instead of relying solely on the tenant
+        // being folded into `self.tag`.
         let events = self
             .read_store
-            .fetch(&self.tag, last_offset.as_ref(), self.config.batch_size)
+            .fetch(&self.tenant, &self.tag, last_offset.as_ref(), self.config.batch_size)
             .await
             .map_err(|e| ProjectionError::transient(format!("fetch failed: {}", e)))?;
 

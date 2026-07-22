@@ -9,6 +9,8 @@ use tokio::runtime::Handle;
 use ego_domain::persistence::{PersistenceError, Snapshot};
 use serde_json::Value;
 
+use crate::postgres::resolve_tenant;
+
 /// Row returned from the snapshots table.
 #[derive(FromRow)]
 #[expect(dead_code)]
@@ -54,11 +56,7 @@ impl Snapshot for PostgreSQLSnapshotStore {
         version: i64,
         payload: Value,
     ) -> Result<(), PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         // Check if a snapshot exists for this aggregate
         let existing_version: Option<i64> = self
@@ -107,11 +105,7 @@ impl Snapshot for PostgreSQLSnapshotStore {
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Option<(i64, Value)>, PersistenceError> {
-        let tenant = match tenant_id {
-            Some("") => None,
-            Some(t) => Some(t.to_string()),
-            None => None,
-        };
+        let tenant = resolve_tenant(tenant_id)?;
 
         let row: Option<SnapshotRow> = self
             .block_on(async {

@@ -137,7 +137,7 @@ pub(crate) fn authenticate_inner(
     JwtValidationEngine::validate_with_mapper(token, &decoding_key, expected_alg, params, clock.as_ref(), mapper)
 }
 
-/// Defines a JWT authentication provider struct and its `new()` / `with_mapper()` constructors.
+/// Defines a JWT authentication provider struct and its `try_new()` / `with_mapper()` constructors.
 /// Each type stays distinct for algorithm enforcement at the type level.
 macro_rules! define_provider {
     ($name:ident) => {
@@ -148,7 +148,7 @@ macro_rules! define_provider {
             "Implements [`ego_security_sdk::AuthenticationProvider`]. ",
             "Construct via [`",
             stringify!($name),
-            "::new`]."
+            "::try_new`]."
         )]
         pub struct $name {
             config: JwtProviderConfig,
@@ -158,18 +158,24 @@ macro_rules! define_provider {
         }
 
         impl $name {
-            #[doc = concat!("Construct a new `", stringify!($name), "`.")]
-            pub fn new(
+            #[doc = concat!(
+                "Construct a new `", stringify!($name), "`.\n\n",
+                "Fails with [`ego_domain::ConfigError`] when `config` is invalid — ",
+                "notably when `expected_aud` is absent, which would leave the provider ",
+                "open to audience-confusion / token-reuse (see [`JwtProviderConfig`])."
+            )]
+            pub fn try_new(
                 config: JwtProviderConfig,
                 resolver: Arc<dyn KeyResolver>,
                 clock: Arc<dyn Clock>,
-            ) -> Self {
-                Self {
+            ) -> Result<Self, ego_domain::ConfigError> {
+                ego_domain::Validate::validate(&config)?;
+                Ok(Self {
                     config,
                     resolver,
                     clock,
                     mapper: Arc::new(DefaultPrincipalMapper),
-                }
+                })
             }
 
             /// Replace the default [`DefaultPrincipalMapper`] with a custom one.
@@ -302,7 +308,7 @@ mod tests {
 
     use crate::key_resolver::{LocalKeyResolver, VerificationKey};
     use chrono::Duration;
-    use crate::test_helpers::{fixed_clock, hs256_secret, make_hs256_token};
+    use crate::test_helpers::{fixed_clock, hs256_secret, make_hs256_token, TEST_AUD};
 
     // Deterministic time anchor for all clock-sensitive tests (2025-06-01 12:00:00 UTC).
     fn pinned_now() -> chrono::DateTime<Utc> {
@@ -363,11 +369,14 @@ mod tests {
         ))
     }
 
+    /// A matching [`TEST_AUD`] `aud` claim is added when the caller omits one,
+    /// so tokens authenticate against providers whose `expected_aud` is
+    /// [`TEST_AUD`] (see [`default_config`]).
     fn make_rs256_token(claims: &serde_json::Value) -> String {
         let header = Header::new(Algorithm::RS256);
         encode(
             &header,
-            claims,
+            &with_default_aud(claims),
             &EncodingKey::from_rsa_pem(rs256_private_key_pem().as_bytes()).unwrap(),
         )
         .unwrap()
@@ -397,14 +406,27 @@ mod tests {
         ))
     }
 
+    /// A matching [`TEST_AUD`] `aud` claim is added when the caller omits one
+    /// (see [`make_rs256_token`]).
     fn make_ec_token(claims: &serde_json::Value) -> String {
         let header = Header::new(Algorithm::ES256);
         encode(
             &header,
-            claims,
+            &with_default_aud(claims),
             &EncodingKey::from_ec_pem(ec_private_key_pem().as_bytes()).unwrap(),
         )
         .unwrap()
+    }
+
+    /// Returns `claims` with a default [`TEST_AUD`] `aud` entry when the caller
+    /// did not set one. Callers that assert on a specific `aud` keep control.
+    fn with_default_aud(claims: &serde_json::Value) -> serde_json::Value {
+        let mut claims = claims.clone();
+        if let Some(obj) = claims.as_object_mut() {
+            obj.entry("aud")
+                .or_insert_with(|| serde_json::Value::from(crate::test_helpers::TEST_AUD));
+        }
+        claims
     }
 
     // -----------------------------------------------------------------------
@@ -488,8 +510,45 @@ mod tests {
         ))
     }
 
+    /// A valid config for provider construction: `expected_aud` is required
+    /// (audience-confusion / token-reuse defense), so a bare `default()` (which
+    /// has `expected_aud: None`) is rejected by `try_new`. Tokens minted for
+    /// these providers carry a matching [`TEST_AUD`] `aud` claim.
     fn default_config() -> crate::config::JwtProviderConfig {
-        crate::config::JwtProviderConfig::default()
+        crate::config::JwtProviderConfig {
+            expected_aud: Some(vec![crate::test_helpers::TEST_AUD.to_string()]),
+            ..crate::config::JwtProviderConfig::default()
+        }
+    }
+
+    #[test]
+    fn try_new_rejects_config_without_expected_aud() {
+        // Construction must fail closed when `expected_aud` is None: an audience
+        // constraint is required to prevent audience-confusion / token-reuse.
+        let config = crate::config::JwtProviderConfig {
+            expected_aud: None,
+            ..Default::default()
+        };
+        // `Provider` is not `Debug`, so match instead of `unwrap_err()`.
+        let err = match Hs256AuthenticationProvider::try_new(config, hs256_resolver(), pinned_clock()) {
+            Ok(_) => panic!("try_new must reject a config without expected_aud"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(&err, ego_domain::ConfigError::Invalid { field, .. } if field == "expected_aud"),
+            "expected ConfigError::Invalid for expected_aud, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn try_new_accepts_config_with_expected_aud() {
+        let config = crate::config::JwtProviderConfig {
+            expected_aud: Some(vec!["api".to_string()]),
+            ..Default::default()
+        };
+        assert!(
+            Hs256AuthenticationProvider::try_new(config, hs256_resolver(), pinned_clock()).is_ok()
+        );
     }
 
 
@@ -501,7 +560,7 @@ mod tests {
     fn hs256_provider_valid_token_returns_security_context() {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let provider = Hs256AuthenticationProvider::new(default_config(), hs256_resolver(), pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), hs256_resolver(), pinned_clock()).unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "user-1");
     }
@@ -515,7 +574,7 @@ mod tests {
             JwtAlgorithm::Hs256,
             VerificationKey::Hmac(b"wrong-secret-that-is-32-bytes!!!".to_vec()),
         ));
-        let provider = Hs256AuthenticationProvider::new(default_config(), wrong_resolver, pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), wrong_resolver, pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -524,14 +583,14 @@ mod tests {
     fn hs256_provider_rejects_rs256_token() {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let rs256_token = make_rs256_token(&claims);
-        let provider = Hs256AuthenticationProvider::new(default_config(), hs256_resolver(), pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), hs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(rs256_token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
 
     #[test]
     fn hs256_provider_non_bearer_credential_returns_invalid_token() {
-        let provider = Hs256AuthenticationProvider::new(default_config(), hs256_resolver(), pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), hs256_resolver(), pinned_clock()).unwrap();
         let err = provider
             .authenticate(&Credential::Basic { username: "user".into(), secret: "pass".into() })
             .unwrap_err();
@@ -542,7 +601,7 @@ mod tests {
     fn hs256_provider_expired_token_returns_expired_token() {
         let claims = json!({ "sub": "user-1", "exp": pinned_past_ts(60) });
         let token = make_hs256_token(&claims);
-        let provider = Hs256AuthenticationProvider::new(default_config(), hs256_resolver(), pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), hs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
@@ -551,7 +610,7 @@ mod tests {
     fn hs256_provider_missing_sub_returns_missing_claim() {
         let claims = json!({ "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let provider = Hs256AuthenticationProvider::new(default_config(), hs256_resolver(), pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), hs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(&err, AuthenticationError::MissingClaim(s) if s == "sub"),
@@ -564,7 +623,7 @@ mod tests {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
         let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver { error: KeyResolverError::KeyNotFound { kid: None } });
-        let provider = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -579,10 +638,10 @@ mod tests {
 
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         header.kid = Some("my-key-id".into());
-        let claims = json!({ "sub": "user-1", "exp": exp });
+        let claims = json!({ "sub": "user-1", "exp": exp, "aud": TEST_AUD });
         let token = jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(&hs256_secret())).unwrap();
 
-        let provider = Hs256AuthenticationProvider::new(default_config(), resolver, fixed_clock(now));
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), resolver, fixed_clock(now)).unwrap();
         let _ = provider.authenticate(&Credential::Bearer(token)).unwrap();
 
         let received = received_kid.lock().unwrap().clone();
@@ -597,7 +656,7 @@ mod tests {
     fn rs256_provider_valid_token_returns_security_context() {
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "rs256-user");
     }
@@ -606,7 +665,7 @@ mod tests {
     fn rs256_provider_mismatched_key_returns_invalid_signature() {
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_other_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_other_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -615,7 +674,7 @@ mod tests {
     fn rs256_provider_rejects_hs256_token() {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let hs256_token = make_hs256_token(&claims);
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(hs256_token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
@@ -625,14 +684,14 @@ mod tests {
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
         let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver { error: KeyResolverError::KeyNotFound { kid: None } });
-        let provider = Rs256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
 
     #[test]
     fn rs256_provider_non_bearer_credential_returns_invalid_token() {
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap();
         let err = provider
             .authenticate(&Credential::Basic { username: "user".into(), secret: "pass".into() })
             .unwrap_err();
@@ -643,7 +702,7 @@ mod tests {
     fn rs256_provider_expired_token_returns_expired_token() {
         let claims = json!({ "sub": "rs256-user", "exp": pinned_past_ts(60) });
         let token = make_rs256_token(&claims);
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
@@ -652,7 +711,7 @@ mod tests {
     fn rs256_provider_missing_sub_returns_missing_claim() {
         let claims = json!({ "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock());
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(&err, AuthenticationError::MissingClaim(s) if s == "sub"),
@@ -670,7 +729,7 @@ mod tests {
 
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         header.kid = Some("rs256-key-id".into());
-        let claims = json!({ "sub": "rs256-user", "exp": exp });
+        let claims = json!({ "sub": "rs256-user", "exp": exp, "aud": TEST_AUD });
         let token = jsonwebtoken::encode(
             &header,
             &claims,
@@ -678,7 +737,7 @@ mod tests {
         )
         .unwrap();
 
-        let provider = Rs256AuthenticationProvider::new(default_config(), resolver, fixed_clock(now));
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), resolver, fixed_clock(now)).unwrap();
         let _ = provider.authenticate(&Credential::Bearer(token)).unwrap();
 
         let received = received_kid.lock().unwrap().clone();
@@ -693,7 +752,7 @@ mod tests {
     fn es256_provider_valid_token_returns_security_context() {
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_resolver(), pinned_clock()).unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "es256-user");
     }
@@ -702,7 +761,7 @@ mod tests {
     fn es256_provider_mismatched_key_returns_invalid_signature() {
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_other_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_other_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
@@ -711,7 +770,7 @@ mod tests {
     fn es256_authentication_provider_rejects_hs256_token() {
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let hs256_token = make_hs256_token(&claims);
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(hs256_token)).unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
     }
@@ -721,14 +780,14 @@ mod tests {
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
         let resolver: Arc<dyn KeyResolver> = Arc::new(FailingResolver { error: KeyResolverError::KeyNotFound { kid: None } });
-        let provider = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::InvalidSignature);
     }
 
     #[test]
     fn es256_provider_non_bearer_credential_returns_invalid_token() {
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_resolver(), pinned_clock()).unwrap();
         let err = provider
             .authenticate(&Credential::Basic { username: "user".into(), secret: "pass".into() })
             .unwrap_err();
@@ -739,7 +798,7 @@ mod tests {
     fn es256_provider_expired_token_returns_expired_token() {
         let claims = json!({ "sub": "es256-user", "exp": pinned_past_ts(60) });
         let token = make_ec_token(&claims);
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
@@ -748,7 +807,7 @@ mod tests {
     fn es256_provider_missing_sub_returns_missing_claim() {
         let claims = json!({ "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let provider = Es256AuthenticationProvider::new(default_config(), ec_resolver(), pinned_clock());
+        let provider = Es256AuthenticationProvider::try_new(default_config(), ec_resolver(), pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(&err, AuthenticationError::MissingClaim(s) if s == "sub"),
@@ -766,7 +825,7 @@ mod tests {
 
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
         header.kid = Some("ec-key-id".into());
-        let claims = json!({ "sub": "es256-user", "exp": exp });
+        let claims = json!({ "sub": "es256-user", "exp": exp, "aud": TEST_AUD });
         let token = jsonwebtoken::encode(
             &header,
             &claims,
@@ -774,7 +833,7 @@ mod tests {
         )
         .unwrap();
 
-        let provider = Es256AuthenticationProvider::new(default_config(), resolver, fixed_clock(now));
+        let provider = Es256AuthenticationProvider::try_new(default_config(), resolver, fixed_clock(now)).unwrap();
         let _ = provider.authenticate(&Credential::Bearer(token)).unwrap();
 
         let received = received_kid.lock().unwrap().clone();
@@ -795,7 +854,7 @@ mod tests {
         });
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let err = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Hs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
@@ -808,7 +867,7 @@ mod tests {
         });
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let err = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Hs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
@@ -824,7 +883,7 @@ mod tests {
         });
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let err = Rs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Rs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
@@ -837,7 +896,7 @@ mod tests {
         });
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let err = Rs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Rs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
@@ -853,7 +912,7 @@ mod tests {
         });
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Es256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::AlgorithmNotSupported(_)));
@@ -866,7 +925,7 @@ mod tests {
         });
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Es256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
@@ -884,7 +943,7 @@ mod tests {
         ));
         let claims = json!({ "sub": "es256-user", "exp": pinned_future_ts(3600) });
         let token = make_ec_token(&claims);
-        let err = Es256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        let err = Es256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
@@ -901,7 +960,7 @@ mod tests {
         let resolver: Arc<dyn KeyResolver> = capturing;
         let claims = json!({ "sub": "user-1", "exp": pinned_future_ts(3600) });
         let token = make_hs256_token(&claims);
-        Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock())
+        Hs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap()
             .authenticate(&Credential::Bearer(token))
             .unwrap();
         assert_eq!(*received_kid.lock().unwrap(), Some(None));
@@ -933,7 +992,7 @@ mod tests {
             .subject("user-1")
             .expires_at(pinned_future_ts(3600))
             .build();
-        let provider = Hs256AuthenticationProvider::new(default_config(), resolver, pinned_clock());
+        let provider = Hs256AuthenticationProvider::try_new(default_config(), resolver, pinned_clock()).unwrap();
         let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::ProviderUnavailable(_)),
@@ -974,7 +1033,7 @@ mod tests {
         let claims = json!({ "sub": "rs256-user", "exp": pinned_future_ts(3600) });
         let token = make_rs256_token(&claims);
 
-        let provider = Rs256AuthenticationProvider::new(default_config(), rs256_resolver(), pinned_clock())
+        let provider = Rs256AuthenticationProvider::try_new(default_config(), rs256_resolver(), pinned_clock()).unwrap()
             .with_mapper(mapper);
 
         provider.authenticate(&Credential::Bearer(token)).unwrap();

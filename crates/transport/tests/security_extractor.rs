@@ -27,17 +27,28 @@ fn make_state() -> AppState {
         JwtAlgorithm::Hs256,
         VerificationKey::Hmac(secret()),
     ));
-    let provider: Arc<dyn AuthenticationProvider> = Arc::new(Hs256AuthenticationProvider::new(
-        JwtProviderConfig::default(),
-        resolver,
-        Arc::new(SystemClock),
-    ));
+    let config = JwtProviderConfig {
+        // `expected_aud` is required (audience-confusion / token-reuse defense),
+        // so a bare `default()` is rejected by `try_new`. Tokens minted below
+        // carry a matching `aud`.
+        expected_aud: Some(vec![TEST_AUD.to_string()]),
+        ..JwtProviderConfig::default()
+    };
+    let provider: Arc<dyn AuthenticationProvider> = Arc::new(
+        Hs256AuthenticationProvider::try_new(config, resolver, Arc::new(SystemClock))
+            .expect("valid JWT provider config"),
+    );
     let rt = RuntimeBuilder::new().build();
     AppState::new(rt.resolver(), provider)
 }
 
+/// Audience the provider's `expected_aud` requires and every minted token carries.
+const TEST_AUD: &str = "transport-test-audience";
+
 fn make_token(sub: &str, tenant_id: Option<&str>) -> String {
-    let mut builder = TestJwtBuilder::new(secret()).subject(sub);
+    let mut builder = TestJwtBuilder::new(secret())
+        .subject(sub)
+        .claim("aud", serde_json::Value::from(TEST_AUD));
     if let Some(t) = tenant_id {
         builder = builder.tenant_id(t);
     }

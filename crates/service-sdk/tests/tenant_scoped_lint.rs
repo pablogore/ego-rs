@@ -439,6 +439,74 @@ fn tenant_scoped_lint_ignores_inherent_impl_and_untracked_traits() {
     );
 }
 
+/// Regression for the AD-011 resolved-tenant READ path specifically. The
+/// existing detection fixture above exercises `tenant_hint()` — the
+/// caller-supplied INPUT accessor. The more security-relevant "tenant-touching"
+/// signal is an operation that READS the resolved tenant via the AD-011 read
+/// accessor `ServiceContext::canonical_tenant()` (context/mod.rs) yet forgot
+/// `#[tenant_scoped]` on its trait declaration: it consumes tenant-scoped state
+/// while never calling `enforce_tenant` (AD-007 fail-open). This must be flagged.
+#[test]
+fn tenant_scoped_lint_detects_violation_reading_resolved_tenant() {
+    let fixture = r#"
+        trait ReportService {
+            #[operation]
+            async fn export(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        struct ReportServiceImpl;
+
+        impl ReportService for ReportServiceImpl {
+            async fn export(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let tenant = ctx.canonical_tenant();
+                Ok(())
+            }
+        }
+    "#;
+
+    let violations = find_violations_in_source(fixture, "fixture");
+
+    assert!(
+        !violations.is_empty(),
+        "detector must flag an #[operation] impl method that reads the resolved \
+         tenant via canonical_tenant() (the AD-011 read accessor) when the trait \
+         declaration lacks #[tenant_scoped] — this is a tenant-touching operation \
+         that never calls enforce_tenant (AD-007 fail-open)"
+    );
+}
+
+/// Control for the case above: the same resolved-tenant-reading impl body, but
+/// the trait declaration correctly carries `#[tenant_scoped]` — must NOT be
+/// flagged, proving the guard does not block legitimate marker adoption on the
+/// AD-011 read path.
+#[test]
+fn tenant_scoped_lint_allows_marked_operation_reading_resolved_tenant() {
+    let fixture = r#"
+        trait ReportService {
+            #[operation]
+            #[tenant_scoped]
+            async fn export(&self, ctx: ServiceContext) -> Result<(), Err>;
+        }
+
+        struct ReportServiceImpl;
+
+        impl ReportService for ReportServiceImpl {
+            async fn export(&self, ctx: ServiceContext) -> Result<(), Err> {
+                let tenant = ctx.canonical_tenant();
+                Ok(())
+            }
+        }
+    "#;
+
+    let violations = find_violations_in_source(fixture, "fixture");
+
+    assert!(
+        violations.is_empty(),
+        "a #[tenant_scoped]-marked operation reading canonical_tenant() must never \
+         be flagged, even though its impl body references the resolved-tenant accessor"
+    );
+}
+
 // -- CORE-008A Phase 6 (TASK-029) — FR-007 structural transport-independence --
 
 /// Identifiers that would indicate a transport dependency leaking into the
