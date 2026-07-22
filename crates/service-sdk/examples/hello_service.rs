@@ -3,24 +3,25 @@
 //! Unlike `order_service.rs` (a pre-existing, older "manual equivalent" that
 //! predates this change and never uses the real macros or a registration
 //! API), this example uses the actual `#[service]`/`#[operation]` proc-macros
-//! and the canonical `RuntimeBuilder::with_service` / `Runtime::resolve` path
-//! added by CORE-025 (design.md's "Quick path").
+//! and the canonical `App::builder().service_instance` / `App::resolve` path
+//! (CORE-028), which builds on the lower-level `RuntimeBuilder` primitive.
 //!
 //! ```ignore
-//! let rt = RuntimeBuilder::new()
-//!     .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)?
-//!     .build();
+//! let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
+//! let app = App::builder()
+//!     .service_instance::<HelloServiceTag>(instance)
+//!     .build()?;
 //!
-//! let hello = rt.resolve::<HelloServiceTag>()?;
+//! let hello = app.resolve::<HelloServiceTag>()?;
 //! let out = hello.greet(ServiceContext::new(), "world".into()).await?;
 //! ```
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ego_service_sdk::app::App;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::ServiceError;
-use ego_service_sdk::runtime::RuntimeBuilder;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::operation;
 use ego_service_sdk_macros::service;
@@ -45,15 +46,16 @@ impl HelloService for HelloServiceImpl {
 
 #[tokio::main]
 async fn main() {
-    // 1. Register the implementation under its generated tag — one call,
-    //    reusing the existing ServiceRegistry/Resolvable machinery.
-    let rt = RuntimeBuilder::new()
-        .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)
-        .expect("registration succeeds")
-        .build();
+    // 1. Register the pre-built implementation under its generated tag and
+    //    compose the app — the canonical `App::builder()` entrypoint.
+    let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
+    let app = App::builder()
+        .service_instance::<HelloServiceTag>(instance)
+        .build()
+        .expect("composition succeeds");
 
     // 2. Resolve the tag to its concrete, macro-generated, fully-guarded proxy.
-    let hello = rt
+    let hello = app
         .resolve::<HelloServiceTag>()
         .expect("registered tag resolves");
 
@@ -74,12 +76,13 @@ mod tests {
 
     #[tokio::test]
     async fn hello_service_registers_resolves_and_invokes() {
-        let rt = RuntimeBuilder::new()
-            .with_service::<HelloServiceTag>(Arc::new(HelloServiceImpl) as Arc<dyn HelloService>)
-            .expect("registration succeeds")
-            .build();
+        let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
+        let app = App::builder()
+            .service_instance::<HelloServiceTag>(instance)
+            .build()
+            .expect("composition succeeds");
 
-        let hello = rt
+        let hello = app
             .resolve::<HelloServiceTag>()
             .expect("registered tag resolves");
         let out = hello
