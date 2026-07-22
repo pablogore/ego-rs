@@ -121,7 +121,7 @@ async fn registered_tag_resolves_to_a_fully_guarded_invokable_proxy() {
 fn unregistered_tag_resolves_to_service_not_found_not_a_panic() {
     let rt = RuntimeBuilder::new().build();
     let result = rt.resolve::<HelloServiceTag>();
-    assert!(matches!(result, Err(RuntimeError::ServiceNotFound)));
+    assert!(matches!(result, Err(RuntimeError::ServiceNotFound { .. })));
 }
 
 /// Domain error with `From<SecurityError>` — required for `#[tenant_scoped]`

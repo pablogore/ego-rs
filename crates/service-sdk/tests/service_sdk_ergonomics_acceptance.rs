@@ -194,7 +194,7 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
         Ok(_) => panic!("try_build must fail fast when the adapter dependency is missing"),
     };
     match err {
-        RuntimeError::DependencyNotFound { type_name, service_name } => {
+        RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
             assert_eq!(
                 type_name,
                 std::any::type_name::<NotifierAdapter>(),

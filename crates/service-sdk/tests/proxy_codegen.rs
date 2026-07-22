@@ -98,7 +98,7 @@ fn create_proxy_returns_service_not_found_for_wrong_shaped_arc() {
     let result = OrderServiceTag::create_proxy(wrong_shaped, chain, runtime_weak);
 
     assert!(
-        matches!(result, Err(RuntimeError::ServiceNotFound)),
+        matches!(result, Err(RuntimeError::ServiceNotFound { .. })),
         "create_proxy must return ServiceNotFound when the stored Any does not downcast to the expected container"
     );
 }

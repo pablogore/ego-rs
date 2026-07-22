@@ -109,7 +109,7 @@ impl DependencyTable {
             .get(&TypeId::of::<T>())
             .and_then(|arc| arc.clone().downcast::<T>().ok())
             .map(ProjectionRef::new)
-            .ok_or_else(dependency_not_found::<T>)
+            .ok_or_else(|| dependency_not_found::<T>(DependencyKind::Projection))
     }
 
     /// Resolves a registered entity runtime as `EntityRuntimeRef<E>`, keyed
@@ -124,7 +124,7 @@ impl DependencyTable {
             .get(&TypeId::of::<E>())
             .and_then(|arc| arc.clone().downcast::<EntityRuntime<E::Event>>().ok())
             .map(EntityRuntimeRef::new)
-            .ok_or_else(dependency_not_found::<E>)
+            .ok_or_else(|| dependency_not_found::<E>(DependencyKind::Entity))
     }
 
     fn resolve_adapter<A: 'static + Send + Sync>(&self) -> Result<AdapterRef<A>, RuntimeError> {
@@ -132,7 +132,7 @@ impl DependencyTable {
             .get(&TypeId::of::<A>())
             .and_then(|arc| arc.clone().downcast::<A>().ok())
             .map(AdapterRef::new)
-            .ok_or_else(dependency_not_found::<A>)
+            .ok_or_else(|| dependency_not_found::<A>(DependencyKind::Adapter))
     }
 
     fn resolve_config<C: 'static + Send + Sync>(&self) -> Result<ConfigValue<C>, RuntimeError> {
@@ -140,14 +140,19 @@ impl DependencyTable {
             .get(&TypeId::of::<C>())
             .and_then(|arc| arc.clone().downcast::<C>().ok())
             .map(ConfigValue::new)
-            .ok_or_else(dependency_not_found::<C>)
+            .ok_or_else(|| dependency_not_found::<C>(DependencyKind::Config))
     }
 }
 
-/// Builds a `DependencyNotFound` naming `T`, with no requesting service attached yet
-/// (the `try_build()` validator path fills in `service_name` on the way out).
-fn dependency_not_found<T: 'static>() -> RuntimeError {
-    RuntimeError::DependencyNotFound { type_name: std::any::type_name::<T>(), service_name: None }
+/// Builds a `DependencyNotFound` naming `T` and its `kind`, with no requesting
+/// service attached yet (the `try_build()` validator path fills in
+/// `service_name` on the way out).
+fn dependency_not_found<T: 'static>(kind: DependencyKind) -> RuntimeError {
+    RuntimeError::DependencyNotFound {
+        kind,
+        type_name: std::any::type_name::<T>(),
+        service_name: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,16 +429,24 @@ impl RuntimeInner {
     /// returned `Err` regardless of table state (no entity table existed);
     /// that fail-safe stub is retired now that entity registration exists.
     pub(crate) fn check_dependency(&self, dep: &DepKey) -> Result<(), RuntimeError> {
-        let (present, type_name) = match dep {
-            DepKey::Entity(id, name) => (self.resolved.entities.contains_key(id), *name),
-            DepKey::Projection(id, name) => (self.resolved.projections.contains_key(id), *name),
-            DepKey::Adapter(id, name) => (self.resolved.adapters.contains_key(id), *name),
-            DepKey::Config(id, name) => (self.resolved.configs.contains_key(id), *name),
+        let (present, type_name, kind) = match dep {
+            DepKey::Entity(id, name) => {
+                (self.resolved.entities.contains_key(id), *name, DependencyKind::Entity)
+            }
+            DepKey::Projection(id, name) => {
+                (self.resolved.projections.contains_key(id), *name, DependencyKind::Projection)
+            }
+            DepKey::Adapter(id, name) => {
+                (self.resolved.adapters.contains_key(id), *name, DependencyKind::Adapter)
+            }
+            DepKey::Config(id, name) => {
+                (self.resolved.configs.contains_key(id), *name, DependencyKind::Config)
+            }
         };
         if present {
             Ok(())
         } else {
-            Err(RuntimeError::DependencyNotFound { type_name, service_name: None })
+            Err(RuntimeError::DependencyNotFound { kind, type_name, service_name: None })
         }
     }
 
@@ -699,18 +712,72 @@ impl AuthenticationProvider for NoopTestAuthn {
 // Runtime errors
 // ---------------------------------------------------------------------------
 
+/// The kind of a missing dependency (design: DX follow-up) — carried by
+/// [`RuntimeError::DependencyNotFound`] so the error can name both what is
+/// missing *and* the exact builder method that registers it. Threaded from
+/// [`RuntimeInner::check_dependency`]'s `DepKey` match and from each typed
+/// `resolve_*` path, so no diagnostic identity is discarded on the way out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    /// A host-registered adapter — registered with `.adapter(...)`.
+    Adapter,
+    /// A host-registered config value — registered with `.config(...)`.
+    Config,
+    /// A registered projection — registered with `.projection(...)`.
+    Projection,
+    /// A registered entity runtime — registered with `.entity::<E>()`.
+    Entity,
+}
+
+impl DependencyKind {
+    /// The `AppBuilder`/`RuntimeBuilder` method that registers this kind,
+    /// ready to splice into a fix hint. `Entity` is parameterized on the
+    /// missing aggregate type so the hint reads `.entity::<MyAgg>()`.
+    fn fix_hint(self, type_name: &str) -> String {
+        match self {
+            DependencyKind::Adapter => ".adapter(...)".to_string(),
+            DependencyKind::Config => ".config(...)".to_string(),
+            DependencyKind::Projection => ".projection(...)".to_string(),
+            DependencyKind::Entity => format!(".entity::<{type_name}>()"),
+        }
+    }
+}
+
+impl std::fmt::Display for DependencyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            DependencyKind::Adapter => "adapter",
+            DependencyKind::Config => "config",
+            DependencyKind::Projection => "projection",
+            DependencyKind::Entity => "entity",
+        };
+        write!(f, "{label}")
+    }
+}
+
 /// Errors that can occur during proxy resolution or dependency injection.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
     /// The requested service was not found in the registry.
-    #[error("service not found")]
-    ServiceNotFound,
+    #[error(
+        "service `{type_name}` not found{} — register it with .service::<{type_name}>() or .service_instance() before resolving",
+        required_by.map(|s| format!(" (required by `{s}`)")).unwrap_or_default()
+    )]
+    ServiceNotFound {
+        /// The name of the missing service tag.
+        type_name: &'static str,
+        /// The name of the requesting service, when known.
+        required_by: Option<&'static str>,
+    },
     /// A dependency was not found during resolution.
     #[error(
-        "dependency `{type_name}` not found{}",
-        service_name.map(|s| format!(" (required by `{s}`)")).unwrap_or_default()
+        "{kind} dependency `{type_name}` not found{} — register it with {} on AppBuilder",
+        service_name.map(|s| format!(" (required by `{s}`)")).unwrap_or_default(),
+        kind.fix_hint(type_name)
     )]
     DependencyNotFound {
+        /// The kind of the missing dependency (adapter/config/projection/entity).
+        kind: DependencyKind,
         /// The name of the missing dependency's type.
         type_name: &'static str,
         /// The name of the requesting service, when known.
@@ -1184,6 +1251,7 @@ mod tests {
     #[test]
     fn dependency_not_found_display_names_type_and_service_when_both_known() {
         let err = RuntimeError::DependencyNotFound {
+            kind: DependencyKind::Adapter,
             type_name: "X",
             service_name: Some("Y"),
         };
@@ -1195,6 +1263,7 @@ mod tests {
     #[test]
     fn dependency_not_found_display_omits_service_gracefully_when_none() {
         let err = RuntimeError::DependencyNotFound {
+            kind: DependencyKind::Adapter,
             type_name: "X",
             service_name: None,
         };
@@ -1206,12 +1275,91 @@ mod tests {
     fn dependency_not_found_is_a_real_std_error() {
         fn boxed_error() -> Result<(), Box<dyn std::error::Error>> {
             Err(RuntimeError::DependencyNotFound {
+                kind: DependencyKind::Adapter,
                 type_name: "X",
                 service_name: Some("Y"),
             })?
         }
         let err = boxed_error().unwrap_err();
         assert!(err.to_string().contains('X'));
+    }
+
+    // DX follow-up: the message names the dependency KIND and the exact
+    // builder method that registers it, so the caller reads the fix off the
+    // error itself.
+    #[test]
+    fn dependency_not_found_display_names_kind_and_builder_method() {
+        let err = RuntimeError::DependencyNotFound {
+            kind: DependencyKind::Adapter,
+            type_name: "X",
+            service_name: Some("Y"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("adapter dependency"), "must name the kind: {msg}");
+        assert!(msg.contains(".adapter"), "must name the fix method: {msg}");
+    }
+
+    // The Entity fix hint is parameterized on the missing aggregate type so it
+    // reads `.entity::<MyAgg>()`, not a bare placeholder.
+    #[test]
+    fn dependency_not_found_entity_names_the_typed_entity_method() {
+        let err = RuntimeError::DependencyNotFound {
+            kind: DependencyKind::Entity,
+            type_name: "MyAgg",
+            service_name: None,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("entity dependency"), "must name the kind: {msg}");
+        assert!(msg.contains(".entity::<MyAgg>()"), "must name the typed method: {msg}");
+    }
+
+    // DX follow-up: `check_dependency` threads the `DepKey` variant into the
+    // error's `kind` for every dependency kind, rather than discarding it.
+    #[test]
+    fn check_dependency_missing_names_the_dependency_kind() {
+        let rt = RuntimeInner::for_test();
+        let cases = [
+            (
+                DepKey::Adapter(TypeId::of::<MyProjection>(), "MyProjection"),
+                DependencyKind::Adapter,
+            ),
+            (DepKey::Config(TypeId::of::<String>(), "String"), DependencyKind::Config),
+            (
+                DepKey::Projection(TypeId::of::<MyProjection>(), "MyProjection"),
+                DependencyKind::Projection,
+            ),
+            (
+                DepKey::Entity(TypeId::of::<MyProjection>(), "MyProjection"),
+                DependencyKind::Entity,
+            ),
+        ];
+        for (dep, expected) in cases {
+            match rt.check_dependency(&dep) {
+                Err(RuntimeError::DependencyNotFound { kind, .. }) => assert_eq!(kind, expected),
+                other => panic!("expected DependencyNotFound, got {other:?}"),
+            }
+        }
+    }
+
+    // DX follow-up (Part A): `ServiceNotFound` is typed — its message names the
+    // missing tag and the fix method, and carries an optional requester.
+    #[test]
+    fn service_not_found_display_names_the_missing_tag_and_the_fix() {
+        let err = RuntimeError::ServiceNotFound { type_name: "MyTag", required_by: None };
+        let msg = err.to_string();
+        assert!(msg.contains("MyTag"), "must name the missing tag: {msg}");
+        assert!(msg.contains(".service::<"), "must name the fix method: {msg}");
+    }
+
+    #[test]
+    fn service_not_found_display_names_the_requester_when_known() {
+        let err = RuntimeError::ServiceNotFound {
+            type_name: "MyTag",
+            required_by: Some("Requester"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MyTag"), "must name the missing tag: {msg}");
+        assert!(msg.contains("Requester"), "must name the requester: {msg}");
     }
 
     // -- CORE-012A Phase 1 (TASK-001/002): SecurityDenialKind Display --

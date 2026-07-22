@@ -91,6 +91,7 @@ fn missing_dependency_names_both_type_and_requester() {
         Err(ego_service_sdk::app::CompositionError::Validation(RuntimeError::DependencyNotFound {
             type_name,
             service_name,
+            ..
         })) => {
             assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
             assert_eq!(service_name, Some(std::any::type_name::<GreetingServiceImpl>()));
@@ -140,6 +141,7 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
         Err(ego_service_sdk::app::CompositionError::Validation(RuntimeError::DependencyNotFound {
             type_name,
             service_name,
+            ..
         })) => {
             assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
             assert_eq!(
@@ -150,6 +152,26 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
             );
         }
         Err(other) => panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}"),
+    }
+}
+
+// DX follow-up (Part A/C): resolving a service tag that was never registered
+// surfaces `ServiceNotFound` naming the missing tag (not a bare fieldless
+// variant), and its message points at the fix method — the type_name from
+// Part A flowing through end to end.
+#[test]
+fn resolving_an_unregistered_service_names_the_missing_tag() {
+    let app = App::builder().build().expect("build succeeds");
+
+    match app.resolve::<GreetingServiceTag>() {
+        Err(RuntimeError::ServiceNotFound { type_name, .. }) => {
+            assert!(
+                type_name.contains("GreetingServiceTag"),
+                "ServiceNotFound must name the missing tag, got {type_name}"
+            );
+        }
+        Err(other) => panic!("expected ServiceNotFound naming the tag, got {other:?}"),
+        Ok(_) => panic!("expected ServiceNotFound, but an unregistered tag resolved"),
     }
 }
 

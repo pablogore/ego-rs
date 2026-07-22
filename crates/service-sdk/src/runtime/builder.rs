@@ -464,8 +464,9 @@ impl RuntimeBuilder {
         for (service_name, validate) in validators {
             if let Err(err) = validate(rt.inner()) {
                 let err = match err {
-                    RuntimeError::DependencyNotFound { type_name, .. } => {
+                    RuntimeError::DependencyNotFound { kind, type_name, .. } => {
                         RuntimeError::DependencyNotFound {
+                            kind,
                             type_name,
                             service_name: Some(service_name),
                         }
@@ -629,7 +630,10 @@ impl Runtime {
             .inner
             .registry
             .resolve_raw::<Tag>(&VersionConstraint::Exact(<Tag as ServiceContract>::version()))
-            .map_err(|_| RuntimeError::ServiceNotFound)?;
+            .map_err(|_| RuntimeError::ServiceNotFound {
+                type_name: std::any::type_name::<Tag>(),
+                required_by: None,
+            })?;
         Tag::create_proxy(raw, self.inner.interceptor_chain.clone(), Arc::downgrade(&self.inner))
     }
 
@@ -1277,7 +1281,7 @@ mod tests {
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name } => {
+            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
                 assert_eq!(type_name, std::any::type_name::<StubAdapter>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
             }
@@ -1349,7 +1353,7 @@ mod tests {
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name } => {
+            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
                 assert_eq!(type_name, std::any::type_name::<StubProjection>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsProjection>()));
             }
@@ -1407,7 +1411,7 @@ mod tests {
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name } => {
+            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
                 assert_eq!(type_name, std::any::type_name::<TestEntity>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsEntity>()));
             }
@@ -1434,7 +1438,7 @@ mod tests {
             Ok(_) => panic!("try_build must fail when multiple recorded dependencies are missing"),
         };
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name } => {
+            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
                 assert_eq!(type_name, std::any::type_name::<StubAdapter>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
             }
@@ -1452,7 +1456,7 @@ mod tests {
             Ok(_) => panic!("try_build must fail when multiple recorded dependencies are missing"),
         };
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name } => {
+            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
                 assert_eq!(type_name, std::any::type_name::<u32>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsConfig>()));
             }
