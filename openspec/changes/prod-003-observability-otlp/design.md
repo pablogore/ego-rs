@@ -10,15 +10,17 @@ in `infrastructure` (the sole `opentelemetry` consumer) whose span table is keye
 enforced in the domain at the port boundary via a typed `SpanAttributes` allow-list, so
 nothing sensitive can even be expressed to the adapter.
 
-## Span handle == the id already in the context (core equivalence)
+## Span identity == the id already in the context (core equivalence)
 
-`start_span` returns a `SpanId` that **is** the span handle **and is exactly**
-`TraceContext.span_id` (`ctx.trace_context().span_id()`). One concept, not two. This
-simultaneously satisfies "start returns a handle" and "no ambient / stateless
-interceptor": the handle is the id already present on `ServiceContext`, so the proxy's
-two separate calls (`on_request` starts, `on_response`/`on_error` ends) share **nothing**
-in local or ambient scope — `end_span` re-derives the same `SpanId` from `&ctx`. The
-adapter's span table is keyed by that `SpanId`.
+`start_span` returns **nothing**. The authoritative span identity is
+`TraceContext.span_id` (`ctx.trace_context().span_id()`) — one concept, not two. A
+returned `SpanId` would always equal `ctx.span_id()` and the stateless interceptor would
+discard it, so the return is omitted to kill that contractual redundancy. This still
+satisfies "no ambient / stateless interceptor": the id is already present on
+`ServiceContext`, so the proxy's two separate calls (`on_request` starts,
+`on_response`/`on_error` ends) share **nothing** in local or ambient scope — `end_span`
+re-derives the same `SpanId` from `&ctx`. The adapter's span table is keyed by that
+`SpanId`.
 
 ## Architecture Decisions
 
@@ -36,14 +38,16 @@ rides the same explicit channel.
 denial path and stays untouched (non-goal). Spans have a start→end lifecycle and a
 different call surface. One trait per responsibility.
 
-### ADR-3: start/end handle pair vs RAII guard
-**Choice**: `start_span(&ctx, name, attrs) -> SpanId` + `end_span(SpanId, SpanOutcome)`.
-**Rejected**: a guard whose `Drop` closes the span.
+### ADR-3: start/end pair (no returned handle) vs RAII guard
+**Choice**: `start_span(&ctx, name, attrs)` (returns nothing) + `end_span(SpanId, SpanOutcome)`.
+**Rejected**: a guard whose `Drop` closes the span; also rejected: returning a `SpanId` from `start_span`.
 **Rationale**: The proxy seam (`service-sdk-macros/src/lib.rs:478-486`) calls
 `on_request(&ctx)` then `on_response(&ctx)`/`on_error(&ctx,e)` as **separate calls with
 no shared local scope** — a guard has nowhere to live but ambient state (forbidden). The
-returned `SpanId` handle equals `ctx.trace_context().span_id()`, so `end_span` needs no
-stored guard; it looks the span up by that argument-supplied id.
+return was removed because it was **always** `ctx.trace_context().span_id()` and the
+stateless interceptor discards it — a contractual redundancy. `end_span` needs no stored
+guard and no returned handle; it re-derives the span id directly from `&ctx`
+(`ctx.trace_context().span_id()`) and looks the span up by that argument-supplied id.
 
 ### ADR-4: TraceContext, `ServiceContext` migration, no `with_span`
 `TraceContext { trace_id, span_id, parent_span_id: Option<_> }` lives in `ego-domain`.
@@ -51,8 +55,14 @@ stored guard; it looks the span up by that argument-supplied id.
 and `trace_context()`. **`with_span(name)` is removed from v1** — v1 is exactly one
 interceptor-owned span per request boundary; the confusing sugar is dropped.
 `TraceContext::child()` is retained as the seam for future manual/nested spans.
-`correlation_id` stays (distinct business-causal concept used by `SemanticEvent`); flat
-`trace_id` becomes a read-through mirror of `trace_context().trace_id` for source compat.
+`correlation_id` stays public (distinct business-causal concept used by `SemanticEvent`);
+flat `trace_id` becomes a read-through mirror of `trace_context().trace_id` for source
+compat. **`TraceContext` is authoritative over the legacy `trace_id` by construction**:
+the `trace_id` field is **private**, `with_trace_context` sets the mirror to
+`trace_context().trace_id()`, and `with_trace_id` writes the legacy value **only when no
+`TraceContext` is present** (otherwise ignored — `TraceContext` wins). Because no external
+code can assign the field directly and both builders maintain the invariant, `trace_id()`
+can never desync from `trace_context().trace_id()` regardless of builder call order.
 
 ### ADR-5: OTLP boundary + span-table operational semantics
 Adapter holds a thread-safe `Map<SpanId, opentelemetry::Span>` (`Mutex`/`DashMap`). The
@@ -71,8 +81,8 @@ neither symbol appears outside the adapter module. Operational rules (also MUST 
 
 ### ADR-6: Redaction at the port boundary (not in the adapter)
 `start_span` takes a domain `SpanAttributes` — an allow-list of non-sensitive typed
-scalars (operation name, tenant-hint **presence** bool, outcome, duration) — **not**
-free-form `&[(&str,&str)]`. Tenant ids, credentials, principal subject, and payloads
+scalars (tenant-hint **presence** bool, duration) — **not** free-form `&[(&str,&str)]`.
+The span's operation is its **name** (`start_span`'s `name` arg), not an attribute. Tenant ids, credentials, principal subject, and payloads
 **cannot be expressed** as `SpanAttributes`, so redaction is structurally enforced in the
 domain before anything reaches infra. The adapter no longer redacts — it maps
 already-safe attributes to otel key/values. Any redacting type attached renders the
@@ -131,7 +141,7 @@ teardown; the OTLP adapter implements both `Tracer` and `TracerLifecycle`.
       │ from_inbound|root → ctx                                                            
       ├──ctx──▶ │                                                                          
       │         ├─on_request(&ctx)─▶│                                                      
-      │         │                   ├ start_span(&ctx,attrs)→SpanId(==ctx.span_id)         
+      │         │                   ├ start_span(&ctx,attrs)  (no return; id == ctx.span_id)
       │         │                   │        insert Map[SpanId]=otel span                  
       │         ├── handler(ctx) ──────────────────────────────▶ inject to_traceparent()─▶│
       │         ├─on_response(&ctx)─▶│                                                     │
@@ -174,15 +184,15 @@ pub fn parse_traceparent(s: &str) -> Result<(TraceId, SpanId), TraceParseError>;
 
 pub struct SpanAttributes;                       // allow-list of non-sensitive typed scalars
 impl SpanAttributes {                            // sensitive data is UNREPRESENTABLE here
-    pub fn new(operation: &str) -> Self;
-    pub fn with_tenant_present(self, present: bool) -> Self;
+    pub fn new() -> Self;                           // empty; span operation is start_span's `name`
+    pub fn with_tenant_hint_present(self, present: bool) -> Self; // inbound hint presence, NOT resolved tenant
     pub fn with_duration(self, d: std::time::Duration) -> Self;
 }
 pub enum SpanOutcome { Ok, Error { status_message: String } } // status_message must be redaction-safe
 
 pub trait Tracer: Send + Sync {                  // non-blocking, stateless-trait like Observability
-    fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes) -> SpanId; // returns ctx.span_id()
-    fn end_span(&self, span: SpanId, outcome: SpanOutcome);   // idempotent per SpanId
+    fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes); // no return; id == ctx.span_id()
+    fn end_span(&self, span: SpanId, outcome: SpanOutcome);   // idempotent per SpanId (adapter contract test in PR5)
 }
 // Exporter/operational lifecycle — SEPARATE from the domain tracing calls (ADR-9) so
 // NoopTracer, test spies, and future tracers need not know an OTLP operational concern.
@@ -190,7 +200,7 @@ pub trait Tracer: Send + Sync {                  // non-blocking, stateless-trai
 pub trait TracerLifecycle: Send + Sync {
     fn shutdown(&self);                                        // flush pending + clear table
 }
-pub struct NoopTracer;   // default; implements Tracer ONLY (start_span returns ctx.span_id(), end no-op)
+pub struct NoopTracer;   // default; implements Tracer ONLY (start_span is a no-op returning nothing, end no-op)
 ```
 
 ## Testing Strategy
@@ -198,7 +208,7 @@ pub struct NoopTracer;   // default; implements Tracer ONLY (start_span returns 
 | Layer | What | Approach |
 |-------|------|----------|
 | Unit | `from_inbound` (new local span, parent = remote), `root`, `child`, `to_traceparent` round-trip; A→B→C parent linkage | domain tests |
-| Unit | `start_span` returns `ctx.span_id()`; `SpanAttributes` cannot carry tenant/credential/payload | domain tests |
+| Unit | `start_span` returns nothing (id is `ctx.span_id()`, authoritative); `SpanAttributes` cannot carry tenant/credential/payload | domain tests |
 | Unit | `end_span` idempotent (double-end = one close); duplicate `start_span` warns; `SpanOutcome::Error{status_message}` redaction-safe | adapter tests |
 | Unit | `TracerLifecycle::shutdown` flushes orphaned spans and clears table; at `max_in_flight_spans` a new span is dropped + warned (no eviction/overwrite/unbounded growth) | adapter tests |
 | Unit | `NoopTracer` no-ops; `TracingInterceptor` start/end/error via spy `Tracer`; no `with_span` | interceptor tests |

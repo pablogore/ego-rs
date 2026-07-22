@@ -9,8 +9,14 @@ span-id, optional parent), settable via `with_trace_context(TraceContext)`
 and readable via `trace_context()`. No ambient, thread-local, or task-local
 storage MUST be used to carry it between construction and read. The
 existing flat `trace_id` field MUST become a read-through mirror of
-`trace_context().trace_id` (source-compatible, not an independent value).
-The existing `correlation_id` field is a distinct business-causal concept
+`trace_context().trace_id` (source-compatible, not an independent value),
+and `TraceContext` MUST be authoritative over it BY CONSTRUCTION: the
+`trace_id` field MUST be private, `with_trace_context` MUST set the mirror to
+`trace_context().trace_id()`, and `with_trace_id` MUST write the legacy value
+ONLY when no `TraceContext` is present (otherwise it is ignored — the
+`TraceContext` wins). This makes `trace_id()` unable to desync from
+`trace_context().trace_id()` regardless of builder call order. The existing
+`correlation_id` field is a distinct business-causal concept, stays public,
 and is NOT changed by this delta.
 
 #### Scenario: Trace-context travels only via the explicit ServiceContext value
@@ -24,6 +30,15 @@ and is NOT changed by this delta.
 - GIVEN a `ServiceContext` constructed via `with_trace_context(tc)`
 - WHEN the flat `trace_id` field/accessor is read
 - THEN its value equals `tc.trace_id`, with no independent trace-id storage
+
+#### Scenario: TraceContext wins over with_trace_id regardless of call order
+- GIVEN a `ServiceContext` built with both `with_trace_context(tc)` and
+  `with_trace_id("x")` applied in either order
+- WHEN `trace_id()` is read
+- THEN it equals `tc.trace_id().to_hex()` (the `with_trace_id("x")` legacy
+  write is ignored while a `TraceContext` is present), and only when no
+  `TraceContext` is set does `with_trace_id("x")` make `trace_id()` return
+  `"x"`
 
 #### Scenario: correlation_id is unaffected by trace-context changes
 - GIVEN a `ServiceContext` with both a `correlation_id` and a `trace_context`
@@ -57,19 +72,23 @@ trace-context.
 ### Requirement: TracingInterceptor Drives Span Lifecycle From ServiceContext
 
 The built-in `TracingInterceptor` MUST, on `on_request`, call
-`tracer.start_span(ctx.trace_context(), name, attrs)`, obtaining a `SpanId`
-equal to `ctx.trace_context().span_id()`. On `on_response` it MUST call
-`tracer.end_span(that SpanId, SpanOutcome::Ok)`. On `on_error` it MUST call
-`tracer.end_span(that SpanId, SpanOutcome::Error { status_message })` with a
-redaction-safe `status_message`. Exactly one span MUST be owned per request
-boundary — the interceptor MUST NOT call `ServiceContext::with_span` (not
-present in v1) or invoke `TraceContext::child()`.
+`tracer.start_span(ctx.trace_context(), name, attrs)` (which returns nothing).
+The span identity is `ctx.trace_context().span_id()`, re-derived from `ctx`.
+On `on_response` it MUST call
+`tracer.end_span(ctx.trace_context().span_id(), SpanOutcome::Ok)`. On
+`on_error` it MUST call
+`tracer.end_span(ctx.trace_context().span_id(), SpanOutcome::Error { status_message })`
+with a redaction-safe `status_message`. Exactly one span MUST be owned per
+request boundary — the interceptor MUST NOT call `ServiceContext::with_span`
+(not present in v1) or invoke `TraceContext::child()`.
 
 #### Scenario: Successful invocation starts and ends exactly one span
-- GIVEN `TracingInterceptor` is installed and `on_request` calls
-  `start_span`, returning `SpanId` `S = ctx.trace_context().span_id()`
+- GIVEN `TracingInterceptor` is installed and `on_request` calls `start_span`
+  (which returns nothing) for the span identified by
+  `S = ctx.trace_context().span_id()`
 - WHEN `on_response` runs
-- THEN it calls `end_span(S, Ok)`, closing exactly the span identified by `S`
+- THEN it calls `end_span(S, Ok)` with `S` re-derived from
+  `ctx.trace_context().span_id()`, closing exactly the span identified by `S`
 
 #### Scenario: Failed invocation ends the span with a redaction-safe error message
 - GIVEN `on_request` started a span with `SpanId` `S`
