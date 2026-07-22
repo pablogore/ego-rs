@@ -676,6 +676,11 @@ fn classify_field_init(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
             if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
                 if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                     match ident_str.as_str() {
+                        "EntityRuntimeRef" => {
+                            return Some(quote! {
+                                rt.resolve_entity::<#inner_ty>()?
+                            });
+                        }
                         "ProjectionRef" => {
                             return Some(quote! {
                                 rt.resolve_projection::<#inner_ty>()?
@@ -708,6 +713,7 @@ fn classify_field_type(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
             if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
                 if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                     let variant = match ident_str.as_str() {
+                        "EntityRuntimeRef" => "Entity",
                         "ProjectionRef" => "Projection",
                         "AdapterRef" => "Adapter",
                         "ConfigValue" => "Config",

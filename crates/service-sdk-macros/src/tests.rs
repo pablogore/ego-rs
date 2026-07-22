@@ -113,4 +113,34 @@ mod tests {
         assert_eq!(tag_path.segments.len(), 1);
         assert_eq!(tag_path.segments.last().unwrap().ident, "MyTraitTag");
     }
+
+    // -------------------------------------------------------------------
+    // CORE-028 Stage 2C DX follow-up — `#[service]` structs must
+    // auto-recognize an `EntityRuntimeRef<E>` field as an Entity DI
+    // dependency, exactly as they already do for `ProjectionRef<P>`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn classify_field_type_recognizes_entity_runtime_ref() {
+        let ty: syn::Type = parse_quote! { EntityRuntimeRef<SomeEntity> };
+        let dep_key = crate::classify_field_type(&ty)
+            .expect("EntityRuntimeRef<E> must classify as a DI dependency");
+        let rendered = dep_key.to_string();
+        assert!(
+            rendered.contains("DepKey") && rendered.contains("Entity"),
+            "expected a DepKey::Entity, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn classify_field_init_resolves_entity_runtime_ref() {
+        let ty: syn::Type = parse_quote! { EntityRuntimeRef<SomeEntity> };
+        let init = crate::classify_field_init(&ty)
+            .expect("EntityRuntimeRef<E> must produce a DI init expression");
+        let rendered = init.to_string();
+        assert!(
+            rendered.contains("resolve_entity"),
+            "expected a resolve_entity init, got: {rendered}"
+        );
+    }
 }
