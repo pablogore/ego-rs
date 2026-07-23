@@ -7,9 +7,16 @@
 //! owned by the request-boundary interceptor (ADR-7); this module is
 //! propagation-only.
 
+use std::convert::Infallible;
+
+use async_trait::async_trait;
+use axum::extract::{FromRef, FromRequestParts};
+use axum::http::request::Parts;
 use axum::http::HeaderMap;
 use ego_domain::TraceContext;
 use ego_service_sdk::context::ServiceContext;
+
+use crate::state::AppState;
 
 /// The W3C `traceparent` header name.
 pub const TRACEPARENT_HEADER: &str = "traceparent";
@@ -35,6 +42,34 @@ pub fn originate_trace_context(headers: &HeaderMap) -> TraceContext {
         .and_then(|value| value.to_str().ok())
         .and_then(|header| TraceContext::from_inbound(header).ok())
         .unwrap_or_else(TraceContext::root)
+}
+
+/// The `TraceContext` originated for this request, extracted before the
+/// handler runs (service-sdk spec: "Trace-Context Originates At HTTP
+/// Ingress"). Mirrors [`crate::security::AuthenticatedContext`]: origination
+/// lives at the transport boundary, not hand-repeated in every handler that
+/// needs it.
+pub struct TraceContextExtractor(pub TraceContext);
+
+/// Generic over any axum state `S` an `AppState` can be extracted from via
+/// `FromRef` (same bound as `AuthenticatedContext`), even though this
+/// extractor does not read `AppState` today — it keeps every ingress
+/// extractor uniformly usable on any route regardless of its concrete state
+/// type.
+#[async_trait]
+impl<S> FromRequestParts<S> for TraceContextExtractor
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    // Infallible: a missing or malformed inbound `traceparent` falls back to
+    // `TraceContext::root()` inside `originate_trace_context` — this
+    // extractor never rejects a request.
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(TraceContextExtractor(originate_trace_context(&parts.headers)))
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +128,77 @@ mod tests {
 
         let originated = originate_trace_context(&headers);
 
+        assert_eq!(originated.parent_span_id(), None);
+    }
+
+    // G1 review fix (RED): `TraceContextExtractor` mirrors
+    // `AuthenticatedContext` (security.rs) — a `FromRequestParts` extractor
+    // so ingress origination happens at the transport boundary, not
+    // hand-repeated in every handler. Valid inbound traceparent -> parent
+    // linkage.
+    use ego_domain::auth::AuthenticationError;
+    use ego_security_sdk::{AuthenticationProvider, Credential, SecurityContext};
+    use ego_service_sdk::runtime::RuntimeBuilder;
+
+    struct StubAuthn;
+
+    impl AuthenticationProvider for StubAuthn {
+        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    fn make_state() -> AppState {
+        AppState::new(RuntimeBuilder::new().build().resolver(), std::sync::Arc::new(StubAuthn))
+    }
+
+    fn parts_with_traceparent(value: Option<&str>) -> Parts {
+        let mut builder = axum::http::Request::builder().method("POST").uri("/register");
+        if let Some(v) = value {
+            builder = builder.header(TRACEPARENT_HEADER, v);
+        }
+        let (parts, ()) = builder.body(()).unwrap().into_parts();
+        parts
+    }
+
+    #[tokio::test]
+    async fn extractor_continues_a_valid_inbound_traceparent() {
+        let remote = TraceContext::root();
+        let header_value = remote.to_traceparent();
+        let mut parts = parts_with_traceparent(Some(&header_value));
+        let state = make_state();
+
+        let TraceContextExtractor(originated) =
+            TraceContextExtractor::from_request_parts(&mut parts, &state)
+                .await
+                .expect("infallible");
+
+        assert_eq!(originated.trace_id(), remote.trace_id());
+        assert_eq!(originated.parent_span_id(), Some(remote.span_id()));
+        assert_ne!(originated.span_id(), remote.span_id());
+    }
+
+    #[tokio::test]
+    async fn extractor_starts_a_root_trace_when_header_is_absent() {
+        let mut parts = parts_with_traceparent(None);
+        let state = make_state();
+
+        let TraceContextExtractor(originated) =
+            TraceContextExtractor::from_request_parts(&mut parts, &state)
+                .await
+                .expect("infallible");
+
+        assert_eq!(originated.parent_span_id(), None);
+    }
+
+    #[tokio::test]
+    async fn extractor_falls_back_to_root_on_malformed_header_and_never_errors() {
+        let mut parts = parts_with_traceparent(Some("not-a-traceparent"));
+        let state = make_state();
+
+        let result = TraceContextExtractor::from_request_parts(&mut parts, &state).await;
+
+        let TraceContextExtractor(originated) = result.expect("infallible — never rejects");
         assert_eq!(originated.parent_span_id(), None);
     }
 }

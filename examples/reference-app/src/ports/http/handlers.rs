@@ -4,11 +4,10 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use ego_service_sdk::context::ServiceContext;
-use ego_transport::propagation::originate_trace_context;
-use ego_transport::{AppState, AuthenticatedContext, TransportError};
+use ego_transport::{AppState, AuthenticatedContext, TraceContextExtractor, TransportError};
 use kitlogger_log_domain::Severity;
 
 use crate::application::{RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserTag};
@@ -55,7 +54,13 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
 pub async fn register_handler(
     State(state): State<AppState>,
     AuthenticatedContext(security): AuthenticatedContext,
-    headers: HeaderMap,
+    // PROD-003 (service-sdk spec: "Trace-Context Originates At HTTP
+    // Ingress"): origination happens exactly once, at the transport
+    // boundary (`ego_transport::propagation::TraceContextExtractor`) —
+    // continues an inbound `traceparent` when present and well-formed, else
+    // starts a fresh root trace. Handlers just declare the extractor; they
+    // never hand-repeat the header-reading/origination logic.
+    TraceContextExtractor(trace_context): TraceContextExtractor,
     Json(input): Json<RegisterInput>,
 ) -> Result<(StatusCode, Json<RegisterOutput>), TransportError> {
     log(&state, Severity::Info, &format!("POST /register: user_id={}", input.user_id));
@@ -64,12 +69,6 @@ pub async fn register_handler(
         .runtime
         .resolve::<RegisterUserTag>()
         .map_err(|_| TransportError::Internal)?;
-
-    // PROD-003 (service-sdk spec: "Trace-Context Originates At HTTP Ingress"):
-    // origination happens exactly once, here, at the HTTP handler boundary —
-    // continues an inbound `traceparent` when present and well-formed, else
-    // starts a fresh root trace. Attached explicitly; no ambient lookup.
-    let trace_context = originate_trace_context(&headers);
 
     let ctx = ServiceContext::new()
         .with_security(Arc::new(security))
