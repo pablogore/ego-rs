@@ -67,6 +67,22 @@ enum LifecycleState {
     Closed,
 }
 
+/// Outcome of [`LifecycleGate::wait_until_drained`]: whether every in-flight
+/// `accept()` finished (`Drained`) or the drain deadline was reached with work
+/// still outstanding (`DeadlineElapsed`).
+///
+/// Exposing the *reason* the wait returned — rather than leaving callers (and
+/// tests) to infer it from elapsed wall-clock — lets the F-03 regression test
+/// assert the drain contract semantically instead of timing a lost wakeup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+enum DrainOutcome {
+    /// Every in-flight `accept()` admitted before draining began has finished.
+    Drained,
+    /// The deadline was reached before the in-flight count fell to zero.
+    DeadlineElapsed,
+}
+
 /// RAII guard: decrements [`LifecycleGate::in_flight`] on drop (success,
 /// failure, or panic-unwind alike) so an early `?` return inside `accept()`
 /// can never leak an in-flight count. Notifies [`LifecycleGate::drained`]
@@ -122,14 +138,18 @@ impl LifecycleGate {
     /// recorded — the same instant already published on `deadline_rx`, which
     /// is exactly what causes those in-flight calls to actually finish
     /// (naturally, or cut short by `wait_for_deadline`). The `sleep_until`
-    /// race here is a defensive backstop, not the primary mechanism. A no-op
-    /// if `begin_draining` was never called.
-    async fn wait_until_drained(&self) {
+    /// race here is a defensive backstop, not the primary mechanism.
+    ///
+    /// Returns [`DrainOutcome::Drained`] once the in-flight count reaches zero
+    /// (or immediately if `begin_draining` was never called — nothing is
+    /// outstanding), or [`DrainOutcome::DeadlineElapsed`] if the deadline is
+    /// reached first.
+    async fn wait_until_drained(&self) -> DrainOutcome {
         let Some(deadline_instant) = (match &*self.state.lock().unwrap() {
             LifecycleState::Draining { deadline } => Some(*deadline),
             LifecycleState::Running | LifecycleState::Closed => None,
         }) else {
-            return;
+            return DrainOutcome::Drained;
         };
         // F-03: a `watch::Receiver` always reflects the latest sent value
         // regardless of exactly when `borrow()`/`changed()` are called
@@ -138,7 +158,7 @@ impl LifecycleGate {
         let mut in_flight_rx = self.in_flight.subscribe();
         loop {
             if *in_flight_rx.borrow() == 0 {
-                return;
+                return DrainOutcome::Drained;
             }
             #[cfg(test)]
             self.probe.notify_one();
@@ -147,10 +167,12 @@ impl LifecycleGate {
                     if result.is_err() {
                         // Sender dropped (the `LifecycleGate` itself is
                         // gone) — nothing further will ever change.
-                        return;
+                        return DrainOutcome::Drained;
                     }
                 }
-                _ = tokio::time::sleep_until(deadline_instant) => return,
+                _ = tokio::time::sleep_until(deadline_instant) => {
+                    return DrainOutcome::DeadlineElapsed;
+                }
             }
         }
     }
@@ -316,7 +338,11 @@ impl EffectRuntimeHandle {
         // be enqueueing.
         let _ = self.deadline.send(Some(elapses_at));
         self.lifecycle.begin_draining(elapses_at);
-        self.lifecycle.wait_until_drained().await;
+        // The drain outcome is intentionally not branched on here: a
+        // `DeadlineElapsed` leaves ~zero remaining budget, which the
+        // split-budget math below already converts into `Err(Timeout)`
+        // downstream. Bound (not `let _ =`) to document the deliberate ignore.
+        let _drain_outcome = self.lifecycle.wait_until_drained().await;
 
         // Only now may the runner stop consuming — every acceptance
         // admitted before draining began has, by this point, either
@@ -1840,48 +1866,42 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wait_until_drained_does_not_lose_the_last_guards_wakeup_under_concurrent_drop() {
         const TRIALS: usize = 300;
-        // The gate's own deadline is the backstop `wait_until_drained` falls
-        // through to *only* if a wakeup is lost. Set it far larger than any
-        // realistic per-trial wall-clock so a healthy trial never reaches it
-        // (it returns the instant the guard drops, via the `watch` wakeup),
-        // while a regressed lost-wakeup would block on it.
-        const GATE_DEADLINE: Duration = Duration::from_secs(30);
-        // How long we are willing to wait for that guard-drop wakeup per
-        // trial. Generous enough to be immune to scheduler contention under
-        // `cargo test --workspace` (a healthy trial returns in well under a
-        // millisecond), yet far below GATE_DEADLINE so a genuinely lost wakeup
-        // surfaces here as a timeout instead of silently burning the backstop.
-        //
-        // This asserts *correctness per trial* (the wakeup is never lost),
-        // deliberately NOT an aggregate latency budget: total wall-clock across
-        // 300 concurrent trials is a function of machine load, not of the
-        // lost-wakeup contract, and conflating the two is what made the former
-        // `elapsed < 150ms` assertion flaky under parallel test load.
-        const WAKEUP_TIMEOUT: Duration = Duration::from_secs(5);
+        // Backstop the wait falls through to ONLY if a wakeup is lost. The
+        // healthy path never reaches it: the drop below is sequenced (via the
+        // `probe`) to land *after* the wait has committed to its blocking await,
+        // and `watch` delivers that wakeup regardless — so a healthy trial
+        // returns `Drained` in well under a millisecond, immune to scheduler
+        // load. A regression (lost wakeup) instead reaches this deadline and
+        // returns `DeadlineElapsed`, which the assertion below rejects.
+        const GATE_DEADLINE: Duration = Duration::from_secs(5);
 
         for trial in 0..TRIALS {
             let gate = LifecycleGate::new();
             let guard = gate.enter().expect("gate starts Running");
             gate.begin_draining(tokio::time::Instant::now() + GATE_DEADLINE);
 
-            tokio::spawn(async move {
-                drop(guard);
-            });
+            // Run the wait on its own task so we can deterministically order the
+            // guard-drop relative to it, rather than racing a spawned drop
+            // against the wait's read-then-await.
+            let gate_for_wait = gate.clone();
+            let wait_task = tokio::spawn(async move { gate_for_wait.wait_until_drained().await });
 
-            // The wakeup is never lost, so this returns the moment the spawned
-            // drop lands — well within WAKEUP_TIMEOUT. A timeout here means
-            // `wait_until_drained` fell through to its deadline backstop despite
-            // the in-flight count having genuinely reached zero: exactly the
-            // F-03 lost-wakeup regression.
-            tokio::time::timeout(WAKEUP_TIMEOUT, gate.wait_until_drained())
-                .await
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "trial {trial}: wait_until_drained did not observe the concurrent \
-                         guard-drop wakeup within {WAKEUP_TIMEOUT:?} — the last guard's wakeup \
-                         was lost (F-03 regression)"
-                    )
-                });
+            // The probe fires the instant the wait finds a nonzero in-flight
+            // count and commits to awaiting `changed()` — i.e. exactly the F-03
+            // window where a drop's wakeup used to be lost. Awaiting it here
+            // guarantees the drop below lands strictly inside that window on
+            // every trial, making this a deterministic exercise of the race
+            // rather than a probabilistic one.
+            gate.probe.notified().await;
+            drop(guard);
+
+            let outcome = wait_task.await.expect("wait task joins cleanly");
+            assert_eq!(
+                outcome,
+                DrainOutcome::Drained,
+                "trial {trial}: the concurrent guard-drop wakeup must be observed \
+                 (Drained); DeadlineElapsed means the wakeup was lost (F-03 regression)"
+            );
         }
     }
 
