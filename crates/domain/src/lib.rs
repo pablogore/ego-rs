@@ -75,7 +75,12 @@ pub mod auth;
 pub mod config;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
+pub use auth::{
+    AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
+    SystemClock,
+};
 pub use command::Command;
+pub use config::{ConfigError, Validate};
 pub use context::{
     AggregateId, AggregateIdError, CausationId, CausationIdError, CorrelationId,
     CorrelationIdError, EntityId, EntityIdError, Metadata, RequestId, RequestIdError, TenantId,
@@ -87,11 +92,6 @@ pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
 pub use tracer::{
-    parse_traceparent, NoopTracer, SpanAttributes, SpanId, SpanOutcome, TraceContext,
-    TraceId, TraceParseError, Tracer, TracerLifecycle,
+    parse_traceparent, NoopTracer, SpanAttributes, SpanId, SpanOutcome, TraceContext, TraceId,
+    TraceParseError, Tracer, TracerLifecycle,
 };
-pub use auth::{
-    AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
-    SystemClock,
-};
-pub use config::{ConfigError, Validate};

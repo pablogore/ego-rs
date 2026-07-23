@@ -78,7 +78,11 @@ mod tests {
 
     #[async_trait]
     impl ExternalEffectExecutor for NoopExecutor {
-        async fn execute(&self, _effect: &ExternalEffectDescription, _ctx: &EffectContext) -> AttemptOutcome {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
             AttemptOutcome::Success
         }
     }

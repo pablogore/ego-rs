@@ -31,8 +31,9 @@ fn security_context_carried_via_explicit_passing() {
 
 #[test]
 fn two_independent_contexts_do_not_share_state() {
-    let ctx_a = ServiceContext::new()
-        .with_security(Arc::new(SecurityContext::empty(make_principal("user:alice"))));
+    let ctx_a = ServiceContext::new().with_security(Arc::new(SecurityContext::empty(
+        make_principal("user:alice"),
+    )));
     let ctx_b = ServiceContext::new()
         .with_security(Arc::new(SecurityContext::empty(make_principal("user:bob"))));
 

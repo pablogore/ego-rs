@@ -44,7 +44,10 @@ pub enum Credential {
 impl fmt::Debug for Credential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Basic { username, secret: _ } => f
+            Self::Basic {
+                username,
+                secret: _,
+            } => f
                 .debug_struct("Basic")
                 .field("username", username)
                 .field("secret", &"[REDACTED]")
@@ -81,27 +84,41 @@ mod tests {
         let c = Credential::Bearer("eyJhbGciOiJSUzI1NiJ9.secret".into());
         let s = format!("{c:?}");
         assert!(s.contains("Bearer"), "variant name must appear");
-        assert!(!s.contains("eyJhbGciOiJSUzI1NiJ9"), "Bearer token must not appear in debug output");
+        assert!(
+            !s.contains("eyJhbGciOiJSUzI1NiJ9"),
+            "Bearer token must not appear in debug output"
+        );
         assert!(s.contains("[REDACTED]"));
     }
 
     #[test]
     fn basic_debug_redacts_secret() {
-        let c = Credential::Basic { username: "alice".into(), secret: "hunter2".into() };
+        let c = Credential::Basic {
+            username: "alice".into(),
+            secret: "hunter2".into(),
+        };
         let s = format!("{c:?}");
         assert!(s.contains("alice"), "username must appear");
-        assert!(!s.contains("hunter2"), "secret must not appear in debug output");
+        assert!(
+            !s.contains("hunter2"),
+            "secret must not appear in debug output"
+        );
         assert!(s.contains("[REDACTED]"));
     }
 
     #[test]
     fn custom_debug_hides_payload() {
-        let c = Credential::Custom { scheme: "api-key".into(), payload: b"\xff\xfe\x00".to_vec() };
+        let c = Credential::Custom {
+            scheme: "api-key".into(),
+            payload: b"\xff\xfe\x00".to_vec(),
+        };
         let s = format!("{c:?}");
         assert!(s.contains("api-key"), "scheme must appear");
-        assert!(s.contains("[3 bytes]"), "payload must be shown as byte count only");
+        assert!(
+            s.contains("[3 bytes]"),
+            "payload must be shown as byte count only"
+        );
     }
-
 
     #[test]
     fn basic_variant_constructs_and_matches() {

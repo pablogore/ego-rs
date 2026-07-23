@@ -68,21 +68,28 @@ mod tests {
     fn fails_when_unarchived_dir_suffix_matches_an_archived_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let changes_dir = tmp.path();
-        fs::create_dir_all(changes_dir.join("archive/2026-07-15-core-019-reliable-external-effects"))
-            .unwrap();
+        fs::create_dir_all(
+            changes_dir.join("archive/2026-07-15-core-019-reliable-external-effects"),
+        )
+        .unwrap();
         fs::create_dir_all(changes_dir.join("core-019-reliable-external-effects")).unwrap();
 
         let duplicates = check_hygiene(changes_dir).unwrap();
 
-        assert_eq!(duplicates, vec!["core-019-reliable-external-effects".to_string()]);
+        assert_eq!(
+            duplicates,
+            vec!["core-019-reliable-external-effects".to_string()]
+        );
     }
 
     #[test]
     fn passes_when_no_unarchived_duplicate_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let changes_dir = tmp.path();
-        fs::create_dir_all(changes_dir.join("archive/2026-07-15-core-019-reliable-external-effects"))
-            .unwrap();
+        fs::create_dir_all(
+            changes_dir.join("archive/2026-07-15-core-019-reliable-external-effects"),
+        )
+        .unwrap();
         fs::create_dir_all(changes_dir.join("core-020-something-else")).unwrap();
 
         let duplicates = check_hygiene(changes_dir).unwrap();

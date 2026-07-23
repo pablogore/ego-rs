@@ -15,11 +15,11 @@
 //!
 //! This module has NO dependency on any infrastructure crate.
 
-pub mod error;
-pub mod credential;
-pub mod clock;
-pub mod claims;
 pub mod claim_set;
+pub mod claims;
+pub mod clock;
+pub mod credential;
+pub mod error;
 
 pub use claim_set::{ClaimSet, ClaimValue};
 pub use claims::{Claims, StandardClaims};

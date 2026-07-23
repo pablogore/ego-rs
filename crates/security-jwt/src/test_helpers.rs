@@ -49,7 +49,9 @@ pub(crate) const TEST_AUD: &str = "test-audience";
 /// specific `aud` value simply set it themselves and keep control.
 pub(crate) fn make_hs256_token(claims: &serde_json::Value) -> String {
     let mut builder = TestJwtBuilder::new(hs256_secret());
-    let has_aud = claims.as_object().is_some_and(|obj| obj.contains_key("aud"));
+    let has_aud = claims
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("aud"));
     if !has_aud {
         builder = builder.claim("aud", serde_json::Value::from(TEST_AUD));
     }

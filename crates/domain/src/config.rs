@@ -107,7 +107,10 @@ mod tests {
             field: "capacity".to_string(),
             reason: "must be non-zero".to_string(),
         };
-        assert_eq!(format!("{}", err), "invalid config field `capacity`: must be non-zero");
+        assert_eq!(
+            format!("{}", err),
+            "invalid config field `capacity`: must be non-zero"
+        );
     }
 
     #[test]

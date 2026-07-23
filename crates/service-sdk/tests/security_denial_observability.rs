@@ -119,7 +119,10 @@ impl DualGuardService for RecordingService {
 fn make_runtime(
     authz: Arc<dyn AuthorizationProvider>,
     observability: Arc<RecordingObservability>,
-) -> (Runtime, std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>) {
+) -> (
+    Runtime,
+    std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>,
+) {
     let rt = RuntimeBuilder::new()
         .with_security(Arc::new(StubAuthnProvider), authz)
         .with_observability(observability)
@@ -133,7 +136,12 @@ fn make_runtime(
 /// differed only in which `AuthorizationProvider` was passed in.
 fn setup(
     authz: Arc<dyn AuthorizationProvider>,
-) -> (Runtime, Arc<RecordingObservability>, Arc<RecordingService>, DualGuardServiceRef) {
+) -> (
+    Runtime,
+    Arc<RecordingObservability>,
+    Arc<RecordingService>,
+    DualGuardServiceRef,
+) {
     let observability = Arc::new(RecordingObservability::new());
     let (rt, weak) = make_runtime(authz, observability.clone());
     let service = Arc::new(RecordingService::default());
@@ -155,7 +163,11 @@ async fn dual_guard_authorize_deny_records_exactly_one_authorization_denied_even
     let result = proxy.dual_op(ctx).await;
 
     assert!(result.is_err(), "expected authorize to deny");
-    assert_eq!(service.ran.load(Ordering::SeqCst), 0, "body must not execute");
+    assert_eq!(
+        service.ran.load(Ordering::SeqCst),
+        0,
+        "body must not execute"
+    );
     assert_eq!(
         observability.denial_kinds(),
         vec!["AuthorizationDenied".to_string()],
@@ -177,7 +189,11 @@ async fn dual_guard_tenant_mismatch_records_exactly_one_tenant_mismatch_event() 
     let result = proxy.dual_op(ctx).await;
 
     assert!(result.is_err(), "expected tenant enforcement to deny");
-    assert_eq!(service.ran.load(Ordering::SeqCst), 0, "body must not execute");
+    assert_eq!(
+        service.ran.load(Ordering::SeqCst),
+        0,
+        "body must not execute"
+    );
     assert_eq!(
         observability.denial_kinds(),
         vec!["TenantMismatch".to_string()],
@@ -197,7 +213,11 @@ async fn dual_guard_allowed_invocation_records_no_denial_event() {
     let result = proxy.dual_op(ctx).await;
 
     assert!(result.is_ok(), "expected both guards to pass: {:?}", result);
-    assert_eq!(service.ran.load(Ordering::SeqCst), 1, "body must run exactly once");
+    assert_eq!(
+        service.ran.load(Ordering::SeqCst),
+        1,
+        "body must run exactly once"
+    );
     assert!(
         observability.denial_kinds().is_empty(),
         "an allowed invocation must record no denial event"

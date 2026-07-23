@@ -38,19 +38,31 @@ impl SharedReadSideStore {
     }
 
     fn insert(&self, event: EventStreamElement<Value>) {
-        self.0.lock().expect("SharedReadSideStore lock poisoned").insert(event);
+        self.0
+            .lock()
+            .expect("SharedReadSideStore lock poisoned")
+            .insert(event);
     }
 
     /// Every tag currently holding at least one event — used by the poll
     /// loop to discover per-tenant tags dynamically (see `super::spawn`).
     pub fn known_tags(&self) -> Vec<EventTag> {
-        self.0.lock().expect("SharedReadSideStore lock poisoned").known_tags()
+        self.0
+            .lock()
+            .expect("SharedReadSideStore lock poisoned")
+            .known_tags()
     }
 }
 
 #[async_trait]
 impl ReadSideStore<Value> for SharedReadSideStore {
-    async fn fetch(&self, tenant: &str, tag: &EventTag, offset: Option<&Offset>, batch_size: usize) -> Result<Vec<EventStreamElement<Value>>, ReadSideStoreError> {
+    async fn fetch(
+        &self,
+        tenant: &str,
+        tag: &EventTag,
+        offset: Option<&Offset>,
+        batch_size: usize,
+    ) -> Result<Vec<EventStreamElement<Value>>, ReadSideStoreError> {
         // The explicit `tenant` is authoritative: the scheduler threads each
         // tag's real tenant into this call (see `super::tenant_from_tag` and
         // `super::spawn`), so we paginate strictly by it. Our tags are
@@ -72,7 +84,12 @@ impl ReadSideStore<Value> for SharedReadSideStore {
         // `paginate` fails closed on an empty scope, so a fetch can never
         // return unscoped data.
         let guard = self.0.lock().expect("SharedReadSideStore lock poisoned");
-        Ok(paginate(guard.events_for_tag(tag.value()), tenant, offset, batch_size))
+        Ok(paginate(
+            guard.events_for_tag(tag.value()),
+            tenant,
+            offset,
+            batch_size,
+        ))
     }
 }
 
@@ -88,7 +105,10 @@ pub struct ReadSideSink {
 
 impl ReadSideSink {
     pub fn new(store: SharedReadSideStore) -> Self {
-        Self { store, next_version: Arc::new(AtomicI64::new(1)) }
+        Self {
+            store,
+            next_version: Arc::new(AtomicI64::new(1)),
+        }
     }
 
     /// Records one domain event as an `EventStreamElement` under a
@@ -97,7 +117,14 @@ impl ReadSideSink {
     /// isolates tenants instead of relying solely on the handler filtering
     /// by `EventStreamElement::tenant_id` after the fact. See
     /// `super::tenant_tag`.
-    pub fn record(&self, tenant_id: &str, aggregate_id: &str, event_type: &str, payload: Value, occurred_at: DateTime<Utc>) {
+    pub fn record(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        event_type: &str,
+        payload: Value,
+        occurred_at: DateTime<Utc>,
+    ) {
         let version = self.next_version.fetch_add(1, Ordering::SeqCst);
         let event_id = format!("{event_type}:{aggregate_id}:{version}");
         self.store.insert(EventStreamElement::new(
@@ -127,14 +154,41 @@ pub struct InMemoryOffsetStore(Arc<Mutex<HashMap<OffsetKey, Offset>>>);
 
 #[async_trait]
 impl OffsetStore for InMemoryOffsetStore {
-    async fn read_offset(&self, projection_id: &str, tag: &EventTag, tenant: &str) -> Result<Option<Offset>, OffsetStoreError> {
-        let key = (projection_id.to_string(), tag.value().to_string(), tenant.to_string());
-        Ok(self.0.lock().expect("InMemoryOffsetStore lock poisoned").get(&key).copied())
+    async fn read_offset(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        tenant: &str,
+    ) -> Result<Option<Offset>, OffsetStoreError> {
+        let key = (
+            projection_id.to_string(),
+            tag.value().to_string(),
+            tenant.to_string(),
+        );
+        Ok(self
+            .0
+            .lock()
+            .expect("InMemoryOffsetStore lock poisoned")
+            .get(&key)
+            .copied())
     }
 
-    async fn write_offset(&self, projection_id: &str, tag: &EventTag, tenant: &str, offset: &Offset) -> Result<(), OffsetStoreError> {
-        let key = (projection_id.to_string(), tag.value().to_string(), tenant.to_string());
-        self.0.lock().expect("InMemoryOffsetStore lock poisoned").insert(key, *offset);
+    async fn write_offset(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        tenant: &str,
+        offset: &Offset,
+    ) -> Result<(), OffsetStoreError> {
+        let key = (
+            projection_id.to_string(),
+            tag.value().to_string(),
+            tenant.to_string(),
+        );
+        self.0
+            .lock()
+            .expect("InMemoryOffsetStore lock poisoned")
+            .insert(key, *offset);
         Ok(())
     }
 }
@@ -146,14 +200,39 @@ pub struct InMemoryDedupStore(Arc<Mutex<HashSet<DedupKey>>>);
 
 #[async_trait]
 impl DedupStore for InMemoryDedupStore {
-    async fn seen(&self, projection_id: &str, tag: &EventTag, event_id: &str) -> Result<bool, DedupStoreError> {
-        let key = (projection_id.to_string(), tag.value().to_string(), event_id.to_string());
-        Ok(self.0.lock().expect("InMemoryDedupStore lock poisoned").contains(&key))
+    async fn seen(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        event_id: &str,
+    ) -> Result<bool, DedupStoreError> {
+        let key = (
+            projection_id.to_string(),
+            tag.value().to_string(),
+            event_id.to_string(),
+        );
+        Ok(self
+            .0
+            .lock()
+            .expect("InMemoryDedupStore lock poisoned")
+            .contains(&key))
     }
 
-    async fn mark_seen(&self, projection_id: &str, tag: &EventTag, event_id: &str) -> Result<(), DedupStoreError> {
-        let key = (projection_id.to_string(), tag.value().to_string(), event_id.to_string());
-        self.0.lock().expect("InMemoryDedupStore lock poisoned").insert(key);
+    async fn mark_seen(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        event_id: &str,
+    ) -> Result<(), DedupStoreError> {
+        let key = (
+            projection_id.to_string(),
+            tag.value().to_string(),
+            event_id.to_string(),
+        );
+        self.0
+            .lock()
+            .expect("InMemoryDedupStore lock poisoned")
+            .insert(key);
         Ok(())
     }
 }
@@ -179,12 +258,34 @@ mod tests {
         let store = SharedReadSideStore::new();
         let sink = ReadSideSink::new(store.clone());
 
-        sink.record("tenant-a", "user-1", "UserRegistered", serde_json::json!({ "email": "a@example.com" }), Utc::now());
-        sink.record("tenant-b", "user-2", "UserRegistered", serde_json::json!({ "email": "b@example.com" }), Utc::now());
-        sink.record("tenant-a", "user-3", "UserRegistered", serde_json::json!({ "email": "c@example.com" }), Utc::now());
+        sink.record(
+            "tenant-a",
+            "user-1",
+            "UserRegistered",
+            serde_json::json!({ "email": "a@example.com" }),
+            Utc::now(),
+        );
+        sink.record(
+            "tenant-b",
+            "user-2",
+            "UserRegistered",
+            serde_json::json!({ "email": "b@example.com" }),
+            Utc::now(),
+        );
+        sink.record(
+            "tenant-a",
+            "user-3",
+            "UserRegistered",
+            serde_json::json!({ "email": "c@example.com" }),
+            Utc::now(),
+        );
 
         let tags = store.known_tags();
-        assert_eq!(tags.len(), 2, "each tenant gets its own tag stream, not one shared tag");
+        assert_eq!(
+            tags.len(),
+            2,
+            "each tenant gets its own tag stream, not one shared tag"
+        );
 
         for tag in &tags {
             // `fetch` scopes by its explicit `tenant` argument (authoritative),
@@ -212,15 +313,30 @@ mod tests {
         let store = SharedReadSideStore::new();
         let sink = ReadSideSink::new(store.clone());
 
-        sink.record("tenant-a", "user-1", "UserRegistered", serde_json::json!({ "email": "a@example.com" }), Utc::now());
-        sink.record("tenant-b", "user-2", "UserRegistered", serde_json::json!({ "email": "b@example.com" }), Utc::now());
+        sink.record(
+            "tenant-a",
+            "user-1",
+            "UserRegistered",
+            serde_json::json!({ "email": "a@example.com" }),
+            Utc::now(),
+        );
+        sink.record(
+            "tenant-b",
+            "user-2",
+            "UserRegistered",
+            serde_json::json!({ "email": "b@example.com" }),
+            Utc::now(),
+        );
 
         let tag_a = super::super::tenant_tag("tenant-a");
         let tag_b = super::super::tenant_tag("tenant-b");
 
         // Matching tenant + tag: returns exactly tenant-a's events.
         let matched = store.fetch("tenant-a", &tag_a, None, 100).await.unwrap();
-        assert!(!matched.is_empty(), "matching tenant + tag must return events");
+        assert!(
+            !matched.is_empty(),
+            "matching tenant + tag must return events"
+        );
         assert!(
             matched.iter().all(|e| e.tenant_id() == "tenant-a"),
             "only tenant-a events may be returned"

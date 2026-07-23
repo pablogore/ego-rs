@@ -103,7 +103,9 @@ pub struct OtlpConfig {
     pub max_in_flight_spans: usize,
 }
 
-fn build_exporter(config: &OtlpConfig) -> Result<OtlpSpanExporter, opentelemetry_otlp::ExporterBuildError> {
+fn build_exporter(
+    config: &OtlpConfig,
+) -> Result<OtlpSpanExporter, opentelemetry_otlp::ExporterBuildError> {
     match config.protocol {
         OtlpProtocol::Grpc => OtlpSpanExporter::builder()
             .with_tonic()
@@ -323,7 +325,8 @@ impl TracerLifecycle for OtlpTracer {
     /// the processor live keeps a caller-visible re-flush idempotent rather
     /// than turning any later export into a silent post-shutdown no-op.
     fn shutdown(&self) {
-        let orphaned_keys: Vec<DomainSpanId> = self.table.iter().map(|entry| *entry.key()).collect();
+        let orphaned_keys: Vec<DomainSpanId> =
+            self.table.iter().map(|entry| *entry.key()).collect();
         for span_id in orphaned_keys {
             if let Some((_, record)) = self.table.remove(&span_id) {
                 self.processor
@@ -356,7 +359,9 @@ mod tests {
     /// with, independent of the wire transport (which is exercised
     /// separately, without a live endpoint, by
     /// `otlp_tracer_can_be_constructed_for_each_protocol`).
-    fn otlp_tracer_with_in_memory_exporter(max_in_flight_spans: usize) -> (OtlpTracer, InMemorySpanExporter) {
+    fn otlp_tracer_with_in_memory_exporter(
+        max_in_flight_spans: usize,
+    ) -> (OtlpTracer, InMemorySpanExporter) {
         let exporter = InMemorySpanExporterBuilder::new().build();
         let processor = BatchSpanProcessor::builder(exporter.clone()).build();
         (
@@ -503,9 +508,17 @@ mod tests {
 
         tracer.shutdown();
 
-        assert_eq!(tracer.in_flight_count(), 0, "table must be empty after shutdown");
+        assert_eq!(
+            tracer.in_flight_count(),
+            0,
+            "table must be empty after shutdown"
+        );
         let finished = exporter.get_finished_spans().unwrap();
-        assert_eq!(finished.len(), 2, "both orphaned spans must have been flushed/exported");
+        assert_eq!(
+            finished.len(),
+            2,
+            "both orphaned spans must have been flushed/exported"
+        );
     }
 
     #[test]
@@ -556,12 +569,11 @@ mod tests {
         let finished = exporter.get_finished_spans().unwrap();
         assert_eq!(finished.len(), 1);
         let attrs = &finished[0].attributes;
-        assert!(attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "tenant.present" && kv.value == opentelemetry::Value::Bool(true)));
-        assert!(attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "duration_ms" && kv.value == opentelemetry::Value::I64(42)));
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == "tenant.present"
+            && kv.value == opentelemetry::Value::Bool(true)));
+        assert!(attrs.iter().any(
+            |kv| kv.key.as_str() == "duration_ms" && kv.value == opentelemetry::Value::I64(42)
+        ));
     }
 
     // -----------------------------------------------------------------

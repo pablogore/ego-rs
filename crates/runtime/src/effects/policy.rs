@@ -290,7 +290,10 @@ mod tests {
     fn policy_for_returns_the_default_when_no_override_is_registered() {
         let policies = RetryPolicies::new(RetryPolicy::default());
 
-        assert_eq!(policies.policy_for("invoice.created"), RetryPolicy::default());
+        assert_eq!(
+            policies.policy_for("invoice.created"),
+            RetryPolicy::default()
+        );
     }
 
     #[test]
@@ -300,10 +303,14 @@ mod tests {
             base_backoff: Duration::from_millis(5),
             max_backoff: Duration::from_millis(5),
         };
-        let policies = RetryPolicies::new(RetryPolicy::default()).with_override("s3.put", aggressive);
+        let policies =
+            RetryPolicies::new(RetryPolicy::default()).with_override("s3.put", aggressive);
 
         assert_eq!(policies.policy_for("s3.put"), aggressive);
-        assert_eq!(policies.policy_for("invoice.created"), RetryPolicy::default());
+        assert_eq!(
+            policies.policy_for("invoice.created"),
+            RetryPolicy::default()
+        );
     }
 
     #[test]

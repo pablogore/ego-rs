@@ -37,9 +37,9 @@ use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError, RuntimeInner};
 use ego_service_sdk::security::SecurityError;
+use ego_service_sdk_macros::service;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::{operation, tenant_scoped};
-use ego_service_sdk_macros::service;
 
 // ---------------------------------------------------------------------------
 // Scenario 1: minimal service, no deps
@@ -75,7 +75,10 @@ struct ConfiguredGreeter {
 impl Injectable for ConfiguredGreeter {
     fn dependencies() -> Vec<DepKey> {
         vec![
-            DepKey::Adapter(TypeId::of::<NotifierAdapter>(), std::any::type_name::<NotifierAdapter>()),
+            DepKey::Adapter(
+                TypeId::of::<NotifierAdapter>(),
+                std::any::type_name::<NotifierAdapter>(),
+            ),
             DepKey::Config(TypeId::of::<u32>(), std::any::type_name::<u32>()),
         ]
     }
@@ -90,7 +93,10 @@ impl Injectable for ConfiguredGreeter {
 
 impl ConfiguredGreeter {
     fn greet(&self, name: &str) -> String {
-        format!("{}: hello {name} (retry limit {})", self.adapter.0, *self.limit)
+        format!(
+            "{}: hello {name} (retry limit {})",
+            self.adapter.0, *self.limit
+        )
     }
 }
 
@@ -179,7 +185,10 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
 
     let configured = ConfiguredGreeter::build(rt.inner())
         .expect("build() succeeds using the same resolved adapter/config try_build validated");
-    assert_eq!(configured.greet("world"), "notifier: hello world (retry limit 10)");
+    assert_eq!(
+        configured.greet("world"),
+        "notifier: hello world (retry limit 10)"
+    );
 
     // --- Scenario 3: missing dependency ----------------------------------
     // The same DI service, this time with no adapter registered — try_build()
@@ -234,7 +243,9 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
     // closed with the same guard order and SecurityError the hand-rolled
     // path enforces when no tenant can be resolved from the context.
     let rt = RuntimeBuilder::new()
-        .with_service::<ProtectedGreeterTag>(Arc::new(ProtectedGreeterImpl) as Arc<dyn ProtectedGreeter>)
+        .with_service::<ProtectedGreeterTag>(
+            Arc::new(ProtectedGreeterImpl) as Arc<dyn ProtectedGreeter>
+        )
         .expect("registration succeeds")
         .build();
 
@@ -243,7 +254,10 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
         .expect("registered tenant-scoped tag resolves");
     let result = protected.greet(ServiceContext::new()).await;
     assert!(
-        matches!(result, Err(TenantGreeterError::Security(SecurityError::MissingContext))),
+        matches!(
+            result,
+            Err(TenantGreeterError::Security(SecurityError::MissingContext))
+        ),
         "tenant-scoped op resolved via `resolve` must fail closed with the same \
          SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports — \
          resolution introduces no alternate, relaxed code path; got {result:?}"

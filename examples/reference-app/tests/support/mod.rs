@@ -31,7 +31,10 @@ use serde_json::Value;
 pub fn make_register_user_full(
     observability: Option<Arc<dyn Observability>>,
     read_side_sink: Option<ReadSideSink>,
-) -> (Arc<dyn RegisterUser>, Arc<EntityRuntime<OrganizationEnsured>>) {
+) -> (
+    Arc<dyn RegisterUser>,
+    Arc<EntityRuntime<OrganizationEnsured>>,
+) {
     let org_runtime = Arc::new(EntityRuntimeBuilder::new().build());
     let user_runtime = Arc::new(EntityRuntimeBuilder::new().build());
     let mut service = RegisterUserImpl::new(org_runtime.clone(), user_runtime, observability);

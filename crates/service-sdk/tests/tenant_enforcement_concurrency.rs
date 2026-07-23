@@ -14,7 +14,9 @@ mod common;
 use common::authenticated_ctx;
 
 fn resolved_tenant_id(ctx: &ServiceContext) -> Option<&str> {
-    ctx.canonical_tenant().and_then(|c| c.tenant_id()).map(|t| t.as_str())
+    ctx.canonical_tenant()
+        .and_then(|c| c.tenant_id())
+        .map(|t| t.as_str())
 }
 
 // TASK-020: two concurrent operations carrying different tenant hints must
@@ -85,10 +87,7 @@ fn clone_before_resolution_neither_copy_has_a_canonical_tenant() {
 fn clone_after_resolution_carries_the_same_canonical_tenant_and_cannot_diverge() {
     let runtime = RuntimeBuilder::new().build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
-    runtime
-        .inner()
-        .enforce_tenant(&mut ctx)
-        .expect("resolves");
+    runtime.inner().enforce_tenant(&mut ctx).expect("resolves");
 
     let cloned = ctx.clone();
 

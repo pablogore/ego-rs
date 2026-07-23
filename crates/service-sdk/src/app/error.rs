@@ -108,8 +108,11 @@ mod tests {
     // no fields still round-trips through the wrapper untouched.
     #[test]
     fn validation_wraps_service_not_found_variant_too() {
-        let err: CompositionError =
-            RuntimeError::ServiceNotFound { type_name: "MyTag", required_by: None }.into();
+        let err: CompositionError = RuntimeError::ServiceNotFound {
+            type_name: "MyTag",
+            required_by: None,
+        }
+        .into();
         assert!(matches!(
             err,
             CompositionError::Validation(RuntimeError::ServiceNotFound { .. })
@@ -122,7 +125,9 @@ mod tests {
     fn projection_wraps_duplicate_projection_variant() {
         use crate::di::DuplicateProjection;
 
-        let inner = DuplicateProjection { type_name: "MyProjection" };
+        let inner = DuplicateProjection {
+            type_name: "MyProjection",
+        };
         let err: CompositionError = inner.into();
         match err {
             CompositionError::Projection(DuplicateProjection { type_name }) => {
@@ -139,7 +144,9 @@ mod tests {
     fn entity_wraps_duplicate_entity_variant() {
         use crate::di::DuplicateEntity;
 
-        let inner = DuplicateEntity { type_name: "MyEntity" };
+        let inner = DuplicateEntity {
+            type_name: "MyEntity",
+        };
         let err: CompositionError = inner.into();
         match err {
             CompositionError::Entity(DuplicateEntity { type_name }) => {

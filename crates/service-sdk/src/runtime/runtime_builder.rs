@@ -19,13 +19,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::runtime::error::RuntimeInfraError;
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::{Observability, SemanticEvent};
-use crate::runtime::error::RuntimeInfraError;
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
-use ego_security_sdk::authorization::{authorize_in_context, Action, AuthorizationProvider, Resource};
+use ego_security_sdk::authorization::{
+    authorize_in_context, Action, AuthorizationProvider, Resource,
+};
 use ego_security_sdk::error::SecurityError;
 use kitlogger::KITLogger;
 use persistent_entity::data_provider_access::DataProviderAccess;
@@ -33,15 +35,15 @@ use persistent_entity::data_provider_access::DataProviderAccess;
 use persistent_entity::persistent_entity::PersistentEntity;
 use persistent_entity::runtime::EntityRuntime;
 
-use crate::context::ServiceContext;
-use crate::di::{AdapterRef, ConfigValue, DepKey, EntityRuntimeRef, ProjectionRef};
-use crate::interceptor::InterceptorChain;
-use crate::registry::ServiceRegistry;
 use super::logger::TeardownStack;
 use super::permit::CrossTenantPermit;
 #[cfg(test)]
 use super::tenant::TenantEnforcementMode;
 use super::tenant::{EstablishedTenantFacts, TenantResolver};
+use crate::context::ServiceContext;
+use crate::di::{AdapterRef, ConfigValue, DepKey, EntityRuntimeRef, ProjectionRef};
+use crate::interceptor::InterceptorChain;
+use crate::registry::ServiceRegistry;
 
 // ---------------------------------------------------------------------------
 // Internal: grouped resolved-instance tables
@@ -98,8 +100,18 @@ impl DependencyTable {
     /// always hardcoding an empty `projections` map — now also threaded
     /// through from `RuntimeBuilder::with_entity`, CORE-028 Stage 2C).
     pub(super) fn with_registrations(registered: RegisteredDependencies) -> Self {
-        let RegisteredDependencies { adapters, configs, projections, entities } = registered;
-        Self { projections, adapters, configs, entities }
+        let RegisteredDependencies {
+            adapters,
+            configs,
+            projections,
+            entities,
+        } = registered;
+        Self {
+            projections,
+            adapters,
+            configs,
+            entities,
+        }
     }
 
     fn resolve_projection<T: 'static + Send + Sync>(
@@ -118,7 +130,13 @@ impl DependencyTable {
     fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, RuntimeError>
     where
         E: PersistentEntity + 'static,
-        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        E::Event: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
     {
         self.entities
             .get(&TypeId::of::<E>())
@@ -242,8 +260,10 @@ pub struct RuntimeInner {
     pub(crate) registry: ServiceRegistry,
     pub(crate) interceptor_chain: Arc<InterceptorChain>,
     /// Optional security providers (authn + authz) installed via RuntimeBuilder.
-    pub(crate) security_providers:
-        Option<(Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>)>,
+    pub(crate) security_providers: Option<(
+        Arc<dyn AuthenticationProvider>,
+        Arc<dyn AuthorizationProvider>,
+    )>,
     /// Resolved instances for projection, adapter, and config injection.
     resolved: DependencyTable,
     /// Resolves the canonical tenant for enforcement (CORE-008A AD-001/AD-009).
@@ -339,9 +359,10 @@ impl RuntimeInner {
     pub(super) fn new_with_logger(
         registry: ServiceRegistry,
         interceptor_chain: Arc<InterceptorChain>,
-        security_providers: Option<
-            (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>),
-        >,
+        security_providers: Option<(
+            Arc<dyn AuthenticationProvider>,
+            Arc<dyn AuthorizationProvider>,
+        )>,
         resolved: DependencyTable,
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
@@ -401,7 +422,13 @@ impl RuntimeInner {
     pub fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, RuntimeError>
     where
         E: PersistentEntity + 'static,
-        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        E::Event: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
     {
         self.resolved.resolve_entity::<E>()
     }
@@ -432,23 +459,35 @@ impl RuntimeInner {
     /// that fail-safe stub is retired now that entity registration exists.
     pub(crate) fn check_dependency(&self, dep: &DepKey) -> Result<(), RuntimeError> {
         let (present, type_name, kind) = match dep {
-            DepKey::Entity(id, name) => {
-                (self.resolved.entities.contains_key(id), *name, DependencyKind::Entity)
-            }
-            DepKey::Projection(id, name) => {
-                (self.resolved.projections.contains_key(id), *name, DependencyKind::Projection)
-            }
-            DepKey::Adapter(id, name) => {
-                (self.resolved.adapters.contains_key(id), *name, DependencyKind::Adapter)
-            }
-            DepKey::Config(id, name) => {
-                (self.resolved.configs.contains_key(id), *name, DependencyKind::Config)
-            }
+            DepKey::Entity(id, name) => (
+                self.resolved.entities.contains_key(id),
+                *name,
+                DependencyKind::Entity,
+            ),
+            DepKey::Projection(id, name) => (
+                self.resolved.projections.contains_key(id),
+                *name,
+                DependencyKind::Projection,
+            ),
+            DepKey::Adapter(id, name) => (
+                self.resolved.adapters.contains_key(id),
+                *name,
+                DependencyKind::Adapter,
+            ),
+            DepKey::Config(id, name) => (
+                self.resolved.configs.contains_key(id),
+                *name,
+                DependencyKind::Config,
+            ),
         };
         if present {
             Ok(())
         } else {
-            Err(RuntimeError::DependencyNotFound { kind, type_name, service_name: None })
+            Err(RuntimeError::DependencyNotFound {
+                kind,
+                type_name,
+                service_name: None,
+            })
         }
     }
 
@@ -675,7 +714,10 @@ impl RuntimeInner {
         Self::new_with_logger(
             ServiceRegistry::new(),
             Arc::new(InterceptorChain::new()),
-            Some((Arc::new(NoopTestAuthn) as Arc<dyn AuthenticationProvider>, provider)),
+            Some((
+                Arc::new(NoopTestAuthn) as Arc<dyn AuthenticationProvider>,
+                provider,
+            )),
             DependencyTable::with_registrations(RegisteredDependencies {
                 adapters: HashMap::new(),
                 configs: HashMap::new(),
@@ -821,21 +863,30 @@ mod tests {
     fn resolve_projection_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<ProjectionRef<()>, RuntimeError> = rt.resolve_projection();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     #[test]
     fn resolve_adapter_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<AdapterRef<()>, RuntimeError> = rt.resolve_adapter();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     #[test]
     fn resolve_config_returns_not_found_for_unregistered() {
         let rt = RuntimeInner::for_test();
         let result: Result<ConfigValue<()>, RuntimeError> = rt.resolve_config();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     // -- Successful downcast -------------------------------------------------
@@ -1036,7 +1087,9 @@ mod tests {
         let ctx = authenticated_ctx();
         let destination = TenantId::new("tenant-b").unwrap();
 
-        let result = rt.issue_cross_tenant_permit(&ctx, destination.clone()).await;
+        let result = rt
+            .issue_cross_tenant_permit(&ctx, destination.clone())
+            .await;
 
         let permit = result.expect("Allow decision must yield a permit");
         assert_eq!(permit.destination(), &destination);
@@ -1067,9 +1120,8 @@ mod tests {
             .with_cross_tenant_access(&permit)
             .with_tenant_id("tenant-b");
 
-        rt.enforce_tenant(&mut ctx).expect(
-            "a valid grant for the requested destination must succeed, not TenantMismatch",
-        );
+        rt.enforce_tenant(&mut ctx)
+            .expect("a valid grant for the requested destination must succeed, not TenantMismatch");
 
         assert_eq!(
             ctx.canonical_tenant()
@@ -1087,10 +1139,7 @@ mod tests {
 
         let result = rt.issue_cross_tenant_permit(&ctx, destination).await;
 
-        assert!(matches!(
-            result,
-            Err(SecurityError::CapabilityNotEnabled)
-        ));
+        assert!(matches!(result, Err(SecurityError::CapabilityNotEnabled)));
     }
 
     // -- CORE-008A Phase 2 (TASK-008): fallible enforce_tenant --------------
@@ -1190,9 +1239,7 @@ mod tests {
     fn check_dependency_config_present_is_ok() {
         let mut rt = RuntimeInner::for_test();
         let instance = Arc::new(String::from("v")) as Arc<dyn Any + Send + Sync>;
-        rt.resolved
-            .configs
-            .insert(TypeId::of::<String>(), instance);
+        rt.resolved.configs.insert(TypeId::of::<String>(), instance);
 
         let dep = DepKey::Config(TypeId::of::<String>(), "String");
         assert!(rt.check_dependency(&dep).is_ok());
@@ -1258,8 +1305,14 @@ mod tests {
             service_name: Some("Y"),
         };
         let msg = err.to_string();
-        assert!(msg.contains('X'), "message must name the missing type: {msg}");
-        assert!(msg.contains('Y'), "message must name the requesting service: {msg}");
+        assert!(
+            msg.contains('X'),
+            "message must name the missing type: {msg}"
+        );
+        assert!(
+            msg.contains('Y'),
+            "message must name the requesting service: {msg}"
+        );
     }
 
     #[test]
@@ -1270,7 +1323,10 @@ mod tests {
             service_name: None,
         };
         let msg = err.to_string();
-        assert!(msg.contains('X'), "message must name the missing type: {msg}");
+        assert!(
+            msg.contains('X'),
+            "message must name the missing type: {msg}"
+        );
     }
 
     #[test]
@@ -1297,7 +1353,10 @@ mod tests {
             service_name: Some("Y"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("adapter dependency"), "must name the kind: {msg}");
+        assert!(
+            msg.contains("adapter dependency"),
+            "must name the kind: {msg}"
+        );
         assert!(msg.contains(".adapter"), "must name the fix method: {msg}");
     }
 
@@ -1311,8 +1370,14 @@ mod tests {
             service_name: None,
         };
         let msg = err.to_string();
-        assert!(msg.contains("entity dependency"), "must name the kind: {msg}");
-        assert!(msg.contains(".entity::<MyAgg>()"), "must name the typed method: {msg}");
+        assert!(
+            msg.contains("entity dependency"),
+            "must name the kind: {msg}"
+        );
+        assert!(
+            msg.contains(".entity::<MyAgg>()"),
+            "must name the typed method: {msg}"
+        );
     }
 
     // DX follow-up: `check_dependency` threads the `DepKey` variant into the
@@ -1325,7 +1390,10 @@ mod tests {
                 DepKey::Adapter(TypeId::of::<MyProjection>(), "MyProjection"),
                 DependencyKind::Adapter,
             ),
-            (DepKey::Config(TypeId::of::<String>(), "String"), DependencyKind::Config),
+            (
+                DepKey::Config(TypeId::of::<String>(), "String"),
+                DependencyKind::Config,
+            ),
             (
                 DepKey::Projection(TypeId::of::<MyProjection>(), "MyProjection"),
                 DependencyKind::Projection,
@@ -1347,10 +1415,16 @@ mod tests {
     // missing tag and the fix method, and carries an optional requester.
     #[test]
     fn service_not_found_display_names_the_missing_tag_and_the_fix() {
-        let err = RuntimeError::ServiceNotFound { type_name: "MyTag", required_by: None };
+        let err = RuntimeError::ServiceNotFound {
+            type_name: "MyTag",
+            required_by: None,
+        };
         let msg = err.to_string();
         assert!(msg.contains("MyTag"), "must name the missing tag: {msg}");
-        assert!(msg.contains(".service::<"), "must name the fix method: {msg}");
+        assert!(
+            msg.contains(".service::<"),
+            "must name the fix method: {msg}"
+        );
         // The service_instance hint must show its full, copy-pasteable signature
         // (`::<Tag>(instance)`), not a bare `.service_instance()` that won't compile.
         assert!(
@@ -1374,9 +1448,18 @@ mod tests {
 
     #[test]
     fn security_denial_kind_display_yields_only_the_kind_label() {
-        assert_eq!(SecurityDenialKind::MissingContext.to_string(), "MissingContext");
-        assert_eq!(SecurityDenialKind::TenantMismatch.to_string(), "TenantMismatch");
-        assert_eq!(SecurityDenialKind::AuthorizationDenied.to_string(), "AuthorizationDenied");
+        assert_eq!(
+            SecurityDenialKind::MissingContext.to_string(),
+            "MissingContext"
+        );
+        assert_eq!(
+            SecurityDenialKind::TenantMismatch.to_string(),
+            "TenantMismatch"
+        );
+        assert_eq!(
+            SecurityDenialKind::AuthorizationDenied.to_string(),
+            "AuthorizationDenied"
+        );
     }
 
     // -- CORE-012A Phase 2 (TASK-003/004/005): record_security_denial helper --
@@ -1397,8 +1480,14 @@ mod tests {
             event.metadata.get("denial_kind").map(String::as_str),
             Some("AuthorizationDenied")
         );
-        assert_eq!(event.metadata.get("service").map(String::as_str), Some("Svc"));
-        assert_eq!(event.metadata.get("operation").map(String::as_str), Some("op"));
+        assert_eq!(
+            event.metadata.get("service").map(String::as_str),
+            Some("Svc")
+        );
+        assert_eq!(
+            event.metadata.get("operation").map(String::as_str),
+            Some("op")
+        );
     }
 
     #[test]
@@ -1424,14 +1513,14 @@ mod tests {
 
     #[test]
     fn authorization_provider_returns_arc_when_providers_set() {
+        use async_trait::async_trait;
         use ego_security_sdk::authentication::AuthenticationProvider;
         use ego_security_sdk::authorization::AuthorizationProvider;
-        use ego_security_sdk::principal::Principal;
-        use ego_security_sdk::{AccessRequest, AuthorizationDecision, SecurityError};
-        use async_trait::async_trait;
         use ego_security_sdk::context::SecurityContext;
         use ego_security_sdk::credential::Credential;
+        use ego_security_sdk::principal::Principal;
         use ego_security_sdk::AuthenticationError;
+        use ego_security_sdk::{AccessRequest, AuthorizationDecision, SecurityError};
 
         struct StubAuthn;
 

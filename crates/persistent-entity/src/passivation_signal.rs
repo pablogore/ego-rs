@@ -119,8 +119,7 @@ mod tests {
     async fn manual_signal_not_triggered_does_not_resolve() {
         let sig = ManualSignal::new();
         // The future should NOT resolve within a short window.
-        let result =
-            tokio::time::timeout(Duration::from_millis(20), sig.passivated()).await;
+        let result = tokio::time::timeout(Duration::from_millis(20), sig.passivated()).await;
         assert!(
             result.is_err(),
             "ManualSignal not triggered must not resolve"

@@ -53,7 +53,10 @@ impl CrossTenantPermit {
     // issuance (this framework-stage codebase has no application services yet).
     #[allow(dead_code)]
     pub(super) fn new(destination: TenantId, issued_to: SubjectId) -> Self {
-        Self { destination, issued_to }
+        Self {
+            destination,
+            issued_to,
+        }
     }
 
     /// The tenant this permit authorizes access to. Read by

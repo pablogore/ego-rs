@@ -154,7 +154,9 @@ fn body_references_tenant_identifier(block: &syn::Block) -> bool {
 /// Pass 1: `trait_name -> method_name -> has_tenant_scoped`, for every method
 /// carrying `#[operation]` (the only methods the runtime treats as tenant
 /// classification targets at all).
-fn collect_trait_operations(files: &[(String, syn::File)]) -> HashMap<String, HashMap<String, bool>> {
+fn collect_trait_operations(
+    files: &[(String, syn::File)],
+) -> HashMap<String, HashMap<String, bool>> {
     let mut trait_ops: HashMap<String, HashMap<String, bool>> = HashMap::new();
     for (_, file) in files {
         let mut on_trait = |t: &ItemTrait| {
@@ -513,8 +515,14 @@ fn tenant_scoped_lint_allows_marked_operation_reading_resolved_tenant() {
 /// runtime's tenant-resolution/enforcement path. Deliberately narrow, same
 /// best-effort spirit as `TENANT_IDENTIFIERS` above — this is a structural
 /// smoke check, not a full dependency-graph audit.
-const TRANSPORT_IDENTIFIERS: [&str; 6] =
-    ["axum", "tonic", "hyper", "HeaderMap", "grpc", "http::header"];
+const TRANSPORT_IDENTIFIERS: [&str; 6] = [
+    "axum",
+    "tonic",
+    "hyper",
+    "HeaderMap",
+    "grpc",
+    "http::header",
+];
 
 /// FR-007: the runtime's tenant-resolution seam (`runtime/tenant.rs`) and the
 /// enforcement path it feeds (`runtime_builder.rs`) MUST reference no

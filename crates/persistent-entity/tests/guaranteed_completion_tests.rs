@@ -101,7 +101,10 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
         panic!("guaranteed_completion_tests: intentional panic during recovery load()");
     }
 
-    fn list_aggregate_ids(&self, _tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        _tenant_id: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
         Ok(Vec::new())
     }
 }
@@ -114,12 +117,11 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
 #[tokio::test]
 async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
     let load_calls = Arc::new(AtomicUsize::new(0));
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
-        PanicOnLoadEventStore {
+    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(Mutex::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
             release_panic: None,
-        },
-    ));
+        }));
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
         .passivation_timeout(Duration::from_secs(3600))
@@ -210,11 +212,17 @@ impl PersistentEntity for PanicOnBoomHandler {
     ) -> Result<Vec<TestEvent>, EntityError> {
         match command {
             ProbeCommand::Noop => Ok(vec![TestEvent::incremented(1)]),
-            ProbeCommand::Boom => panic!("guaranteed_completion_tests: intentional panic mid-drain"),
+            ProbeCommand::Boom => {
+                panic!("guaranteed_completion_tests: intentional panic mid-drain")
+            }
         }
     }
 
-    async fn apply_event(&self, state: &TestState, event: &TestEvent) -> Result<TestState, EntityError> {
+    async fn apply_event(
+        &self,
+        state: &TestState,
+        event: &TestEvent,
+    ) -> Result<TestState, EntityError> {
         let value = match event {
             TestEvent::Incremented(v) => state.value + v,
             TestEvent::Decremented(v) => state.value.saturating_sub(*v),
@@ -225,7 +233,11 @@ impl PersistentEntity for PanicOnBoomHandler {
         })
     }
 
-    async fn apply_events(&self, state: &TestState, events: &[TestEvent]) -> Result<TestState, EntityError> {
+    async fn apply_events(
+        &self,
+        state: &TestState,
+        events: &[TestEvent],
+    ) -> Result<TestState, EntityError> {
         let mut s = state.clone();
         for event in events {
             s = self.apply_event(&s, event).await?;
@@ -275,8 +287,9 @@ async fn panic_mid_processing_after_real_successes_answers_the_remainder() {
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
 
-    let handler: Arc<dyn PersistentEntity<Command = ProbeCommand, Event = TestEvent, State = TestState>> =
-        Arc::new(PanicOnBoomHandler);
+    let handler: Arc<
+        dyn PersistentEntity<Command = ProbeCommand, Event = TestEvent, State = TestState>,
+    > = Arc::new(PanicOnBoomHandler);
 
     let triple = EntityTriple::new("default".to_string(), "probe", "mid-drain-1");
     let aggregate_id = triple.aggregate_id();
@@ -455,7 +468,8 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
     // so `tokio::time::timeout`'s internal timer registers against
     // `checker_rt`'s own ambient context rather than whatever (possibly
     // absent) context is active on the calling thread.
-    let outcome = checker_rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), rx).await });
+    let outcome =
+        checker_rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), rx).await });
 
     let resolved =
         outcome.expect("FR-009: the already-enqueued caller must not hang after runtime shutdown");
@@ -485,12 +499,11 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
 async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_once() {
     let load_calls = Arc::new(AtomicUsize::new(0));
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
-        PanicOnLoadEventStore {
+    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(Mutex::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
             release_panic: Some(release_rx),
-        },
-    ));
+        }));
 
     let runtime = Arc::new(
         EntityRuntimeBuilder::<TestEvent>::new()
@@ -514,7 +527,10 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
                 .unwrap();
             tokio::time::timeout(
                 Duration::from_secs(10),
-                entity_ref.send_command(TestCommand::Increment((i + 1) as u64), create_test_context()),
+                entity_ref.send_command(
+                    TestCommand::Increment((i + 1) as u64),
+                    create_test_context(),
+                ),
             )
             .await
             .expect("FR-009: every one of the 20 callers must eventually resolve, not hang")
@@ -634,7 +650,11 @@ impl PersistentEntity for MismatchHandler {
         Ok(vec![])
     }
 
-    async fn apply_event(&self, state: &MismatchState, _event: &TestEvent) -> Result<MismatchState, EntityError> {
+    async fn apply_event(
+        &self,
+        state: &MismatchState,
+        _event: &TestEvent,
+    ) -> Result<MismatchState, EntityError> {
         Ok(state.clone())
     }
 
@@ -680,7 +700,11 @@ async fn downcast_mismatch_never_blocks_or_disturbs_other_triples() {
     for _ in 0..20 {
         let rt = runtime.clone();
         mismatch_handles.push(tokio::spawn(async move {
-            rt.entity_ref::<MismatchCommand, MismatchState>("probe", "mismatch-1", Arc::new(MismatchHandler))
+            rt.entity_ref::<MismatchCommand, MismatchState>(
+                "probe",
+                "mismatch-1",
+                Arc::new(MismatchHandler),
+            )
         }));
     }
 
@@ -722,9 +746,13 @@ async fn downcast_mismatch_never_blocks_or_disturbs_other_triples() {
         );
     }
     for handle in other_handles {
-        let outcome: Result<CommandResult<TestEvent, TestState>, EntityError> =
-            handle.await.expect("other-triple task must not itself panic");
-        assert!(outcome.is_ok(), "an unrelated triple must activate normally: {outcome:?}");
+        let outcome: Result<CommandResult<TestEvent, TestState>, EntityError> = handle
+            .await
+            .expect("other-triple task must not itself panic");
+        assert!(
+            outcome.is_ok(),
+            "an unrelated triple must activate normally: {outcome:?}"
+        );
     }
 
     let after: CommandResult<TestEvent, TestState> = original_ref
@@ -761,7 +789,10 @@ async fn downcast_mismatch_never_blocks_or_disturbs_other_triples() {
 async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
     let registry = Arc::new(EntityRegistry::new());
     let bad_ids: Vec<String> = (0..10)
-        .map(|i| EntityTriple::new("default".to_string(), "probe", format!("no-runtime-{i}")).aggregate_id())
+        .map(|i| {
+            EntityTriple::new("default".to_string(), "probe", format!("no-runtime-{i}"))
+                .aggregate_id()
+        })
         .collect();
 
     let mut bad_handles = Vec::with_capacity(10);
@@ -817,7 +848,10 @@ async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
     for (i, handle) in good_handles.into_iter().enumerate() {
         let outcome: Result<CommandResult<TestEvent, TestState>, EntityError> =
             handle.join().expect("good thread must not itself panic");
-        assert!(outcome.is_ok(), "good thread {i} must activate its triple normally: {outcome:?}");
+        assert!(
+            outcome.is_ok(),
+            "good thread {i} must activate its triple normally: {outcome:?}"
+        );
     }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -881,12 +915,17 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
             // a sleep. Blocks this one Tokio worker thread; the other 7
             // (`worker_threads = 8`) keep servicing the 100 caller tasks.
             let _ = self.release_panic.recv();
-            panic!("guaranteed_completion_tests: intentional panic on the FIRST recovery attempt only");
+            panic!(
+                "guaranteed_completion_tests: intentional panic on the FIRST recovery attempt only"
+            );
         }
         Ok(Vec::new())
     }
 
-    fn list_aggregate_ids(&self, _tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        _tenant_id: Option<&str>,
+    ) -> Result<Vec<String>, PersistenceError> {
         Ok(Vec::new())
     }
 }
@@ -915,12 +954,11 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
 async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() {
     let load_calls = Arc::new(AtomicUsize::new(0));
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> = Arc::new(Mutex::new(
-        GatedPanicOnceEventStore {
+    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(Mutex::new(GatedPanicOnceEventStore {
             load_calls: load_calls.clone(),
             release_panic: release_rx,
-        },
-    ));
+        }));
 
     let runtime = Arc::new(
         EntityRuntimeBuilder::<TestEvent>::new()
@@ -947,7 +985,10 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
                 .unwrap();
             tokio::time::timeout(
                 Duration::from_secs(10),
-                entity_ref.send_command(TestCommand::Increment((i + 1) as u64), create_test_context()),
+                entity_ref.send_command(
+                    TestCommand::Increment((i + 1) as u64),
+                    create_test_context(),
+                ),
             )
             .await
             .expect("FR-009: every one of the 100 callers must eventually resolve, not hang")

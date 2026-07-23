@@ -118,7 +118,9 @@ fn make_proxy(
 ) -> (Runtime, TenantContractServiceRef) {
     let inner: Arc<dyn TenantContractService> = service;
     let chain = Arc::new(InterceptorChain::new());
-    let rt = RuntimeBuilder::new().with_tenant_enforcement_mode(mode).build();
+    let rt = RuntimeBuilder::new()
+        .with_tenant_enforcement_mode(mode)
+        .build();
     let runtime_weak = Arc::downgrade(rt.inner());
     let proxy = TenantContractServiceRef::new(inner, chain, runtime_weak);
     (rt, proxy)
@@ -188,7 +190,10 @@ async fn caller_supplied_tenant_conflicting_with_principal_is_tenant_mismatch() 
             assert_eq!(expected, "tenant-a");
             assert_eq!(actual, "tenant-b");
         }
-        other => panic!("expected TenantMismatch{{tenant-a, tenant-b}}, got: {:?}", other),
+        other => panic!(
+            "expected TenantMismatch{{tenant-a, tenant-b}}, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -278,7 +283,9 @@ async fn divergent_ingress_values_converge_to_one_authoritative_value() {
 fn direct_tenant_mutation_cannot_override_derived_authenticated_tenant() {
     let rt = RuntimeBuilder::new().build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
-    rt.inner().enforce_tenant(&mut ctx).expect("resolves to tenant-a");
+    rt.inner()
+        .enforce_tenant(&mut ctx)
+        .expect("resolves to tenant-a");
 
     // Mutating the hint field via `with_tenant_id` never touches
     // `resolved_tenant` (AD-011: no public setter exists for it) — the
@@ -286,7 +293,10 @@ fn direct_tenant_mutation_cannot_override_derived_authenticated_tenant() {
     let mutated = ctx.with_tenant_id("tenant-b");
 
     assert_eq!(
-        mutated.canonical_tenant().and_then(|c| c.tenant_id()).map(|t| t.as_str()),
+        mutated
+            .canonical_tenant()
+            .and_then(|c| c.tenant_id())
+            .map(|t| t.as_str()),
         Some("tenant-a"),
         "a mutation attempt must never be treated as authoritative for enforcement (FR-010)"
     );
@@ -296,7 +306,9 @@ fn direct_tenant_mutation_cannot_override_derived_authenticated_tenant() {
 fn downstream_mutation_attempt_does_not_affect_operation_already_in_progress() {
     let rt = RuntimeBuilder::new().build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
-    rt.inner().enforce_tenant(&mut ctx).expect("resolves to tenant-a");
+    rt.inner()
+        .enforce_tenant(&mut ctx)
+        .expect("resolves to tenant-a");
 
     // Simulate downstream code holding a clone of the in-progress context and
     // attempting to alter the tenant it sees.
@@ -304,7 +316,9 @@ fn downstream_mutation_attempt_does_not_affect_operation_already_in_progress() {
     let altered = downstream_clone.with_tenant_id("tenant-c");
 
     assert_eq!(
-        ctx.canonical_tenant().and_then(|c| c.tenant_id()).map(|t| t.as_str()),
+        ctx.canonical_tenant()
+            .and_then(|c| c.tenant_id())
+            .map(|t| t.as_str()),
         Some("tenant-a"),
         "the original in-progress operation must keep observing the original canonical tenant"
     );
@@ -329,7 +343,10 @@ async fn tenant_mismatch_and_missing_context_are_independently_reachable_and_dis
 
     let (_rt1, proxy1) = make_proxy(service.clone(), TenantEnforcementMode::AuthenticatedOnly);
     let mismatch_result = proxy1
-        .scoped_op(authenticated_ctx_with_hint(Some("tenant-a"), Some("tenant-b")))
+        .scoped_op(authenticated_ctx_with_hint(
+            Some("tenant-a"),
+            Some("tenant-b"),
+        ))
         .await;
 
     let (_rt2, proxy2) = make_proxy(service, TenantEnforcementMode::AuthenticatedOnly);

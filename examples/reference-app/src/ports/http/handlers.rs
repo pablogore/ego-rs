@@ -10,7 +10,9 @@ use ego_service_sdk::context::ServiceContext;
 use ego_transport::{AppState, AuthenticatedContext, TraceContextExtractor, TransportError};
 use kitlogger_log_domain::Severity;
 
-use crate::application::{RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserTag};
+use crate::application::{
+    RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserTag,
+};
 use crate::read_side::{TenantUsersView, UsersByTenantStore};
 
 /// Best-effort text log through the kit-config-materialized logger
@@ -63,7 +65,11 @@ pub async fn register_handler(
     TraceContextExtractor(trace_context): TraceContextExtractor,
     Json(input): Json<RegisterInput>,
 ) -> Result<(StatusCode, Json<RegisterOutput>), TransportError> {
-    log(&state, Severity::Info, &format!("POST /register: user_id={}", input.user_id));
+    log(
+        &state,
+        Severity::Info,
+        &format!("POST /register: user_id={}", input.user_id),
+    );
 
     let proxy = state
         .runtime
@@ -78,11 +84,19 @@ pub async fn register_handler(
     let user_id = input.user_id.clone();
     match proxy.register(ctx, input).await {
         Ok(output) => {
-            log(&state, Severity::Info, &format!("register_user.success: user_id={user_id}"));
+            log(
+                &state,
+                Severity::Info,
+                &format!("register_user.success: user_id={user_id}"),
+            );
             Ok((StatusCode::CREATED, Json(output)))
         }
         Err(err) => {
-            log(&state, Severity::Error, &format!("register_user.failure: user_id={user_id} error={err}"));
+            log(
+                &state,
+                Severity::Error,
+                &format!("register_user.failure: user_id={user_id} error={err}"),
+            );
             Err(map_register_error(err))
         }
     }
@@ -114,7 +128,9 @@ pub async fn users_by_tenant_handler(
     Path(tenant_id): Path<String>,
 ) -> Result<Json<TenantUsersView>, TransportError> {
     match security.principal().tenant_id.as_ref() {
-        Some(principal_tenant) if principal_tenant.as_str() == tenant_id => Ok(Json(store.view(&tenant_id))),
+        Some(principal_tenant) if principal_tenant.as_str() == tenant_id => {
+            Ok(Json(store.view(&tenant_id)))
+        }
         _ => Err(TransportError::Forbidden),
     }
 }
@@ -133,16 +149,34 @@ mod tests {
     #[test]
     fn security_denials_map_through_the_granular_transport_table() {
         let cases = [
-            (SecurityError::AuthenticationFailed("x".into()), StatusCode::UNAUTHORIZED),
-            (SecurityError::MissingContext, StatusCode::UNAUTHORIZED),
-            (SecurityError::CapabilityNotEnabled, StatusCode::INTERNAL_SERVER_ERROR),
-            (SecurityError::ProviderError("x".into()), StatusCode::INTERNAL_SERVER_ERROR),
-            (SecurityError::AuthorizationDenied { reason: "x".into() }, StatusCode::FORBIDDEN),
             (
-                SecurityError::TenantMismatch { expected: "a".into(), actual: "b".into() },
+                SecurityError::AuthenticationFailed("x".into()),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (SecurityError::MissingContext, StatusCode::UNAUTHORIZED),
+            (
+                SecurityError::CapabilityNotEnabled,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                SecurityError::ProviderError("x".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                SecurityError::AuthorizationDenied { reason: "x".into() },
                 StatusCode::FORBIDDEN,
             ),
-            (SecurityError::CrossTenantDenied { reason: "x".into() }, StatusCode::FORBIDDEN),
+            (
+                SecurityError::TenantMismatch {
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                SecurityError::CrossTenantDenied { reason: "x".into() },
+                StatusCode::FORBIDDEN,
+            ),
         ];
         for (security_err, expected) in cases {
             let err = RegisterUserError::Security(security_err);
@@ -153,6 +187,9 @@ mod tests {
     #[test]
     fn entity_write_failure_maps_to_internal() {
         let err = RegisterUserError::EntityWrite("boom".into());
-        assert_eq!(map_register_error(err).status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            map_register_error(err).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

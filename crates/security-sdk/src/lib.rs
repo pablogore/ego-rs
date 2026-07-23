@@ -23,19 +23,21 @@ pub mod principal_mapper;
 pub mod providers;
 
 pub use authentication::{AuthenticationInterceptor, AuthenticationProvider};
-pub use interceptor::Interceptor;
-pub use credential_extractor::{ApiKeyExtractor, BasicExtractor, BearerExtractor, CredentialExtractor, RequestContext};
-pub use principal_mapper::PrincipalMapper;
 pub use authorization::{
     authorize_in_context, AccessRequest, Action, AuthorizationDecision, AuthorizationProvider,
     Resource,
 };
 pub use context::SecurityContext;
 pub use credential::Credential;
+pub use credential_extractor::{
+    ApiKeyExtractor, BasicExtractor, BearerExtractor, CredentialExtractor, RequestContext,
+};
 pub use ego_domain::auth::{AuthenticationError, Claims, StandardClaims};
 pub use error::SecurityError;
+pub use interceptor::Interceptor;
 pub use policy::{InMemoryRoleStore, Permission, RoleStore};
 pub use principal::{Claim, Principal, PrincipalKind, Role, SubjectId};
+pub use principal_mapper::PrincipalMapper;
 #[cfg(feature = "dev-providers")]
 pub use providers::allow_all::AllowAllAuthorizationProvider;
 pub use providers::{

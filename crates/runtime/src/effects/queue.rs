@@ -471,7 +471,8 @@ mod tests {
     #[tokio::test]
     async fn old_position_keyed_pop_front_assigns_wrong_effects_timestamp_under_concurrent_senders()
     {
-        let pending_since: Arc<StdMutex<VecDeque<Instant>>> = Arc::new(StdMutex::new(VecDeque::new()));
+        let pending_since: Arc<StdMutex<VecDeque<Instant>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
         let (tx, mut rx) = mpsc::channel::<&'static str>(4);
 
         let release_b = Arc::new(Notify::new());
@@ -645,7 +646,8 @@ mod tests {
     /// from it — a permanent phantom entry once the sender resumes.
     #[tokio::test]
     async fn old_design_shape_permanently_desyncs_when_recv_races_sends_side_channel_update() {
-        let pending_since: Arc<StdMutex<VecDeque<Instant>>> = Arc::new(StdMutex::new(VecDeque::new()));
+        let pending_since: Arc<StdMutex<VecDeque<Instant>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
         let pause_before_push_back = Arc::new(Notify::new());
         let (tx, mut rx) = mpsc::channel::<Instant>(4);
 
@@ -667,7 +669,10 @@ mod tests {
         // structure — which, at this point, the paused sender above has not
         // yet pushed onto.
         let received = rx.recv().await;
-        assert!(received.is_some(), "the channel item is visible before the sender's side update");
+        assert!(
+            received.is_some(),
+            "the channel item is visible before the sender's side update"
+        );
         pending_since.lock().unwrap().pop_front();
 
         // Only now let the sender's delayed side-structure update run.

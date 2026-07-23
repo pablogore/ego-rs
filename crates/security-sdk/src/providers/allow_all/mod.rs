@@ -96,9 +96,7 @@ mod tests {
 
     #[test]
     fn crate_root_reexport_compiles() {
-        let _: Arc<dyn AuthorizationProvider> =
-            Arc::new(crate::AllowAllAuthorizationProvider);
-        let _: Arc<dyn AuthorizationProvider> =
-            Arc::new(crate::DenyAllAuthorizationProvider);
+        let _: Arc<dyn AuthorizationProvider> = Arc::new(crate::AllowAllAuthorizationProvider);
+        let _: Arc<dyn AuthorizationProvider> = Arc::new(crate::DenyAllAuthorizationProvider);
     }
 }

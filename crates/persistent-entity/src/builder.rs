@@ -62,7 +62,16 @@ pub struct EntityRuntimeBuilder<
     effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static> EntityRuntimeBuilder<E> {
+impl<
+        E: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
+    > EntityRuntimeBuilder<E>
+{
     pub fn new() -> Self {
         EntityRuntimeBuilder {
             mailbox_capacity: 1000,
@@ -130,10 +139,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
     }
 
     /// Inject a custom event store.  If not set, an [`InMemoryEventStore`] is used.
-    pub fn with_event_store(
-        mut self,
-        store: Arc<Mutex<dyn EventStore<E> + Send>>,
-    ) -> Self {
+    pub fn with_event_store(mut self, store: Arc<Mutex<dyn EventStore<E> + Send>>) -> Self {
         self.event_store = Some(store);
         self
     }
@@ -168,7 +174,9 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
     pub fn with_config(self, config: RuntimeConfig) -> Self {
         self.mailbox_capacity(config.mailbox_capacity)
             .concurrency_budget(config.concurrency_budget)
-            .passivation_timeout(std::time::Duration::from_secs(config.passivation_timeout_secs))
+            .passivation_timeout(std::time::Duration::from_secs(
+                config.passivation_timeout_secs,
+            ))
             .single_tenant(config.single_tenant_mode)
             .tenant_id(config.tenant_id)
     }
@@ -183,10 +191,7 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
     }
 
     /// Inject a custom snapshot store.  If not set, an [`InMemorySnapshotStore`] is used.
-    pub fn with_snapshot_store(
-        mut self,
-        store: Arc<Mutex<dyn Snapshot + Send>>,
-    ) -> Self {
+    pub fn with_snapshot_store(mut self, store: Arc<Mutex<dyn Snapshot + Send>>) -> Self {
         self.snapshot_store = Some(store);
         self
     }
@@ -271,8 +276,15 @@ impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + S
     }
 }
 
-impl<E: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static> Default
-    for EntityRuntimeBuilder<E>
+impl<
+        E: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
+    > Default for EntityRuntimeBuilder<E>
 {
     fn default() -> Self {
         Self::new()
@@ -327,17 +339,25 @@ mod tests {
             .passivation_timeout(std::time::Duration::from_millis(300))
             .snapshot_strategy(Arc::new(NoSnapshot))
             .build();
-        let handler: Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>> =
-            Arc::new(TestEntity::new());
+        let handler: Arc<
+            dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>,
+        > = Arc::new(TestEntity::new());
 
         let entity_ref = runtime
             .entity_ref::<TestCommand, TestState>("test", "regression-entity", handler)
             .unwrap();
         let _: CommandResult<TestEvent, TestState> = entity_ref
-            .send_command(TestCommand::Increment(1), CommandContext::new("test".to_string()))
+            .send_command(
+                TestCommand::Increment(1),
+                CommandContext::new("test".to_string()),
+            )
             .await
             .unwrap();
-        assert_eq!(runtime.active_count(), 1, "freshly activated entity must be active");
+        assert_eq!(
+            runtime.active_count(),
+            1,
+            "freshly activated entity must be active"
+        );
 
         // Well under the configured 300ms timeout, the entity must still be
         // active — a truncated-to-zero timeout would have already passivated
@@ -381,7 +401,11 @@ mod tests {
             1,
             "a sub-second nonzero duration must round up to 1, never truncate to 0"
         );
-        assert_eq!(ceil_secs(std::time::Duration::from_secs(1)), 1, "an exact second stays exact");
+        assert_eq!(
+            ceil_secs(std::time::Duration::from_secs(1)),
+            1,
+            "an exact second stays exact"
+        );
         assert_eq!(
             ceil_secs(std::time::Duration::from_millis(1500)),
             2,

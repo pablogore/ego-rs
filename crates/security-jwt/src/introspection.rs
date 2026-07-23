@@ -146,11 +146,17 @@ impl IntrospectionProvider for HttpIntrospectionProvider {
         })?;
 
         if !raw.active {
-            return Ok(IntrospectionResult { active: false, claims: None });
+            return Ok(IntrospectionResult {
+                active: false,
+                claims: None,
+            });
         }
 
         let claim_set = crate::principal_mapper::claims_map_to_claim_set(raw.claims);
-        Ok(IntrospectionResult { active: true, claims: Some(claim_set) })
+        Ok(IntrospectionResult {
+            active: true,
+            claims: Some(claim_set),
+        })
     }
 }
 
@@ -220,7 +226,12 @@ impl IntrospectionAuthenticationProvider {
         clock: Arc<dyn Clock>,
         mapper: Arc<dyn PrincipalMapper>,
     ) -> Result<Self, AuthenticationError> {
-        Self::with_provider(config, clock, mapper, Arc::new(HttpIntrospectionProvider::new()))
+        Self::with_provider(
+            config,
+            clock,
+            mapper,
+            Arc::new(HttpIntrospectionProvider::new()),
+        )
     }
 
     /// Construct with a custom `IntrospectionProvider` (use `FakeIntrospection` in tests).
@@ -231,17 +242,13 @@ impl IntrospectionAuthenticationProvider {
         provider: Arc<dyn IntrospectionProvider>,
     ) -> Result<Self, AuthenticationError> {
         let endpoint = config.introspection_endpoint.ok_or_else(|| {
-            AuthenticationError::ProviderUnavailable(
-                "introspection_endpoint is required".into(),
-            )
+            AuthenticationError::ProviderUnavailable("introspection_endpoint is required".into())
         })?;
 
         crate::oidc_config::validate_url_requires_https(&endpoint, "introspection_endpoint")?;
 
         let client_id = config.introspection_client_id.ok_or_else(|| {
-            AuthenticationError::ProviderUnavailable(
-                "introspection_client_id is required".into(),
-            )
+            AuthenticationError::ProviderUnavailable("introspection_client_id is required".into())
         })?;
         let client_secret = config.introspection_client_secret.ok_or_else(|| {
             AuthenticationError::ProviderUnavailable(
@@ -249,23 +256,36 @@ impl IntrospectionAuthenticationProvider {
             )
         })?;
 
-        let credentials = ClientCredentials { client_id, client_secret };
+        let credentials = ClientCredentials {
+            client_id,
+            client_secret,
+        };
 
         const MAX_CACHE_TTL: u64 = 300;
-        let cache = config.introspection_cache_ttl_seconds.map(|ttl| -> Result<_, AuthenticationError> {
-            if ttl == 0 || ttl > MAX_CACHE_TTL {
-                return Err(AuthenticationError::ProviderUnavailable(format!(
-                    "introspection_cache_ttl_seconds must be 1..={MAX_CACHE_TTL}"
-                )));
-            }
-            Ok((
-                ttl,
-                Arc::new(RwLock::new(HashMap::new())),
-                Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-            ))
-        }).transpose()?;
+        let cache = config
+            .introspection_cache_ttl_seconds
+            .map(|ttl| -> Result<_, AuthenticationError> {
+                if ttl == 0 || ttl > MAX_CACHE_TTL {
+                    return Err(AuthenticationError::ProviderUnavailable(format!(
+                        "introspection_cache_ttl_seconds must be 1..={MAX_CACHE_TTL}"
+                    )));
+                }
+                Ok((
+                    ttl,
+                    Arc::new(RwLock::new(HashMap::new())),
+                    Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+                ))
+            })
+            .transpose()?;
 
-        Ok(Self { provider, endpoint, credentials, mapper, cache, clock })
+        Ok(Self {
+            provider,
+            endpoint,
+            credentials,
+            mapper,
+            cache,
+            clock,
+        })
     }
 
     fn call_introspect(&self, token: &str) -> Result<IntrospectionResult, AuthenticationError> {
@@ -278,10 +298,17 @@ impl IntrospectionAuthenticationProvider {
         let token_owned = token.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         resolver_pool().spawn_ok(async move {
-            let _ = tx.send(provider_ref.introspect(&token_owned, &endpoint_ref, &creds).await);
+            let _ = tx.send(
+                provider_ref
+                    .introspect(&token_owned, &endpoint_ref, &creds)
+                    .await,
+            );
         });
-        rx.recv()
-            .map_err(|_| AuthenticationError::ProviderUnavailable("introspection did not complete (pool exhausted or task dropped)".into()))?
+        rx.recv().map_err(|_| {
+            AuthenticationError::ProviderUnavailable(
+                "introspection did not complete (pool exhausted or task dropped)".into(),
+            )
+        })?
     }
 }
 
@@ -292,7 +319,11 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
     ) -> Result<SecurityContext, AuthenticationError> {
         let token = match credential {
             Credential::Bearer(t) => t.as_str(),
-            _ => return Err(AuthenticationError::InvalidToken("unsupported credential type".into())),
+            _ => {
+                return Err(AuthenticationError::InvalidToken(
+                    "unsupported credential type".into(),
+                ))
+            }
         };
 
         // Pre-check: token too large (INV per spec)
@@ -310,7 +341,8 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
             let guard = cache.read().expect("introspection cache poisoned");
             if let Some((inserted_at, ctx)) = guard.get(&key) {
                 // B-3: avoid i64/u64 cast; compare with u64 arithmetic instead.
-                let age_u64 = u64::try_from(now_ts.saturating_sub(*inserted_at)).unwrap_or(u64::MAX);
+                let age_u64 =
+                    u64::try_from(now_ts.saturating_sub(*inserted_at)).unwrap_or(u64::MAX);
                 if age_u64 < *ttl {
                     return Ok(ctx.clone());
                 }
@@ -321,7 +353,9 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
         let result = self.call_introspect(token)?;
 
         if !result.active {
-            return Err(AuthenticationError::InvalidToken("token is not active".into()));
+            return Err(AuthenticationError::InvalidToken(
+                "token is not active".into(),
+            ));
         }
 
         let claim_set = result.claims.ok_or_else(|| {
@@ -345,7 +379,8 @@ impl AuthenticationProvider for IntrospectionAuthenticationProvider {
             // push only if the key is already present AND fresh (within TTL), to prevent
             // duplicate queue entries. Expired entries must still be overwritten.
             if let Some((inserted_at, existing_ctx)) = cache_guard.get(&key) {
-                let age_u64 = u64::try_from(now_ts.saturating_sub(*inserted_at)).unwrap_or(u64::MAX);
+                let age_u64 =
+                    u64::try_from(now_ts.saturating_sub(*inserted_at)).unwrap_or(u64::MAX);
                 if age_u64 < *cache_ttl {
                     return Ok(existing_ctx.clone());
                 }
@@ -416,7 +451,9 @@ mod tests {
     fn fixed_clock(ts: i64) -> Arc<dyn Clock> {
         struct FixedClock(chrono::DateTime<chrono::Utc>);
         impl Clock for FixedClock {
-            fn now(&self) -> chrono::DateTime<chrono::Utc> { self.0 }
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                self.0
+            }
         }
         Arc::new(FixedClock(chrono::DateTime::from_timestamp(ts, 0).unwrap()))
     }
@@ -455,7 +492,10 @@ mod tests {
         fn inactive() -> (Self, Arc<AtomicUsize>) {
             let count = Arc::new(AtomicUsize::new(0));
             let fake = Self {
-                response: IntrospectionResult { active: false, claims: None },
+                response: IntrospectionResult {
+                    active: false,
+                    claims: None,
+                },
                 count: Arc::clone(&count),
             };
             (fake, count)
@@ -489,7 +529,9 @@ mod tests {
             _: &url::Url,
             _: &ClientCredentials,
         ) -> Result<IntrospectionResult, AuthenticationError> {
-            Err(AuthenticationError::ProviderUnavailable("network error".into()))
+            Err(AuthenticationError::ProviderUnavailable(
+                "network error".into(),
+            ))
         }
     }
 
@@ -557,7 +599,11 @@ mod tests {
             .authenticate(&Credential::Bearer(huge_token))
             .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
-        assert_eq!(count.load(Ordering::SeqCst), 0, "no I/O should occur for large token");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "no I/O should occur for large token"
+        );
     }
 
     #[test]
@@ -570,9 +616,17 @@ mod tests {
             Arc::new(fake),
         )
         .unwrap();
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 2, "two calls when cache disabled");
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "two calls when cache disabled"
+        );
     }
 
     #[test]
@@ -585,9 +639,17 @@ mod tests {
             Arc::new(fake),
         )
         .unwrap();
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 1, "second call within TTL should be cached");
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "second call within TTL should be cached"
+        );
     }
 
     #[test]
@@ -615,15 +677,23 @@ mod tests {
         .unwrap();
 
         // First call — cache miss, provider called once, result stored.
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         // Advance past TTL (60 s → expired at T+61).
         *ts.write().unwrap() += 61;
 
         // Second call — cache entry is expired, provider called again.
-        provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 2, "expired cache must trigger a second introspection call");
+        provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "expired cache must trigger a second introspection call"
+        );
     }
 
     #[test]
@@ -653,25 +723,47 @@ mod tests {
         // tok-0 gets ts=T+0 (oldest), tok-4 gets ts=T+4 (newest before new entry).
         for i in 0..MAX_INTROSPECTION_CACHE_ENTRIES {
             *ts.write().unwrap() = 1_000_000 + i as i64;
-            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+            provider
+                .authenticate(&Credential::Bearer(format!("tok-{i}")))
+                .unwrap();
         }
-        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES, "fill: 5 calls");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            MAX_INTROSPECTION_CACHE_ENTRIES,
+            "fill: 5 calls"
+        );
 
         // Insert tok-new (ts=T+5) → evicts tok-0 (oldest at T+0), cache is still at capacity.
         *ts.write().unwrap() = 1_000_000 + MAX_INTROSPECTION_CACHE_ENTRIES as i64;
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES + 1, "tok-new: 1 call");
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            MAX_INTROSPECTION_CACHE_ENTRIES + 1,
+            "tok-new: 1 call"
+        );
 
         // Verify tok-1 through tok-4 and tok-new are still cached (count must not increase).
         let before = count.load(Ordering::SeqCst);
         for i in 1..MAX_INTROSPECTION_CACHE_ENTRIES {
-            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+            provider
+                .authenticate(&Credential::Bearer(format!("tok-{i}")))
+                .unwrap();
         }
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), before, "tok-1..tok-4 and tok-new must still be cached");
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before,
+            "tok-1..tok-4 and tok-new must still be cached"
+        );
 
         // tok-0 was evicted — re-authenticating it causes a cache miss (count +1).
-        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
+        provider
+            .authenticate(&Credential::Bearer("tok-0".into()))
+            .unwrap();
         assert_eq!(
             count.load(Ordering::SeqCst),
             MAX_INTROSPECTION_CACHE_ENTRIES + 2,
@@ -711,7 +803,9 @@ mod tests {
         // Fill the cache with 4 tokens (leaving 1 slot free).
         for i in 0..4 {
             *ts.write().unwrap() = 1_000_000 + i as i64;
-            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+            provider
+                .authenticate(&Credential::Bearer(format!("tok-{i}")))
+                .unwrap();
         }
         assert_eq!(count.load(Ordering::SeqCst), 4);
 
@@ -721,8 +815,14 @@ mod tests {
         // Re-authenticate tok-0 — cache miss (expired), calls provider, re-inserts.
         // A new queue entry (tok-0-key, T+61) is pushed; the old entry (tok-0-key, T+0)
         // remains in the queue but is now a ghost (its queued_at != new inserted_at).
-        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 5, "tok-0 re-auth must call provider (expired)");
+        provider
+            .authenticate(&Credential::Bearer("tok-0".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            5,
+            "tok-0 re-auth must call provider (expired)"
+        );
 
         // Cache now has 5 entries (tok-0 re-inserted, tok-1..tok-3 still live, 1 slot was free).
         // Insert tok-new → triggers FIFO eviction. The queue front is the ghost for tok-0
@@ -730,19 +830,37 @@ mod tests {
         // (live, queued_at matches) — tok-1 is evicted.
         // The key invariant: tok-0 (re-inserted most recently) must still be present.
         *ts.write().unwrap() = 1_000_000 + 62;
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 6, "tok-new must be a cache miss");
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            6,
+            "tok-new must be a cache miss"
+        );
 
         // tok-0 was re-inserted after tok-1..tok-3, so its position in the queue is AFTER them.
         // tok-new was just inserted — it is present.
         // Verify tok-new is cached (no extra call).
         let before = count.load(Ordering::SeqCst);
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), before, "tok-new must be cached");
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before,
+            "tok-new must be cached"
+        );
 
         // tok-0 must also still be cached (re-auth was the most recent insertion).
-        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), before, "tok-0 must still be cached after re-auth");
+        provider
+            .authenticate(&Credential::Bearer("tok-0".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before,
+            "tok-0 must still be cached after re-auth"
+        );
     }
 
     // After TTL expiry and re-insertion, tok-0's ghost queue entry is skipped during eviction.
@@ -774,9 +892,14 @@ mod tests {
         // Fill cache to capacity (5 entries): tok-0..tok-4
         for i in 0..MAX_INTROSPECTION_CACHE_ENTRIES {
             *ts.write().unwrap() = 1_000_000 + i as i64;
-            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+            provider
+                .authenticate(&Credential::Bearer(format!("tok-{i}")))
+                .unwrap();
         }
-        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            MAX_INTROSPECTION_CACHE_ENTRIES
+        );
 
         // Advance past TTL so tok-0 expires (inserted at T+0, TTL=60, now=T+61).
         *ts.write().unwrap() = 1_000_000 + 61;
@@ -784,24 +907,46 @@ mod tests {
         // Re-authenticate tok-0 — cache miss (expired), re-inserts with new timestamp T+61.
         // tok-0's ghost queue entry (queued_at=T+0) remains but will be skipped during eviction
         // because its timestamp no longer matches the live entry's inserted_at (T+61).
-        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES + 1);
+        provider
+            .authenticate(&Credential::Bearer("tok-0".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            MAX_INTROSPECTION_CACHE_ENTRIES + 1
+        );
 
         // Insert tok-new → triggers eviction.
         // Queue front: ghost for tok-0 (queued_at=T+0 != live inserted_at=T+61) — skip.
         // Next: tok-1 (queued_at=T+1, live inserted_at=T+1 — match) — evict tok-1.
         *ts.write().unwrap() = 1_000_000 + 62;
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), MAX_INTROSPECTION_CACHE_ENTRIES + 2);
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            MAX_INTROSPECTION_CACHE_ENTRIES + 2
+        );
 
         // tok-0 must still be cached (re-inserted most recently among existing tokens).
         let before = count.load(Ordering::SeqCst);
-        provider.authenticate(&Credential::Bearer("tok-0".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), before, "tok-0 must still be cached — it was re-inserted after tok-1..tok-4");
+        provider
+            .authenticate(&Credential::Bearer("tok-0".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before,
+            "tok-0 must still be cached — it was re-inserted after tok-1..tok-4"
+        );
 
         // tok-new must still be cached.
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), before, "tok-new must still be cached");
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before,
+            "tok-new must still be cached"
+        );
     }
 
     #[test]
@@ -816,7 +961,10 @@ mod tests {
                 _: &url::Url,
                 _: &ClientCredentials,
             ) -> Result<IntrospectionResult, AuthenticationError> {
-                Ok(IntrospectionResult { active: true, claims: None })
+                Ok(IntrospectionResult {
+                    active: true,
+                    claims: None,
+                })
             }
         }
 
@@ -866,13 +1014,17 @@ mod tests {
         // Fill cache at the same timestamp (all tied).
         // MAX_INTROSPECTION_CACHE_ENTRIES == 5 in test mode.
         for i in 0..MAX_INTROSPECTION_CACHE_ENTRIES {
-            provider.authenticate(&Credential::Bearer(format!("tok-{i}"))).unwrap();
+            provider
+                .authenticate(&Credential::Bearer(format!("tok-{i}")))
+                .unwrap();
         }
 
         // Insert tok-new at the same timestamp → must evict the deterministically chosen minimum.
         // We don't care WHICH one is chosen, only that it is the same one on every run
         // (i.e., that the code doesn't panic or evict all entries).
-        provider.authenticate(&Credential::Bearer("tok-new".into())).unwrap();
+        provider
+            .authenticate(&Credential::Bearer("tok-new".into()))
+            .unwrap();
 
         // Cache must still be at capacity (one evicted, one inserted).
         // We cannot inspect the cache directly here, but a second insertion of a known token
@@ -889,9 +1041,13 @@ mod tests {
         // Stress: fill and evict twice; if eviction panics this test fails.
         for _ in 0..2 {
             for i in 0..MAX_INTROSPECTION_CACHE_ENTRIES {
-                provider2.authenticate(&Credential::Bearer(format!("stress-{i}"))).unwrap();
+                provider2
+                    .authenticate(&Credential::Bearer(format!("stress-{i}")))
+                    .unwrap();
             }
-            provider2.authenticate(&Credential::Bearer("stress-new".into())).unwrap();
+            provider2
+                .authenticate(&Credential::Bearer("stress-new".into()))
+                .unwrap();
         }
         // count2 should be exactly MAX*2+2 — every unique token causes one introspection call
         // (cache only helps for repeated tokens; we used unique ones each iteration)

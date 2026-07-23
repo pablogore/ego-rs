@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use ego_testkit::{PrincipalBuilder, ServiceTestFixture};
 use reference_app::application::{RegisterInput, RegisterUser, RegisterUserTag};
-use reference_app::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore, UsersByTenantStore};
+use reference_app::read_side::{
+    ReadSideHandles, ReadSideSink, SharedReadSideStore, UsersByTenantStore,
+};
 
 fn input(user_id: &str, email: &str, tenant_id: &str, org_name: &str) -> RegisterInput {
     RegisterInput {
@@ -35,10 +37,15 @@ async fn register(store: &SharedReadSideStore, tenant_id: &str, input: RegisterI
         .expect("registration succeeds")
         .principal(principal)
         .build();
-    let proxy = fixture.resolve::<RegisterUserTag>().expect("registered tag resolves");
+    let proxy = fixture
+        .resolve::<RegisterUserTag>()
+        .expect("registered tag resolves");
     let ctx = fixture.context().with_tenant_id(tenant_id);
 
-    proxy.register(ctx, input).await.expect("registration succeeds");
+    proxy
+        .register(ctx, input)
+        .await
+        .expect("registration succeeds");
 }
 
 /// Polls `condition` until true or `timeout` elapses — the scheduler is a
@@ -47,7 +54,10 @@ async fn register(store: &SharedReadSideStore, tenant_id: &str, input: RegisterI
 async fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     while !condition() {
-        assert!(tokio::time::Instant::now() < deadline, "condition was not met within {timeout:?}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition was not met within {timeout:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -55,7 +65,12 @@ async fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) {
 #[tokio::test]
 async fn projection_populates_from_real_registration_events_not_a_hand_built_read_model() {
     let store = SharedReadSideStore::new();
-    register(&store, "tenant-a", input("user-1", "user@example.com", "tenant-a", "Acme")).await;
+    register(
+        &store,
+        "tenant-a",
+        input("user-1", "user@example.com", "tenant-a", "Acme"),
+    )
+    .await;
 
     // The projection is constructed AFTER the write and reads only from the
     // shared store the write already populated — proving the read model
@@ -64,7 +79,11 @@ async fn projection_populates_from_real_registration_events_not_a_hand_built_rea
     let query: UsersByTenantStore = handles.query.clone();
     let runtime = handles.spawn();
 
-    wait_until(|| !query.view("tenant-a").users.is_empty(), Duration::from_secs(2)).await;
+    wait_until(
+        || !query.view("tenant-a").users.is_empty(),
+        Duration::from_secs(2),
+    )
+    .await;
     let _ = runtime.stop().await;
 
     let view = query.view("tenant-a");
@@ -77,14 +96,28 @@ async fn projection_populates_from_real_registration_events_not_a_hand_built_rea
 #[tokio::test]
 async fn query_returns_only_what_was_registered_for_that_tenant() {
     let store = SharedReadSideStore::new();
-    register(&store, "tenant-a", input("user-1", "a@example.com", "tenant-a", "Acme")).await;
-    register(&store, "tenant-b", input("user-2", "b@example.com", "tenant-b", "Globex")).await;
+    register(
+        &store,
+        "tenant-a",
+        input("user-1", "a@example.com", "tenant-a", "Acme"),
+    )
+    .await;
+    register(
+        &store,
+        "tenant-b",
+        input("user-2", "b@example.com", "tenant-b", "Globex"),
+    )
+    .await;
 
     let handles = ReadSideHandles::new(store);
     let query = handles.query.clone();
     let runtime = handles.spawn();
 
-    wait_until(|| !query.view("tenant-a").users.is_empty() && !query.view("tenant-b").users.is_empty(), Duration::from_secs(2)).await;
+    wait_until(
+        || !query.view("tenant-a").users.is_empty() && !query.view("tenant-b").users.is_empty(),
+        Duration::from_secs(2),
+    )
+    .await;
     let _ = runtime.stop().await;
 
     let tenant_a = query.view("tenant-a");
@@ -127,12 +160,22 @@ async fn projection_catches_up_past_the_first_poll_batch() {
         .expect("registration succeeds")
         .principal(principal)
         .build();
-    let proxy = fixture.resolve::<RegisterUserTag>().expect("registered tag resolves");
+    let proxy = fixture
+        .resolve::<RegisterUserTag>()
+        .expect("registered tag resolves");
     let ctx = fixture.context().with_tenant_id("tenant-a");
 
     for i in 1..=25 {
         proxy
-            .register(ctx.clone(), input(&format!("user-{i}"), &format!("user{i}@example.com"), "tenant-a", "Acme"))
+            .register(
+                ctx.clone(),
+                input(
+                    &format!("user-{i}"),
+                    &format!("user{i}@example.com"),
+                    "tenant-a",
+                    "Acme",
+                ),
+            )
             .await
             .expect("registration succeeds");
     }
@@ -141,7 +184,11 @@ async fn projection_catches_up_past_the_first_poll_batch() {
     let query = handles.query.clone();
     let runtime = handles.spawn();
 
-    wait_until(|| query.view("tenant-a").users.len() == 25, Duration::from_secs(5)).await;
+    wait_until(
+        || query.view("tenant-a").users.len() == 25,
+        Duration::from_secs(5),
+    )
+    .await;
     let _ = runtime.stop().await;
 
     assert_eq!(query.view("tenant-a").users.len(), 25);

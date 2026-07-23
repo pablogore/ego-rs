@@ -92,7 +92,11 @@ fn find_violations(root: &Path, files: &[PathBuf]) -> Vec<Violation> {
         let Ok(content) = std::fs::read_to_string(file) else {
             continue;
         };
-        let label = file.strip_prefix(root).unwrap_or(file).display().to_string();
+        let label = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .display()
+            .to_string();
         violations.extend(find_violations_in_source(&label, &content));
     }
     violations
@@ -112,9 +116,14 @@ fn no_handler_outside_pricing_lookup_rs_constructs_the_dogfood_provider_directly
 
     let mut files = Vec::new();
     collect_rs_files(&scan_dir, &mut files);
-    assert!(!files.is_empty(), "workspace scan found no .rs files — CWD/workspace-root resolution is broken");
     assert!(
-        files.iter().any(|f| f.file_name().and_then(|n| n.to_str()) == Some("pricing.rs")),
+        !files.is_empty(),
+        "workspace scan found no .rs files — CWD/workspace-root resolution is broken"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("pricing.rs")),
         "domain/pricing.rs — the file defining PricingEntity::handle_command — must be part of \
          the scanned set; if it's missing, this lint cannot see the one handler it exists to audit"
     );
@@ -145,7 +154,9 @@ fn pricing_lookup_rs_is_excluded_from_the_scan() {
     collect_rs_files(&root.join("examples/reference-app/src"), &mut files);
 
     assert!(
-        !files.iter().any(|f| f.file_name().and_then(|n| n.to_str()) == Some("pricing_lookup.rs")),
+        !files
+            .iter()
+            .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("pricing_lookup.rs")),
         "pricing_lookup.rs must be excluded from the scan by filename"
     );
 }

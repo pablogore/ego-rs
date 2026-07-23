@@ -51,16 +51,13 @@ fn provider_error_display_contains_no_vendor_name() {
 
 #[test]
 fn authentication_provider_error_is_neutral() {
-    use ego_security_sdk::context::SecurityContext;
     use ego_domain::auth::AuthenticationError;
+    use ego_security_sdk::context::SecurityContext;
 
     struct ErrorAuthProvider;
 
     impl AuthenticationProvider for ErrorAuthProvider {
-        fn authenticate(
-            &self,
-            _: &Credential,
-        ) -> Result<SecurityContext, AuthenticationError> {
+        fn authenticate(&self, _: &Credential) -> Result<SecurityContext, AuthenticationError> {
             Err(AuthenticationError::InvalidToken("provider error".into()))
         }
     }

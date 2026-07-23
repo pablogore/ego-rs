@@ -59,7 +59,9 @@ fn main() {
         vec![],
     )
     .expect("non-empty message");
-    logger.log_record(&record, None).expect("log_record succeeds");
+    logger
+        .log_record(&record, None)
+        .expect("log_record succeeds");
 
     // Runtime owns shutdown: flush-then-close, idempotent.
     runtime.shutdown().expect("shutdown succeeds");

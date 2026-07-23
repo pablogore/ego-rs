@@ -59,14 +59,19 @@ async fn describe_deliver_retry_then_dedup_through_the_real_actor_spawn_path() {
 
     // The real actor-spawning path: EntityRuntimeBuilder -> EntityRuntime ->
     // entity_ref() -> TokioEntityRef::new() -> tokio::spawn-ed EntityActor.
-    let user_runtime = Arc::new(EntityRuntimeBuilder::<UserRegistered>::new().with_effect_acceptor(acceptor).build());
+    let user_runtime = Arc::new(
+        EntityRuntimeBuilder::<UserRegistered>::new()
+            .with_effect_acceptor(acceptor)
+            .build(),
+    );
 
     let user_ref = user_runtime
         .entity_ref::<UserCommand, UserState>("user", "user-e2e-1", Arc::new(UserEntity::new()))
         .unwrap();
 
-    let result: Result<CommandResult<UserRegistered, UserState>, EntityError> =
-        user_ref.send_command(register_command("user-e2e-1"), ctx()).await;
+    let result: Result<CommandResult<UserRegistered, UserState>, EntityError> = user_ref
+        .send_command(register_command("user-e2e-1"), ctx())
+        .await;
     assert!(
         matches!(result, Ok(CommandResult::Events { .. })),
         "registration must succeed: {result:?}"
@@ -98,8 +103,9 @@ async fn describe_deliver_retry_then_dedup_through_the_real_actor_spawn_path() {
     // idempotency key (derived only from user_id, domain/user.rs) — the
     // second accept()'s effect must dedupe at the delivery runner, never
     // reach the executor a third time.
-    let second_result: Result<CommandResult<UserRegistered, UserState>, EntityError> =
-        user_ref.send_command(register_command("user-e2e-1"), ctx()).await;
+    let second_result: Result<CommandResult<UserRegistered, UserState>, EntityError> = user_ref
+        .send_command(register_command("user-e2e-1"), ctx())
+        .await;
     assert!(matches!(second_result, Ok(CommandResult::Events { .. })));
 
     // Give the single-consumer runner a bounded window to drain the second

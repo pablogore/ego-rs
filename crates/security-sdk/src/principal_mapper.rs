@@ -30,10 +30,10 @@ pub trait PrincipalMapper: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::principal::{Principal, PrincipalKind, SubjectId};
+    use ego_domain::auth::{ClaimSet, ClaimValue, Claims};
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use ego_domain::auth::{ClaimSet, ClaimValue, Claims};
-    use crate::principal::{Principal, PrincipalKind, SubjectId};
 
     // --- Object-safety and Send + Sync ---
 

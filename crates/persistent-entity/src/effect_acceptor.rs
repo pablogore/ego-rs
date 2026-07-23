@@ -140,7 +140,10 @@ mod tests {
         let tenant = TenantId::new("tenant-a").unwrap();
 
         acceptor
-            .accept(&tenant, vec![description("uow-1:0"), description("uow-1:1")])
+            .accept(
+                &tenant,
+                vec![description("uow-1:0"), description("uow-1:1")],
+            )
             .await
             .unwrap();
 
@@ -162,7 +165,10 @@ mod tests {
             failed_idempotency_key: IdempotencyKey::new("uow-1:0").unwrap(),
         };
 
-        assert!(matches!(retries, EffectAcceptanceError::RetriesExhausted { .. }));
+        assert!(matches!(
+            retries,
+            EffectAcceptanceError::RetriesExhausted { .. }
+        ));
         assert!(matches!(permanent, EffectAcceptanceError::Permanent { .. }));
         assert_ne!(retries, permanent);
         assert_eq!(
@@ -196,7 +202,10 @@ mod tests {
                 failed_idempotency_key,
                 ..
             } => {
-                assert_eq!(failed_at_index, 2, "the 3rd effect (index 2) is the one that failed");
+                assert_eq!(
+                    failed_at_index, 2,
+                    "the 3rd effect (index 2) is the one that failed"
+                );
                 assert_eq!(
                     failed_idempotency_key,
                     IdempotencyKey::new("uow-1:2").unwrap()

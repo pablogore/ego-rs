@@ -55,7 +55,10 @@ async fn cross_tenant_request_is_denied_and_no_entity_write_occurs() {
     let ctx = fixture.context().with_tenant_id("tenant-b");
     let result = proxy.register(ctx, input()).await;
 
-    assert!(result.is_err(), "expected tenant-scoping to deny the cross-tenant call");
+    assert!(
+        result.is_err(),
+        "expected tenant-scoping to deny the cross-tenant call"
+    );
 }
 
 // TASK-018: authorized + matching tenant -> success.

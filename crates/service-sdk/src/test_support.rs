@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ego_domain::{Level, Observability, SemanticEvent};
-use ego_security_sdk::authorization::{AccessRequest, AuthorizationDecision, AuthorizationProvider};
+use ego_security_sdk::authorization::{
+    AccessRequest, AuthorizationDecision, AuthorizationProvider,
+};
 use ego_security_sdk::context::SecurityContext;
 use ego_security_sdk::error::SecurityError;
 use ego_security_sdk::principal::{Principal, PrincipalKind, SubjectId};

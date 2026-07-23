@@ -17,7 +17,8 @@ pub trait AuthenticationProvider: Send + Sync {
     /// # Errors
     /// Returns [`AuthenticationError`] on invalid credentials, expired tokens,
     /// unsupported algorithms, missing required claims, or signature mismatch.
-    fn authenticate(&self, credential: &Credential) -> Result<SecurityContext, AuthenticationError>;
+    fn authenticate(&self, credential: &Credential)
+        -> Result<SecurityContext, AuthenticationError>;
 }
 
 #[cfg(test)]
@@ -74,7 +75,8 @@ mod tests {
                 &self,
                 _credential: &Credential,
             ) -> Result<SecurityContext, AuthenticationError> {
-                let principal = Principal::new(PrincipalKind::User, SubjectId::new("user:stub").unwrap());
+                let principal =
+                    Principal::new(PrincipalKind::User, SubjectId::new("user:stub").unwrap());
                 Ok(SecurityContext::empty(principal))
             }
         }

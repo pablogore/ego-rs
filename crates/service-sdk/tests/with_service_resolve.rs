@@ -19,9 +19,9 @@ use ego_service_sdk::error::{ServiceError, ServiceErrorTrait};
 use ego_service_sdk::registry::RegistryError;
 use ego_service_sdk::runtime::{RuntimeBuilder, RuntimeError};
 use ego_service_sdk::security::SecurityError;
+use ego_service_sdk_macros::service;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::{operation, tenant_scoped};
-use ego_service_sdk_macros::service;
 
 // ---------------------------------------------------------------------------
 // TASK-013: RuntimeBuilder::with_service registration
@@ -55,7 +55,10 @@ impl HelloService for OtherHelloServiceImpl {
 fn first_registration_for_a_tag_succeeds() {
     let inner: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
     let result = RuntimeBuilder::new().with_service::<HelloServiceTag>(inner);
-    assert!(result.is_ok(), "first registration for a fresh tag must succeed");
+    assert!(
+        result.is_ok(),
+        "first registration for a fresh tag must succeed"
+    );
 }
 
 #[tokio::test]
@@ -84,14 +87,17 @@ async fn duplicate_registration_is_rejected_and_the_original_remains_resolvable(
     // registry — build it and prove the ORIGINAL registration still resolves
     // and invokes correctly, not just that the registry was left unmutated in theory.
     let rt = snapshot_before_duplicate.build();
-    let proxy = rt
-        .resolve::<HelloServiceTag>()
-        .expect("the originally registered instance must remain resolvable after a rejected duplicate");
+    let proxy = rt.resolve::<HelloServiceTag>().expect(
+        "the originally registered instance must remain resolvable after a rejected duplicate",
+    );
     let out = proxy
         .greet(ServiceContext::new(), "world".to_string())
         .await
         .expect("the original instance must still be invokable, not the rejected duplicate");
-    assert_eq!(out, "hello, world", "must be HelloServiceImpl's output, not OtherHelloServiceImpl's \"other\"");
+    assert_eq!(
+        out, "hello, world",
+        "must be HelloServiceImpl's output, not OtherHelloServiceImpl's \"other\""
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +195,10 @@ async fn tenant_scoped_operation_resolved_via_resolve_still_fails_closed() {
     let result = proxy.greet(ServiceContext::new()).await;
 
     assert!(
-        matches!(result, Err(TenantHelloError::Security(SecurityError::MissingContext))),
+        matches!(
+            result,
+            Err(TenantHelloError::Security(SecurityError::MissingContext))
+        ),
         "tenant-scoped op resolved via `resolve` must fail closed with the same \
          SecurityError::MissingContext the hand-rolled path (tenant_scoped_codegen.rs) reports, \
          got {result:?}"

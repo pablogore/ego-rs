@@ -32,7 +32,10 @@ pub trait CredentialExtractor: Send + Sync {
     /// - `Ok(Some(credential))` — credential found and well-formed.
     /// - `Ok(None)` — no credential present (anonymous pass-through).
     /// - `Err(InvalidToken)` — header present but malformed.
-    fn extract(&self, request: &dyn RequestContext) -> Result<Option<Credential>, AuthenticationError>;
+    fn extract(
+        &self,
+        request: &dyn RequestContext,
+    ) -> Result<Option<Credential>, AuthenticationError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +50,10 @@ pub trait CredentialExtractor: Send + Sync {
 pub struct BearerExtractor;
 
 impl CredentialExtractor for BearerExtractor {
-    fn extract(&self, request: &dyn RequestContext) -> Result<Option<Credential>, AuthenticationError> {
+    fn extract(
+        &self,
+        request: &dyn RequestContext,
+    ) -> Result<Option<Credential>, AuthenticationError> {
         match request.header("authorization") {
             None => Ok(None),
             Some(val) => {
@@ -60,9 +66,11 @@ impl CredentialExtractor for BearerExtractor {
                     // Recover the token from the original val to preserve casing.
                     // offset = val.len() - token_lower.len() = 7 (len("bearer "))
                     let offset = val.len() - token_lower.len();
-                    let token = val.get(offset..).ok_or_else(|| AuthenticationError::InvalidToken(
-                        "Authorization header has invalid byte boundary".into(),
-                    ))?;
+                    let token = val.get(offset..).ok_or_else(|| {
+                        AuthenticationError::InvalidToken(
+                            "Authorization header has invalid byte boundary".into(),
+                        )
+                    })?;
                     // RFC 7230 §3.2.6: exactly one SP separates scheme from token.
                     // A leading space in the recovered token means the header had
                     // double-space ("Bearer  tok") — reject as malformed.
@@ -99,7 +107,10 @@ impl CredentialExtractor for BearerExtractor {
 pub struct BasicExtractor;
 
 impl CredentialExtractor for BasicExtractor {
-    fn extract(&self, request: &dyn RequestContext) -> Result<Option<Credential>, AuthenticationError> {
+    fn extract(
+        &self,
+        request: &dyn RequestContext,
+    ) -> Result<Option<Credential>, AuthenticationError> {
         match request.header("authorization") {
             None => Ok(None),
             Some(val) => {
@@ -110,9 +121,11 @@ impl CredentialExtractor for BasicExtractor {
                     return Ok(None);
                 }
                 // "basic " is 6 bytes; use get() as a panic defense against any non-ASCII byte.
-                let encoded = val.get(6..).ok_or_else(|| AuthenticationError::InvalidToken(
-                    "Authorization header has invalid byte boundary".into(),
-                ))?;
+                let encoded = val.get(6..).ok_or_else(|| {
+                    AuthenticationError::InvalidToken(
+                        "Authorization header has invalid byte boundary".into(),
+                    )
+                })?;
                 let decoded = base64_decode(encoded)?;
                 let text = String::from_utf8(decoded).map_err(|_| {
                     AuthenticationError::InvalidToken("Basic credential is not valid UTF-8".into())
@@ -148,7 +161,10 @@ pub struct ApiKeyExtractor {
 }
 
 impl CredentialExtractor for ApiKeyExtractor {
-    fn extract(&self, request: &dyn RequestContext) -> Result<Option<Credential>, AuthenticationError> {
+    fn extract(
+        &self,
+        request: &dyn RequestContext,
+    ) -> Result<Option<Credential>, AuthenticationError> {
         match request.header(&self.header_name) {
             None => Ok(None),
             Some("") => Err(AuthenticationError::InvalidToken(
@@ -196,8 +212,12 @@ mod tests {
         fn header(&self, name: &str) -> Option<&str> {
             self.headers.get(&name.to_lowercase()).map(String::as_str)
         }
-        fn metadata(&self, _: &str) -> Option<&str> { None }
-        fn query_param(&self, _: &str) -> Option<&str> { None }
+        fn metadata(&self, _: &str) -> Option<&str> {
+            None
+        }
+        fn query_param(&self, _: &str) -> Option<&str> {
+            None
+        }
     }
 
     // --- BearerExtractor ---
@@ -306,7 +326,10 @@ mod tests {
         match cred {
             Credential::Basic { username, secret } => {
                 assert_eq!(username, "user");
-                assert_eq!(secret, "pass:word", "password-with-colon must be preserved after first ':'");
+                assert_eq!(
+                    secret, "pass:word",
+                    "password-with-colon must be preserved after first ':'"
+                );
             }
             _ => panic!("expected Basic"),
         }
@@ -348,7 +371,9 @@ mod tests {
     #[test]
     fn api_key_extractor_reads_configured_header() {
         let ctx = MockRequestContext::new(&[("x-api-key", "my-secret-key")]);
-        let extractor = ApiKeyExtractor { header_name: "x-api-key".into() };
+        let extractor = ApiKeyExtractor {
+            header_name: "x-api-key".into(),
+        };
         let cred = extractor.extract(&ctx).unwrap().unwrap();
         assert!(matches!(cred, Credential::Bearer(ref t) if t == "my-secret-key"));
     }
@@ -356,7 +381,9 @@ mod tests {
     #[test]
     fn api_key_extractor_returns_none_when_header_absent() {
         let ctx = MockRequestContext::new(&[]);
-        let extractor = ApiKeyExtractor { header_name: "x-api-key".into() };
+        let extractor = ApiKeyExtractor {
+            header_name: "x-api-key".into(),
+        };
         assert!(extractor.extract(&ctx).unwrap().is_none());
     }
 
@@ -364,7 +391,9 @@ mod tests {
     #[test]
     fn api_key_extractor_rejects_empty_header_value() {
         let ctx = MockRequestContext::new(&[("x-api-key", "")]);
-        let extractor = ApiKeyExtractor { header_name: "x-api-key".into() };
+        let extractor = ApiKeyExtractor {
+            header_name: "x-api-key".into(),
+        };
         let err = extractor.extract(&ctx).unwrap_err();
         assert!(
             matches!(err, AuthenticationError::InvalidToken(_)),

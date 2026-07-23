@@ -23,7 +23,9 @@ use super::policy::{DeliveryConfig, RetryPolicy, RunnerMode};
 use super::queue::{EffectQueue, EffectQueueReceiver};
 use super::registry::ExecutorRegistry;
 use super::runner::DeliveryRunner;
-use super::store::{AcceptedEffect, EffectDedupStore, EffectId, EffectStateStore, EffectStoreError};
+use super::store::{
+    AcceptedEffect, EffectDedupStore, EffectId, EffectStateStore, EffectStoreError,
+};
 
 /// **F-02 (PR3 round 3 review, BLOCKER fix):** admission-gating lifecycle
 /// state, shared (via `Arc`) between [`RuntimeEffectAcceptor`] and
@@ -181,7 +183,8 @@ impl LifecycleGate {
 /// **F-02 (PR3 round 3 review):** the message `accept()` reports when it
 /// rejects a call outright because the acceptor is already `Draining`/
 /// `Closed` — no minting, no store call, no enqueue ever happens for it.
-const SHUTDOWN_REJECTED_MSG: &str = "effect acceptor is shutting down; new acceptance calls are rejected";
+const SHUTDOWN_REJECTED_MSG: &str =
+    "effect acceptor is shutting down; new acceptance calls are rejected";
 
 /// Owns both the shutdown signal AND the spawned `Deferred`-mode runner
 /// task's `JoinHandle` (F-01, PR3 review). Returned by
@@ -514,7 +517,12 @@ impl RuntimeEffectAcceptor {
         config: DeliveryConfig,
     ) -> Self {
         let (queue, receiver) = EffectQueue::bounded(config.queue_capacity);
-        let runner = Arc::new(DeliveryRunner::new(state.clone(), dedup, registry, config.retry));
+        let runner = Arc::new(DeliveryRunner::new(
+            state.clone(),
+            dedup,
+            registry,
+            config.retry,
+        ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (deadline_tx, deadline_rx) = watch::channel(None);
 
@@ -679,7 +687,11 @@ impl RuntimeEffectAcceptor {
         }
     }
 
-    async fn accept_one(&self, effect: AcceptedEffect, index: usize) -> Result<(), EffectAcceptanceError> {
+    async fn accept_one(
+        &self,
+        effect: AcceptedEffect,
+        index: usize,
+    ) -> Result<(), EffectAcceptanceError> {
         self.accept_into_store(&effect, index).await?;
         log_accepted(&effect);
 
@@ -875,7 +887,10 @@ mod tests {
         ) -> Result<Vec<super::super::store::StoredEffect>, EffectStoreError> {
             self.inner.claim_due(now, limit).await
         }
-        async fn recover_in_flight(&self, now: super::super::store::Timestamp) -> Result<u64, EffectStoreError> {
+        async fn recover_in_flight(
+            &self,
+            now: super::super::store::Timestamp,
+        ) -> Result<u64, EffectStoreError> {
             self.inner.recover_in_flight(now).await
         }
     }
@@ -946,7 +961,10 @@ mod tests {
         ) -> Result<Vec<super::super::store::StoredEffect>, EffectStoreError> {
             self.inner.claim_due(now, limit).await
         }
-        async fn recover_in_flight(&self, now: super::super::store::Timestamp) -> Result<u64, EffectStoreError> {
+        async fn recover_in_flight(
+            &self,
+            now: super::super::store::Timestamp,
+        ) -> Result<u64, EffectStoreError> {
             self.inner.recover_in_flight(now).await
         }
     }
@@ -993,8 +1011,12 @@ mod tests {
     #[tokio::test]
     async fn accept_retries_temporarily_unavailable_then_succeeds_within_bound() {
         let store = Arc::new(ScriptedAcceptStore::new(vec![
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
         ]));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
@@ -1029,9 +1051,15 @@ mod tests {
     #[tokio::test]
     async fn accept_returns_retries_exhausted_when_temporarily_unavailable_persists() {
         let store = Arc::new(ScriptedAcceptStore::new(vec![
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
         ]));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let registry = ExecutorRegistry::new();
@@ -1057,15 +1085,22 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, EffectAcceptanceError::RetriesExhausted { .. }));
-        assert_eq!(store.accept_calls(), 3, "1 initial attempt + 2 retries, then give up");
+        assert!(matches!(
+            err,
+            EffectAcceptanceError::RetriesExhausted { .. }
+        ));
+        assert_eq!(
+            store.accept_calls(),
+            3,
+            "1 initial attempt + 2 retries, then give up"
+        );
     }
 
     #[tokio::test]
     async fn accept_surfaces_backend_error_immediately_without_retry() {
-        let store = Arc::new(ScriptedAcceptStore::new(vec![Err(EffectStoreError::Backend(
-            "corrupt record".into(),
-        ))]));
+        let store = Arc::new(ScriptedAcceptStore::new(vec![Err(
+            EffectStoreError::Backend("corrupt record".into()),
+        )]));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let registry = ExecutorRegistry::new();
         let acceptor = RuntimeEffectAcceptor::new(
@@ -1081,7 +1116,11 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, EffectAcceptanceError::Permanent { .. }));
-        assert_eq!(store.accept_calls(), 1, "a permanent error must never be retried");
+        assert_eq!(
+            store.accept_calls(),
+            1,
+            "a permanent error must never be retried"
+        );
     }
 
     #[tokio::test]
@@ -1090,9 +1129,9 @@ mod tests {
         // `accept` specifically is permanent (an id-collision/invariant
         // conflict), never paired with the retry loop that only
         // `TemporarilyUnavailable` gets (AD-9's classification table).
-        let store = Arc::new(ScriptedAcceptStore::new(vec![Err(EffectStoreError::Conflict(
-            "effect id collision".into(),
-        ))]));
+        let store = Arc::new(ScriptedAcceptStore::new(vec![Err(
+            EffectStoreError::Conflict("effect id collision".into()),
+        )]));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let registry = ExecutorRegistry::new();
         let acceptor = RuntimeEffectAcceptor::new(
@@ -1442,9 +1481,15 @@ mod tests {
             max_backoff: Duration::from_secs(60 * 60 * 24 * 365),
         };
         let store = Arc::new(ScriptedAcceptStore::new(vec![
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
-            Err(EffectStoreError::TemporarilyUnavailable("pool exhausted".into())),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "pool exhausted".into(),
+            )),
         ]));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let registry = ExecutorRegistry::new();
@@ -1645,7 +1690,10 @@ mod tests {
         ) -> Result<Vec<super::super::store::StoredEffect>, EffectStoreError> {
             self.inner.claim_due(now, limit).await
         }
-        async fn recover_in_flight(&self, now: super::super::store::Timestamp) -> Result<u64, EffectStoreError> {
+        async fn recover_in_flight(
+            &self,
+            now: super::super::store::Timestamp,
+        ) -> Result<u64, EffectStoreError> {
             self.inner.recover_in_flight(now).await
         }
     }
@@ -1765,7 +1813,9 @@ mod tests {
         let dedup = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let executor = Arc::new(AlwaysSucceeds::new());
-        registry.register("invoice.created", executor.clone()).unwrap();
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
         let config = DeliveryConfig {
             queue_capacity: 4,
             retry: RetryPolicy::default(),

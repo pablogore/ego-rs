@@ -73,7 +73,9 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(TraceContextExtractor(originate_trace_context(&parts.headers)))
+        Ok(TraceContextExtractor(originate_trace_context(
+            &parts.headers,
+        )))
     }
 }
 
@@ -175,17 +177,25 @@ mod tests {
     struct StubAuthn;
 
     impl AuthenticationProvider for StubAuthn {
-        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
+        fn authenticate(
+            &self,
+            _credential: &Credential,
+        ) -> Result<SecurityContext, AuthenticationError> {
             unimplemented!("not exercised by these tests")
         }
     }
 
     fn make_state() -> AppState {
-        AppState::new(RuntimeBuilder::new().build().resolver(), std::sync::Arc::new(StubAuthn))
+        AppState::new(
+            RuntimeBuilder::new().build().resolver(),
+            std::sync::Arc::new(StubAuthn),
+        )
     }
 
     fn parts_with_traceparent(value: Option<&str>) -> Parts {
-        let mut builder = axum::http::Request::builder().method("POST").uri("/register");
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/register");
         if let Some(v) = value {
             builder = builder.header(TRACEPARENT_HEADER, v);
         }

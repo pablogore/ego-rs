@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 /// These are stripped from the custom-claims map after extraction.
 const STANDARD_JWT_CLAIM_KEYS: &[&str] = &["exp", "nbf", "iat", "jti", "iss", "aud"];
 
-use ego_domain::auth::{ClaimSet, ClaimValue, StandardClaims};
-use ego_security_sdk::{Principal, PrincipalKind,     PrincipalMapper, Role, SubjectId};
 use ego_domain::auth::AuthenticationError;
+use ego_domain::auth::{ClaimSet, ClaimValue, StandardClaims};
 use ego_domain::context::TenantId;
+use ego_security_sdk::{Principal, PrincipalKind, PrincipalMapper, Role, SubjectId};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -42,9 +42,7 @@ pub(crate) fn value_to_claim_value(v: Value) -> ClaimValue {
             }
         }
         Value::String(s) => ClaimValue::String(s),
-        Value::Array(arr) => {
-            ClaimValue::Array(arr.into_iter().map(value_to_claim_value).collect())
-        }
+        Value::Array(arr) => ClaimValue::Array(arr.into_iter().map(value_to_claim_value).collect()),
         Value::Object(map) => {
             let converted: BTreeMap<String, ClaimValue> = map
                 .into_iter()
@@ -57,8 +55,10 @@ pub(crate) fn value_to_claim_value(v: Value) -> ClaimValue {
 
 /// Convert a `BTreeMap<String, serde_json::Value>` to a `ClaimSet`.
 pub(crate) fn claims_map_to_claim_set(map: BTreeMap<String, Value>) -> ClaimSet {
-    let raw: BTreeMap<String, ClaimValue> =
-        map.into_iter().map(|(k, v)| (k, value_to_claim_value(v))).collect();
+    let raw: BTreeMap<String, ClaimValue> = map
+        .into_iter()
+        .map(|(k, v)| (k, value_to_claim_value(v)))
+        .collect();
     ClaimSet::new(raw)
 }
 
@@ -105,7 +105,10 @@ impl PrincipalMapper for DefaultPrincipalMapper {
         let roles_source_key: Option<&str> = if roles_consumed {
             if claim_set.get_array("roles").is_some() {
                 Some("roles")
-            } else if claim_set.get_nested_array("realm_access", "roles").is_some() {
+            } else if claim_set
+                .get_nested_array("realm_access", "roles")
+                .is_some()
+            {
                 Some("realm_access")
             } else {
                 Some("groups")
@@ -179,19 +182,35 @@ impl PrincipalMapper for DefaultPrincipalMapper {
 // ---------------------------------------------------------------------------
 
 fn build_standard_from_claim_set(cs: &ClaimSet) -> StandardClaims {
-    let exp = cs.get_i64("exp")
+    let exp = cs
+        .get_i64("exp")
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-    let nbf = cs.get_i64("nbf")
+    let nbf = cs
+        .get_i64("nbf")
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-    let iat = cs.get_i64("iat")
+    let iat = cs
+        .get_i64("iat")
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
     let jti = cs.get_str("jti").map(str::to_owned);
     let iss = cs.get_str("iss").map(str::to_owned);
-    let aud = cs.get_array("aud").map(|arr| {
-        arr.iter().filter_map(ClaimValue::as_str).map(str::to_owned).collect()
-    }).or_else(|| cs.get_str("aud").map(|s| vec![s.to_owned()]));
+    let aud = cs
+        .get_array("aud")
+        .map(|arr| {
+            arr.iter()
+                .filter_map(ClaimValue::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .or_else(|| cs.get_str("aud").map(|s| vec![s.to_owned()]));
 
-    StandardClaims { exp, nbf, iat, jti, iss, aud }
+    StandardClaims {
+        exp,
+        nbf,
+        iat,
+        jti,
+        iss,
+        aud,
+    }
 }
 
 /// Convert a `ClaimValue` back to `serde_json::Value` for storage in `Claims.custom`.
@@ -204,9 +223,7 @@ pub(crate) fn claim_value_to_json(v: &ClaimValue) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         ClaimValue::String(s) => Value::String(s.clone()),
-        ClaimValue::Array(arr) => {
-            Value::Array(arr.iter().map(claim_value_to_json).collect())
-        }
+        ClaimValue::Array(arr) => Value::Array(arr.iter().map(claim_value_to_json).collect()),
         ClaimValue::Map(map) => {
             let obj: serde_json::Map<String, Value> = map
                 .iter()
@@ -245,7 +262,10 @@ mod tests {
 
     #[test]
     fn bool_converts() {
-        assert_eq!(value_to_claim_value(Value::Bool(true)), ClaimValue::Bool(true));
+        assert_eq!(
+            value_to_claim_value(Value::Bool(true)),
+            ClaimValue::Bool(true)
+        );
     }
 
     #[test]
@@ -305,7 +325,10 @@ mod tests {
     fn maps_roles_to_principal_roles() {
         let cs = make_claims(vec![
             ("sub", ClaimValue::String("u1".into())),
-            ("roles", ClaimValue::Array(vec![ClaimValue::String("admin".into())])),
+            (
+                "roles",
+                ClaimValue::Array(vec![ClaimValue::String("admin".into())]),
+            ),
             ("exp", ClaimValue::Integer(9_999_999_999)),
         ]);
         let (principal, _) = DefaultPrincipalMapper.map(&cs).unwrap();
@@ -332,7 +355,10 @@ mod tests {
     fn maps_groups_to_principal_roles() {
         let cs = make_claims(vec![
             ("sub", ClaimValue::String("u1".into())),
-            ("groups", ClaimValue::Array(vec![ClaimValue::String("viewers".into())])),
+            (
+                "groups",
+                ClaimValue::Array(vec![ClaimValue::String("viewers".into())]),
+            ),
             ("exp", ClaimValue::Integer(9_999_999_999)),
         ]);
         let (principal, _) = DefaultPrincipalMapper.map(&cs).unwrap();

@@ -29,6 +29,9 @@ mod tests {
     #[test]
     fn empty_crate_list_is_an_error_not_a_vacuous_pass() {
         let result = verify_isolation(&[]);
-        assert!(result.is_err(), "empty crate list must fail loudly, not silently pass");
+        assert!(
+            result.is_err(),
+            "empty crate list must fail loudly, not silently pass"
+        );
     }
 }

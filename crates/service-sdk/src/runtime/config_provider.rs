@@ -59,8 +59,9 @@ impl ConfigurationProvider {
     /// Deserialize the consumed logging view. Any structural error is fail-fast.
     pub fn logging(&self) -> Result<LoggingSettings, RuntimeInfraError> {
         let node = self.root.get("logging").cloned().unwrap_or_default();
-        serde_json::from_value(node)
-            .map_err(|e| RuntimeInfraError::ConfigInvalid { reason: e.to_string() })
+        serde_json::from_value(node).map_err(|e| RuntimeInfraError::ConfigInvalid {
+            reason: e.to_string(),
+        })
     }
 }
 
@@ -87,7 +88,10 @@ mod tests {
         }));
 
         let result = provider.logging();
-        assert!(matches!(result, Err(RuntimeInfraError::ConfigInvalid { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeInfraError::ConfigInvalid { .. })
+        ));
     }
 
     #[test]
@@ -98,7 +102,10 @@ mod tests {
         }));
 
         let result = provider.logging();
-        assert!(matches!(result, Err(RuntimeInfraError::ConfigInvalid { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeInfraError::ConfigInvalid { .. })
+        ));
     }
 
     #[test]
@@ -112,13 +119,18 @@ mod tests {
         // an empty `"logging": {}` object to get defaults.
         let provider = ConfigurationProvider::from_value(json!({}));
         let result = provider.logging();
-        assert!(matches!(result, Err(RuntimeInfraError::ConfigInvalid { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeInfraError::ConfigInvalid { .. })
+        ));
     }
 
     #[test]
     fn logging_empty_object_uses_defaults() {
         let provider = ConfigurationProvider::from_value(json!({ "logging": {} }));
-        let settings = provider.logging().expect("empty object applies field defaults");
+        let settings = provider
+            .logging()
+            .expect("empty object applies field defaults");
         assert!(settings.enabled);
         assert_eq!(settings.format, LogFormatSetting::Json);
     }

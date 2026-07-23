@@ -100,7 +100,12 @@ where
         // being folded into `self.tag`.
         let events = self
             .read_store
-            .fetch(&self.tenant, &self.tag, last_offset.as_ref(), self.config.batch_size)
+            .fetch(
+                &self.tenant,
+                &self.tag,
+                last_offset.as_ref(),
+                self.config.batch_size,
+            )
             .await
             .map_err(|e| ProjectionError::transient(format!("fetch failed: {}", e)))?;
 

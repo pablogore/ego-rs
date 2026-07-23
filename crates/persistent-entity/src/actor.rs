@@ -249,9 +249,9 @@ where
                                     entity_id = %self.entity_id.aggregate_id(),
                                     "post-persist apply_events failed — actor transitioned to Failed"
                                 );
-                                let _ = reply.send(Err(crate::error::EntityError::PersistenceError(
-                                    e.to_string(),
-                                )));
+                                let _ = reply.send(Err(
+                                    crate::error::EntityError::PersistenceError(e.to_string()),
+                                ));
                                 return;
                             }
                         };
@@ -427,11 +427,11 @@ where
             self.execute_command(actor_envelope).await;
             if self.lifecycle.current_state == EntityState::Failed {
                 while let Ok(envelope) = self.mailbox.recv().await {
-                    let _ = envelope.reply.send(Err(
-                        crate::error::EntityError::PersistenceError(
+                    let _ = envelope
+                        .reply
+                        .send(Err(crate::error::EntityError::PersistenceError(
                             "actor failed during passivation drain".to_string(),
-                        ),
-                    ));
+                        )));
                 }
                 self.registry
                     .mark_passivated(self.entity_id.aggregate_id(), self.version);
@@ -820,7 +820,10 @@ mod tests {
             1,
             "the acceptor must be called exactly once for the one described effect"
         );
-        assert!(rx.await.unwrap().is_ok(), "successful acceptance yields an Ok reply");
+        assert!(
+            rx.await.unwrap().is_ok(),
+            "successful acceptance yields an Ok reply"
+        );
     }
 
     #[tokio::test]

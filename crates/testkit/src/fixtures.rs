@@ -297,7 +297,10 @@ mod tests {
 
         let result = fixture.service::<HandRolledService>();
 
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     #[test]

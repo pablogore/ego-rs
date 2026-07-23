@@ -70,9 +70,15 @@ impl std::fmt::Debug for OidcProviderConfig {
             .field("introspection_client_id", &self.introspection_client_id)
             .field(
                 "introspection_client_secret",
-                &self.introspection_client_secret.as_ref().map(|_| "[REDACTED]"),
+                &self
+                    .introspection_client_secret
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
             )
-            .field("introspection_cache_ttl_seconds", &self.introspection_cache_ttl_seconds)
+            .field(
+                "introspection_cache_ttl_seconds",
+                &self.introspection_cache_ttl_seconds,
+            )
             .field("allowed_algorithms", &self.allowed_algorithms)
             .finish()
     }
@@ -128,7 +134,8 @@ impl OidcProviderConfig {
         if let Some(ttl) = self.introspection_cache_ttl_seconds {
             if ttl == 0 {
                 return Err(AuthenticationError::ProviderUnavailable(
-                    "introspection_cache_ttl_seconds must be >= 1 (use None to disable cache)".into(),
+                    "introspection_cache_ttl_seconds must be >= 1 (use None to disable cache)"
+                        .into(),
                 ));
             }
             if ttl > MAX_INTROSPECTION_CACHE_TTL_SECS {
@@ -154,7 +161,8 @@ impl OidcProviderConfig {
         if self.jwks_uri.is_some() && self.expected_iss.is_none() {
             return Err(AuthenticationError::ProviderUnavailable(
                 "expected_iss is required when jwks_uri is configured — \
-                 without it, tokens from any issuer are accepted".into(),
+                 without it, tokens from any issuer are accepted"
+                    .into(),
             ));
         }
 
@@ -175,7 +183,10 @@ impl OidcProviderConfig {
 /// Returns `Err` when the URL does not use `https://` (or `http://` with a localhost host).
 /// Any scheme other than `https` or `http` is also rejected. The `field` name is included
 /// in the error message for diagnostics (H-6).
-pub(crate) fn validate_url_requires_https(url: &url::Url, field: &str) -> Result<(), AuthenticationError> {
+pub(crate) fn validate_url_requires_https(
+    url: &url::Url,
+    field: &str,
+) -> Result<(), AuthenticationError> {
     match url.scheme() {
         "https" => Ok(()),
         "http" => {
@@ -194,7 +205,6 @@ pub(crate) fn validate_url_requires_https(url: &url::Url, field: &str) -> Result
         ))),
     }
 }
-
 
 /// Configuration for multi-issuer routing.
 ///
@@ -288,7 +298,10 @@ mod tests {
         let mut cfg = cfg_with_jwks_uri();
         cfg.issuer_url = Some(url("https://example.com"));
         assert!(cfg.validate().is_ok());
-        assert!(cfg.jwks_uri.is_some(), "jwks_uri field is Some when both set");
+        assert!(
+            cfg.jwks_uri.is_some(),
+            "jwks_uri field is Some when both set"
+        );
     }
 
     // --- INV-11: introspection endpoint ---
@@ -439,11 +452,13 @@ mod tests {
         cfg.introspection_endpoint = Some(url("http://[::1]:8080/introspect"));
         cfg.introspection_client_id = Some("cid".into());
         cfg.introspection_client_secret = Some("csec".into());
-        assert!(cfg.validate().is_ok(), "::1 loopback must be allowed for http introspection");
+        assert!(
+            cfg.validate().is_ok(),
+            "::1 loopback must be allowed for http introspection"
+        );
     }
 
-
-        // H-3: introspection_cache_ttl_seconds above 300 must be rejected.
+    // H-3: introspection_cache_ttl_seconds above 300 must be rejected.
     #[test]
     fn validate_rejects_introspection_cache_ttl_above_max() {
         let mut cfg = cfg_with_jwks_uri();
@@ -541,6 +556,4 @@ mod tests {
             "http with non-loopback IPv6 must be rejected, got: {err:?}"
         );
     }
-
-
 }

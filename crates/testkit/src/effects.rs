@@ -67,7 +67,11 @@ impl RecordingExecutor {
 
 #[async_trait]
 impl ExternalEffectExecutor for RecordingExecutor {
-    async fn execute(&self, effect: &ExternalEffectDescription, ctx: &EffectContext) -> AttemptOutcome {
+    async fn execute(
+        &self,
+        effect: &ExternalEffectDescription,
+        ctx: &EffectContext,
+    ) -> AttemptOutcome {
         self.attempts.lock().unwrap().push(RecordedAttempt {
             effect_type: effect.effect_type.clone(),
             destination: effect.destination.clone(),
@@ -135,16 +139,29 @@ mod tests {
             AttemptOutcome::Success,
         ]));
 
-        let first = executor.execute(&description("invoice.created", "uow-2:0"), &ctx(1)).await;
-        let second = executor.execute(&description("invoice.created", "uow-2:0"), &ctx(2)).await;
+        let first = executor
+            .execute(&description("invoice.created", "uow-2:0"), &ctx(1))
+            .await;
+        let second = executor
+            .execute(&description("invoice.created", "uow-2:0"), &ctx(2))
+            .await;
         // A 3rd attempt beyond the scripted sequence repeats the last entry
         // rather than panicking — real delivery runners may attempt more
         // times than were explicitly scripted.
-        let third = executor.execute(&description("invoice.created", "uow-2:0"), &ctx(3)).await;
+        let third = executor
+            .execute(&description("invoice.created", "uow-2:0"), &ctx(3))
+            .await;
 
-        assert_eq!(first, AttemptOutcome::RetryableFailure("timeout".to_string()));
+        assert_eq!(
+            first,
+            AttemptOutcome::RetryableFailure("timeout".to_string())
+        );
         assert_eq!(second, AttemptOutcome::Success);
         assert_eq!(third, AttemptOutcome::Success);
-        assert_eq!(executor.attempts().len(), 3, "every attempt is recorded, including the repeated one");
+        assert_eq!(
+            executor.attempts().len(),
+            3,
+            "every attempt is recorded, including the repeated one"
+        );
     }
 }

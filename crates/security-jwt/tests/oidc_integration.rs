@@ -6,19 +6,18 @@
 #![cfg(feature = "test-kit")]
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use ego_domain::auth::{AuthenticationError, ClaimSet, ClaimValue};
 use ego_domain::context::TenantId;
-use ego_security_sdk::{AuthenticationProvider, Credential, PrincipalMapper, Principal, Claims};
-use security_jwt::{
-    JwtAlgorithm, OidcAuthenticationProvider, MultiIssuerAuthenticationProvider,
-    StaticIssuerResolver, OidcProviderConfig, TokenFormat,
-    IntrospectionAuthenticationProvider,
-};
+use ego_security_sdk::{AuthenticationProvider, Claims, Credential, Principal, PrincipalMapper};
 use security_jwt::principal_mapper::DefaultPrincipalMapper;
-use security_jwt::test_kit::{FakeIssuer, FakeIntrospection, FakeJwks};
+use security_jwt::test_kit::{FakeIntrospection, FakeIssuer, FakeJwks};
+use security_jwt::{
+    IntrospectionAuthenticationProvider, JwtAlgorithm, MultiIssuerAuthenticationProvider,
+    OidcAuthenticationProvider, OidcProviderConfig, StaticIssuerResolver, TokenFormat,
+};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -31,7 +30,9 @@ fn pinned_now() -> chrono::DateTime<chrono::Utc> {
 fn fixed_clock(dt: chrono::DateTime<chrono::Utc>) -> Arc<dyn ego_domain::auth::Clock> {
     struct C(chrono::DateTime<chrono::Utc>);
     impl ego_domain::auth::Clock for C {
-        fn now(&self) -> chrono::DateTime<chrono::Utc> { self.0 }
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            self.0
+        }
     }
     Arc::new(C(dt))
 }
@@ -53,7 +54,10 @@ fn make_claims(sub: &str, exp: i64) -> BTreeMap<String, ClaimValue> {
     let mut m = BTreeMap::new();
     m.insert("sub".into(), ClaimValue::String(sub.into()));
     m.insert("exp".into(), ClaimValue::Integer(exp));
-    m.insert("iss".into(), ClaimValue::String("https://fake-issuer.test".into()));
+    m.insert(
+        "iss".into(),
+        ClaimValue::String("https://fake-issuer.test".into()),
+    );
     m
 }
 
@@ -99,8 +103,12 @@ fn us001_bearer_extractor_with_oidc_provider_returns_ok() {
                 None
             }
         }
-        fn metadata(&self, _: &str) -> Option<&str> { None }
-        fn query_param(&self, _: &str) -> Option<&str> { None }
+        fn metadata(&self, _: &str) -> Option<&str> {
+            None
+        }
+        fn query_param(&self, _: &str) -> Option<&str> {
+            None
+        }
     }
 
     let ctx = SimpleCtx(format!("Bearer {token}"));
@@ -126,7 +134,10 @@ fn us001_nbf_in_future_returns_invalid_token() {
     claims.insert("sub".to_string(), ClaimValue::String("user-1".to_string()));
     claims.insert("exp".to_string(), ClaimValue::Integer(9_999_999_999));
     claims.insert("nbf".to_string(), ClaimValue::Integer(1100)); // T + 100
-    claims.insert("iss".to_string(), ClaimValue::String("https://fake-issuer.test".to_string()));
+    claims.insert(
+        "iss".to_string(),
+        ClaimValue::String("https://fake-issuer.test".to_string()),
+    );
     let token = issuer.issue_token(claims);
     let config = OidcProviderConfig {
         jwks_uri: Some(url::Url::parse("https://fake.example.com/jwks").unwrap()),
@@ -166,9 +177,13 @@ fn us002_jwks_uri_config_no_discovery_called() {
         expected_iss: Some("https://fake-issuer.test".into()),
         ..Default::default()
     };
-    let provider =
-        OidcAuthenticationProvider::with_resolver(resolver, config, fixed_clock(pinned_now()), default_mapper())
-        .unwrap();
+    let provider = OidcAuthenticationProvider::with_resolver(
+        resolver,
+        config,
+        fixed_clock(pinned_now()),
+        default_mapper(),
+    )
+    .unwrap();
 
     let token = issuer.issue_token(make_claims("u-jwks-direct", future_ts(3600)));
     let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
@@ -222,7 +237,10 @@ fn us003_tampered_signature_returns_error() {
         .authenticate(&Credential::Bearer(token))
         .unwrap_err();
     assert!(
-        matches!(err, AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)),
+        matches!(
+            err,
+            AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)
+        ),
         "unexpected {err:?}"
     );
 }
@@ -242,11 +260,16 @@ fn us003_iss_mismatch_post_signature_returns_invalid_token() {
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
-        resolver, config, fixed_clock(pinned_now()), default_mapper(),
+        resolver,
+        config,
+        fixed_clock(pinned_now()),
+        default_mapper(),
     )
     .unwrap();
 
-    let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+    let err = provider
+        .authenticate(&Credential::Bearer(token))
+        .unwrap_err();
     assert!(matches!(err, AuthenticationError::InvalidToken(_)));
 }
 
@@ -268,7 +291,10 @@ fn us003b_auto_jwt_uses_jwt_path() {
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
-        resolver, config, fixed_clock(pinned_now()), default_mapper(),
+        resolver,
+        config,
+        fixed_clock(pinned_now()),
+        default_mapper(),
     )
     .unwrap();
 
@@ -288,7 +314,10 @@ fn us003b_auto_no_dots_uses_opaque_path_or_invalid_token() {
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
-        resolver, config, fixed_clock(pinned_now()), default_mapper(),
+        resolver,
+        config,
+        fixed_clock(pinned_now()),
+        default_mapper(),
     )
     .unwrap();
 
@@ -303,9 +332,9 @@ fn us003b_auto_no_dots_uses_opaque_path_or_invalid_token() {
 fn us003b_opaque_format_with_dotted_token_uses_introspection() {
     // Introspection configured; TokenFormat::Opaque; token looks like JWT → goes to introspection.
     // Uses FakeIntrospection so the test is deterministic and requires no network (W4).
-    use std::collections::BTreeMap;
     use ego_domain::auth::{ClaimSet, ClaimValue};
     use security_jwt::IntrospectionAuthenticationProvider;
+    use std::collections::BTreeMap;
 
     let clock = fixed_clock(pinned_now());
     let issuer = FakeIssuer::new(Arc::clone(&clock));
@@ -368,9 +397,7 @@ fn make_introspection_config(ttl: Option<u64>) -> OidcProviderConfig {
     // Adding jwks_uri would require expected_iss (R1-B1 guard) but these tests only
     // exercise IntrospectionAuthenticationProvider which does not call config.validate().
     OidcProviderConfig {
-        introspection_endpoint: Some(
-            url::Url::parse("https://fake.test/introspect").unwrap(),
-        ),
+        introspection_endpoint: Some(url::Url::parse("https://fake.test/introspect").unwrap()),
         introspection_client_id: Some("cid".into()),
         introspection_client_secret: Some("csec".into()),
         introspection_cache_ttl_seconds: ttl,
@@ -394,7 +421,9 @@ fn us004_active_true_introspection_returns_ok() {
     )
     .unwrap();
 
-    let ctx = provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
+    let ctx = provider
+        .authenticate(&Credential::Bearer("tok".into()))
+        .unwrap();
     assert_eq!(ctx.principal.subject_id.as_str(), "introspected-user");
 }
 
@@ -411,7 +440,9 @@ fn us004_active_false_introspection_returns_invalid_token() {
     )
     .unwrap();
 
-    let err = provider.authenticate(&Credential::Bearer("tok".into())).unwrap_err();
+    let err = provider
+        .authenticate(&Credential::Bearer("tok".into()))
+        .unwrap_err();
     assert!(matches!(err, AuthenticationError::InvalidToken(_)));
 }
 
@@ -427,7 +458,9 @@ fn us004_token_over_8kib_rejected_before_io() {
     )
     .unwrap();
     let huge = "x".repeat(8193);
-    let err = provider.authenticate(&Credential::Bearer(huge)).unwrap_err();
+    let err = provider
+        .authenticate(&Credential::Bearer(huge))
+        .unwrap_err();
     assert!(matches!(err, AuthenticationError::InvalidToken(_)));
 }
 
@@ -437,8 +470,8 @@ fn us004_token_over_8kib_rejected_before_io() {
 
 #[test]
 fn us005_cache_hit_returns_key_without_second_fetch() {
-    use security_jwt::{JwksKeyResolver, JwksProvider, KeyResolver, VerificationKey};
     use async_trait::async_trait;
+    use security_jwt::{JwksKeyResolver, JwksProvider, KeyResolver, VerificationKey};
 
     struct CountingFakeJwks {
         key: VerificationKey,
@@ -491,7 +524,10 @@ fn us006_default_mapper_maps_all_standard_claims() {
     let clock = fixed_clock(pinned_now());
     let issuer = FakeIssuer::new(Arc::clone(&clock));
     let mut claims = make_claims("std-user", future_ts(3600));
-    claims.insert("roles".into(), ClaimValue::Array(vec![ClaimValue::String("admin".into())]));
+    claims.insert(
+        "roles".into(),
+        ClaimValue::Array(vec![ClaimValue::String("admin".into())]),
+    );
     claims.insert("tid".into(), ClaimValue::String("tenant-99".into()));
     let token = issuer.issue_token(claims);
 
@@ -510,10 +546,7 @@ fn us006_default_mapper_maps_all_standard_claims() {
 struct PreferredUsernameToPrincipalMapper;
 
 impl PrincipalMapper for PreferredUsernameToPrincipalMapper {
-    fn map(
-        &self,
-        claims: &ClaimSet,
-    ) -> Result<(Principal, Claims), AuthenticationError> {
+    fn map(&self, claims: &ClaimSet) -> Result<(Principal, Claims), AuthenticationError> {
         // Use preferred_username as subject_id instead of sub
         let sub = claims
             .get_str("preferred_username")
@@ -566,7 +599,10 @@ fn us006_missing_sub_returns_missing_claim() {
     let issuer = FakeIssuer::new(Arc::clone(&clock));
     let mut claims = BTreeMap::new();
     claims.insert("exp".into(), ClaimValue::Integer(future_ts(3600)));
-    claims.insert("iss".into(), ClaimValue::String("https://fake-issuer.test".into()));
+    claims.insert(
+        "iss".into(),
+        ClaimValue::String("https://fake-issuer.test".into()),
+    );
     // no sub
     let token = issuer.issue_token(claims);
     let err = oidc_provider_with_issuer(&issuer)
@@ -581,10 +617,7 @@ struct TrackingMapper {
 }
 
 impl PrincipalMapper for TrackingMapper {
-    fn map(
-        &self,
-        claims: &ClaimSet,
-    ) -> Result<(Principal, Claims), AuthenticationError> {
+    fn map(&self, claims: &ClaimSet) -> Result<(Principal, Claims), AuthenticationError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.inner.map(claims)
     }
@@ -609,7 +642,10 @@ fn us006_mapper_called_exactly_once_per_authenticate() {
         ..Default::default()
     };
     let provider = OidcAuthenticationProvider::with_resolver(
-        resolver, config, fixed_clock(pinned_now()), mapper,
+        resolver,
+        config,
+        fixed_clock(pinned_now()),
+        mapper,
     )
     .unwrap();
 
@@ -645,10 +681,14 @@ fn us007_known_issuer_routes_correctly() {
     let mut issuers: HashMap<String, Arc<dyn AuthenticationProvider>> = HashMap::new();
     issuers.insert("https://issuer-a.test".into(), provider_a);
 
-    let multi = MultiIssuerAuthenticationProvider::new(Arc::new(StaticIssuerResolver::new(issuers)));
+    let multi =
+        MultiIssuerAuthenticationProvider::new(Arc::new(StaticIssuerResolver::new(issuers)));
 
     let mut claims = make_claims("user-a", future_ts(3600));
-    claims.insert("iss".into(), ClaimValue::String("https://issuer-a.test".into()));
+    claims.insert(
+        "iss".into(),
+        ClaimValue::String("https://issuer-a.test".into()),
+    );
     let token = issuer_a.issue_token(claims);
 
     let ctx = multi.authenticate(&Credential::Bearer(token)).unwrap();
@@ -657,11 +697,15 @@ fn us007_known_issuer_routes_correctly() {
 
 #[test]
 fn us007_unknown_iss_returns_invalid_token() {
-    let multi = MultiIssuerAuthenticationProvider::new(Arc::new(StaticIssuerResolver::new(HashMap::new())));
+    let multi =
+        MultiIssuerAuthenticationProvider::new(Arc::new(StaticIssuerResolver::new(HashMap::new())));
     let clock = fixed_clock(pinned_now());
     let issuer = FakeIssuer::new(Arc::clone(&clock));
     let mut claims = make_claims("user", future_ts(3600));
-    claims.insert("iss".into(), ClaimValue::String("https://unknown.test".into()));
+    claims.insert(
+        "iss".into(),
+        ClaimValue::String("https://unknown.test".into()),
+    );
     let token = issuer.issue_token(claims);
     let err = multi.authenticate(&Credential::Bearer(token)).unwrap_err();
     assert!(matches!(err, AuthenticationError::InvalidToken(_)));
@@ -691,7 +735,10 @@ fn us007_multi_issuer_end_to_end_two_issuers() {
         };
         Arc::new(
             OidcAuthenticationProvider::with_resolver(
-                resolver, config, fixed_clock(pinned_now()), default_mapper(),
+                resolver,
+                config,
+                fixed_clock(pinned_now()),
+                default_mapper(),
             )
             .unwrap(),
         ) as Arc<dyn AuthenticationProvider>
@@ -706,7 +753,10 @@ fn us007_multi_issuer_end_to_end_two_issuers() {
         };
         Arc::new(
             OidcAuthenticationProvider::with_resolver(
-                resolver, config, fixed_clock(pinned_now()), default_mapper(),
+                resolver,
+                config,
+                fixed_clock(pinned_now()),
+                default_mapper(),
             )
             .unwrap(),
         ) as Arc<dyn AuthenticationProvider>

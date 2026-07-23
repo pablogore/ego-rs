@@ -34,9 +34,9 @@ pub fn build_logger(cfg: &LoggingSettings) -> Result<Option<Arc<KITLogger>>, Run
     let logger = KITLogger::with_format(fmt);
     // KITLogger::init() -> Result<(), AdapterError>; AdapterError is not re-exported,
     // so map by Debug at the boundary rather than naming the type.
-    logger
-        .init()
-        .map_err(|e| RuntimeInfraError::LoggerInit { reason: format!("{e:?}") })?;
+    logger.init().map_err(|e| RuntimeInfraError::LoggerInit {
+        reason: format!("{e:?}"),
+    })?;
     Ok(Some(Arc::new(logger)))
 }
 
@@ -51,7 +51,9 @@ pub(super) struct TeardownStack {
 
 impl TeardownStack {
     pub(super) fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub(super) fn push(&mut self, l: Arc<KITLogger>) {
@@ -66,7 +68,9 @@ impl TeardownStack {
             // LIFO = reverse order
             if let Err(e) = l.shutdown() {
                 // flush-then-close (OnShutdownFlush)
-                first_err.get_or_insert(RuntimeInfraError::Teardown { reason: format!("{e:?}") });
+                first_err.get_or_insert(RuntimeInfraError::Teardown {
+                    reason: format!("{e:?}"),
+                });
             }
         }
         first_err.map_or(Ok(()), Err)
@@ -90,10 +94,16 @@ mod tests {
             (LogFormatSetting::Text, "text"),
         ];
         for (format, label) in cases {
-            let settings = LoggingSettings { enabled: true, format };
+            let settings = LoggingSettings {
+                enabled: true,
+                format,
+            };
             let result = build_logger(&settings);
             assert!(result.is_ok(), "format {label} should construct a logger");
-            assert!(result.unwrap().is_some(), "format {label} should yield Some(logger)");
+            assert!(
+                result.unwrap().is_some(),
+                "format {label} should yield Some(logger)"
+            );
         }
     }
 
@@ -131,9 +141,9 @@ mod tests {
         exporter.init().expect("first init succeeds");
 
         let logger = KITLogger::with_exporter_and_format(exporter, LogFormat::Json);
-        let result = logger
-            .init()
-            .map_err(|e| RuntimeInfraError::LoggerInit { reason: format!("{e:?}") });
+        let result = logger.init().map_err(|e| RuntimeInfraError::LoggerInit {
+            reason: format!("{e:?}"),
+        });
 
         assert!(matches!(result, Err(RuntimeInfraError::LoggerInit { .. })));
     }
@@ -158,7 +168,10 @@ mod tests {
         let stdout = CaptureBuffer::default();
         exporter.set_writers(Box::new(stdout.clone()), Box::new(CaptureBuffer::default()));
         exporter.init().expect("capture exporter initializes");
-        let logger = Arc::new(KITLogger::with_exporter_and_format(exporter, LogFormat::Json));
+        let logger = Arc::new(KITLogger::with_exporter_and_format(
+            exporter,
+            LogFormat::Json,
+        ));
         (logger, stdout)
     }
 
@@ -244,6 +257,8 @@ mod tests {
         assert!(matches!(result, Err(RuntimeInfraError::Teardown { .. })));
 
         // The healthy entry was still torn down despite the other's failure.
-        assert!(healthy_logger.log(Severity::Info, "after-shutdown").is_err());
+        assert!(healthy_logger
+            .log(Severity::Info, "after-shutdown")
+            .is_err());
     }
 }

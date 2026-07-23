@@ -124,7 +124,10 @@ mod tests {
         let cases = [
             (ServiceError::validation("x"), StatusCode::BAD_REQUEST),
             (ServiceError::authorization("x"), StatusCode::FORBIDDEN),
-            (ServiceError::internal("x"), StatusCode::INTERNAL_SERVER_ERROR),
+            (
+                ServiceError::internal("x"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
             (ServiceError::not_found("x"), StatusCode::NOT_FOUND),
             (ServiceError::conflict("x"), StatusCode::CONFLICT),
             (ServiceError::timeout("x"), StatusCode::GATEWAY_TIMEOUT),

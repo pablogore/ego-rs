@@ -74,7 +74,9 @@ impl Parse for ServiceArgs {
             } else {
                 return Err(syn::Error::new(
                     ident.span(),
-                    format!("unknown #[service] argument `{ident}` — expected `version` or `impl_of`"),
+                    format!(
+                        "unknown #[service] argument `{ident}` — expected `version` or `impl_of`"
+                    ),
                 ));
             }
             if input.peek(syn::Token![,]) {
@@ -168,7 +170,10 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
     for item in &input_trait.items {
         if let TraitItem::Fn(method) = item {
-            let has_operation = method.attrs.iter().any(|a| SdkAttr::detect(a) == Some(SdkAttr::Operation));
+            let has_operation = method
+                .attrs
+                .iter()
+                .any(|a| SdkAttr::detect(a) == Some(SdkAttr::Operation));
             if has_operation {
                 let method_name = &method.sig.ident;
 
@@ -255,38 +260,40 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 let mut ctx_param_idx: Option<usize> = None;
 
                 // Clone the first param (context) so the original stays alive for enforce_tenant and interceptor calls.
-                let (ctx_param, inner_call_args): (proc_macro2::TokenStream, Vec<_>) =
-                    if arg_names.is_empty() {
-                        // Parameterless methods: ctx_param is a phantom token. Any method here
-                        // without #[authorize] will get a compile error on enforce_tenant(&ctx) —
-                        // that is intentional: all #[operation] methods must have a context parameter.
-                        (quote! { ctx }, vec![])
-                    } else {
-                        // When #[authorize] is present, derive ctx_param from context_ident so
-                        // enforce_tenant and interceptors operate on the same variable as the guard.
-                        // Use the index returned by validate_context_ident_in_signature
-                        // directly — no second O(N) scan.
-                        let (ctx, clone_idx) = if let (Some(ref args), Some(idx)) = (&maybe_authorize, maybe_ctx_idx) {
+                let (ctx_param, inner_call_args): (proc_macro2::TokenStream, Vec<_>) = if arg_names
+                    .is_empty()
+                {
+                    // Parameterless methods: ctx_param is a phantom token. Any method here
+                    // without #[authorize] will get a compile error on enforce_tenant(&ctx) —
+                    // that is intentional: all #[operation] methods must have a context parameter.
+                    (quote! { ctx }, vec![])
+                } else {
+                    // When #[authorize] is present, derive ctx_param from context_ident so
+                    // enforce_tenant and interceptors operate on the same variable as the guard.
+                    // Use the index returned by validate_context_ident_in_signature
+                    // directly — no second O(N) scan.
+                    let (ctx, clone_idx) =
+                        if let (Some(ref args), Some(idx)) = (&maybe_authorize, maybe_ctx_idx) {
                             let ci = &args.context_ident;
                             (quote! { #ci }, idx)
                         } else {
                             let first = &arg_names[0];
                             (quote! { #first }, 0)
                         };
-                        ctx_param_idx = Some(clone_idx);
-                        let call_args = arg_names
-                            .iter()
-                            .enumerate()
-                            .map(|(i, name)| {
-                                if i == clone_idx {
-                                    quote! { #name.clone() }
-                                } else {
-                                    quote! { #name }
-                                }
-                            })
-                            .collect();
-                        (ctx, call_args)
-                    };
+                    ctx_param_idx = Some(clone_idx);
+                    let call_args = arg_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| {
+                            if i == clone_idx {
+                                quote! { #name.clone() }
+                            } else {
+                                quote! { #name }
+                            }
+                        })
+                        .collect();
+                    (ctx, call_args)
+                };
 
                 // #212 (PROD-003 follow-up): the context parameter is always rebound at
                 // the top of the body via `with_operation_name` (see
@@ -506,9 +513,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 });
 
                 let mut clean = method.clone();
-                clean.attrs.retain(|a| {
-                    SdkAttr::detect(a).is_none()
-                });
+                clean.attrs.retain(|a| SdkAttr::detect(a).is_none());
                 output_items.push(TraitItem::Fn(clean));
             } else {
                 // A #[tenant_scoped] method missing #[operation] must not fall through

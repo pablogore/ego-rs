@@ -164,7 +164,9 @@ mod key_resolver_error_tests {
 
     #[test]
     fn key_not_found_carries_kid() {
-        let err = KeyResolverError::KeyNotFound { kid: Some("k1".into()) };
+        let err = KeyResolverError::KeyNotFound {
+            kid: Some("k1".into()),
+        };
         let repr = format!("{err:?}");
         assert!(repr.contains("k1"));
         let display = err.to_string();
@@ -271,10 +273,8 @@ mod local_key_resolver_tests {
 
     #[test]
     fn test_resolves_hs256_key() {
-        let resolver = LocalKeyResolver::new(
-            JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(hmac_secret()),
-        );
+        let resolver =
+            LocalKeyResolver::new(JwtAlgorithm::Hs256, VerificationKey::Hmac(hmac_secret()));
         let result = block_on(resolver.resolve(None, JwtAlgorithm::Hs256));
         match result {
             Ok(VerificationKey::Hmac(bytes)) => assert_eq!(bytes, hmac_secret()),
@@ -284,10 +284,8 @@ mod local_key_resolver_tests {
 
     #[test]
     fn test_resolves_rs256_key() {
-        let resolver = LocalKeyResolver::new(
-            JwtAlgorithm::Rs256,
-            VerificationKey::RsaPem(rsa_pem()),
-        );
+        let resolver =
+            LocalKeyResolver::new(JwtAlgorithm::Rs256, VerificationKey::RsaPem(rsa_pem()));
         let result = block_on(resolver.resolve(None, JwtAlgorithm::Rs256));
         match result {
             Ok(VerificationKey::RsaPem(pem)) => assert_eq!(pem, rsa_pem()),
@@ -297,13 +295,14 @@ mod local_key_resolver_tests {
 
     #[test]
     fn test_algorithm_mismatch() {
-        let resolver = LocalKeyResolver::new(
-            JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(hmac_secret()),
-        );
+        let resolver =
+            LocalKeyResolver::new(JwtAlgorithm::Hs256, VerificationKey::Hmac(hmac_secret()));
         let result = block_on(resolver.resolve(None, JwtAlgorithm::Rs256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Hs256);
                 assert_eq!(requested, JwtAlgorithm::Rs256);
             }
@@ -313,10 +312,8 @@ mod local_key_resolver_tests {
 
     #[test]
     fn test_ignores_kid() {
-        let resolver = LocalKeyResolver::new(
-            JwtAlgorithm::Hs256,
-            VerificationKey::Hmac(hmac_secret()),
-        );
+        let resolver =
+            LocalKeyResolver::new(JwtAlgorithm::Hs256, VerificationKey::Hmac(hmac_secret()));
         let with_kid = block_on(resolver.resolve(Some("key-id-1"), JwtAlgorithm::Hs256));
         let without_kid = block_on(resolver.resolve(None, JwtAlgorithm::Hs256));
         match (with_kid, without_kid) {

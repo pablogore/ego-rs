@@ -11,7 +11,9 @@ fn main() -> anyhow::Result<()> {
         Some("verify-isolation") => verify_isolation()?,
         Some("verify-hygiene") => verify_hygiene()?,
         _ => {
-            eprintln!("usage: cargo run -p xtask -- <verify-layers|verify-isolation|verify-hygiene>");
+            eprintln!(
+                "usage: cargo run -p xtask -- <verify-layers|verify-isolation|verify-hygiene>"
+            );
             std::process::exit(2);
         }
     };
@@ -34,7 +36,10 @@ fn verify_layers() -> anyhow::Result<bool> {
     );
 
     if violations.is_empty() {
-        println!("verify-layers: OK ({} crates, 0 violations)", workspace.crates.len());
+        println!(
+            "verify-layers: OK ({} crates, 0 violations)",
+            workspace.crates.len()
+        );
         return Ok(true);
     }
 
@@ -59,7 +64,10 @@ fn verify_isolation() -> anyhow::Result<bool> {
         return Ok(true);
     }
 
-    println!("verify-isolation: FAIL ({} crate(s) failed in isolation)", failures.len());
+    println!(
+        "verify-isolation: FAIL ({} crate(s) failed in isolation)",
+        failures.len()
+    );
     for name in &failures {
         println!("  - {name}");
     }

@@ -23,7 +23,13 @@ async fn poll_loop_logs_errors_instead_of_silently_swallowing_them() {
     // (see `read_side::projection`'s `unrecognized event_type` poison-event
     // arm) — not a test-only backdoor, just an event type the handler
     // doesn't recognize.
-    sink.record("tenant-x", "agg-1", "NotARealEventType", serde_json::json!({}), Utc::now());
+    sink.record(
+        "tenant-x",
+        "agg-1",
+        "NotARealEventType",
+        serde_json::json!({}),
+        Utc::now(),
+    );
 
     let capturing = CapturingLogger::new();
     let handles = ReadSideHandles::new(store).with_logger(Some(capturing.logger()));
@@ -35,7 +41,10 @@ async fn poll_loop_logs_errors_instead_of_silently_swallowing_them() {
 
     let records = capturing.records();
     assert!(
-        records.iter().any(|r| r.message.contains("read_side poll failed") && r.message.contains("poison event")),
+        records
+            .iter()
+            .any(|r| r.message.contains("read_side poll failed")
+                && r.message.contains("poison event")),
         "expected the poll failure to be logged, got: {records:?}"
     );
 }

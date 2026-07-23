@@ -22,9 +22,13 @@ use persistent_entity::testing::{TestCommand, TestEvent, TestState};
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn handler(
-) -> Arc<dyn persistent_entity::persistent_entity::PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>>
-{
+fn handler() -> Arc<
+    dyn persistent_entity::persistent_entity::PersistentEntity<
+        Command = TestCommand,
+        Event = TestEvent,
+        State = TestState,
+    >,
+> {
     Arc::new(TestEntity::new())
 }
 
@@ -70,10 +74,13 @@ async fn test_real_actor_command_reply() {
         .passivation_timeout(Duration::from_secs(3600))
         .snapshot_strategy(Arc::new(NoSnapshot))
         .build();
-    let entity_ref = runtime.entity_ref::<TestCommand, TestState>("counter", "c1", handler()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "c1", handler())
+        .unwrap();
 
-    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-        entity_ref.send_command(TestCommand::Increment(5), ctx()).await;
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(5), ctx())
+        .await;
 
     assert!(result.is_ok(), "command should succeed: {:?}", result.err());
     match result.unwrap() {
@@ -115,14 +122,19 @@ async fn test_recovery_replays_seeded_events() {
         .with_event_store(event_store)
         .build();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "c-recovery", handler())
+        .unwrap();
 
     // GetState emits no events — the actor returns the recovered state as-is.
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
         entity_ref.send_command(TestCommand::GetState, ctx()).await;
 
-    assert!(result.is_ok(), "GetState should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "GetState should succeed: {:?}",
+        result.err()
+    );
     match result.unwrap() {
         CommandResult::NoEvents { state } => {
             // 3 events seeded, each increments state.version by 1.
@@ -151,12 +163,14 @@ async fn test_passivation_updates_registry() {
             .build(),
     );
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "p1", handler()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "p1", handler())
+        .unwrap();
 
     // Send a command before passivation fires — must be replied.
-    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-        entity_ref.send_command(TestCommand::Increment(1), ctx()).await;
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), ctx())
+        .await;
     assert!(result.is_ok(), "pre-passivation command should succeed");
 
     // Wait for the actor to passivate.
@@ -192,18 +206,18 @@ async fn test_recovery_failure_returns_error() {
         .with_snapshot_store(failing_snapshot_store)
         .build();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("counter", "fail-1", handler()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("counter", "fail-1", handler())
+        .unwrap();
 
     // The actor fails recovery synchronously inside its spawned task.
     // send_command must get a reply (Err) rather than hanging forever.
-    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            entity_ref.send_command(TestCommand::Increment(1), ctx()),
-        )
-        .await
-        .expect("send_command must complete within 2 s (no hang)");
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = tokio::time::timeout(
+        Duration::from_secs(2),
+        entity_ref.send_command(TestCommand::Increment(1), ctx()),
+    )
+    .await
+    .expect("send_command must complete within 2 s (no hang)");
 
     assert!(
         result.is_err(),
@@ -259,7 +273,11 @@ impl PersistentEntity for EffectEmittingEntity {
         }
     }
 
-    async fn apply_event(&self, state: &TestState, event: &TestEvent) -> Result<TestState, EntityError> {
+    async fn apply_event(
+        &self,
+        state: &TestState,
+        event: &TestEvent,
+    ) -> Result<TestState, EntityError> {
         match event {
             TestEvent::Incremented(v) => Ok(TestState {
                 value: state.value + v,
@@ -272,7 +290,11 @@ impl PersistentEntity for EffectEmittingEntity {
         }
     }
 
-    async fn apply_events(&self, state: &TestState, events: &[TestEvent]) -> Result<TestState, EntityError> {
+    async fn apply_events(
+        &self,
+        state: &TestState,
+        events: &[TestEvent],
+    ) -> Result<TestState, EntityError> {
         let mut s = state.clone();
         for event in events {
             s = self.apply_event(&s, event).await?;
@@ -321,7 +343,9 @@ impl EffectAcceptor for RecordingAcceptor {
 #[tokio::test(flavor = "current_thread")]
 async fn builder_wired_effect_acceptor_reaches_a_real_spawned_actor() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let acceptor: Arc<dyn EffectAcceptor> = Arc::new(RecordingAcceptor { calls: calls.clone() });
+    let acceptor: Arc<dyn EffectAcceptor> = Arc::new(RecordingAcceptor {
+        calls: calls.clone(),
+    });
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
         .passivation_timeout(Duration::from_secs(3600))
@@ -330,11 +354,16 @@ async fn builder_wired_effect_acceptor_reaches_a_real_spawned_actor() {
         .build();
 
     let entity_ref = runtime
-        .entity_ref::<TestCommand, TestState>("counter", "effects-wired-1", Arc::new(EffectEmittingEntity))
+        .entity_ref::<TestCommand, TestState>(
+            "counter",
+            "effects-wired-1",
+            Arc::new(EffectEmittingEntity),
+        )
         .unwrap();
 
-    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-        entity_ref.send_command(TestCommand::Increment(1), ctx()).await;
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), ctx())
+        .await;
 
     assert!(result.is_ok(), "command should succeed: {:?}", result.err());
     assert_eq!(
@@ -362,11 +391,16 @@ async fn without_with_effect_acceptor_described_effects_fail_closed_not_silently
         .build();
 
     let entity_ref = runtime
-        .entity_ref::<TestCommand, TestState>("counter", "effects-unwired-1", Arc::new(EffectEmittingEntity))
+        .entity_ref::<TestCommand, TestState>(
+            "counter",
+            "effects-unwired-1",
+            Arc::new(EffectEmittingEntity),
+        )
         .unwrap();
 
-    let result: Result<CommandResult<TestEvent, TestState>, EntityError> =
-        entity_ref.send_command(TestCommand::Increment(1), ctx()).await;
+    let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
+        .send_command(TestCommand::Increment(1), ctx())
+        .await;
 
     assert!(
         matches!(result, Ok(CommandResult::EffectsAcceptanceFailed { .. })),

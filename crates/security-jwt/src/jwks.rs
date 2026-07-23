@@ -78,7 +78,9 @@ impl JwksProvider for HttpJwksProvider {
             })?
             .error_for_status()
             .map_err(|e| {
-                AuthenticationError::ProviderUnavailable(format!("JWKS endpoint returned error status: {e}"))
+                AuthenticationError::ProviderUnavailable(format!(
+                    "JWKS endpoint returned error status: {e}"
+                ))
             })?;
 
         let jwk_set: JwkSet = resp.json().await.map_err(|e| {
@@ -156,7 +158,9 @@ fn rsa_components_to_pem(n_b64: &str, e_b64: &str) -> Result<String, Authenticat
 
     let mut alg_content = Vec::new();
     // OID 1.2.840.113549.1.1.1 (rsaEncryption) — RFC 3447 Appendix C
-    alg_content.extend_from_slice(&[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]);
+    alg_content.extend_from_slice(&[
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    ]);
     // NULL parameters — required by RFC 3447 §3.1
     alg_content.extend_from_slice(&[0x05, 0x00]);
     let alg_seq = der_sequence(&alg_content);
@@ -265,7 +269,10 @@ fn der_integer(bytes: &[u8]) -> Vec<u8> {
     // X.690 §8.3: INTEGER — prepend 0x00 if MSB is set to signal a positive value.
     // X.690 §8.3.1: INTEGER must have at least one content octet — callers must
     // validate non-empty before calling (rsa_components_to_pem and ec guard above).
-    debug_assert!(!bytes.is_empty(), "der_integer: empty input produces invalid DER 02 00");
+    debug_assert!(
+        !bytes.is_empty(),
+        "der_integer: empty input produces invalid DER 02 00"
+    );
     let needs_pad = bytes.first().is_some_and(|b| b & 0x80 != 0);
     let mut content: Vec<u8> = if needs_pad { vec![0x00] } else { vec![] };
     content.extend_from_slice(bytes);
@@ -293,7 +300,10 @@ const P256_COORD_BYTES: usize = 32;
 
 /// Maps a `VerificationKey` + requested `JwtAlgorithm` to a result, returning
 /// `AlgorithmMismatch` when the key type does not match the algorithm.
-fn vk_to_result(vk: VerificationKey, algorithm: JwtAlgorithm) -> Result<VerificationKey, KeyResolverError> {
+fn vk_to_result(
+    vk: VerificationKey,
+    algorithm: JwtAlgorithm,
+) -> Result<VerificationKey, KeyResolverError> {
     match (&vk, algorithm) {
         (VerificationKey::Hmac(_), JwtAlgorithm::Hs256)
         | (VerificationKey::RsaPem(_), JwtAlgorithm::Rs256)
@@ -375,8 +385,12 @@ impl JwksKeyResolver {
                 *guard = keys.into_iter().collect();
             }
             Ok(Ok(_)) => warn!("JWKS warm-up returned 0 keys — cache starts empty"),
-            Ok(Err(e)) => warn!("JWKS warm-up failed: {e} — cache starts empty, will retry on first auth"),
-            Err(_) => warn!("JWKS warm-up: thread panicked — cache starts empty, will retry on first auth"),
+            Ok(Err(e)) => {
+                warn!("JWKS warm-up failed: {e} — cache starts empty, will retry on first auth")
+            }
+            Err(_) => warn!(
+                "JWKS warm-up: thread panicked — cache starts empty, will retry on first auth"
+            ),
         }
 
         // Background refresh task — only when a Tokio runtime is available.
@@ -411,7 +425,13 @@ impl JwksKeyResolver {
         let last_force_refresh =
             Mutex::new(Instant::now() - Duration::from_secs(FORCE_REFRESH_INITIAL_AGE_SECS));
 
-        Self { cache, jwks_uri, provider, last_force_refresh, refresh_in_flight: AtomicBool::new(false) }
+        Self {
+            cache,
+            jwks_uri,
+            provider,
+            last_force_refresh,
+            refresh_in_flight: AtomicBool::new(false),
+        }
     }
 
     /// Force a synchronous cache refresh on a dedicated OS thread.
@@ -441,7 +461,10 @@ impl JwksKeyResolver {
                 }
                 // Update debounce timer only on success — failed fetches must not
                 // block retries for the full 30 s window (C3).
-                *self.last_force_refresh.lock().expect("debounce mutex poisoned") = Instant::now();
+                *self
+                    .last_force_refresh
+                    .lock()
+                    .expect("debounce mutex poisoned") = Instant::now();
             }
             Ok(Ok(_)) => warn!("JWKS force_refresh returned 0 keys — retaining stale cache"),
             Ok(Err(e)) => warn!("JWKS forced refresh failed: {e} — retaining stale cache"),
@@ -477,7 +500,10 @@ impl KeyResolver for JwksKeyResolver {
         // C3: `last_force_refresh` is updated ONLY inside `force_refresh` on success, so a failed
         // fetch does not burn the 30 s window. `refresh_in_flight` prevents concurrent calls.
         let should_refresh = {
-            let last = self.last_force_refresh.lock().expect("debounce mutex poisoned");
+            let last = self
+                .last_force_refresh
+                .lock()
+                .expect("debounce mutex poisoned");
             if last.elapsed() < Duration::from_secs(FORCE_REFRESH_DEBOUNCE_SECS) {
                 false
             } else {
@@ -527,7 +553,10 @@ mod tests {
 
     impl FakeJwks {
         fn new(keys: Vec<(Option<String>, VerificationKey)>) -> Self {
-            Self { keys, call_count: Arc::new(AtomicUsize::new(0)) }
+            Self {
+                keys,
+                call_count: Arc::new(AtomicUsize::new(0)),
+            }
         }
     }
 
@@ -541,8 +570,6 @@ mod tests {
             Ok(self.keys.clone())
         }
     }
-
-
 
     #[test]
     fn force_refresh_debounce_skips_second_miss_within_window() {
@@ -562,18 +589,30 @@ mod tests {
         let after_warmup = call_count.load(std::sync::atomic::Ordering::SeqCst);
 
         // First miss: debounce window expired (initialized 31 s ago) → refresh fires.
-        let _ = futures_executor::block_on(resolver.resolve(Some("unknown-1"), JwtAlgorithm::Hs256));
+        let _ =
+            futures_executor::block_on(resolver.resolve(Some("unknown-1"), JwtAlgorithm::Hs256));
         let after_first_miss = call_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(after_first_miss, after_warmup + 1, "first miss should trigger exactly one refresh");
+        assert_eq!(
+            after_first_miss,
+            after_warmup + 1,
+            "first miss should trigger exactly one refresh"
+        );
 
         // Second miss immediately after: still within 30 s window → no refresh.
-        let _ = futures_executor::block_on(resolver.resolve(Some("unknown-2"), JwtAlgorithm::Hs256));
+        let _ =
+            futures_executor::block_on(resolver.resolve(Some("unknown-2"), JwtAlgorithm::Hs256));
         let after_second_miss = call_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(after_second_miss, after_first_miss, "second miss within debounce window must not trigger refresh");
+        assert_eq!(
+            after_second_miss, after_first_miss,
+            "second miss within debounce window must not trigger refresh"
+        );
     }
 
     fn fake_key(kid: &str) -> (Option<String>, VerificationKey) {
-        (Some(kid.to_string()), VerificationKey::Hmac(vec![kid.as_bytes()[0]]))
+        (
+            Some(kid.to_string()),
+            VerificationKey::Hmac(vec![kid.as_bytes()[0]]),
+        )
     }
 
     fn make_resolver(keys: Vec<(Option<String>, VerificationKey)>) -> JwksKeyResolver {
@@ -612,7 +651,11 @@ mod tests {
         let calls_after_warmup = counter.load(Ordering::SeqCst);
         // Cache hit — no additional fetch
         let _ = futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256));
-        assert_eq!(counter.load(Ordering::SeqCst), calls_after_warmup, "cache hit should not trigger fetch");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            calls_after_warmup,
+            "cache hit should not trigger fetch"
+        );
     }
 
     #[test]
@@ -687,7 +730,10 @@ mod tests {
         resolver.force_refresh();
 
         let vk2 = futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256));
-        assert!(vk2.is_ok(), "stale cache must be retained when force_refresh fails");
+        assert!(
+            vk2.is_ok(),
+            "stale cache must be retained when force_refresh fails"
+        );
     }
 
     #[test]
@@ -733,7 +779,8 @@ mod tests {
 
         // Confirm warm-up: A present
         assert!(
-            futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256)).is_ok()
+            futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256))
+                .is_ok()
         );
 
         // Force refresh: now provider returns [B, C]
@@ -741,14 +788,17 @@ mod tests {
 
         // B must be present
         assert!(
-            futures_executor::block_on(resolver.resolve(Some("kid-B"), JwtAlgorithm::Hs256)).is_ok()
+            futures_executor::block_on(resolver.resolve(Some("kid-B"), JwtAlgorithm::Hs256))
+                .is_ok()
         );
         // C must be present
         assert!(
-            futures_executor::block_on(resolver.resolve(Some("kid-C"), JwtAlgorithm::Hs256)).is_ok()
+            futures_executor::block_on(resolver.resolve(Some("kid-C"), JwtAlgorithm::Hs256))
+                .is_ok()
         );
         // A must be evicted — resolve triggers another refresh (3rd round = empty), still no A
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-A"), JwtAlgorithm::Hs256));
         assert!(result.is_err(), "kid-A must be evicted after key rotation");
     }
 
@@ -788,7 +838,8 @@ mod tests {
             })
             .collect();
         for h in handles {
-            h.join().expect("thread panicked — possible deadlock or pool starvation");
+            h.join()
+                .expect("thread panicked — possible deadlock or pool starvation");
         }
     }
 
@@ -796,9 +847,13 @@ mod tests {
     fn algorithm_mismatch_hmac_key_with_rs256_cache_hit() {
         // Cache warm-up loads an HMAC key; resolve with Rs256 must return AlgorithmMismatch.
         let resolver = make_resolver(vec![fake_key("kid-hmac")]);
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Rs256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Rs256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Hs256);
                 assert_eq!(requested, JwtAlgorithm::Rs256);
             }
@@ -823,13 +878,17 @@ mod tests {
                 _: &url::Url,
             ) -> Result<Vec<(Option<String>, VerificationKey)>, AuthenticationError> {
                 let mut rounds = self.rounds.lock().unwrap();
-                if rounds.is_empty() { Ok(vec![]) } else { Ok(rounds.remove(0)) }
+                if rounds.is_empty() {
+                    Ok(vec![])
+                } else {
+                    Ok(rounds.remove(0))
+                }
             }
         }
 
         let provider = Arc::new(TwoRoundJwks {
             rounds: Mutex::new(vec![
-                vec![],                    // warm-up → empty, cache stays empty
+                vec![],                     // warm-up → empty, cache stays empty
                 vec![fake_key("kid-hmac")], // force_refresh → HMAC key lands in cache
             ]),
         });
@@ -841,9 +900,13 @@ mod tests {
         );
 
         // kid-hmac not in cache yet (warm-up was empty) → triggers force_refresh
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Rs256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Rs256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Hs256);
                 assert_eq!(requested, JwtAlgorithm::Rs256);
             }
@@ -859,9 +922,13 @@ mod tests {
             Some("kid-rsa".into()),
             VerificationKey::RsaPem("fake-pem".into()),
         )]);
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-rsa"), JwtAlgorithm::Es256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-rsa"), JwtAlgorithm::Es256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Rs256);
                 assert_eq!(requested, JwtAlgorithm::Es256);
             }
@@ -875,9 +942,13 @@ mod tests {
             Some("kid-ec".into()),
             VerificationKey::EcPem("fake-ec-pem".into()),
         )]);
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-ec"), JwtAlgorithm::Rs256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-ec"), JwtAlgorithm::Rs256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Es256);
                 assert_eq!(requested, JwtAlgorithm::Rs256);
             }
@@ -888,9 +959,13 @@ mod tests {
     #[test]
     fn algorithm_mismatch_hmac_key_with_es256() {
         let resolver = make_resolver(vec![fake_key("kid-hmac")]);
-        let result = futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Es256));
+        let result =
+            futures_executor::block_on(resolver.resolve(Some("kid-hmac"), JwtAlgorithm::Es256));
         match result {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Hs256);
                 assert_eq!(requested, JwtAlgorithm::Es256);
             }
@@ -964,7 +1039,11 @@ mod tests {
                 _: &url::Url,
             ) -> Result<Vec<(Option<String>, VerificationKey)>, AuthenticationError> {
                 let mut rounds = self.rounds.lock().unwrap();
-                if rounds.is_empty() { Ok(vec![]) } else { Ok(rounds.remove(0)) }
+                if rounds.is_empty() {
+                    Ok(vec![])
+                } else {
+                    Ok(rounds.remove(0))
+                }
             }
         }
         let provider = Arc::new(TwoRoundJwks {
@@ -979,7 +1058,7 @@ mod tests {
             provider,
         );
         resolver.force_refresh(); // load [B, C]; A is gone from cache
-        // Read the cache directly — no resolve() to avoid triggering a third refresh
+                                  // Read the cache directly — no resolve() to avoid triggering a third refresh
         let guard = resolver.cache.read().unwrap();
         let has_a = guard.contains_key(&Some("kid-A".to_string()));
         let has_b = guard.contains_key(&Some("kid-B".to_string()));
@@ -1027,7 +1106,10 @@ mod tests {
     fn vk_to_result_rsa_key_with_es256_returns_mismatch() {
         let vk = VerificationKey::RsaPem("fake-rsa-pem".into());
         match vk_to_result(vk, JwtAlgorithm::Es256) {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Rs256);
                 assert_eq!(requested, JwtAlgorithm::Es256);
             }
@@ -1039,7 +1121,10 @@ mod tests {
     fn vk_to_result_ec_key_with_rs256_returns_mismatch() {
         let vk = VerificationKey::EcPem("fake-ec-pem".into());
         match vk_to_result(vk, JwtAlgorithm::Rs256) {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Es256);
                 assert_eq!(requested, JwtAlgorithm::Rs256);
             }
@@ -1051,7 +1136,10 @@ mod tests {
     fn vk_to_result_hmac_key_with_es256_returns_mismatch() {
         let vk = VerificationKey::Hmac(vec![0u8; 32]);
         match vk_to_result(vk, JwtAlgorithm::Es256) {
-            Err(KeyResolverError::AlgorithmMismatch { expected, requested }) => {
+            Err(KeyResolverError::AlgorithmMismatch {
+                expected,
+                requested,
+            }) => {
                 assert_eq!(expected, JwtAlgorithm::Hs256);
                 assert_eq!(requested, JwtAlgorithm::Es256);
             }
@@ -1080,5 +1168,4 @@ mod tests {
             "empty RSA exponent must return InvalidToken, got: {result:?}"
         );
     }
-
 }

@@ -82,20 +82,22 @@ pub mod multi_issuer;
 pub mod test_kit;
 
 mod key_resolver;
-mod validation;
 #[cfg(test)]
 mod test_helpers;
+mod validation;
 
-pub use authenticator::{Es256AuthenticationProvider, Hs256AuthenticationProvider, Rs256AuthenticationProvider};
-pub use oidc_provider::OidcAuthenticationProvider;
-pub use multi_issuer::{IssuerResolver, MultiIssuerAuthenticationProvider, StaticIssuerResolver};
+pub use authenticator::{
+    Es256AuthenticationProvider, Hs256AuthenticationProvider, Rs256AuthenticationProvider,
+};
 pub use config::{Es256Config, Hs256Config, JwtAlgorithm, JwtProviderConfig, Rs256Config};
-pub use key_resolver::{KeyResolver, KeyResolverError, LocalKeyResolver, VerificationKey};
-pub use oidc_config::{MultiIssuerConfig, OidcProviderConfig, TokenFormat};
-pub use jwks::{HttpJwksProvider, JwksKeyResolver, JwksProvider};
 pub use discovery::OidcEndpoints;
-pub use principal_mapper::DefaultPrincipalMapper;
 pub use introspection::{
     ClientCredentials, HttpIntrospectionProvider, IntrospectionAuthenticationProvider,
     IntrospectionProvider, IntrospectionResult,
 };
+pub use jwks::{HttpJwksProvider, JwksKeyResolver, JwksProvider};
+pub use key_resolver::{KeyResolver, KeyResolverError, LocalKeyResolver, VerificationKey};
+pub use multi_issuer::{IssuerResolver, MultiIssuerAuthenticationProvider, StaticIssuerResolver};
+pub use oidc_config::{MultiIssuerConfig, OidcProviderConfig, TokenFormat};
+pub use oidc_provider::OidcAuthenticationProvider;
+pub use principal_mapper::DefaultPrincipalMapper;

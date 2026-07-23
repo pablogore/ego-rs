@@ -39,7 +39,11 @@ pub struct EffectContext {
 #[async_trait]
 pub trait ExternalEffectExecutor: Send + Sync {
     /// Executes exactly one attempt of `effect`.
-    async fn execute(&self, effect: &ExternalEffectDescription, ctx: &EffectContext) -> AttemptOutcome;
+    async fn execute(
+        &self,
+        effect: &ExternalEffectDescription,
+        ctx: &EffectContext,
+    ) -> AttemptOutcome;
 
     /// Doc-only signal for end-to-end semantics; does not change runtime
     /// behavior. Defaults to `false` — most executors don't cooperate on
@@ -57,7 +61,11 @@ mod tests {
 
     #[async_trait]
     impl ExternalEffectExecutor for AlwaysSucceeds {
-        async fn execute(&self, _effect: &ExternalEffectDescription, _ctx: &EffectContext) -> AttemptOutcome {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
             AttemptOutcome::Success
         }
     }
@@ -66,7 +74,11 @@ mod tests {
 
     #[async_trait]
     impl ExternalEffectExecutor for IdempotentExecutor {
-        async fn execute(&self, _effect: &ExternalEffectDescription, _ctx: &EffectContext) -> AttemptOutcome {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
             AttemptOutcome::RetryableFailure("timeout".into())
         }
 

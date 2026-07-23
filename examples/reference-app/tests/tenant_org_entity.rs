@@ -9,7 +9,9 @@
 
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::persistent_entity::PersistentEntity;
-use reference_app::domain::tenant_org::{TenantOrgCommand, TenantOrgState, TenantOrganizationEntity};
+use reference_app::domain::tenant_org::{
+    TenantOrgCommand, TenantOrgState, TenantOrganizationEntity,
+};
 
 fn ctx() -> CommandContext {
     CommandContext::new("tenant-org".to_string())
@@ -30,7 +32,11 @@ async fn ensure_on_absent_produces_organization_ensured_and_transitions_to_prese
         .handle_command(&cmd, &state, &ctx())
         .await
         .expect("ensure should succeed");
-    assert_eq!(events.len(), 1, "exactly one OrganizationEnsured event expected");
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one OrganizationEnsured event expected"
+    );
 
     let new_state = entity
         .apply_event(&state, &events[0])

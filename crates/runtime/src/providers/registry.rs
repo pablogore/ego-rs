@@ -85,7 +85,9 @@ mod tests {
     #[test]
     fn duplicate_registration_for_same_provider_id_fails() {
         let mut registry = ExternalDataProviderRegistry::new();
-        registry.register("pricing", Arc::new(NoopProvider)).unwrap();
+        registry
+            .register("pricing", Arc::new(NoopProvider))
+            .unwrap();
 
         let err = registry
             .register("pricing", Arc::new(NoopProvider))
@@ -103,9 +105,7 @@ mod tests {
         registry
             .register("pricing", Arc::new(NoopProvider))
             .unwrap();
-        registry
-            .register("jwks", Arc::new(NoopProvider))
-            .unwrap();
+        registry.register("jwks", Arc::new(NoopProvider)).unwrap();
 
         assert!(registry.get("pricing").is_some());
         assert!(registry.get("jwks").is_some());
