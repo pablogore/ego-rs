@@ -1840,28 +1840,49 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wait_until_drained_does_not_lose_the_last_guards_wakeup_under_concurrent_drop() {
         const TRIALS: usize = 300;
-        const PER_TRIAL_DEADLINE: Duration = Duration::from_millis(50);
+        // The gate's own deadline is the backstop `wait_until_drained` falls
+        // through to *only* if a wakeup is lost. Set it far larger than any
+        // realistic per-trial wall-clock so a healthy trial never reaches it
+        // (it returns the instant the guard drops, via the `watch` wakeup),
+        // while a regressed lost-wakeup would block on it.
+        const GATE_DEADLINE: Duration = Duration::from_secs(30);
+        // How long we are willing to wait for that guard-drop wakeup per
+        // trial. Generous enough to be immune to scheduler contention under
+        // `cargo test --workspace` (a healthy trial returns in well under a
+        // millisecond), yet far below GATE_DEADLINE so a genuinely lost wakeup
+        // surfaces here as a timeout instead of silently burning the backstop.
+        //
+        // This asserts *correctness per trial* (the wakeup is never lost),
+        // deliberately NOT an aggregate latency budget: total wall-clock across
+        // 300 concurrent trials is a function of machine load, not of the
+        // lost-wakeup contract, and conflating the two is what made the former
+        // `elapsed < 150ms` assertion flaky under parallel test load.
+        const WAKEUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        let started = std::time::Instant::now();
-        for _ in 0..TRIALS {
+        for trial in 0..TRIALS {
             let gate = LifecycleGate::new();
             let guard = gate.enter().expect("gate starts Running");
-            gate.begin_draining(tokio::time::Instant::now() + PER_TRIAL_DEADLINE);
+            gate.begin_draining(tokio::time::Instant::now() + GATE_DEADLINE);
 
             tokio::spawn(async move {
                 drop(guard);
             });
 
-            gate.wait_until_drained().await;
+            // The wakeup is never lost, so this returns the moment the spawned
+            // drop lands — well within WAKEUP_TIMEOUT. A timeout here means
+            // `wait_until_drained` fell through to its deadline backstop despite
+            // the in-flight count having genuinely reached zero: exactly the
+            // F-03 lost-wakeup regression.
+            tokio::time::timeout(WAKEUP_TIMEOUT, gate.wait_until_drained())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "trial {trial}: wait_until_drained did not observe the concurrent \
+                         guard-drop wakeup within {WAKEUP_TIMEOUT:?} — the last guard's wakeup \
+                         was lost (F-03 regression)"
+                    )
+                });
         }
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < PER_TRIAL_DEADLINE * 3,
-            "across {TRIALS} trials racing a concurrent guard-drop against \
-             wait_until_drained's own read-then-await, total elapsed time ({elapsed:?}) must \
-             stay far below even a couple of per-trial deadlines ({PER_TRIAL_DEADLINE:?} each)"
-        );
     }
 
     /// **F-03 (PR3 round 4 review, BLOCKER) — deterministic RED/GREEN proof.**
