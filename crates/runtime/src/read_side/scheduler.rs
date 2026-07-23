@@ -221,9 +221,12 @@ where
 {
     /// Spawns a projection poll loop from a [`ProjectionSpec`] and returns a
     /// single [`ReadSideProjectionHandle`]. This is the only supported entry
-    /// point for launching a projection: the spec groups the arguments and
-    /// defaults the boilerplate, and `spawn` creates the `watch` stop channel
-    /// internally so the caller never has to wire it.
+    /// point for launching a persistent projection poll loop: the spec groups
+    /// the arguments and defaults the boilerplate, and `spawn` creates the
+    /// `watch` stop channel internally so the caller never has to wire it.
+    /// (The [`TagScheduler::start_projection`] trait method remains public but
+    /// processes a single batch per call — it is the primitive `spawn` loops
+    /// over, not a lifecycle entry point.)
     ///
     /// `tag_provider` is called fresh on every iteration rather than being
     /// captured as a fixed `Vec<(EventTag, String)>` once — required for
