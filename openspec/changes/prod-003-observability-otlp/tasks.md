@@ -79,14 +79,14 @@ Chain strategy: pending
 
 ## Phase 7: Boundary Lint & Spec Reconciliation
 
-- [ ] TASK-026 RED: source-scan test `crates/service-sdk/tests/otlp_boundary_lint.rs` (mirrors `tenant_scoped_lint.rs`): fails against a fixture using `Context::current()`/`Span::current()` outside `tracing_otlp.rs`.
-- [ ] TASK-027 GREEN: confirm zero real violations workspace-wide (no production code change). AC: `cargo test -p ego-service-sdk otlp_boundary_lint` green.
-- [ ] TASK-028: reconcile `openspec/specs/service-sdk/spec.md` "ServiceContext Remains a Pure DTO" (AC-9) — scoping note: AC-9 governs the CORE-015 change and does not preclude additive data-only fields (e.g. PROD-003's `trace_context`). AC: doc-only diff, no code change.
+- [x] TASK-026 RED: source-scan test `crates/service-sdk/tests/otlp_boundary_lint.rs` (mirrors `tenant_scoped_lint.rs`): fails against a fixture using `Context::current()`/`Span::current()` outside `tracing_otlp.rs`.
+- [x] TASK-027 GREEN: confirm zero real violations workspace-wide (no production code change). AC: `cargo test -p ego-service-sdk otlp_boundary_lint` green.
+- [x] TASK-028: reconcile `openspec/specs/service-sdk/spec.md` "ServiceContext Remains a Pure DTO" (AC-9) — scoping note: AC-9 governs the CORE-015 change and does not preclude additive data-only fields (e.g. PROD-003's `trace_context`). AC: doc-only diff, no code change.
 
 ## Phase 8: Verification
 
-- [ ] TASK-029: run `cargo test --workspace` and `cargo build --workspace`. AC: exit 0, no regressions.
-- [ ] TASK-030: confirm default runtime (no `with_tracer`) is behaviorally unchanged (NoopTracer). AC: pre-existing test suite passes unmodified.
+- [x] TASK-029: run `cargo test --workspace` and `cargo build --workspace`. AC: exit 0, no regressions.
+- [x] TASK-030: confirm default runtime (no `with_tracer`) is behaviorally unchanged (NoopTracer). AC: pre-existing test suite passes unmodified.
 
 ## Non-Goals (no tasks generated)
 

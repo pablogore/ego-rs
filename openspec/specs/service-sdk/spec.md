@@ -1284,6 +1284,15 @@ The pipeline order is fixed and independent of attribute lexical order:
 - AC-9.1: No new methods, fields, or trait implementations are added to `ServiceContext` in this change.
 - AC-9.2: `ServiceContext` does not expose a reference or accessor to any runtime provider.
 
+**Scope note (PROD-003):** AC-9.1's "in this change" bounds the change that
+introduced this requirement — it froze `ServiceContext`'s surface *for that
+change*, it is not a permanent freeze on the type. AC-9's durable intent is
+AC-9.2: `ServiceContext` stays a **pure data DTO** and MUST NOT expose a
+runtime provider / behavior. A later change MAY add additive, **data-only**
+fields — e.g. PROD-003's explicit `trace_context: Option<TraceContext>`
+(trace identity carried by value, no provider reference, no ambient access) —
+without violating AC-9.2. Such additions remain DTO-compatible.
+
 ---
 
 ### Requirement: `RuntimeInner::authorization_provider()` Accessor Added
