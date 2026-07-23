@@ -18,9 +18,11 @@ use crate::context::ServiceContext;
 use crate::error::{ServiceError, ServiceErrorTrait};
 use crate::interceptor::chain::Interceptor;
 
-/// The fixed span name used for the single request-boundary span (v1 has no
-/// per-operation name threaded through the `Interceptor` call sites — see
-/// `service-sdk-macros/src/lib.rs:478-486`).
+/// The fallback span name for the single request-boundary span, used when the
+/// context carries no operation name (contexts built manually / in tests /
+/// without a generated proxy — PROD-003 follow-up #212). The generated proxy
+/// populates [`ServiceContext::operation_name`] with the dispatched method
+/// name, which is preferred over this generic name when present.
 const REQUEST_SPAN_NAME: &str = "request";
 
 /// Built-in interceptor that owns exactly one span per request boundary,
@@ -48,8 +50,10 @@ impl Interceptor for TracingInterceptor {
         if let Some(trace_context) = context.trace_context() {
             let attrs = SpanAttributes::new()
                 .with_tenant_hint_present(context.has_tenant_hint());
-            self.tracer
-                .start_span(trace_context, REQUEST_SPAN_NAME, attrs);
+            // Prefer the per-operation name populated by the generated proxy
+            // (#212); fall back to the generic name for proxy-less contexts.
+            let span_name = context.operation_name().unwrap_or(REQUEST_SPAN_NAME);
+            self.tracer.start_span(trace_context, span_name, attrs);
         }
         Ok(())
     }
@@ -101,6 +105,7 @@ mod tests {
 
     struct SpyTracer {
         started: Mutex<Vec<SpanId>>,
+        started_names: Mutex<Vec<String>>,
         ended: Mutex<Vec<(SpanId, SpanOutcome)>>,
     }
 
@@ -108,14 +113,16 @@ mod tests {
         fn new() -> Self {
             Self {
                 started: Mutex::new(Vec::new()),
+                started_names: Mutex::new(Vec::new()),
                 ended: Mutex::new(Vec::new()),
             }
         }
     }
 
     impl Tracer for SpyTracer {
-        fn start_span(&self, ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {
+        fn start_span(&self, ctx: &TraceContext, name: &str, _attrs: SpanAttributes) {
             self.started.lock().unwrap().push(ctx.span_id());
+            self.started_names.lock().unwrap().push(name.to_string());
         }
 
         fn end_span(&self, span: SpanId, outcome: SpanOutcome) {
@@ -140,6 +147,36 @@ mod tests {
         let started = tracer.started.lock().unwrap();
         assert_eq!(started.len(), 1);
         assert_eq!(started[0], ctx.trace_context().unwrap().span_id());
+    }
+
+    #[tokio::test]
+    async fn on_request_uses_operation_name_for_the_span_name_when_present() {
+        let tracer = std::sync::Arc::new(SpyTracer::new());
+        let interceptor = TracingInterceptor::new(tracer.clone());
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new()
+            .with_trace_context(tc)
+            .with_operation_name("register");
+
+        interceptor.on_request(&ctx).await.unwrap();
+
+        let names = tracer.started_names.lock().unwrap();
+        assert_eq!(names.as_slice(), &["register".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn on_request_falls_back_to_request_span_name_without_operation_name() {
+        let tracer = std::sync::Arc::new(SpyTracer::new());
+        let interceptor = TracingInterceptor::new(tracer.clone());
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new().with_trace_context(tc);
+
+        interceptor.on_request(&ctx).await.unwrap();
+
+        let names = tracer.started_names.lock().unwrap();
+        assert_eq!(names.as_slice(), &[super::REQUEST_SPAN_NAME.to_string()]);
     }
 
     #[tokio::test]

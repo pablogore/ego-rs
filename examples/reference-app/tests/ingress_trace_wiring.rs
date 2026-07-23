@@ -42,11 +42,13 @@ use tower::ServiceExt;
 #[derive(Default)]
 struct SpyTracer {
     spans: Mutex<Vec<TraceContext>>,
+    names: Mutex<Vec<String>>,
 }
 
 impl Tracer for SpyTracer {
-    fn start_span(&self, ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {
+    fn start_span(&self, ctx: &TraceContext, name: &str, _attrs: SpanAttributes) {
         self.spans.lock().unwrap().push(*ctx);
+        self.names.lock().unwrap().push(name.to_string());
     }
 
     fn end_span(&self, _span: SpanId, _outcome: SpanOutcome) {}
@@ -169,6 +171,16 @@ async fn valid_inbound_traceparent_crosses_the_full_boundary_to_the_tracer() {
         captured.span_id(),
         remote.span_id(),
         "the originated span must be a FRESH local span, not the remote one"
+    );
+
+    // #212 (PROD-003 follow-up): the generated proxy stamps the dispatched
+    // operation name onto the context, so the span is named after the method
+    // (`register`) end-to-end rather than the generic fallback.
+    let names = tracer.names.lock().unwrap();
+    assert_eq!(
+        names.as_slice(),
+        &["register".to_string()],
+        "the request-boundary span must be named after the dispatched operation"
     );
 }
 
