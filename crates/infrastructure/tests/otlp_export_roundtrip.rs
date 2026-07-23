@@ -139,7 +139,11 @@ async fn otlp_http_export_preserves_domain_ids_over_the_wire() {
     });
 
     let tc = export_one_span(OtlpConfig {
-        // The OTLP/HTTP exporter appends `/v1/traces` to the base endpoint.
+        // A programmatic `.with_endpoint(..)` is used VERBATIM by
+        // opentelemetry-otlp 0.32 — it does NOT append `/v1/traces` (only the
+        // `OTEL_EXPORTER_OTLP_ENDPOINT` env var / default does). The stub's
+        // `fallback` captures whatever path the exporter POSTs to, so this
+        // test is robust to that; a real collector needs the full traces URL.
         endpoint: format!("http://{addr}"),
         protocol: OtlpProtocol::Http,
         max_in_flight_spans: 128,
