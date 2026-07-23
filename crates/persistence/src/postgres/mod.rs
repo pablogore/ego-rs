@@ -20,9 +20,7 @@ use ego_domain::persistence::PersistenceError;
 /// would silently file a caller that *meant* to scope a tenant into the shared,
 /// un-scoped NULL partition — a tenant-isolation fail-open. A concrete tenant
 /// (`Some(t)`) is returned verbatim.
-pub(crate) fn resolve_tenant(
-    tenant_id: Option<&str>,
-) -> Result<Option<String>, PersistenceError> {
+pub(crate) fn resolve_tenant(tenant_id: Option<&str>) -> Result<Option<String>, PersistenceError> {
     match tenant_id {
         None => Ok(None),
         Some("") => Err(PersistenceError::MissingTenant),
@@ -39,7 +37,10 @@ mod tests {
         // An empty-string tenant must fail closed instead of being coerced to
         // SQL NULL (which would file the row into the shared, un-scoped NULL
         // partition — a tenant-isolation fail-open).
-        assert_eq!(resolve_tenant(Some("")), Err(PersistenceError::MissingTenant));
+        assert_eq!(
+            resolve_tenant(Some("")),
+            Err(PersistenceError::MissingTenant)
+        );
     }
 
     #[test]

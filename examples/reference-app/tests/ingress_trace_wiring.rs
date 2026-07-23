@@ -22,8 +22,8 @@ use axum::Router;
 use ego_domain::auth::{AuthenticationError, SystemClock};
 use ego_domain::{SpanAttributes, SpanId, SpanOutcome, TraceContext, Tracer};
 use ego_security_sdk::{
-    AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Credential, Principal,
-    SecurityContext, SecurityError,
+    AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider,
+    Credential, Principal, SecurityContext, SecurityError,
 };
 use ego_service_sdk::runtime::RuntimeBuilder;
 use ego_transport::AppState;
@@ -32,7 +32,9 @@ use reference_app::application::{RegisterUserImpl, RegisterUserTag};
 use reference_app::ports::http::build_router;
 use reference_app::read_side::UsersByTenantStore;
 use reference_app::{DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
-use security_jwt::{Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, LocalKeyResolver, VerificationKey};
+use security_jwt::{
+    Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, LocalKeyResolver, VerificationKey,
+};
 use support::make_token;
 use tower::ServiceExt;
 
@@ -83,8 +85,13 @@ impl AuthorizationProvider for AllowAll {
 struct UnusedAuthn;
 
 impl AuthenticationProvider for UnusedAuthn {
-    fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
-        unimplemented!("not exercised by this test — real authentication happens via AppState::authn")
+    fn authenticate(
+        &self,
+        _credential: &Credential,
+    ) -> Result<SecurityContext, AuthenticationError> {
+        unimplemented!(
+            "not exercised by this test — real authentication happens via AppState::authn"
+        )
     }
 }
 
@@ -155,7 +162,11 @@ async fn valid_inbound_traceparent_crosses_the_full_boundary_to_the_tracer() {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     let spans = tracer.spans.lock().unwrap();
-    assert_eq!(spans.len(), 1, "TracingInterceptor must start exactly one span for this request");
+    assert_eq!(
+        spans.len(),
+        1,
+        "TracingInterceptor must start exactly one span for this request"
+    );
     let captured = spans[0];
     assert_eq!(
         captured.trace_id(),

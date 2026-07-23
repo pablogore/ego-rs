@@ -22,9 +22,7 @@ pub(crate) struct AuthorizeArgs {
 /// The function calls `syn::meta::parser` internally to accumulate both
 /// arguments before validating completeness, so it correctly detects missing
 /// keys even when only one argument is supplied.
-pub(crate) fn parse_authorize_args(
-    tokens: proc_macro2::TokenStream,
-) -> syn::Result<AuthorizeArgs> {
+pub(crate) fn parse_authorize_args(tokens: proc_macro2::TokenStream) -> syn::Result<AuthorizeArgs> {
     let mut context_ident: Option<syn::Ident> = None;
     let mut permission_lit: Option<syn::LitStr> = None;
 
@@ -46,10 +44,11 @@ pub(crate) fn parse_authorize_args(
                     "#[authorize] context must be a parameter name (identifier), not an expression",
                 ));
             }
-            let ident: syn::Ident = value.parse().map_err(|_| {
-                syn::Error::new(meta.path.get_ident().unwrap().span(),
+            let ident: syn::Ident =
+                value.parse().map_err(|_| {
+                    syn::Error::new(meta.path.get_ident().unwrap().span(),
                     "#[authorize] context must be a parameter name (identifier), not an expression")
-            })?;
+                })?;
             context_ident = Some(ident);
             Ok(())
         } else if meta.path.is_ident("permission") {
@@ -74,10 +73,16 @@ pub(crate) fn parse_authorize_args(
             permission_lit = Some(lit);
             Ok(())
         } else {
-            let key = meta.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+            let key = meta
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
             Err(syn::Error::new_spanned(
                 &meta.path,
-                format!("#[authorize] unknown argument '{key}'; expected 'context' and 'permission'"),
+                format!(
+                    "#[authorize] unknown argument '{key}'; expected 'context' and 'permission'"
+                ),
             ))
         }
     });
@@ -111,17 +116,13 @@ pub(crate) fn parse_authorize_args(
             if resource.is_empty() {
                 return Err(syn::Error::new_spanned(
                     &perm_lit,
-                    format!(
-                        "#[authorize] resource in \"{perm_value}\" must not be empty"
-                    ),
+                    format!("#[authorize] resource in \"{perm_value}\" must not be empty"),
                 ));
             }
             if action.is_empty() {
                 return Err(syn::Error::new_spanned(
                     &perm_lit,
-                    format!(
-                        "#[authorize] action in \"{perm_value}\" must not be empty"
-                    ),
+                    format!("#[authorize] action in \"{perm_value}\" must not be empty"),
                 ));
             }
             if resource == "*" || action == "*" {
@@ -272,7 +273,8 @@ pub(crate) mod authorize_args_tests {
     fn e4b_missing_permission() {
         let tokens: proc_macro2::TokenStream =
             syn::parse_str("context = ctx").expect("token parse");
-        let err = parse_authorize_args(tokens).expect_err("expected Err for E4b missing permission");
+        let err =
+            parse_authorize_args(tokens).expect_err("expected Err for E4b missing permission");
         let msg = err.to_string();
         assert!(
             msg.contains("missing required argument"),
@@ -284,8 +286,7 @@ pub(crate) mod authorize_args_tests {
     fn e4b_missing_context() {
         let tokens: proc_macro2::TokenStream =
             syn::parse_str("permission = \"orders:read\"").expect("token parse");
-        let err =
-            parse_authorize_args(tokens).expect_err("expected Err for E4b missing context");
+        let err = parse_authorize_args(tokens).expect_err("expected Err for E4b missing context");
         let msg = err.to_string();
         assert!(
             msg.contains("missing required argument"),
@@ -339,9 +340,10 @@ pub(crate) mod authorize_args_tests {
 
     #[test]
     fn e_duplicate_permission() {
-        let tokens: proc_macro2::TokenStream =
-            syn::parse_str("context = ctx, permission = \"orders:read\", permission = \"orders:write\"")
-                .expect("token parse");
+        let tokens: proc_macro2::TokenStream = syn::parse_str(
+            "context = ctx, permission = \"orders:read\", permission = \"orders:write\"",
+        )
+        .expect("token parse");
         let err = parse_authorize_args(tokens).expect_err("expected Err for duplicate permission");
         let msg = err.to_string();
         assert!(
@@ -380,8 +382,7 @@ pub(crate) mod authorize_args_tests {
             syn::parse_str("async fn foo(&self, ctx: ServiceContext) -> Result<(), E>")
                 .expect("sig parse");
         let ident: syn::Ident = syn::parse_str("wrong").expect("ident parse");
-        let err =
-            validate_context_ident_in_signature(&ident, &sig).expect_err("expected E6 error");
+        let err = validate_context_ident_in_signature(&ident, &sig).expect_err("expected E6 error");
         let msg = err.to_string();
         assert!(
             msg.contains("context parameter 'wrong' not found"),

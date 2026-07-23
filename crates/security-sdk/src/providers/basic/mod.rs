@@ -73,11 +73,7 @@ mod tests {
         struct StubVerifier;
 
         impl CredentialVerifier for StubVerifier {
-            fn verify(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> Result<Option<Principal>, SecurityError> {
+            fn verify(&self, _: &str, _: &str) -> Result<Option<Principal>, SecurityError> {
                 unimplemented!()
             }
         }
@@ -97,11 +93,7 @@ mod tests {
     }
 
     impl CredentialVerifier for InMemoryVerifier {
-        fn verify(
-            &self,
-            username: &str,
-            secret: &str,
-        ) -> Result<Option<Principal>, SecurityError> {
+        fn verify(&self, username: &str, secret: &str) -> Result<Option<Principal>, SecurityError> {
             if username == self.username && secret == self.secret {
                 let subject = SubjectId::new(format!("user:{}", username)).unwrap();
                 Ok(Some(Principal::new(PrincipalKind::User, subject)))
@@ -144,10 +136,7 @@ mod tests {
             username: "alice".into(),
             secret: "wrong".into(),
         });
-        assert!(matches!(
-            result,
-            Err(AuthenticationError::InvalidToken(_))
-        ));
+        assert!(matches!(result, Err(AuthenticationError::InvalidToken(_))));
     }
 
     #[test]
@@ -157,10 +146,7 @@ mod tests {
             secret: "s3cr3t".into(),
         }));
         let result = provider.authenticate(&Credential::Bearer("tok".into()));
-        assert!(matches!(
-            result,
-            Err(AuthenticationError::InvalidToken(_))
-        ));
+        assert!(matches!(result, Err(AuthenticationError::InvalidToken(_))));
     }
 
     #[test]

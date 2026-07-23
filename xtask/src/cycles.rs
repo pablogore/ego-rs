@@ -75,7 +75,10 @@ impl<'a> Tarjan<'a> {
         if self.lowlink[v] == self.indices[v] {
             let mut scc = Vec::new();
             loop {
-                let w = self.stack.pop().expect("stack non-empty within its own SCC");
+                let w = self
+                    .stack
+                    .pop()
+                    .expect("stack non-empty within its own SCC");
                 self.on_stack.remove(&w);
                 let is_v = w == v;
                 scc.push(w);
@@ -108,7 +111,10 @@ mod tests {
         assert_eq!(cycles.len(), 1);
         let mut members = cycles[0].clone();
         members.sort();
-        assert_eq!(members, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            members,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

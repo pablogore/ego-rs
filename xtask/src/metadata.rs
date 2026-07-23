@@ -97,7 +97,10 @@ fn build_workspace(raw: &RawMetadata) -> Workspace {
     let crate_ids: Vec<&str> = raw
         .packages
         .iter()
-        .filter(|p| members.contains(p.id.as_str()) && is_under_crates_dir(&p.manifest_path, &raw.workspace_root))
+        .filter(|p| {
+            members.contains(p.id.as_str())
+                && is_under_crates_dir(&p.manifest_path, &raw.workspace_root)
+        })
         .map(|p| p.id.as_str())
         .collect();
     let crate_id_set: std::collections::HashSet<&str> = crate_ids.iter().copied().collect();
@@ -130,7 +133,10 @@ fn build_workspace(raw: &RawMetadata) -> Workspace {
         }
     }
 
-    let mut crates: Vec<String> = crate_ids.iter().map(|id| id_to_name[id].to_string()).collect();
+    let mut crates: Vec<String> = crate_ids
+        .iter()
+        .map(|id| id_to_name[id].to_string())
+        .collect();
     crates.sort();
 
     Workspace { graph, crates }
@@ -185,9 +191,18 @@ mod tests {
         let workspace = build_workspace(&raw);
 
         let a_deps = &workspace.graph["a"];
-        assert!(!a_deps.contains(&"b".to_string()), "dev dep must be excluded");
-        assert!(a_deps.contains(&"c".to_string()), "normal (kind: null) dep must be included");
-        assert!(a_deps.contains(&"d".to_string()), "build dep must be included");
+        assert!(
+            !a_deps.contains(&"b".to_string()),
+            "dev dep must be excluded"
+        );
+        assert!(
+            a_deps.contains(&"c".to_string()),
+            "normal (kind: null) dep must be included"
+        );
+        assert!(
+            a_deps.contains(&"d".to_string()),
+            "build dep must be included"
+        );
     }
 
     #[test]

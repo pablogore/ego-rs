@@ -93,7 +93,9 @@ async fn wait_for_passivation(runtime: &persistent_entity::runtime::EntityRuntim
 async fn send_with_retry_on_mailbox_closed(
     runtime: &Arc<persistent_entity::runtime::EntityRuntime<TestEvent>>,
     entity_id: &'static str,
-    handler: &Arc<dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>>,
+    handler: &Arc<
+        dyn PersistentEntity<Command = TestCommand, Event = TestEvent, State = TestState>,
+    >,
 ) -> Result<CommandResult<TestEvent, TestState>, EntityError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -123,8 +125,9 @@ async fn test_activation_lookup_active_and_passivated() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-1", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-1", h.clone())
+        .unwrap();
 
     // Entity is not active initially — send activates it
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
@@ -145,8 +148,9 @@ async fn test_activation_fifo_ordering() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-2", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-2", h.clone())
+        .unwrap();
 
     let mut expected = 0u64;
     for i in 1..=10u64 {
@@ -176,8 +180,9 @@ async fn test_no_partial_state_observable() {
     let h = handler();
 
     // Build up state with multiple commands
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-3", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-3", h.clone())
+        .unwrap();
     for _i in 1..=5u64 {
         let _: CommandResult<TestEvent, TestState> = entity_ref
             .send_command(TestCommand::Increment(10), create_test_context())
@@ -205,8 +210,9 @@ async fn test_activation_redirect() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-4", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-4", h.clone())
+        .unwrap();
 
     // Send first command to activate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -249,8 +255,9 @@ async fn test_no_double_spawn_concurrent() {
     let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-5", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-5", h.clone())
+        .unwrap();
 
     // Activate then let passivate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -333,8 +340,9 @@ async fn test_activation_mutex_serializes() {
     let runtime = build_fast_passivation_runtime_with_counter(load_calls.clone());
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-6", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-6", h.clone())
+        .unwrap();
 
     // Activate then let passivate
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -442,8 +450,9 @@ async fn test_no_double_spawn_multiple_entities() {
         let h = h.clone();
         let entity_id = format!("multi-{}", i);
         handles.push(tokio::spawn(async move {
-            let entity_ref =
-                rt.entity_ref::<TestCommand, TestState>("test", &entity_id, h).unwrap();
+            let entity_ref = rt
+                .entity_ref::<TestCommand, TestState>("test", &entity_id, h)
+                .unwrap();
             let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
                 .send_command(
                     TestCommand::Increment(1),
@@ -476,8 +485,9 @@ async fn test_recovery_barrier() {
     let runtime = build_runtime();
     let h = handler();
 
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-7", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-7", h.clone())
+        .unwrap();
 
     for _ in 0..50 {
         let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -514,8 +524,9 @@ async fn test_recovery_barrier() {
 async fn test_recovery_deterministic_replay() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-8", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-8", h.clone())
+        .unwrap();
 
     // Build deterministic state
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -559,8 +570,9 @@ async fn test_recovery_deterministic_replay() {
 async fn test_recovery_failure_transitions_to_failed() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-9", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-9", h.clone())
+        .unwrap();
 
     // Decrement on zero should fail
     let result: Result<CommandResult<TestEvent, TestState>, EntityError> = entity_ref
@@ -595,8 +607,9 @@ async fn test_recovery_failure_transitions_to_failed() {
 async fn test_recovery_retry_after_failure() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-10", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-10", h.clone())
+        .unwrap();
 
     // Activate and do work
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -616,8 +629,9 @@ async fn test_recovery_retry_after_failure() {
 async fn test_zero_event_query() {
     let runtime = build_runtime();
     let h = handler();
-    let entity_ref =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-16", h.clone()).unwrap();
+    let entity_ref = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-16", h.clone())
+        .unwrap();
 
     // Activate with a mutation
     let _: CommandResult<TestEvent, TestState> = entity_ref
@@ -645,10 +659,12 @@ async fn test_multiple_entity_isolation() {
     let runtime = build_runtime();
     let h = handler();
 
-    let ref_a =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-a", h.clone()).unwrap();
-    let ref_b =
-        runtime.entity_ref::<TestCommand, TestState>("test", "entity-b", h.clone()).unwrap();
+    let ref_a = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-a", h.clone())
+        .unwrap();
+    let ref_b = runtime
+        .entity_ref::<TestCommand, TestState>("test", "entity-b", h.clone())
+        .unwrap();
 
     // Mutate entity-a
     let _: CommandResult<TestEvent, TestState> = ref_a

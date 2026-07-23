@@ -24,8 +24,11 @@ use tower::ServiceExt;
 
 fn app() -> Router {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } =
-        build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config).expect("build_runtime succeeds");
     let state = AppState::new(app.resolver(), authn);
     build_router(state, read_side_handles.query.clone())
 }

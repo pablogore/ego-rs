@@ -148,11 +148,7 @@ struct TrackingOrderService {
 
 #[async_trait]
 impl OrderService for TrackingOrderService {
-    async fn get_order(
-        &self,
-        _ctx: ServiceContext,
-        _id: String,
-    ) -> Result<String, AuthTestError> {
+    async fn get_order(&self, _ctx: ServiceContext, _id: String) -> Result<String, AuthTestError> {
         self.body_ran.fetch_add(1, Ordering::Relaxed);
         Ok("order-result".to_string())
     }
@@ -178,9 +174,7 @@ fn make_security_ctx() -> SecurityContext {
 /// Build a live `Runtime` with the given authorization provider and return
 /// both the `Runtime` (keeps the inner Arc alive) and a Weak reference to its
 /// `RuntimeInner`.
-fn make_runtime(
-    authz: Arc<dyn AuthorizationProvider>,
-) -> (Runtime, std::sync::Weak<RuntimeInner>) {
+fn make_runtime(authz: Arc<dyn AuthorizationProvider>) -> (Runtime, std::sync::Weak<RuntimeInner>) {
     make_runtime_with_observability(authz, None)
 }
 
@@ -227,7 +221,11 @@ async fn t18_allow_path_body_executes() {
 
     assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     assert_eq!(result.unwrap(), "order-result");
-    assert_eq!(body_ran.load(Ordering::Relaxed), 1, "body must have executed exactly once");
+    assert_eq!(
+        body_ran.load(Ordering::Relaxed),
+        1,
+        "body must have executed exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +251,11 @@ async fn t19_deny_path_body_does_not_execute() {
         err_str.contains("authorization denied"),
         "expected 'authorization denied' in error, got: {err_str}"
     );
-    assert_eq!(body_ran.load(Ordering::Relaxed), 0, "body must NOT execute on deny");
+    assert_eq!(
+        body_ran.load(Ordering::Relaxed),
+        0,
+        "body must NOT execute on deny"
+    );
 
     // CORE-012A: exactly one AuthorizationDenied event recorded (site: lib.rs:312).
     assert_eq!(
@@ -298,7 +300,8 @@ async fn t21_missing_security_context_fails_closed() {
     // ctx has no SecurityContext — #[authorize] must fail closed with MissingContext.
     let provider = Arc::new(CountingAllowProvider::new());
     let observability = Arc::new(RecordingObservability::new());
-    let (_rt, weak) = make_runtime_with_observability(provider.clone(), Some(observability.clone()));
+    let (_rt, weak) =
+        make_runtime_with_observability(provider.clone(), Some(observability.clone()));
     let body_ran = Arc::new(AtomicUsize::new(0));
     let proxy = make_proxy(body_ran.clone(), weak);
 
@@ -306,13 +309,24 @@ async fn t21_missing_security_context_fails_closed() {
 
     let result = proxy.get_order(ctx, "order-1".to_string()).await;
 
-    assert!(result.is_err(), "expected Err when SecurityContext is absent");
+    assert!(
+        result.is_err(),
+        "expected Err when SecurityContext is absent"
+    );
     assert!(
         result.unwrap_err().0.contains("missing security context"),
         "expected MissingContext error"
     );
-    assert_eq!(body_ran.load(Ordering::Relaxed), 0, "body must NOT execute when SecurityContext is absent");
-    assert_eq!(provider.call_count(), 0, "provider must NOT be called when SecurityContext is absent");
+    assert_eq!(
+        body_ran.load(Ordering::Relaxed),
+        0,
+        "body must NOT execute when SecurityContext is absent"
+    );
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "provider must NOT be called when SecurityContext is absent"
+    );
 
     // CORE-012A: exactly one MissingContext event recorded (site: lib.rs:285).
     assert_eq!(
@@ -342,13 +356,21 @@ async fn t22_runtime_dropped_returns_provider_error() {
 
     let result = proxy.get_order(ctx, "order-1".to_string()).await;
 
-    assert!(result.is_err(), "expected Err when runtime is dropped, got: {:?}", result);
+    assert!(
+        result.is_err(),
+        "expected Err when runtime is dropped, got: {:?}",
+        result
+    );
     let err_str = result.unwrap_err().0;
     assert!(
         err_str.contains("provider error"),
         "expected 'provider error' in error, got: {err_str}"
     );
-    assert_eq!(body_ran.load(Ordering::Relaxed), 0, "body must NOT execute when runtime is dropped");
+    assert_eq!(
+        body_ran.load(Ordering::Relaxed),
+        0,
+        "body must NOT execute when runtime is dropped"
+    );
 
     // CORE-012A: ProviderError (dropped runtime) is an infra failure, not one
     // of the 3 spec denial kinds — design.md explicitly excludes it. No event.
@@ -420,7 +442,11 @@ async fn t23_capability_not_enabled_returns_error() {
 
     let result = proxy.get_order(ctx, "order-1".to_string()).await;
 
-    assert!(result.is_err(), "expected Err for CapabilityNotEnabled, got: {:?}", result);
+    assert!(
+        result.is_err(),
+        "expected Err for CapabilityNotEnabled, got: {:?}",
+        result
+    );
     let err_str = result.unwrap_err().0;
     assert!(
         err_str.contains("security capability not enabled"),
@@ -462,11 +488,7 @@ struct TrackingMultiOpService {
 
 #[async_trait]
 impl MultiOpService for TrackingMultiOpService {
-    async fn read_order(
-        &self,
-        _ctx: ServiceContext,
-        _id: String,
-    ) -> Result<String, AuthTestError> {
+    async fn read_order(&self, _ctx: ServiceContext, _id: String) -> Result<String, AuthTestError> {
         self.read_ran.fetch_add(1, Ordering::Relaxed);
         Ok("read-result".to_string())
     }
@@ -504,11 +526,27 @@ async fn t24_multiple_annotated_methods_independent_guards() {
     let ctx_write = ServiceContext::new().with_security(Arc::clone(&sec));
     let result_write = proxy.write_order(ctx_write, "ord-1".to_string()).await;
 
-    assert!(result_read.is_ok(), "read_order must succeed: {:?}", result_read);
-    assert!(result_write.is_ok(), "write_order must succeed: {:?}", result_write);
+    assert!(
+        result_read.is_ok(),
+        "read_order must succeed: {:?}",
+        result_read
+    );
+    assert!(
+        result_write.is_ok(),
+        "write_order must succeed: {:?}",
+        result_write
+    );
 
-    assert_eq!(read_ran.load(Ordering::Relaxed), 1, "read body must run once");
-    assert_eq!(write_ran.load(Ordering::Relaxed), 1, "write body must run once");
+    assert_eq!(
+        read_ran.load(Ordering::Relaxed),
+        1,
+        "read body must run once"
+    );
+    assert_eq!(
+        write_ran.load(Ordering::Relaxed),
+        1,
+        "write body must run once"
+    );
     // Two method calls → two authorization checks.
     assert_eq!(
         provider.call_count(),

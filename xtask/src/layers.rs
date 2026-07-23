@@ -33,7 +33,10 @@ pub enum Violation {
     Cycle(Vec<String>),
     UnmappedCrate(String),
     DeadLayerEntry(String),
-    InvalidLayer { crate_name: String, layer: String },
+    InvalidLayer {
+        crate_name: String,
+        layer: String,
+    },
 }
 
 impl std::fmt::Display for Violation {
@@ -149,8 +152,8 @@ pub fn load_layers_toml(path: &Path) -> anyhow::Result<LayerMap> {
     }
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-    let file: File = toml::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
+    let file: File =
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
     Ok(file.layers)
 }
 
@@ -177,7 +180,10 @@ mod tests {
         // application -> infrastructure is forbidden (application may only
         // depend on domain, design.md §2 matrix).
         let graph = graph_from(&[("app-crate", &["infra-crate"]), ("infra-crate", &[])]);
-        let layers = layers_from(&[("app-crate", "application"), ("infra-crate", "infrastructure")]);
+        let layers = layers_from(&[
+            ("app-crate", "application"),
+            ("infra-crate", "infrastructure"),
+        ]);
 
         let violations = check_direction(&graph, &layers);
 
@@ -208,7 +214,10 @@ mod tests {
 
         let violations = check_completeness(&crates, &layers);
 
-        assert_eq!(violations, vec![Violation::UnmappedCrate("unmapped".into())]);
+        assert_eq!(
+            violations,
+            vec![Violation::UnmappedCrate("unmapped".into())]
+        );
     }
 
     #[test]

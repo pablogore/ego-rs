@@ -27,7 +27,12 @@ impl RecordingObservability {
     }
 
     fn event_names(&self) -> Vec<String> {
-        self.events.lock().unwrap().iter().map(|e| e.event_name.clone()).collect()
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event_name.clone())
+            .collect()
     }
 }
 
@@ -74,13 +79,18 @@ async fn successful_registration_records_at_least_one_event() {
     };
 
     let result = proxy.register(ctx, input).await;
-    assert!(result.is_ok(), "expected registration to succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "expected registration to succeed: {result:?}"
+    );
 
     assert!(
         !observability.event_names().is_empty(),
         "expected at least one recorded event on success"
     );
-    assert!(observability.event_names().contains(&"register_user.success".to_string()));
+    assert!(observability
+        .event_names()
+        .contains(&"register_user.success".to_string()));
 }
 
 // TASK-022: partial failure records >= 1 event via RegisterUserImpl's explicit trace.

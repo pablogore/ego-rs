@@ -79,14 +79,30 @@ mod tests {
     fn service_args_parses_version_and_impl_of_combined() {
         let args: crate::ServiceArgs = parse_quote! { version = "1.2.3", impl_of = MyTrait };
         assert_eq!(args.version.as_deref(), Some("1.2.3"));
-        assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
+        assert_eq!(
+            args.impl_of
+                .expect("impl_of must parse")
+                .segments
+                .last()
+                .unwrap()
+                .ident,
+            "MyTrait"
+        );
     }
 
     #[test]
     fn service_args_parses_impl_of_before_version() {
         let args: crate::ServiceArgs = parse_quote! { impl_of = MyTrait, version = "2.0.0" };
         assert_eq!(args.version.as_deref(), Some("2.0.0"));
-        assert_eq!(args.impl_of.expect("impl_of must parse").segments.last().unwrap().ident, "MyTrait");
+        assert_eq!(
+            args.impl_of
+                .expect("impl_of must parse")
+                .segments
+                .last()
+                .unwrap()
+                .ident,
+            "MyTrait"
+        );
     }
 
     // Duplicate keys must be rejected loudly rather than silently last-winning,
@@ -123,7 +139,11 @@ mod tests {
         let tag_path = crate::tag_path_from_impl_of(&path);
 
         assert_eq!(tag_path.segments.last().unwrap().ident, "MyTraitTag");
-        assert_eq!(tag_path.segments.len(), 3, "module path segments must be preserved");
+        assert_eq!(
+            tag_path.segments.len(),
+            3,
+            "module path segments must be preserved"
+        );
         assert_eq!(tag_path.segments[0].ident, "crate");
         assert_eq!(tag_path.segments[1].ident, "foo");
 

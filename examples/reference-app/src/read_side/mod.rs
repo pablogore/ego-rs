@@ -59,7 +59,9 @@ pub(crate) fn tenant_tag(tenant_id: &str) -> EventTag {
 /// authoritative tenant directly — `tenant_from_tag` merely re-derives it as
 /// a defense-in-depth mismatch check.
 pub(crate) fn tenant_from_tag(tag: &EventTag) -> Option<&str> {
-    tag.value().strip_prefix(&format!("{PROJECTION_TAG}:")).filter(|t| !t.is_empty())
+    tag.value()
+        .strip_prefix(&format!("{PROJECTION_TAG}:"))
+        .filter(|t| !t.is_empty())
 }
 
 /// Poll interval for the background scheduler loop. `TagSchedulerImpl`
@@ -185,8 +187,11 @@ impl ReadSideRuntime {
     /// Signals the loop to stop and awaits the in-flight batch's drain —
     /// see `ReadSideProjectionHandle::stop`.
     pub async fn stop(self) -> Result<(), ego_service_sdk::RuntimeInfraError> {
-        self.handle.stop().await.map_err(|join_err| ego_service_sdk::RuntimeInfraError::Teardown {
-            reason: format!("read-side scheduler task failed to drain: {join_err}"),
-        })
+        self.handle
+            .stop()
+            .await
+            .map_err(|join_err| ego_service_sdk::RuntimeInfraError::Teardown {
+                reason: format!("read-side scheduler task failed to drain: {join_err}"),
+            })
     }
 }

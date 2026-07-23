@@ -152,7 +152,9 @@ fn registry_rs_is_excluded_from_the_scan() {
     collect_rs_files(&root.join("crates/runtime/src"), &mut files);
 
     assert!(
-        !files.iter().any(|f| f.file_name().and_then(|n| n.to_str()) == Some("registry.rs")),
+        !files
+            .iter()
+            .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("registry.rs")),
         "registry.rs must be excluded from the scan by filename"
     );
 }

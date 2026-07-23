@@ -126,8 +126,7 @@ impl FakeIssuer {
             .collect();
         let value = serde_json::Value::Object(json_claims);
 
-        encode(&header, &value, &self.encoding_key)
-            .expect("FakeIssuer failed to encode token")
+        encode(&header, &value, &self.encoding_key).expect("FakeIssuer failed to encode token")
     }
 
     /// Returns a `JwksKeyResolver` pre-loaded with this issuer's public key.
@@ -158,7 +157,9 @@ pub struct FakeJwks {
 impl FakeJwks {
     /// Create from an existing `FakeIssuer`.
     pub fn new(issuer: &FakeIssuer) -> Self {
-        Self { key: issuer.verification_key.clone() }
+        Self {
+            key: issuer.verification_key.clone(),
+        }
     }
 }
 
@@ -230,19 +231,33 @@ pub struct FakeIntrospection {
 impl FakeIntrospection {
     /// Create with no pre-configured responses (all tokens inactive by default).
     pub fn new() -> Self {
-        Self { responses: Mutex::new(HashMap::new()) }
+        Self {
+            responses: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Mark a token as inactive (rejected by introspection).
     pub fn set_inactive_response(&mut self, token: &str) {
-        let result = IntrospectionResult { active: false, claims: None };
-        self.responses.lock().unwrap().insert(token.to_string(), result);
+        let result = IntrospectionResult {
+            active: false,
+            claims: None,
+        };
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), result);
     }
 
     /// Set a full active response with claims for a token.
     pub fn set_active_response(&mut self, token: &str, claims: ClaimSet) {
-        let result = IntrospectionResult { active: true, claims: Some(claims) };
-        self.responses.lock().unwrap().insert(token.to_string(), result);
+        let result = IntrospectionResult {
+            active: true,
+            claims: Some(claims),
+        };
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), result);
     }
 }
 
@@ -269,7 +284,10 @@ impl IntrospectionProvider for FakeIntrospection {
                 claims: result.claims.clone(),
             })
         } else {
-            Ok(IntrospectionResult { active: false, claims: None })
+            Ok(IntrospectionResult {
+                active: false,
+                claims: None,
+            })
         }
     }
 }
@@ -305,7 +323,10 @@ mod tests {
         let mut map = BTreeMap::new();
         map.insert("sub".to_string(), ClaimValue::String(sub.into()));
         map.insert("exp".to_string(), ClaimValue::Integer(exp));
-        map.insert("iss".to_string(), ClaimValue::String("https://fake-issuer.test".into()));
+        map.insert(
+            "iss".to_string(),
+            ClaimValue::String("https://fake-issuer.test".into()),
+        );
         map
     }
 
@@ -359,7 +380,10 @@ mod tests {
     fn fake_issuer_expired_token_returns_expired_token() {
         let clock = fixed_clock(pinned_now());
         let issuer = FakeIssuer::new(Arc::clone(&clock));
-        let claims = make_claims("user", (pinned_now() - chrono::Duration::seconds(60)).timestamp());
+        let claims = make_claims(
+            "user",
+            (pinned_now() - chrono::Duration::seconds(60)).timestamp(),
+        );
         let token = issuer.issue_token(claims);
 
         let resolver = Arc::new(issuer.jwks_resolver());
@@ -372,7 +396,9 @@ mod tests {
         let provider =
             OidcAuthenticationProvider::with_resolver(resolver, config, clock, mapper).unwrap();
 
-        let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
         assert_eq!(err, ego_domain::auth::AuthenticationError::ExpiredToken);
     }
 
@@ -387,9 +413,7 @@ mod tests {
 
         let config = OidcProviderConfig {
             jwks_uri: Some(url::Url::parse("https://fake.test/jwks").unwrap()),
-            introspection_endpoint: Some(
-                url::Url::parse("https://fake.test/introspect").unwrap(),
-            ),
+            introspection_endpoint: Some(url::Url::parse("https://fake.test/introspect").unwrap()),
             introspection_client_id: Some("cid".into()),
             introspection_client_secret: Some("csecret".into()),
             ..Default::default()
@@ -407,22 +431,26 @@ mod tests {
         let err = provider
             .authenticate(&Credential::Bearer("tok".into()))
             .unwrap_err();
-        assert!(matches!(err, ego_domain::auth::AuthenticationError::InvalidToken(_)));
+        assert!(matches!(
+            err,
+            ego_domain::auth::AuthenticationError::InvalidToken(_)
+        ));
     }
 
     #[test]
     fn fake_introspection_set_active_response_returns_ok() {
         let mut fake = FakeIntrospection::new();
         let mut raw = BTreeMap::new();
-        raw.insert("sub".to_string(), ClaimValue::String("introspected-user".into()));
+        raw.insert(
+            "sub".to_string(),
+            ClaimValue::String("introspected-user".into()),
+        );
         raw.insert("exp".to_string(), ClaimValue::Integer(9_999_999_999));
         fake.set_active_response("tok", ClaimSet::new(raw));
 
         let config = OidcProviderConfig {
             jwks_uri: Some(url::Url::parse("https://fake.test/jwks").unwrap()),
-            introspection_endpoint: Some(
-                url::Url::parse("https://fake.test/introspect").unwrap(),
-            ),
+            introspection_endpoint: Some(url::Url::parse("https://fake.test/introspect").unwrap()),
             introspection_client_id: Some("cid".into()),
             introspection_client_secret: Some("csecret".into()),
             ..Default::default()
@@ -437,7 +465,9 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = provider.authenticate(&Credential::Bearer("tok".into())).unwrap();
+        let ctx = provider
+            .authenticate(&Credential::Bearer("tok".into()))
+            .unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "introspected-user");
     }
 }

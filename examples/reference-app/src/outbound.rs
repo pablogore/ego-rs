@@ -25,7 +25,10 @@ use ego_transport::propagation::{traceparent_header, TRACEPARENT_HEADER};
 /// somehow not a valid header value — axum's `Builder::header` accepts a
 /// plain `String` and carries either failure through to `.body()`'s
 /// `Result` rather than panicking.
-pub fn build_outbound_request(ctx: &ServiceContext, uri: &str) -> Result<Request<()>, axum::http::Error> {
+pub fn build_outbound_request(
+    ctx: &ServiceContext,
+    uri: &str,
+) -> Result<Request<()>, axum::http::Error> {
     let mut builder = Request::get(uri);
     if let Some(header_value) = traceparent_header(ctx) {
         builder = builder.header(TRACEPARENT_HEADER, header_value);

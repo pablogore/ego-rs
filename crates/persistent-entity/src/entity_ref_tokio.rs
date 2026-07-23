@@ -59,7 +59,8 @@ impl<C> Drop for TeardownGuard<C> {
 
         // Step 3: remove-if-mine (epoch-scoped, idempotent — a safe no-op if
         // the actor's own exit path already removed this entry).
-        self.registry.deactivate_if_mine(&self.aggregate_id, self.epoch);
+        self.registry
+            .deactivate_if_mine(&self.aggregate_id, self.epoch);
 
         // Step 4: publish a terminal state — but never stomp a terminal
         // state the actor already legitimately published. This only
@@ -147,7 +148,9 @@ where
                         "routing type mismatch for triple {aggregate_id}: erased mailbox is not \
                          BoundedMailbox<ActorEnvelope<C>> for this entity_type"
                     );
-                    EntityError::Internal(format!("routing type mismatch for triple {aggregate_id}"))
+                    EntityError::Internal(format!(
+                        "routing type mismatch for triple {aggregate_id}"
+                    ))
                 })
         };
 
@@ -161,12 +164,16 @@ where
                     _phantom: PhantomData,
                 })
             }
-            RouteOutcome::Inserted { mailbox: erased, epoch, tx } => {
+            RouteOutcome::Inserted {
+                mailbox: erased,
+                epoch,
+                tx,
+            } => {
                 // Freshly inserted under this call's own type parameters, so the
                 // downcast is infallible in practice — kept uniform with the
                 // Existing branch rather than special-cased.
-                let mailbox = downcast(erased)
-                    .expect("freshly-inserted mailbox always matches its own type");
+                let mailbox =
+                    downcast(erased).expect("freshly-inserted mailbox always matches its own type");
                 let mailbox_for_actor = (*mailbox).clone();
 
                 let entity_id = triple.clone();
@@ -239,20 +246,13 @@ where
     type Command = C;
 
     /// Enqueues a command on the actor mailbox and awaits the reply.
-    async fn send_command<T>(
-        &self,
-        command: C,
-        context: CommandContext,
-    ) -> Result<T, EntityError>
+    async fn send_command<T>(&self, command: C, context: CommandContext) -> Result<T, EntityError>
     where
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
         let actor_envelope = ActorEnvelope {
-            envelope: CommandEnvelope {
-                command,
-                context,
-            },
+            envelope: CommandEnvelope { command, context },
             reply: tx,
         };
 
@@ -266,9 +266,7 @@ where
         })??;
 
         let boxed_t: Box<T> = erased.downcast::<T>().map_err(|_| {
-            EntityError::Internal(
-                "TokioEntityRef::send_command: result type mismatch".to_string(),
-            )
+            EntityError::Internal("TokioEntityRef::send_command: result type mismatch".to_string())
         })?;
         Ok(*boxed_t)
     }

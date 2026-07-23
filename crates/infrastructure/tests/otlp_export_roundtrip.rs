@@ -35,7 +35,12 @@ fn single_span_ids(req: &ExportTraceServiceRequest) -> (String, String, String) 
         .flat_map(|rs| rs.scope_spans.iter())
         .flat_map(|ss| ss.spans.iter())
         .collect();
-    assert_eq!(spans.len(), 1, "expected exactly one exported span, got {}", spans.len());
+    assert_eq!(
+        spans.len(),
+        1,
+        "expected exactly one exported span, got {}",
+        spans.len()
+    );
     let s = spans[0];
     (hex(&s.trace_id), hex(&s.span_id), hex(&s.parent_span_id))
 }
@@ -51,11 +56,21 @@ fn export_one_span(config: OtlpConfig) -> TraceContext {
 
 fn assert_ids_match(req: &ExportTraceServiceRequest, tc: &TraceContext) {
     let (trace_id, span_id, parent_span_id) = single_span_ids(req);
-    assert_eq!(trace_id, tc.trace_id().to_hex(), "exported trace_id must equal the domain trace_id");
-    assert_eq!(span_id, tc.span_id().to_hex(), "exported span_id must equal the domain span_id");
+    assert_eq!(
+        trace_id,
+        tc.trace_id().to_hex(),
+        "exported trace_id must equal the domain trace_id"
+    );
+    assert_eq!(
+        span_id,
+        tc.span_id().to_hex(),
+        "exported span_id must equal the domain span_id"
+    );
     assert_eq!(
         parent_span_id,
-        tc.parent_span_id().expect("from_inbound sets a parent").to_hex(),
+        tc.parent_span_id()
+            .expect("from_inbound sets a parent")
+            .to_hex(),
         "exported parent_span_id must equal the inbound remote span"
     );
 }
@@ -121,16 +136,19 @@ async fn otlp_http_export_preserves_domain_ids_over_the_wire() {
     let (tx, mut rx) = mpsc::channel::<ExportTraceServiceRequest>(4);
     // Capture ANY request the exporter makes (robust to the exact OTLP/HTTP
     // path), decode the protobuf body, and forward it.
-    let app = Router::new()
-        .fallback(
-            |State(tx): State<mpsc::Sender<ExportTraceServiceRequest>>, _uri: Uri, body: Bytes| async move {
-                if let Ok(req) = ExportTraceServiceRequest::decode(body) {
-                    let _ = tx.send(req).await;
-                }
-                axum::http::StatusCode::OK
-            },
-        )
-        .with_state(tx);
+    let app =
+        Router::new()
+            .fallback(
+                |State(tx): State<mpsc::Sender<ExportTraceServiceRequest>>,
+                 _uri: Uri,
+                 body: Bytes| async move {
+                    if let Ok(req) = ExportTraceServiceRequest::decode(body) {
+                        let _ = tx.send(req).await;
+                    }
+                    axum::http::StatusCode::OK
+                },
+            )
+            .with_state(tx);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

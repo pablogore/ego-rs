@@ -53,7 +53,13 @@ pub struct EntityRuntimeRef<E: PersistentEntity> {
 
 impl<E: PersistentEntity> EntityRuntimeRef<E>
 where
-    E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+    E::Event: DomainEvent
+        + Clone
+        + serde::de::DeserializeOwned
+        + serde::Serialize
+        + Send
+        + Sync
+        + 'static,
 {
     /// Creates a new `EntityRuntimeRef` wrapping the given `Arc<EntityRuntime<E::Event>>`.
     pub fn new(inner: Arc<EntityRuntime<E::Event>>) -> Self {
@@ -226,7 +232,9 @@ mod tests {
     // (`duplicate_adapter_carries_type_name`).
     #[test]
     fn duplicate_projection_carries_type_name() {
-        let err = DuplicateProjection { type_name: "MyProjection" };
+        let err = DuplicateProjection {
+            type_name: "MyProjection",
+        };
         assert_eq!(err.type_name, "MyProjection");
         assert!(err.to_string().contains("MyProjection"));
     }
@@ -235,7 +243,9 @@ mod tests {
     // aggregate type name, mirroring `duplicate_projection_carries_type_name`.
     #[test]
     fn duplicate_entity_carries_type_name() {
-        let err = DuplicateEntity { type_name: "MyEntity" };
+        let err = DuplicateEntity {
+            type_name: "MyEntity",
+        };
         assert_eq!(err.type_name, "MyEntity");
         assert!(err.to_string().contains("MyEntity"));
     }

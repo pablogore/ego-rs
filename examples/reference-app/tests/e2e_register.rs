@@ -15,11 +15,7 @@ use support::make_token;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-async fn http_post(
-    addr: std::net::SocketAddr,
-    authorization: Option<&str>,
-    body: &str,
-) -> String {
+async fn http_post(addr: std::net::SocketAddr, authorization: Option<&str>, body: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("connect to server");
     let mut request = format!(
         "POST /register HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
@@ -31,17 +27,26 @@ async fn http_post(
     request.push_str("Connection: close\r\n\r\n");
     request.push_str(body);
 
-    stream.write_all(request.as_bytes()).await.expect("write request");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
     let mut response = String::new();
-    stream.read_to_string(&mut response).await.expect("read response");
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("read response");
     response
 }
 
 #[tokio::test]
 async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operation() {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } =
-        build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config).expect("build_runtime succeeds");
     let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, read_side_handles.query.clone());
 
@@ -76,8 +81,11 @@ async fn real_http_request_without_jwt_returns_401_and_never_reaches_the_operati
 #[tokio::test]
 async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } =
-        build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config).expect("build_runtime succeeds");
 
     let query = read_side_handles.query.clone();
     let read_side_runtime = read_side_handles.spawn();
@@ -93,7 +101,10 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, query);
 
-    let running = app.start().await.expect("App::start succeeds (no effects registered)");
+    let running = app
+        .start()
+        .await
+        .expect("App::start succeeds (no effects registered)");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -110,7 +121,10 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     .to_string();
     let response = http_post(addr, Some(&format!("Bearer {token}")), &body).await;
     assert!(response.contains("201"), "expected 201, got: {response}");
-    assert!(response.contains("\"user_id\":\"user-1\""), "expected body to echo user_id: {response}");
+    assert!(
+        response.contains("\"user_id\":\"user-1\""),
+        "expected body to echo user_id: {response}"
+    );
 
     // The DI-resolved handle observes the read-side engine's writes — proof
     // it shares live state with `read_side_handles.query`, not a frozen
@@ -137,5 +151,8 @@ async fn real_http_request_with_valid_jwt_registers_both_entities_end_to_end() {
     // Same two-phase shutdown main.rs runs: read-side stop-and-drain first,
     // then the sync teardown stack — now via RunningApp::shutdown() instead
     // of a raw Runtime handle.
-    running.shutdown().await.expect("RunningApp::shutdown succeeds");
+    running
+        .shutdown()
+        .await
+        .expect("RunningApp::shutdown succeeds");
 }

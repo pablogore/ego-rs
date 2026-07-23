@@ -46,7 +46,10 @@ async fn denies_when_no_canonical_tenant_is_resolved() {
     let err = service.register(ctx, input("tenant-a")).await.unwrap_err();
 
     assert!(
-        matches!(err, RegisterUserError::Security(SecurityError::AuthorizationDenied { .. })),
+        matches!(
+            err,
+            RegisterUserError::Security(SecurityError::AuthorizationDenied { .. })
+        ),
         "missing canonical tenant must be denied, got: {err:?}"
     );
 }
@@ -64,13 +67,18 @@ async fn denies_when_resolved_tenant_disagrees_with_input_tenant_id() {
         .principal(principal)
         .build();
 
-    let proxy = fixture.resolve::<RegisterUserTag>().expect("registered tag resolves");
+    let proxy = fixture
+        .resolve::<RegisterUserTag>()
+        .expect("registered tag resolves");
     let ctx = fixture.context().with_tenant_id("tenant-a");
 
     let err = proxy.register(ctx, input("tenant-b")).await.unwrap_err();
 
     assert!(
-        matches!(err, RegisterUserError::Security(SecurityError::AuthorizationDenied { .. })),
+        matches!(
+            err,
+            RegisterUserError::Security(SecurityError::AuthorizationDenied { .. })
+        ),
         "resolved tenant != input.tenant_id must be denied, got: {err:?}"
     );
 }
@@ -85,10 +93,15 @@ async fn allows_when_resolved_tenant_matches_input_tenant_id() {
         .principal(principal)
         .build();
 
-    let proxy = fixture.resolve::<RegisterUserTag>().expect("registered tag resolves");
+    let proxy = fixture
+        .resolve::<RegisterUserTag>()
+        .expect("registered tag resolves");
     let ctx = fixture.context().with_tenant_id("tenant-a");
 
-    let output = proxy.register(ctx, input("tenant-a")).await.expect("matching tenant should succeed");
+    let output = proxy
+        .register(ctx, input("tenant-a"))
+        .await
+        .expect("matching tenant should succeed");
 
     assert_eq!(output.user_id, "user-1");
     assert_eq!(output.tenant_id, "tenant-a");

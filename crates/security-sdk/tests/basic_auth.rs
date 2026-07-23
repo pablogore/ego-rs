@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ego_domain::auth::AuthenticationError;
 use ego_security_sdk::{
     authentication::AuthenticationProvider,
     credential::Credential,
@@ -7,7 +8,6 @@ use ego_security_sdk::{
     principal::{Principal, PrincipalKind, SubjectId},
     providers::basic::{BasicAuthenticationProvider, CredentialVerifier},
 };
-use ego_domain::auth::AuthenticationError;
 
 struct StaticVerifier {
     username: String,
@@ -15,11 +15,7 @@ struct StaticVerifier {
 }
 
 impl CredentialVerifier for StaticVerifier {
-    fn verify(
-        &self,
-        username: &str,
-        secret: &str,
-    ) -> Result<Option<Principal>, SecurityError> {
+    fn verify(&self, username: &str, secret: &str) -> Result<Option<Principal>, SecurityError> {
         if username == self.username && secret == self.secret {
             let subject = SubjectId::new(format!("user:{username}")).unwrap();
             Ok(Some(Principal::new(PrincipalKind::User, subject)))
@@ -64,10 +60,7 @@ fn injected_verifier_returns_none_gives_invalid_token() {
         username: "alice".into(),
         secret: "wrong".into(),
     });
-    assert!(matches!(
-        result,
-        Err(AuthenticationError::InvalidToken(_))
-    ));
+    assert!(matches!(result, Err(AuthenticationError::InvalidToken(_))));
 }
 
 #[test]
@@ -78,10 +71,7 @@ fn non_basic_credential_returns_invalid_token() {
     }));
 
     let result = provider.authenticate(&Credential::Bearer("tok".into()));
-    assert!(matches!(
-        result,
-        Err(AuthenticationError::InvalidToken(_))
-    ));
+    assert!(matches!(result, Err(AuthenticationError::InvalidToken(_))));
 }
 
 #[test]

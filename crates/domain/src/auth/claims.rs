@@ -35,7 +35,6 @@ pub struct StandardClaims {
     pub aud: Option<Vec<String>>,
 }
 
-
 /// Combined standard + custom claims extracted from a JWT.
 ///
 /// `custom` holds all claims not mapped to standard fields or identity fields

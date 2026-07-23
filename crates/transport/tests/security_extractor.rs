@@ -10,11 +10,10 @@ use ego_domain::auth::SystemClock;
 use ego_security_sdk::AuthenticationProvider;
 use ego_service_sdk::runtime::RuntimeBuilder;
 use ego_testkit::TestJwtBuilder;
-use ego_transport::state::AppState;
 use ego_transport::security::AuthenticatedContext;
+use ego_transport::state::AppState;
 use security_jwt::{
-    Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, LocalKeyResolver,
-    VerificationKey,
+    Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, LocalKeyResolver, VerificationKey,
 };
 
 /// NIST SP 800-107 minimum HMAC secret length is 32 bytes.

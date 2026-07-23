@@ -38,7 +38,9 @@ fn workspace_root(start: &Path) -> PathBuf {
                 return dir.to_path_buf();
             }
         }
-        dir = dir.parent().expect("reached filesystem root without a [workspace] Cargo.toml");
+        dir = dir
+            .parent()
+            .expect("reached filesystem root without a [workspace] Cargo.toml");
     }
 }
 
@@ -58,7 +60,9 @@ fn first_forbidden(code: &str) -> Option<&'static str> {
 
 /// Recursively collect `.rs` files under `dir` (skipping `target/`).
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -77,13 +81,19 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn detector_flags_ambient_context_lookup_in_code() {
     let src = "fn handler() { let cx = opentelemetry::Context::current(); let _ = cx; }";
-    assert_eq!(first_forbidden(&strip_line_comments(src)), Some("Context::current"));
+    assert_eq!(
+        first_forbidden(&strip_line_comments(src)),
+        Some("Context::current")
+    );
 }
 
 #[test]
 fn detector_flags_ambient_span_lookup_in_code() {
     let src = "fn handler() { let s = tracing::Span::current(); let _ = s; }";
-    assert_eq!(first_forbidden(&strip_line_comments(src)), Some("Span::current"));
+    assert_eq!(
+        first_forbidden(&strip_line_comments(src)),
+        Some("Span::current")
+    );
 }
 
 #[test]
@@ -102,19 +112,26 @@ fn otlp_boundary_lint_workspace_has_zero_violations() {
     // Production source only: `crates/*/src` and `examples/*/src`.
     let mut files = Vec::new();
     for base in [root.join("crates"), root.join("examples")] {
-        let Ok(members) = std::fs::read_dir(&base) else { continue };
+        let Ok(members) = std::fs::read_dir(&base) else {
+            continue;
+        };
         for member in members.flatten() {
             collect_rs(&member.path().join("src"), &mut files);
         }
     }
-    assert!(!files.is_empty(), "found no source files to scan — path anchoring is wrong");
+    assert!(
+        !files.is_empty(),
+        "found no source files to scan — path anchoring is wrong"
+    );
 
     let mut violations = Vec::new();
     for file in files {
         if file == adapter {
             continue; // the adapter is the one allowed site
         }
-        let Ok(src) = std::fs::read_to_string(&file) else { continue };
+        let Ok(src) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         if let Some(pat) = first_forbidden(&strip_line_comments(&src)) {
             violations.push(format!("{}: uses `{pat}`", file.display()));
         }

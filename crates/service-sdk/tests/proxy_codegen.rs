@@ -23,7 +23,10 @@ fn test_runtime() -> Runtime {
 /// Shared fixture: a fresh interceptor chain plus a weak handle to `rt`, the
 /// two extra arguments every hand-rolled `{Trait}Ref::new(...)` call needs.
 fn test_chain_and_weak(rt: &Runtime) -> (Arc<InterceptorChain>, Weak<RuntimeInner>) {
-    (Arc::new(InterceptorChain::new()), Arc::downgrade(rt.inner()))
+    (
+        Arc::new(InterceptorChain::new()),
+        Arc::downgrade(rt.inner()),
+    )
 }
 
 // ---------------------------------------------------------------------------

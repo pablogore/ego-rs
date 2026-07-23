@@ -43,7 +43,10 @@ async fn serve_handles_a_request_then_shuts_down_gracefully() {
         response.contains("200 OK"),
         "expected 200 OK, got: {response}"
     );
-    assert!(response.contains("ok"), "expected body 'ok', got: {response}");
+    assert!(
+        response.contains("ok"),
+        "expected body 'ok', got: {response}"
+    );
 
     shutdown_tx.send(()).expect("shutdown receiver still alive");
 

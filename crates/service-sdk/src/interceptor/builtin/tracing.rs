@@ -48,8 +48,7 @@ impl TracingInterceptor {
 impl Interceptor for TracingInterceptor {
     async fn on_request(&self, context: &ServiceContext) -> Result<(), ServiceError> {
         if let Some(trace_context) = context.trace_context() {
-            let attrs = SpanAttributes::new()
-                .with_tenant_hint_present(context.has_tenant_hint());
+            let attrs = SpanAttributes::new().with_tenant_hint_present(context.has_tenant_hint());
             // Prefer the per-operation name populated by the generated proxy
             // (#212); fall back to the generic name for proxy-less contexts.
             let span_name = context.operation_name().unwrap_or(REQUEST_SPAN_NAME);

@@ -29,7 +29,11 @@ impl TestJwtBuilder {
     pub fn new(signing_key: impl Into<Vec<u8>>) -> Self {
         let mut claims = Map::new();
         claims.insert("exp".to_string(), Value::from(default_exp()));
-        Self { signing_key: signing_key.into(), claims, named_claims: HashSet::new() }
+        Self {
+            signing_key: signing_key.into(),
+            claims,
+            named_claims: HashSet::new(),
+        }
     }
 
     /// Sets the `sub` claim. Omit to build a token with no `sub` claim
@@ -42,7 +46,8 @@ impl TestJwtBuilder {
 
     /// Sets the `tenant_id` claim.
     pub fn tenant_id(mut self, tenant_id: &str) -> Self {
-        self.claims.insert("tenant_id".to_string(), Value::from(tenant_id));
+        self.claims
+            .insert("tenant_id".to_string(), Value::from(tenant_id));
         self.named_claims.insert("tenant_id");
         self
     }
@@ -103,9 +108,13 @@ mod tests {
     }
 
     fn decode_claims(token: &str) -> Value {
-        decode::<Value>(token, &DecodingKey::from_secret(&secret()), &Validation::new(Algorithm::HS256))
-            .expect("token built by TestJwtBuilder must verify as a valid HS256 token")
-            .claims
+        decode::<Value>(
+            token,
+            &DecodingKey::from_secret(&secret()),
+            &Validation::new(Algorithm::HS256),
+        )
+        .expect("token built by TestJwtBuilder must verify as a valid HS256 token")
+        .claims
     }
 
     #[test]
@@ -167,7 +176,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "collides")]
     fn claim_rejects_exp_collision_after_expires_at() {
-        TestJwtBuilder::new(secret()).expires_at(123).claim("exp", Value::from(456)).build();
+        TestJwtBuilder::new(secret())
+            .expires_at(123)
+            .claim("exp", Value::from(456))
+            .build();
     }
 
     #[test]
@@ -175,7 +187,9 @@ mod tests {
         // No collision: `sub` was never set via `.subject()`, so a raw
         // claims-object builder (e.g. one needing a non-string `sub` for a
         // negative test) may still set it through the escape hatch.
-        let token = TestJwtBuilder::new(secret()).claim("sub", Value::from(42)).build();
+        let token = TestJwtBuilder::new(secret())
+            .claim("sub", Value::from(42))
+            .build();
 
         let claims = decode_claims(&token);
 

@@ -19,8 +19,11 @@ use tower::ServiceExt;
 
 fn app() -> Router {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } =
-        build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config).expect("build_runtime succeeds");
     // Router-level tests never call `App::start()` — no effect executor is
     // registered in this reference app, and `App::resolver()` is callable
     // before starting (request-time resolution never depended on it).
@@ -167,8 +170,11 @@ async fn users_by_tenant_cross_tenant_request_returns_403() {
 #[tokio::test]
 async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } =
-        build_runtime(&config).expect("build_runtime succeeds");
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config).expect("build_runtime succeeds");
     let state = AppState::new(app.resolver(), authn);
     let query = read_side_handles.query.clone();
     let router = build_router(state, query.clone());
@@ -188,7 +194,10 @@ async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
     // The projection catches up asynchronously (CORE-005 is pull-based).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while query.view("tenant-a").users.is_empty() {
-        assert!(tokio::time::Instant::now() < deadline, "projection never caught up");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "projection never caught up"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -201,7 +210,9 @@ async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
     let response = router.oneshot(query_request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(view["org_name"], "Acme");
     assert_eq!(view["users"][0]["user_id"], "user-1");

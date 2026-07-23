@@ -659,7 +659,10 @@ impl DeliveryRunner {
             &effect.description.payload,
             &effect.description.destination,
         );
-        match self.reserve_with_retry(&scope, effect.id, fingerprint).await {
+        match self
+            .reserve_with_retry(&scope, effect.id, fingerprint)
+            .await
+        {
             // No prior reservation, or this effect's own reservation that
             // hasn't succeeded yet (a fresh submission, or a legitimate
             // crash-recovery/retry re-attempt of itself) — proceed to
@@ -1068,11 +1071,9 @@ fn classify_join_result(
 ) -> ExecutionOutcome {
     match result {
         Ok(outcome) => ExecutionOutcome::Outcome(outcome),
-        Err(join_err) if join_err.is_panic() => {
-            ExecutionOutcome::Outcome(AttemptOutcome::RetryableFailure(
-                "executor panicked".to_string(),
-            ))
-        }
+        Err(join_err) if join_err.is_panic() => ExecutionOutcome::Outcome(
+            AttemptOutcome::RetryableFailure("executor panicked".to_string()),
+        ),
         Err(_) => ExecutionOutcome::CancelledForShutdown,
     }
 }
@@ -1082,7 +1083,9 @@ mod tests {
     use super::*;
     use crate::effects::policy::{DeliveryConfig, RetryPolicy, RunnerMode};
     use crate::effects::queue::EffectQueue;
-    use crate::effects::store::{EffectId, EffectState, EffectStoreError, InMemoryEffectStore, StoredEffect};
+    use crate::effects::store::{
+        EffectId, EffectState, EffectStoreError, InMemoryEffectStore, StoredEffect,
+    };
     use async_trait::async_trait;
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -1539,12 +1542,7 @@ mod tests {
         retry: impl Into<RetryPolicies>,
     ) -> (Arc<DeliveryRunner>, EffectQueue) {
         let (queue, _receiver) = EffectQueue::bounded(8);
-        let runner = Arc::new(DeliveryRunner::new(
-            state,
-            dedup,
-            Arc::new(registry),
-            retry,
-        ));
+        let runner = Arc::new(DeliveryRunner::new(state, dedup, Arc::new(registry), retry));
         (runner, queue)
     }
 
@@ -1586,9 +1584,9 @@ mod tests {
         // `claim_due` tick is the only way it ever gets a second attempt.
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
-        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-            "timeout".into(),
-        )]));
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("timeout".into()),
+        ]));
         registry
             .register("invoice.created", executor.clone())
             .unwrap();
@@ -1984,9 +1982,9 @@ mod tests {
         // separate accept()->execute() shortcut exists anywhere in this file.
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
-        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-            "boom".into(),
-        )]));
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("boom".into()),
+        ]));
         registry
             .register("invoice.created", executor.clone())
             .unwrap();
@@ -2032,9 +2030,9 @@ mod tests {
         let state = Arc::new(FlakyMarkRetryableStore::new(BOOKKEEPING_RETRY_ATTEMPTS - 1));
         let dedup = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
-        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-            "timeout".into(),
-        )]));
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("timeout".into()),
+        ]));
         registry
             .register("invoice.created", executor.clone())
             .unwrap();
@@ -2059,13 +2057,17 @@ mod tests {
         runner.drain_one(effect).await;
 
         let due = state.claim_due(Timestamp::now(), 10).await.unwrap();
-        assert_eq!(due.len(), 1, "mark_retryable's bounded retry must eventually succeed");
+        assert_eq!(
+            due.len(),
+            1,
+            "mark_retryable's bounded retry must eventually succeed"
+        );
         assert_eq!(due[0].state, EffectState::RetryableFailed);
     }
 
     #[tokio::test]
-    async fn mark_retryable_permanent_failure_abandons_effect_instead_of_leaving_it_stuck_in_flight()
-    {
+    async fn mark_retryable_permanent_failure_abandons_effect_instead_of_leaving_it_stuck_in_flight(
+    ) {
         // Gap 2 (PR2 residual fix): `mark_retryable`'s own bounded retry
         // (already exhausted here — `AlwaysFailingMarkRetryableStore` always
         // fails) used to just log a warning and leave the effect silently
@@ -2079,9 +2081,9 @@ mod tests {
         let state = Arc::new(AlwaysFailingMarkRetryableStore::new());
         let dedup = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
-        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-            "timeout".into(),
-        )]));
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("timeout".into()),
+        ]));
         registry
             .register("invoice.created", executor.clone())
             .unwrap();
@@ -2101,8 +2103,10 @@ mod tests {
             effect_type: effect.description.effect_type.clone(),
             key: effect.description.idempotency_key.clone(),
         };
-        let fp =
-            EffectFingerprint::compute(&effect.description.payload, &effect.description.destination);
+        let fp = EffectFingerprint::compute(
+            &effect.description.payload,
+            &effect.description.destination,
+        );
 
         runner.drain_one(effect).await;
 
@@ -2301,12 +2305,8 @@ mod tests {
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let loop_handle = tokio::spawn(runner.run_inner(
-            receiver,
-            1,
-            shutdown_rx,
-            StdDuration::from_millis(10),
-        ));
+        let loop_handle =
+            tokio::spawn(runner.run_inner(receiver, 1, shutdown_rx, StdDuration::from_millis(10)));
 
         shutdown_tx.send(true).unwrap();
         tokio::time::timeout(StdDuration::from_millis(500), loop_handle)
@@ -2339,9 +2339,9 @@ mod tests {
         // shutdown-drain deadline and this test's own timeout.
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
-        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-            "timeout".into(),
-        )]));
+        let executor = Arc::new(ScriptedExecutor::new(vec![
+            AttemptOutcome::RetryableFailure("timeout".into()),
+        ]));
         registry
             .register("invoice.created", executor.clone())
             .unwrap();
@@ -2447,8 +2447,12 @@ mod tests {
         store.accept(effect.clone()).await.unwrap();
         queue.send(effect).await.unwrap();
 
-        let loop_handle =
-            tokio::spawn(runner.clone().run_inner(receiver, 2, shutdown_rx, RECLAIM_INTERVAL));
+        let loop_handle = tokio::spawn(runner.clone().run_inner(
+            receiver,
+            2,
+            shutdown_rx,
+            RECLAIM_INTERVAL,
+        ));
 
         tokio::time::timeout(StdDuration::from_secs(1), started.notified())
             .await
@@ -2684,17 +2688,17 @@ mod tests {
         registry
             .register(
                 "fast-fail",
-                Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-                    "x".into(),
-                )])),
+                Arc::new(ScriptedExecutor::new(vec![
+                    AttemptOutcome::RetryableFailure("x".into()),
+                ])),
             )
             .unwrap();
         registry
             .register(
                 "lenient-fail",
-                Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::RetryableFailure(
-                    "x".into(),
-                )])),
+                Arc::new(ScriptedExecutor::new(vec![
+                    AttemptOutcome::RetryableFailure("x".into()),
+                ])),
             )
             .unwrap();
 
@@ -2971,7 +2975,11 @@ mod tests {
         runner.requeue_without_charging_attempt(effect).await;
 
         let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
-        assert_eq!(due.len(), 1, "must be reclaim-eligible despite a zero-retry policy");
+        assert_eq!(
+            due.len(),
+            1,
+            "must be reclaim-eligible despite a zero-retry policy"
+        );
         assert_eq!(due[0].state, EffectState::RetryableFailed);
         // F-04 (PR2 round 4): no longer bumped — dedup reservation is
         // identity-based now, not attempt-gated, so this counter is left
@@ -3109,14 +3117,24 @@ mod tests {
         // Two shutdown-triggered cancellations in a row — neither is a real
         // delivery failure, and neither may cost any retry budget.
         store.mark_in_flight(id).await.unwrap();
-        runner.requeue_without_charging_attempt(effect.clone()).await;
+        runner
+            .requeue_without_charging_attempt(effect.clone())
+            .await;
         let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
-        assert_eq!(due[0].attempt, 0, "first cancellation must not bump attempt");
+        assert_eq!(
+            due[0].attempt, 0,
+            "first cancellation must not bump attempt"
+        );
 
         store.mark_in_flight(id).await.unwrap();
-        runner.requeue_without_charging_attempt(effect.clone()).await;
+        runner
+            .requeue_without_charging_attempt(effect.clone())
+            .await;
         let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
-        assert_eq!(due[0].attempt, 0, "second cancellation must not bump attempt either");
+        assert_eq!(
+            due[0].attempt, 0,
+            "second cancellation must not bump attempt either"
+        );
 
         // Now the full `max_attempts: 1` real budget must still be
         // available: the first genuine failure is retried once, the second
@@ -3124,7 +3142,10 @@ mod tests {
         runner.drain_one(effect).await;
         let due = store.claim_due(Timestamp::now(), 10).await.unwrap();
         assert_eq!(due[0].state, EffectState::RetryableFailed);
-        assert_eq!(due[0].attempt, 1, "the first genuine failure consumes the one real retry");
+        assert_eq!(
+            due[0].attempt, 1,
+            "the first genuine failure consumes the one real retry"
+        );
 
         let redispatched = AcceptedEffect {
             id: due[0].id,
@@ -3145,7 +3166,11 @@ mod tests {
             ),
             "the second genuine failure must exhaust the full (uncorrupted) one-retry budget"
         );
-        assert_eq!(executor.call_count(), 2, "both genuine attempts must actually run");
+        assert_eq!(
+            executor.call_count(),
+            2,
+            "both genuine attempts must actually run"
+        );
     }
 
     #[tokio::test]

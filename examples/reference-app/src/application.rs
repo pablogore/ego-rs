@@ -30,7 +30,9 @@ use persistent_entity::persistent_entity::CommandResult;
 use persistent_entity::runtime::EntityRuntime;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::tenant_org::{OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity};
+use crate::domain::tenant_org::{
+    OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity,
+};
 use crate::domain::user::{UserCommand, UserEntity, UserRegistered, UserState};
 use crate::read_side::ReadSideSink;
 
@@ -119,7 +121,11 @@ pub trait RegisterUser {
     #[operation]
     #[authorize(context = ctx, permission = "user:register")]
     #[tenant_scoped]
-    async fn register(&self, ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError>;
+    async fn register(
+        &self,
+        ctx: ServiceContext,
+        input: RegisterInput,
+    ) -> Result<RegisterOutput, RegisterUserError>;
 }
 
 /// The concrete implementation (AD-4: two independent `EntityRuntime`s).
@@ -162,9 +168,13 @@ impl RegisterUserImpl {
     /// method's own body (success, partial-failure) need an explicit call.
     fn record(&self, event_name: &str, actor_id: &str, lifecycle_state: &str) {
         if let Some(obs) = &self.observability {
-            if let Ok(event) =
-                SemanticEvent::without_metadata(event_name, actor_id, actor_id, lifecycle_state, Utc::now().to_rfc3339())
-            {
+            if let Ok(event) = SemanticEvent::without_metadata(
+                event_name,
+                actor_id,
+                actor_id,
+                lifecycle_state,
+                Utc::now().to_rfc3339(),
+            ) {
                 obs.trace(event);
             }
         }
@@ -176,7 +186,13 @@ impl RegisterUserImpl {
     fn publish_read_side<E: DomainEvent>(&self, tenant_id: &str, events: &[E]) {
         if let Some(sink) = &self.read_side_sink {
             for event in events {
-                sink.record(tenant_id, event.aggregate_id(), event.event_type(), event.payload().clone(), *event.occurred_at());
+                sink.record(
+                    tenant_id,
+                    event.aggregate_id(),
+                    event.event_type(),
+                    event.payload().clone(),
+                    *event.occurred_at(),
+                );
             }
         }
     }
@@ -184,7 +200,11 @@ impl RegisterUserImpl {
 
 #[async_trait]
 impl RegisterUser for RegisterUserImpl {
-    async fn register(&self, ctx: ServiceContext, input: RegisterInput) -> Result<RegisterOutput, RegisterUserError> {
+    async fn register(
+        &self,
+        ctx: ServiceContext,
+        input: RegisterInput,
+    ) -> Result<RegisterOutput, RegisterUserError> {
         // Security: `#[tenant_scoped]` only proves `ctx` resolves to SOME
         // tenant — it never compares that against `input.tenant_id` (a
         // client-controlled request-body field). Without this check, an
@@ -201,22 +221,26 @@ impl RegisterUser for RegisterUserImpl {
         match ctx.canonical_tenant().and_then(|c| c.tenant_id()) {
             Some(resolved) if resolved.as_str() == input.tenant_id => {}
             _ => {
-                return Err(RegisterUserError::Security(SecurityError::AuthorizationDenied {
-                    reason: format!(
-                        "request tenant_id {:?} does not match a resolved authenticated tenant",
-                        input.tenant_id
-                    ),
-                }));
+                return Err(RegisterUserError::Security(
+                    SecurityError::AuthorizationDenied {
+                        reason: format!(
+                            "request tenant_id {:?} does not match a resolved authenticated tenant",
+                            input.tenant_id
+                        ),
+                    },
+                ));
             }
         }
 
         // AD-5: ensure the org FIRST (idempotent) — a User must never
         // reference a missing org.
-        let org_ref = self.org_runtime.entity_ref::<TenantOrgCommand, TenantOrgState>(
-            "tenant_organization",
-            input.tenant_id.clone(),
-            Arc::new(TenantOrganizationEntity::new()),
-        )?;
+        let org_ref = self
+            .org_runtime
+            .entity_ref::<TenantOrgCommand, TenantOrgState>(
+                "tenant_organization",
+                input.tenant_id.clone(),
+                Arc::new(TenantOrganizationEntity::new()),
+            )?;
         let org_result: CommandResult<OrganizationEnsured, TenantOrgState> = org_ref
             .send_command(
                 TenantOrgCommand::Ensure {
@@ -227,7 +251,8 @@ impl RegisterUser for RegisterUserImpl {
             )
             .await?;
         match &org_result {
-            CommandResult::Events { events, .. } | CommandResult::EffectsAcceptanceFailed { events, .. } => {
+            CommandResult::Events { events, .. }
+            | CommandResult::EffectsAcceptanceFailed { events, .. } => {
                 self.publish_read_side(&input.tenant_id, events);
             }
             CommandResult::NoEvents { .. } => {}
@@ -277,7 +302,11 @@ impl RegisterUser for RegisterUserImpl {
                 })
             }
             Err(e) => {
-                self.record("register_user.partial_failure", &input.user_id, "user_write_failed");
+                self.record(
+                    "register_user.partial_failure",
+                    &input.user_id,
+                    "user_write_failed",
+                );
                 Err(RegisterUserError::from(e))
             }
         }

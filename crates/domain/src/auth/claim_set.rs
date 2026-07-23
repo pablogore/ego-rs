@@ -122,7 +122,8 @@ impl ClaimSet {
 
     /// Organization identifier from `organization` or `org_id`.
     pub fn organization(&self) -> Option<&str> {
-        self.get_str("organization").or_else(|| self.get_str("org_id"))
+        self.get_str("organization")
+            .or_else(|| self.get_str("org_id"))
     }
 
     /// Token expiry timestamp (`exp` claim).
@@ -387,7 +388,10 @@ mod tests {
 
     #[test]
     fn issuer_returns_iss_claim() {
-        let cs = make_claims(vec![("iss", ClaimValue::String("https://example.com".into()))]);
+        let cs = make_claims(vec![(
+            "iss",
+            ClaimValue::String("https://example.com".into()),
+        )]);
         assert_eq!(cs.issuer(), Some("https://example.com"));
     }
 }

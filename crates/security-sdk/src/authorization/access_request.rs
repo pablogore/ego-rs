@@ -233,7 +233,10 @@ mod tests {
     #[test]
     fn from_static_parses_valid_descriptor() {
         let req = AccessRequest::from_static("orders:read").unwrap();
-        assert!(matches!(req.resource.kind, std::borrow::Cow::Borrowed("orders")));
+        assert!(matches!(
+            req.resource.kind,
+            std::borrow::Cow::Borrowed("orders")
+        ));
         assert!(matches!(req.action.0, std::borrow::Cow::Borrowed("read")));
     }
 

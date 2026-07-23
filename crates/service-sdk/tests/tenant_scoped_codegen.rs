@@ -16,9 +16,9 @@ use ego_service_sdk::error::ServiceErrorTrait;
 use ego_service_sdk::interceptor::InterceptorChain;
 use ego_service_sdk::runtime::{Runtime, RuntimeBuilder};
 use ego_service_sdk::security::SecurityError;
+use ego_service_sdk_macros::service;
 #[allow(unused_imports)]
 use ego_service_sdk_macros::{operation, tenant_scoped};
-use ego_service_sdk_macros::service;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -198,7 +198,10 @@ async fn tenant_scoped_op_succeeds_and_body_observes_canonical_tenant_when_resol
 
     let result = proxy.scoped_op(ctx).await;
 
-    assert!(result.is_ok(), "tenant-scoped op must succeed with a resolvable tenant");
+    assert!(
+        result.is_ok(),
+        "tenant-scoped op must succeed with a resolvable tenant"
+    );
     assert!(
         result.unwrap(),
         "body must observe canonical_tenant() populated by enforce_tenant before it runs"

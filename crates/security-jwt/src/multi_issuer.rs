@@ -8,7 +8,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD}, Engine as _};
+use base64::{
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use ego_domain::auth::AuthenticationError;
 use ego_security_sdk::{AuthenticationProvider, Credential, SecurityContext};
 
@@ -29,11 +32,15 @@ pub(crate) fn unverified_iss(token: &str) -> Option<String> {
     }
     // Payload is parts[1] — base64url (URL_SAFE_NO_PAD, RFC 4648 §5).
     // Some IdPs emit padded base64url (with '='). Try unpadded first; fall back to padded.
-    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1])
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
         .or_else(|_| URL_SAFE.decode(parts[1]))
         .ok()?;
     let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-    payload.get("iss").and_then(|v| v.as_str()).map(str::to_owned)
+    payload
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +115,9 @@ impl AuthenticationProvider for MultiIssuerAuthenticationProvider {
 
         // Pre-check: reject oversized tokens before any base64 work (INV per spec)
         if token.len() > crate::authenticator::MAX_TOKEN_BYTES {
-            return Err(AuthenticationError::InvalidToken("token exceeds 8 KiB limit".into()));
+            return Err(AuthenticationError::InvalidToken(
+                "token exceeds 8 KiB limit".into(),
+            ));
         }
 
         // Extract iss without verifying signature (routing only — INV-4)
@@ -143,7 +152,7 @@ mod tests {
     use crate::config::{JwtAlgorithm, JwtProviderConfig};
     use crate::key_resolver::{LocalKeyResolver, VerificationKey};
     use crate::test_helpers::{fixed_clock, TEST_AUD};
-    use crate::{Rs256AuthenticationProvider};
+    use crate::Rs256AuthenticationProvider;
 
     // -----------------------------------------------------------------------
     // Key fixtures
@@ -177,8 +186,12 @@ mod tests {
             "aud": TEST_AUD,
             "exp": future_ts(3600),
         });
-        encode(&header, &claims, &EncodingKey::from_rsa_pem(rs256_private_pem().as_bytes()).unwrap())
-            .unwrap()
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(rs256_private_pem().as_bytes()).unwrap(),
+        )
+        .unwrap()
     }
 
     fn rs256_provider_for_iss(iss: &str, pub_pem: &str) -> Arc<dyn AuthenticationProvider> {
@@ -260,7 +273,8 @@ mod tests {
             "test setup: padded_b64 must contain '=' to exercise the fallback"
         );
         let fake_token = format!("header.{padded_b64}.signature");
-        let iss = unverified_iss(&fake_token).expect("unverified_iss must succeed for padded payload");
+        let iss =
+            unverified_iss(&fake_token).expect("unverified_iss must succeed for padded payload");
         assert_eq!(iss, "https://padded-issuer.example.com");
     }
 
@@ -271,9 +285,7 @@ mod tests {
     #[test]
     fn routes_token_from_issuer_a_to_provider_a() {
         let provider_a = rs256_provider_for_iss("https://issuer-a.example.com", rs256_public_pem());
-        let multi = build_multi_issuer(vec![
-            ("https://issuer-a.example.com", provider_a),
-        ]);
+        let multi = build_multi_issuer(vec![("https://issuer-a.example.com", provider_a)]);
 
         let token = make_rs256_token_with_iss("user-a", "https://issuer-a.example.com");
         let ctx = multi.authenticate(&Credential::Bearer(token)).unwrap();
@@ -283,9 +295,7 @@ mod tests {
     #[test]
     fn unknown_iss_returns_invalid_token() {
         let provider_a = rs256_provider_for_iss("https://issuer-a.example.com", rs256_public_pem());
-        let multi = build_multi_issuer(vec![
-            ("https://issuer-a.example.com", provider_a),
-        ]);
+        let multi = build_multi_issuer(vec![("https://issuer-a.example.com", provider_a)]);
 
         let token = make_rs256_token_with_iss("user", "https://unknown.example.com");
         let err = multi.authenticate(&Credential::Bearer(token)).unwrap_err();
@@ -327,9 +337,10 @@ mod tests {
             ) as Arc<dyn AuthenticationProvider>
         };
 
-        let multi2 = build_multi_issuer(vec![
-            ("https://issuer-a.example.com", provider_b_with_wrong_key),
-        ]);
+        let multi2 = build_multi_issuer(vec![(
+            "https://issuer-a.example.com",
+            provider_b_with_wrong_key,
+        )]);
 
         // Token is signed with the real private key (corresponds to public_pem, not other_public_pem)
         let token = encode(
@@ -357,7 +368,8 @@ mod tests {
     #[test]
     fn forged_iss_using_b_token_routed_to_a_fails_signature() {
         let provider_a = rs256_provider_for_iss("https://issuer-a.example.com", rs256_public_pem());
-        let provider_b = rs256_provider_for_iss("https://issuer-b.example.com", rs256_other_public_pem());
+        let provider_b =
+            rs256_provider_for_iss("https://issuer-b.example.com", rs256_other_public_pem());
         let multi = build_multi_issuer(vec![
             ("https://issuer-a.example.com", provider_a),
             ("https://issuer-b.example.com", provider_b),

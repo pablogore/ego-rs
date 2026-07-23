@@ -96,8 +96,12 @@ fn try_jwt_path(
                 mapper,
                 |key| match key {
                     VerificationKey::RsaPem(pem) => DecodingKey::from_rsa_pem(pem.as_bytes())
-                        .map_err(|e| AuthenticationError::InvalidToken(format!("bad RSA key: {e}"))),
-                    _ => Err(AuthenticationError::InvalidToken("expected RSA PEM key".into())),
+                        .map_err(|e| {
+                            AuthenticationError::InvalidToken(format!("bad RSA key: {e}"))
+                        }),
+                    _ => Err(AuthenticationError::InvalidToken(
+                        "expected RSA PEM key".into(),
+                    )),
                 },
             )
         }
@@ -118,7 +122,9 @@ fn try_jwt_path(
                 |key| match key {
                     VerificationKey::EcPem(pem) => DecodingKey::from_ec_pem(pem.as_bytes())
                         .map_err(|e| AuthenticationError::InvalidToken(format!("bad EC key: {e}"))),
-                    _ => Err(AuthenticationError::InvalidToken("expected EC PEM key".into())),
+                    _ => Err(AuthenticationError::InvalidToken(
+                        "expected EC PEM key".into(),
+                    )),
                 },
             )
         }
@@ -161,7 +167,12 @@ impl OidcAuthenticationProvider {
         clock: Arc<dyn Clock>,
         mapper: Arc<dyn PrincipalMapper>,
     ) -> Result<Self, AuthenticationError> {
-        Self::with_discovery(config, clock, mapper, Arc::new(HttpDiscoveryProvider::new()))
+        Self::with_discovery(
+            config,
+            clock,
+            mapper,
+            Arc::new(HttpDiscoveryProvider::new()),
+        )
     }
 
     /// Construct with a custom `DiscoveryProvider` (used in tests).
@@ -198,16 +209,15 @@ impl OidcAuthenticationProvider {
             uri
         } else {
             // issuer_url is guaranteed Some because validate() passed.
-            let issuer_url = config.issuer_url.clone().expect("issuer_url absent after validate");
+            let issuer_url = config
+                .issuer_url
+                .clone()
+                .expect("issuer_url absent after validate");
             Self::discover_sync(Arc::clone(&discovery), issuer_url)?.jwks_uri
         };
 
         let ttl = Duration::from_secs(config.jwks_refresh_ttl_seconds.unwrap_or(300));
-        let jwks_resolver = Arc::new(JwksKeyResolver::with_provider(
-            jwks_uri,
-            ttl,
-            jwks_provider,
-        ));
+        let jwks_resolver = Arc::new(JwksKeyResolver::with_provider(jwks_uri, ttl, jwks_provider));
 
         let jwt_config = JwtProviderConfig {
             expected_iss: config.expected_iss.clone(),
@@ -215,10 +225,13 @@ impl OidcAuthenticationProvider {
             leeway_seconds: config.leeway_seconds,
         };
 
-        let introspection = Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
+        let introspection =
+            Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
 
         let token_format = config.token_format.clone().unwrap_or(TokenFormat::Auto);
-        let allowed_algorithms = config.allowed_algorithms.clone()
+        let allowed_algorithms = config
+            .allowed_algorithms
+            .clone()
             .unwrap_or_else(|| vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]);
 
         Ok(Self {
@@ -254,11 +267,22 @@ impl OidcAuthenticationProvider {
         };
 
         let token_format = config.token_format.clone().unwrap_or(TokenFormat::Auto);
-        let introspection = Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
-        let allowed_algorithms = config.allowed_algorithms.clone()
+        let introspection =
+            Self::build_introspection(&config, Arc::clone(&clock), Arc::clone(&mapper))?;
+        let allowed_algorithms = config
+            .allowed_algorithms
+            .clone()
             .unwrap_or_else(|| vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]);
 
-        Ok(Self { jwks_resolver, jwt_config, introspection, token_format, clock, mapper, allowed_algorithms })
+        Ok(Self {
+            jwks_resolver,
+            jwt_config,
+            introspection,
+            token_format,
+            clock,
+            mapper,
+            allowed_algorithms,
+        })
     }
 
     /// Construct with explicit resolver and introspection provider (test-kit only).
@@ -282,10 +306,20 @@ impl OidcAuthenticationProvider {
         };
 
         let token_format = config.token_format.clone().unwrap_or(TokenFormat::Auto);
-        let allowed_algorithms = config.allowed_algorithms.clone()
+        let allowed_algorithms = config
+            .allowed_algorithms
+            .clone()
             .unwrap_or_else(|| vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]);
 
-        Ok(Self { jwks_resolver, jwt_config, introspection, token_format, clock, mapper, allowed_algorithms })
+        Ok(Self {
+            jwks_resolver,
+            jwt_config,
+            introspection,
+            token_format,
+            clock,
+            mapper,
+            allowed_algorithms,
+        })
     }
 
     fn build_introspection(
@@ -322,8 +356,11 @@ impl OidcAuthenticationProvider {
         resolver_pool().spawn_ok(async move {
             let _ = tx.send(discovery.fetch_configuration(&issuer_url).await);
         });
-        rx.recv()
-            .map_err(|_| AuthenticationError::ProviderUnavailable("discovery did not complete (pool exhausted or task dropped)".into()))?
+        rx.recv().map_err(|_| {
+            AuthenticationError::ProviderUnavailable(
+                "discovery did not complete (pool exhausted or task dropped)".into(),
+            )
+        })?
     }
 }
 
@@ -334,12 +371,18 @@ impl AuthenticationProvider for OidcAuthenticationProvider {
     ) -> Result<SecurityContext, AuthenticationError> {
         let token = match credential {
             Credential::Bearer(t) => t.as_str(),
-            _ => return Err(AuthenticationError::InvalidToken("unsupported credential type".into())),
+            _ => {
+                return Err(AuthenticationError::InvalidToken(
+                    "unsupported credential type".into(),
+                ))
+            }
         };
 
         // Pre-check: token size limit (INV per spec)
         if token.len() > crate::authenticator::MAX_TOKEN_BYTES {
-            return Err(AuthenticationError::InvalidToken("token exceeds 8 KiB limit".into()));
+            return Err(AuthenticationError::InvalidToken(
+                "token exceeds 8 KiB limit".into(),
+            ));
         }
 
         match &self.token_format {
@@ -492,11 +535,21 @@ mod tests {
     }
 
     impl FakeDiscovery {
-        fn new(jwks_uri: url::Url) -> (Self, Arc<AtomicUsize>, Arc<std::sync::Mutex<Option<url::Url>>>) {
+        fn new(
+            jwks_uri: url::Url,
+        ) -> (
+            Self,
+            Arc<AtomicUsize>,
+            Arc<std::sync::Mutex<Option<url::Url>>>,
+        ) {
             let count = Arc::new(AtomicUsize::new(0));
             let received_url = Arc::new(std::sync::Mutex::new(None));
             (
-                Self { jwks_uri, count: Arc::clone(&count), received_url: Arc::clone(&received_url) },
+                Self {
+                    jwks_uri,
+                    count: Arc::clone(&count),
+                    received_url: Arc::clone(&received_url),
+                },
                 count,
                 Arc::clone(&received_url),
             )
@@ -511,7 +564,10 @@ mod tests {
         ) -> Result<OidcEndpoints, AuthenticationError> {
             self.count.fetch_add(1, Ordering::SeqCst);
             *self.received_url.lock().unwrap() = Some(issuer_url.clone());
-            Ok(OidcEndpoints { jwks_uri: self.jwks_uri.clone(), introspection_endpoint: None })
+            Ok(OidcEndpoints {
+                jwks_uri: self.jwks_uri.clone(),
+                introspection_endpoint: None,
+            })
         }
     }
 
@@ -617,7 +673,10 @@ mod tests {
             ..base_config()
         };
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         // A token that ends with a dot (empty signature) must go to opaque, not JWT.
@@ -646,7 +705,10 @@ mod tests {
         let token = make_rs256_token(&claims);
         let resolver = rsa_resolver(rs256_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, base_config(), pinned_clock(), default_mapper(),
+            resolver,
+            base_config(),
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
@@ -659,7 +721,10 @@ mod tests {
         let token = make_ec_token(&claims);
         let resolver = ec_resolver(ec_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, base_config(), pinned_clock(), default_mapper(),
+            resolver,
+            base_config(),
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
@@ -672,10 +737,15 @@ mod tests {
         let token = make_rs256_token(&claims);
         let resolver = rsa_resolver(rs256_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, base_config(), pinned_clock(), default_mapper(),
+            resolver,
+            base_config(),
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
-        let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
         assert_eq!(err, AuthenticationError::ExpiredToken);
     }
 
@@ -687,12 +757,20 @@ mod tests {
         token.push_str("TAMPERED");
         let resolver = rsa_resolver(rs256_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, base_config(), pinned_clock(), default_mapper(),
+            resolver,
+            base_config(),
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
-        let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
         assert!(
-            matches!(err, AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)),
+            matches!(
+                err,
+                AuthenticationError::InvalidSignature | AuthenticationError::InvalidToken(_)
+            ),
             "expected signature error, got {err:?}"
         );
     }
@@ -701,11 +779,16 @@ mod tests {
     fn token_over_8kib_returns_invalid_token() {
         let resolver = rsa_resolver(rs256_public_pem());
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, base_config(), pinned_clock(), default_mapper(),
+            resolver,
+            base_config(),
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         let huge = "x".repeat(8193);
-        let err = provider.authenticate(&Credential::Bearer(huge)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(huge))
+            .unwrap_err();
         assert!(matches!(err, AuthenticationError::InvalidToken(_)));
     }
 
@@ -732,7 +815,10 @@ mod tests {
             Arc::new(fake_jwks),
         );
 
-        assert!(result.is_ok(), "with_discovery must succeed when FakeDiscovery returns a valid jwks_uri");
+        assert!(
+            result.is_ok(),
+            "with_discovery must succeed when FakeDiscovery returns a valid jwks_uri"
+        );
         assert_eq!(
             discovery_count.load(Ordering::SeqCst),
             1,
@@ -748,7 +834,8 @@ mod tests {
         let provider = result.unwrap();
         let claims = json!({ "sub": "user", "iss": issuer.as_str(), "exp": future_ts(3600) });
         let token = make_rs256_token(&claims);
-        let ctx = provider.authenticate(&Credential::Bearer(token))
+        let ctx = provider
+            .authenticate(&Credential::Bearer(token))
             .expect("auth must succeed with FakeJwks holding the matching RS256 key");
         assert_eq!(ctx.principal.subject_id.as_str(), "user");
         assert!(
@@ -767,7 +854,9 @@ mod tests {
                 &self,
                 _: &url::Url,
             ) -> Result<OidcEndpoints, AuthenticationError> {
-                Err(AuthenticationError::ProviderUnavailable("discovery unavailable".into()))
+                Err(AuthenticationError::ProviderUnavailable(
+                    "discovery unavailable".into(),
+                ))
             }
         }
 
@@ -797,11 +886,15 @@ mod tests {
         let resolver = rsa_resolver(rs256_public_pem());
         let config = base_config(); // has jwks_uri set
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
 
-        let claims = json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
+        let claims =
+            json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_rs256_token(&claims);
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
         assert_eq!(ctx.principal.subject_id.as_str(), "user");
@@ -829,7 +922,10 @@ mod tests {
             ..Default::default()
         };
         let result = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         );
         assert!(
             matches!(result, Err(AuthenticationError::ProviderUnavailable(_))),
@@ -839,7 +935,8 @@ mod tests {
 
     #[test]
     fn token_format_auto_with_jwt_uses_jwt_path() {
-        let claims = json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
+        let claims =
+            json!({ "sub": "user", "exp": future_ts(3600), "iss": "https://idp.example.com" });
         let token = make_rs256_token(&claims); // 3-part JWT
         let resolver = rsa_resolver(rs256_public_pem());
         let config = OidcProviderConfig {
@@ -847,7 +944,10 @@ mod tests {
             ..base_config()
         };
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         let ctx = provider.authenticate(&Credential::Bearer(token)).unwrap();
@@ -862,7 +962,10 @@ mod tests {
             ..base_config()
         };
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
         // Opaque token (no dots)
@@ -897,7 +1000,10 @@ mod tests {
         // We accept that HttpIntrospectionProvider fails (ProviderUnavailable) since we're
         // not spinning up a real HTTP server.
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
 
@@ -907,7 +1013,9 @@ mod tests {
         // We use a structurally-valid JWT string to prove it didn't go through the JWT path.
         let claims = json!({ "sub": "user", "exp": future_ts(3600) });
         let jwt_token = make_rs256_token(&claims);
-        let err = provider.authenticate(&Credential::Bearer(jwt_token)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(jwt_token))
+            .unwrap_err();
         // If JWT path was taken: would get Ok (valid token, valid key)
         // If opaque path was taken: HttpIntrospectionProvider fails → ProviderUnavailable
         assert!(
@@ -928,10 +1036,15 @@ mod tests {
             ..base_config()
         };
         let provider = OidcAuthenticationProvider::with_resolver(
-            resolver, config, pinned_clock(), default_mapper(),
+            resolver,
+            config,
+            pinned_clock(),
+            default_mapper(),
         )
         .unwrap();
-        let err = provider.authenticate(&Credential::Bearer(token)).unwrap_err();
+        let err = provider
+            .authenticate(&Credential::Bearer(token))
+            .unwrap_err();
         assert!(
             matches!(err, AuthenticationError::AlgorithmNotSupported(_)),
             "RS256 token must be rejected when only Es256 is allowed; got {err:?}"

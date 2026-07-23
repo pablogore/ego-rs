@@ -63,7 +63,12 @@ impl PriceLooked {
     /// Building it from [`PriceLookedPayload`] instead means every field
     /// that belongs in the payload is declared once, in one dedicated type,
     /// rather than listed a second time by hand at each construction site.
-    fn new(sku: String, price_payload: Vec<u8>, cache_hit: bool, occurred_at: DateTime<Utc>) -> Self {
+    fn new(
+        sku: String,
+        price_payload: Vec<u8>,
+        cache_hit: bool,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
         let payload = serde_json::to_value(PriceLookedPayload {
             sku: &sku,
             price_payload: &price_payload,
@@ -159,7 +164,12 @@ impl PersistentEntity for PricingEntity {
                     )
                     .await
                     .map_err(|e| EntityError::Internal(e.to_string()))?;
-                Ok(vec![PriceLooked::new(sku.clone(), response.payload, response.cache_hit, Utc::now())])
+                Ok(vec![PriceLooked::new(
+                    sku.clone(),
+                    response.payload,
+                    response.cache_hit,
+                    Utc::now(),
+                )])
             }
         }
     }

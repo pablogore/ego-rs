@@ -68,7 +68,10 @@ impl InMemoryReadSideStore {
     /// callers that build their own pagination via [`paginate`] (e.g.
     /// `SharedReadSideStore::fetch`, which must stay synchronous while
     /// holding its own lock guard).
-    pub fn events_for_tag(&self, tag: &str) -> impl Iterator<Item = &EventStreamElement<serde_json::Value>> {
+    pub fn events_for_tag(
+        &self,
+        tag: &str,
+    ) -> impl Iterator<Item = &EventStreamElement<serde_json::Value>> {
         self.streams.get(tag).into_iter().flatten()
     }
 
@@ -76,7 +79,10 @@ impl InMemoryReadSideStore {
     /// Used by pollers that discover their tag set dynamically (e.g. one tag
     /// per tenant) instead of knowing it upfront.
     pub fn known_tags(&self) -> Vec<EventTag> {
-        self.streams.keys().map(|t| EventTag::new(t.clone())).collect()
+        self.streams
+            .keys()
+            .map(|t| EventTag::new(t.clone()))
+            .collect()
     }
 }
 
@@ -124,7 +130,12 @@ impl ReadSideStore<serde_json::Value> for InMemoryReadSideStore {
         offset: Option<&Offset>,
         batch_size: usize,
     ) -> Result<Vec<EventStreamElement<serde_json::Value>>, ReadSideStoreError> {
-        Ok(paginate(self.events_for_tag(tag.value()), tenant, offset, batch_size))
+        Ok(paginate(
+            self.events_for_tag(tag.value()),
+            tenant,
+            offset,
+            batch_size,
+        ))
     }
 }
 
@@ -159,7 +170,10 @@ mod tests {
         }
 
         let tag = EventTag::new("order");
-        let page = store.fetch("tenant-a", &tag, Some(&Offset::sequence(2)), 2).await.unwrap();
+        let page = store
+            .fetch("tenant-a", &tag, Some(&Offset::sequence(2)), 2)
+            .await
+            .unwrap();
 
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].event_version, 3);

@@ -56,7 +56,10 @@ mod tests {
     struct StubAuthn;
 
     impl AuthenticationProvider for StubAuthn {
-        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
+        fn authenticate(
+            &self,
+            _credential: &Credential,
+        ) -> Result<SecurityContext, AuthenticationError> {
             unimplemented!("not exercised by this test")
         }
     }
@@ -101,7 +104,10 @@ mod tests {
             .runtime
             .resolve::<EchoTag>()
             .expect("registered tag resolves");
-        let out = proxy.echo(ServiceContext::new(), "hi".into()).await.unwrap();
+        let out = proxy
+            .echo(ServiceContext::new(), "hi".into())
+            .await
+            .unwrap();
         assert_eq!(out, "hi");
     }
 }

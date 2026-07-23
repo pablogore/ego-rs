@@ -89,13 +89,9 @@ impl DiscoveryProvider for HttpDiscoveryProvider {
                 AuthenticationError::ProviderUnavailable("invalid issuer URL".to_string())
             })?
         };
-        let discovery_url = base
-            .join(".well-known/openid-configuration")
-            .map_err(|_| {
-                AuthenticationError::ProviderUnavailable(
-                    "failed to build discovery URL".to_string(),
-                )
-            })?;
+        let discovery_url = base.join(".well-known/openid-configuration").map_err(|_| {
+            AuthenticationError::ProviderUnavailable("failed to build discovery URL".to_string())
+        })?;
 
         let resp = self
             .client
@@ -133,7 +129,10 @@ impl DiscoveryProvider for HttpDiscoveryProvider {
             validate_url_requires_https(ep, "introspection_endpoint (from discovery)")?;
         }
 
-        Ok(OidcEndpoints { jwks_uri, introspection_endpoint: config.introspection_endpoint })
+        Ok(OidcEndpoints {
+            jwks_uri,
+            introspection_endpoint: config.introspection_endpoint,
+        })
     }
 }
 
@@ -152,7 +151,12 @@ mod tests {
 
     impl FakeDiscovery {
         pub(crate) fn new(jwks_uri: url::Url) -> Self {
-            Self { endpoints: OidcEndpoints { jwks_uri, introspection_endpoint: None } }
+            Self {
+                endpoints: OidcEndpoints {
+                    jwks_uri,
+                    introspection_endpoint: None,
+                },
+            }
         }
     }
 
@@ -200,9 +204,9 @@ mod tests {
     fn fake_discovery_returns_configured_endpoints() {
         let jwks_uri = url::Url::parse("https://example.com/jwks").unwrap();
         let discovery = FakeDiscovery::new(jwks_uri.clone());
-        let endpoints = futures_executor::block_on(discovery.fetch_configuration(
-            &url::Url::parse("https://example.com").unwrap(),
-        ))
+        let endpoints = futures_executor::block_on(
+            discovery.fetch_configuration(&url::Url::parse("https://example.com").unwrap()),
+        )
         .unwrap();
         assert_eq!(endpoints.jwks_uri, jwks_uri);
     }

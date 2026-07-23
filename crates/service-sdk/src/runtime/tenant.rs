@@ -126,7 +126,11 @@ impl<'a> EstablishedTenantFacts<'a> {
         hint: Option<&'a str>,
         cross_tenant_grant: Option<&'a CrossTenantGrant>,
     ) -> Self {
-        Self { security, hint, cross_tenant_grant }
+        Self {
+            security,
+            hint,
+            cross_tenant_grant,
+        }
     }
 }
 

@@ -88,15 +88,22 @@ fn missing_dependency_names_both_type_and_requester() {
 
     match result {
         Ok(_) => panic!("expected build to fail on a missing adapter dependency"),
-        Err(ego_service_sdk::app::CompositionError::Validation(RuntimeError::DependencyNotFound {
-            type_name,
-            service_name,
-            ..
-        })) => {
+        Err(ego_service_sdk::app::CompositionError::Validation(
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            },
+        )) => {
             assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
-            assert_eq!(service_name, Some(std::any::type_name::<GreetingServiceImpl>()));
+            assert_eq!(
+                service_name,
+                Some(std::any::type_name::<GreetingServiceImpl>())
+            );
         }
-        Err(other) => panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}"),
+        Err(other) => {
+            panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}")
+        }
     }
 }
 
@@ -138,11 +145,13 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
 
     match result {
         Ok(_) => panic!("expected build to fail — GreeterAdapter was never registered"),
-        Err(ego_service_sdk::app::CompositionError::Validation(RuntimeError::DependencyNotFound {
-            type_name,
-            service_name,
-            ..
-        })) => {
+        Err(ego_service_sdk::app::CompositionError::Validation(
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            },
+        )) => {
             assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
             assert_eq!(
                 service_name,
@@ -151,7 +160,9 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
                  incomplete dependencies() list) must still name the requesting service"
             );
         }
-        Err(other) => panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}"),
+        Err(other) => {
+            panic!("expected Validation(DependencyNotFound) naming type+requester, got {other:?}")
+        }
     }
 }
 
@@ -265,7 +276,10 @@ struct LimitServiceImpl {
 
 impl Injectable for LimitServiceImpl {
     fn dependencies() -> Vec<DepKey> {
-        vec![DepKey::Config(std::any::TypeId::of::<u32>(), std::any::type_name::<u32>())]
+        vec![DepKey::Config(
+            std::any::TypeId::of::<u32>(),
+            std::any::type_name::<u32>(),
+        )]
     }
 
     fn build(rt: &ego_service_sdk::runtime::RuntimeInner) -> Result<Self, RuntimeError> {

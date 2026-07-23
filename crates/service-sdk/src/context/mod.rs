@@ -543,9 +543,9 @@ mod tests {
     // (code-review fix: this copy had already drifted, missing the
     // DenyCrossTenant variant runtime_builder.rs's copy has).
 
-    use ego_domain::context::TenantId;
     use crate::runtime::RuntimeInner;
     use crate::test_support::{authenticated_ctx, AllowCrossTenant};
+    use ego_domain::context::TenantId;
 
     #[tokio::test]
     #[allow(deprecated)]
@@ -614,10 +614,7 @@ mod tests {
         let ctx = ServiceContext::new().with_security(Arc::new(sec_ctx));
         let result = ctx.require_security();
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap().principal().subject_id.as_str(),
-            "user:test"
-        );
+        assert_eq!(result.unwrap().principal().subject_id.as_str(), "user:test");
     }
 
     // -- CORE-017: logger access (TASK-018/TASK-019) ------------------------

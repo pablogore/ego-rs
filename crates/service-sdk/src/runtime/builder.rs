@@ -27,7 +27,9 @@ use crate::di::{DuplicateEntity, DuplicateProjection, Injectable};
 use crate::interceptor::{InterceptorChain, TracingInterceptor};
 use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
-use crate::runtime::runtime_builder::{DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner};
+use crate::runtime::runtime_builder::{
+    DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner,
+};
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 
@@ -40,7 +42,10 @@ use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 const DEFAULT_EFFECT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The pair of security providers registered with a [`Runtime`].
-pub type SecurityProviders = (Arc<dyn AuthenticationProvider>, Arc<dyn AuthorizationProvider>);
+pub type SecurityProviders = (
+    Arc<dyn AuthenticationProvider>,
+    Arc<dyn AuthorizationProvider>,
+);
 
 /// A recorded `(service_name, S::validate)` pair for `with_injectable`/`try_build` (AD-3).
 type ValidatorEntry = (&'static str, fn(&RuntimeInner) -> Result<(), RuntimeError>);
@@ -190,7 +195,8 @@ impl RuntimeBuilder {
     /// Last-write-wins: registering another value of the same concrete type `A`
     /// REPLACES the previous one; only the most recent value per type is retained.
     pub fn with_adapter<A: Send + Sync + 'static>(mut self, adapter: Arc<A>) -> Self {
-        self.adapters.insert(TypeId::of::<A>(), adapter as Arc<dyn Any + Send + Sync>);
+        self.adapters
+            .insert(TypeId::of::<A>(), adapter as Arc<dyn Any + Send + Sync>);
         self
     }
 
@@ -198,7 +204,8 @@ impl RuntimeBuilder {
     /// Last-write-wins (same semantics as `with_adapter`). CORE-016: accepts only an
     /// already-constructed `Arc<C>`, never a raw config source/loader.
     pub fn with_config<C: Send + Sync + 'static>(mut self, value: Arc<C>) -> Self {
-        self.configs.insert(TypeId::of::<C>(), value as Arc<dyn Any + Send + Sync>);
+        self.configs
+            .insert(TypeId::of::<C>(), value as Arc<dyn Any + Send + Sync>);
         self
     }
 
@@ -220,7 +227,8 @@ impl RuntimeBuilder {
                 type_name: std::any::type_name::<P>(),
             });
         }
-        self.projections.insert(type_id, projection as Arc<dyn Any + Send + Sync>);
+        self.projections
+            .insert(type_id, projection as Arc<dyn Any + Send + Sync>);
         Ok(self)
     }
 
@@ -241,7 +249,13 @@ impl RuntimeBuilder {
     ) -> Result<Self, DuplicateEntity>
     where
         E: PersistentEntity + 'static,
-        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        E::Event: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
     {
         let type_id = TypeId::of::<E>();
         if self.entities.contains_key(&type_id) {
@@ -249,7 +263,8 @@ impl RuntimeBuilder {
                 type_name: std::any::type_name::<E>(),
             });
         }
-        self.entities.insert(type_id, runtime as Arc<dyn Any + Send + Sync>);
+        self.entities
+            .insert(type_id, runtime as Arc<dyn Any + Send + Sync>);
         Ok(self)
     }
 
@@ -265,7 +280,8 @@ impl RuntimeBuilder {
         Tag: Resolvable + 'static,
     {
         let raw: Arc<dyn Any + Send + Sync> = Arc::new(ResolvableContainer(svc));
-        self.registry.register::<Tag>(<Tag as ServiceContract>::version(), raw)?;
+        self.registry
+            .register::<Tag>(<Tag as ServiceContract>::version(), raw)?;
         Ok(self)
     }
 
@@ -274,7 +290,8 @@ impl RuntimeBuilder {
     /// zero effect on `build()`; the bookkeeping recorded here only takes
     /// effect when the caller later calls `try_build()` instead of `build()`.
     pub fn with_injectable<S: Injectable>(mut self) -> Self {
-        self.validators.push((std::any::type_name::<S>(), S::validate));
+        self.validators
+            .push((std::any::type_name::<S>(), S::validate));
         self
     }
 
@@ -365,7 +382,8 @@ impl RuntimeBuilder {
         executor: Arc<dyn ExternalEffectExecutor>,
     ) -> Result<Self, DuplicateEffectType> {
         for effect_type in effect_types {
-            self.effect_executors.register(effect_type, executor.clone())?;
+            self.effect_executors
+                .register(effect_type, executor.clone())?;
         }
         Ok(self)
     }
@@ -389,7 +407,8 @@ impl RuntimeBuilder {
         provider_id: impl Into<String>,
         provider: Arc<dyn ExternalDataProvider>,
     ) -> Result<Self, DuplicateProviderId> {
-        self.data_provider_registry.register(provider_id, provider.clone())?;
+        self.data_provider_registry
+            .register(provider_id, provider.clone())?;
         let already_tracked = self
             .data_providers_for_teardown
             .iter()
@@ -558,13 +577,13 @@ impl RuntimeBuilder {
         for (service_name, validate) in validators {
             if let Err(err) = validate(rt.inner()) {
                 let err = match err {
-                    RuntimeError::DependencyNotFound { kind, type_name, .. } => {
-                        RuntimeError::DependencyNotFound {
-                            kind,
-                            type_name,
-                            service_name: Some(service_name),
-                        }
-                    }
+                    RuntimeError::DependencyNotFound {
+                        kind, type_name, ..
+                    } => RuntimeError::DependencyNotFound {
+                        kind,
+                        type_name,
+                        service_name: Some(service_name),
+                    },
                     other => other,
                 };
                 return Err(err);
@@ -602,9 +621,7 @@ impl Runtime {
     }
 
     /// Returns the registered security providers, if any.
-    pub fn security_providers(
-        &self,
-    ) -> Option<&SecurityProviders> {
+    pub fn security_providers(&self) -> Option<&SecurityProviders> {
         self.inner.security_providers.as_ref()
     }
 
@@ -664,12 +681,15 @@ impl Runtime {
         // Finding 6/F-02 already established: `EffectRuntimeHandle::
         // shutdown_and_wait`'s `Result` is propagated, never swallowed.
         self.register_async_teardown(async move {
-            handle.shutdown_and_wait(deadline).await.map_err(|err| RuntimeInfraError::Teardown {
-                reason: format!(
-                    "external-effects drain deadline reached before shutdown completed \
+            handle
+                .shutdown_and_wait(deadline)
+                .await
+                .map_err(|err| RuntimeInfraError::Teardown {
+                    reason: format!(
+                        "external-effects drain deadline reached before shutdown completed \
                      cleanly (drain_incomplete): {err}"
-                ),
-            })
+                    ),
+                })
         });
         Ok(())
     }
@@ -689,7 +709,11 @@ impl Runtime {
     /// is out of `ego-service-sdk`'s scope (it lives wherever the host
     /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
     pub fn effect_acceptor(&self) -> Option<Arc<dyn EffectAcceptor>> {
-        if !self.inner.effect_started.load(std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .inner
+            .effect_started
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return None;
         }
         self.inner
@@ -723,12 +747,18 @@ impl Runtime {
         let raw = self
             .inner
             .registry
-            .resolve_raw::<Tag>(&VersionConstraint::Exact(<Tag as ServiceContract>::version()))
+            .resolve_raw::<Tag>(&VersionConstraint::Exact(
+                <Tag as ServiceContract>::version(),
+            ))
             .map_err(|_| RuntimeError::ServiceNotFound {
                 type_name: std::any::type_name::<Tag>(),
                 required_by: None,
             })?;
-        Tag::create_proxy(raw, self.inner.interceptor_chain.clone(), Arc::downgrade(&self.inner))
+        Tag::create_proxy(
+            raw,
+            self.inner.interceptor_chain.clone(),
+            Arc::downgrade(&self.inner),
+        )
     }
 
     /// Drains initialized infrastructure in reverse construction order.
@@ -816,7 +846,9 @@ impl Runtime {
     /// transport layer) has no legitimate reason to reach them through a
     /// side channel.
     pub fn resolver(&self) -> RuntimeResolver {
-        RuntimeResolver { runtime: self.clone() }
+        RuntimeResolver {
+            runtime: self.clone(),
+        }
     }
 }
 
@@ -857,9 +889,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ego_security_sdk::authentication::AuthenticationProvider;
-    use ego_security_sdk::authorization::{
-        AuthorizationDecision, AuthorizationProvider,
-    };
+    use ego_security_sdk::authorization::{AuthorizationDecision, AuthorizationProvider};
     use ego_security_sdk::context::SecurityContext;
     use ego_security_sdk::credential::Credential;
     use ego_security_sdk::error::SecurityError;
@@ -873,7 +903,10 @@ mod tests {
     struct StubAuthn;
 
     impl AuthenticationProvider for StubAuthn {
-        fn authenticate(&self, _credential: &Credential) -> Result<SecurityContext, AuthenticationError> {
+        fn authenticate(
+            &self,
+            _credential: &Credential,
+        ) -> Result<SecurityContext, AuthenticationError> {
             let subject = SubjectId::new("user:stub").unwrap();
             let principal = Principal::new(PrincipalKind::User, subject);
             Ok(SecurityContext::empty(principal))
@@ -951,7 +984,9 @@ mod tests {
 
     #[test]
     fn shutdown_with_logger_succeeds_and_is_idempotent() {
-        let rt = RuntimeBuilder::new().with_logger(initialized_logger()).build();
+        let rt = RuntimeBuilder::new()
+            .with_logger(initialized_logger())
+            .build();
         assert!(rt.shutdown().is_ok());
         assert!(rt.shutdown().is_ok());
     }
@@ -1127,7 +1162,9 @@ mod tests {
         let first = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let second = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
 
-        let builder = RuntimeBuilder::new().with_entity::<TestEntity>(first.clone()).unwrap();
+        let builder = RuntimeBuilder::new()
+            .with_entity::<TestEntity>(first.clone())
+            .unwrap();
 
         let err = match builder.clone().with_entity::<TestEntity>(second.clone()) {
             Err(e) => e,
@@ -1181,7 +1218,10 @@ mod tests {
         type State = TestState;
 
         fn initial_state(&self) -> Self::State {
-            TestState { value: 0, version: 0 }
+            TestState {
+                value: 0,
+                version: 0,
+            }
         }
 
         async fn handle_command(
@@ -1229,13 +1269,10 @@ mod tests {
             .inner()
             .resolve_entity::<TestEntity>()
             .expect("TestEntity must resolve its own registered runtime");
-        let resolved_b = rt
-            .inner()
-            .resolve_entity::<TestEntity2>()
-            .expect(
-                "TestEntity2 must resolve its own registered runtime, unaffected by \
+        let resolved_b = rt.inner().resolve_entity::<TestEntity2>().expect(
+            "TestEntity2 must resolve its own registered runtime, unaffected by \
                  sharing an event type with TestEntity",
-            );
+        );
 
         // `.is_ok()` alone would still pass if a keying bug stored `runtime_a`
         // under both TypeIds — both share the same erased `Arc<EntityRuntime<TestEvent>>`
@@ -1268,10 +1305,22 @@ mod tests {
             .with_config(Arc::new(StubConfigD("d".to_string())))
             .build();
 
-        assert_eq!(*rt.inner().resolve_adapter::<StubAdapter>().unwrap(), StubAdapter(1));
-        assert_eq!(*rt.inner().resolve_adapter::<StubAdapterB>().unwrap(), StubAdapterB(2));
-        assert_eq!(*rt.inner().resolve_config::<StubConfig>().unwrap(), StubConfig("c".to_string()));
-        assert_eq!(*rt.inner().resolve_config::<StubConfigD>().unwrap(), StubConfigD("d".to_string()));
+        assert_eq!(
+            *rt.inner().resolve_adapter::<StubAdapter>().unwrap(),
+            StubAdapter(1)
+        );
+        assert_eq!(
+            *rt.inner().resolve_adapter::<StubAdapterB>().unwrap(),
+            StubAdapterB(2)
+        );
+        assert_eq!(
+            *rt.inner().resolve_config::<StubConfig>().unwrap(),
+            StubConfig("c".to_string())
+        );
+        assert_eq!(
+            *rt.inner().resolve_config::<StubConfigD>().unwrap(),
+            StubConfigD("d".to_string())
+        );
     }
 
     // -- CORE-120: unregistered type unchanged behavior ----------------------
@@ -1280,14 +1329,20 @@ mod tests {
     fn resolve_adapter_unregistered_returns_dependency_not_found() {
         let rt = RuntimeBuilder::new().build();
         let result = rt.inner().resolve_adapter::<StubAdapter>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     #[test]
     fn resolve_config_unregistered_returns_dependency_not_found() {
         let rt = RuntimeBuilder::new().build();
         let result = rt.inner().resolve_config::<StubConfig>();
-        assert!(matches!(result, Err(RuntimeError::DependencyNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RuntimeError::DependencyNotFound { .. })
+        ));
     }
 
     // -- CORE-120: identity preservation (no clone-on-resolve) ---------------
@@ -1328,8 +1383,14 @@ mod tests {
             .with_config(Arc::new(SharedType(2)))
             .build();
 
-        assert_eq!(*rt.inner().resolve_adapter::<SharedType>().unwrap(), SharedType(1));
-        assert_eq!(*rt.inner().resolve_config::<SharedType>().unwrap(), SharedType(2));
+        assert_eq!(
+            *rt.inner().resolve_adapter::<SharedType>().unwrap(),
+            SharedType(1)
+        );
+        assert_eq!(
+            *rt.inner().resolve_config::<SharedType>().unwrap(),
+            SharedType(2)
+        );
     }
 
     // -- CORE-025 TASK-015: with_injectable / try_build ----------------------
@@ -1369,17 +1430,26 @@ mod tests {
     fn try_build_fails_fast_on_missing_dependency_naming_both_type_and_service() {
         // `Runtime` (the `Ok` type) doesn't implement `Debug`, so `expect_err`
         // isn't available here — match manually instead.
-        let err = match RuntimeBuilder::new().with_injectable::<NeedsAdapter>().try_build() {
+        let err = match RuntimeBuilder::new()
+            .with_injectable::<NeedsAdapter>()
+            .try_build()
+        {
             Err(e) => e,
             Ok(_) => panic!("try_build must fail fast when a recorded dependency is missing"),
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            } => {
                 assert_eq!(type_name, std::any::type_name::<StubAdapter>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsAdapter>()));
             }
-            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+            other => {
+                panic!("expected DependencyNotFound naming both type and service, got {other:?}")
+            }
         }
     }
 
@@ -1394,11 +1464,16 @@ mod tests {
 
     impl Injectable for NeedsConfig {
         fn dependencies() -> Vec<DepKey> {
-            vec![DepKey::Config(TypeId::of::<u32>(), std::any::type_name::<u32>())]
+            vec![DepKey::Config(
+                TypeId::of::<u32>(),
+                std::any::type_name::<u32>(),
+            )]
         }
 
         fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(Self { limit: rt.resolve_config::<u32>()? })
+            Ok(Self {
+                limit: rt.resolve_config::<u32>()?,
+            })
         }
     }
 
@@ -1441,17 +1516,28 @@ mod tests {
 
     #[test]
     fn try_build_fails_before_startup_when_declared_projection_dependency_is_missing() {
-        let err = match RuntimeBuilder::new().with_injectable::<NeedsProjection>().try_build() {
+        let err = match RuntimeBuilder::new()
+            .with_injectable::<NeedsProjection>()
+            .try_build()
+        {
             Err(e) => e,
-            Ok(_) => panic!("try_build must fail fast when the declared projection dependency is missing"),
+            Ok(_) => panic!(
+                "try_build must fail fast when the declared projection dependency is missing"
+            ),
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            } => {
                 assert_eq!(type_name, std::any::type_name::<StubProjection>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsProjection>()));
             }
-            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+            other => {
+                panic!("expected DependencyNotFound naming both type and service, got {other:?}")
+            }
         }
     }
 
@@ -1474,7 +1560,9 @@ mod tests {
         }
 
         fn build(rt: &RuntimeInner) -> Result<Self, RuntimeError> {
-            Ok(Self { entity: rt.resolve_entity::<TestEntity>()? })
+            Ok(Self {
+                entity: rt.resolve_entity::<TestEntity>()?,
+            })
         }
     }
 
@@ -1493,23 +1581,35 @@ mod tests {
         // Does not call `entity.entity_ref(...)` here — that spawns a real
         // Tokio actor (`TokioEntityRef::new`), out of scope for a plain
         // `#[test]`; resolution success alone is what this proof needs.
-        let _svc = NeedsEntity::build(rt.inner())
-            .expect("build() succeeds using the same registered entity runtime try_build validated");
+        let _svc = NeedsEntity::build(rt.inner()).expect(
+            "build() succeeds using the same registered entity runtime try_build validated",
+        );
     }
 
     #[test]
     fn try_build_fails_before_startup_when_declared_entity_dependency_is_missing() {
-        let err = match RuntimeBuilder::new().with_injectable::<NeedsEntity>().try_build() {
+        let err = match RuntimeBuilder::new()
+            .with_injectable::<NeedsEntity>()
+            .try_build()
+        {
             Err(e) => e,
-            Ok(_) => panic!("try_build must fail fast when the declared entity dependency is missing"),
+            Ok(_) => {
+                panic!("try_build must fail fast when the declared entity dependency is missing")
+            }
         };
 
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            } => {
                 assert_eq!(type_name, std::any::type_name::<TestEntity>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsEntity>()));
             }
-            other => panic!("expected DependencyNotFound naming both type and service, got {other:?}"),
+            other => {
+                panic!("expected DependencyNotFound naming both type and service, got {other:?}")
+            }
         }
     }
 
@@ -1522,7 +1622,8 @@ mod tests {
     /// registration order (the `Vec` + linear scan in `try_build`), not by
     /// coincidence or dependency kind.
     #[test]
-    fn try_build_reports_only_the_first_registered_service_when_multiple_are_missing_dependencies() {
+    fn try_build_reports_only_the_first_registered_service_when_multiple_are_missing_dependencies()
+    {
         let err = match RuntimeBuilder::new()
             .with_injectable::<NeedsAdapter>()
             .with_injectable::<NeedsConfig>()
@@ -1550,7 +1651,11 @@ mod tests {
             Ok(_) => panic!("try_build must fail when multiple recorded dependencies are missing"),
         };
         match err {
-            RuntimeError::DependencyNotFound { type_name, service_name, .. } => {
+            RuntimeError::DependencyNotFound {
+                type_name,
+                service_name,
+                ..
+            } => {
                 assert_eq!(type_name, std::any::type_name::<u32>());
                 assert_eq!(service_name, Some(std::any::type_name::<NeedsConfig>()));
             }
@@ -1568,7 +1673,9 @@ mod tests {
     #[test]
     fn with_observability_wiring_reaches_runtime_inner() {
         let obs = Arc::new(RecordingObservability::new());
-        let rt = RuntimeBuilder::new().with_observability(obs.clone()).build();
+        let rt = RuntimeBuilder::new()
+            .with_observability(obs.clone())
+            .build();
 
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::AuthorizationDenied);
@@ -1656,7 +1763,10 @@ mod tests {
         });
 
         let result = rt.shutdown_async().await;
-        assert!(result.is_err(), "a failing hook must surface as an Err, not a silent Ok(())");
+        assert!(
+            result.is_err(),
+            "a failing hook must surface as an Err, not a silent Ok(())"
+        );
 
         // The sync stack drained regardless of the hook's failure — no
         // resource leak just because one subsystem's teardown failed.
@@ -1708,7 +1818,9 @@ mod tests {
         // A required adapter is missing, but calling build() (not try_build())
         // must still succeed — with_injectable bookkeeping has no effect on
         // build(), matching the existing "build() Behavior Is Unchanged" contract.
-        let rt = RuntimeBuilder::new().with_injectable::<NeedsAdapter>().build();
+        let rt = RuntimeBuilder::new()
+            .with_injectable::<NeedsAdapter>()
+            .build();
         assert!(rt.inner().resolve_adapter::<StubAdapter>().is_err());
     }
 
@@ -2108,7 +2220,10 @@ mod tests {
         let provider_b = Arc::new(RecordingShutdownProvider::new());
 
         let rt = RuntimeBuilder::new()
-            .register_data_provider("pricing", provider_a.clone() as Arc<dyn ExternalDataProvider>)
+            .register_data_provider(
+                "pricing",
+                provider_a.clone() as Arc<dyn ExternalDataProvider>,
+            )
             .unwrap()
             .register_data_provider("jwks", provider_b.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
@@ -2131,7 +2246,10 @@ mod tests {
         let rt = RuntimeBuilder::new()
             .register_data_provider("jwks", provider.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
-            .register_data_provider("jwks-legacy", provider.clone() as Arc<dyn ExternalDataProvider>)
+            .register_data_provider(
+                "jwks-legacy",
+                provider.clone() as Arc<dyn ExternalDataProvider>,
+            )
             .unwrap()
             .build();
 
@@ -2245,7 +2363,9 @@ mod tests {
     #[tokio::test]
     async fn with_tracer_wires_a_tracing_interceptor_into_the_chain() {
         let tracer = Arc::new(SpyTracer::new());
-        let rt = RuntimeBuilder::new().with_tracer(tracer.clone() as Arc<dyn Tracer>).build();
+        let rt = RuntimeBuilder::new()
+            .with_tracer(tracer.clone() as Arc<dyn Tracer>)
+            .build();
 
         let ctx = ctx_with_root_trace();
         rt.inner()
@@ -2305,8 +2425,12 @@ mod tests {
             .with_tracer_lifecycle(lifecycle.clone() as Arc<dyn TracerLifecycle>)
             .build();
 
-        rt.shutdown_async().await.expect("first shutdown_async succeeds");
-        rt.shutdown_async().await.expect("second shutdown_async succeeds");
+        rt.shutdown_async()
+            .await
+            .expect("first shutdown_async succeeds");
+        rt.shutdown_async()
+            .await
+            .expect("second shutdown_async succeeds");
 
         assert_eq!(
             lifecycle.shutdown_call_count(),

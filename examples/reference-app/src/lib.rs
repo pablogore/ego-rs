@@ -50,14 +50,18 @@ use ego_domain::{Clock, ConfigError, SystemClock, Validate};
 use ego_persistence::DatabaseConfig;
 use ego_scheduler::event_bus::EventBusConfig;
 use ego_security_sdk::{
-    AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Principal, SecurityContext, SecurityError,
+    AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Principal,
+    SecurityContext, SecurityError,
 };
 use ego_service_sdk::{build_logger, App, ConfigurationProvider};
 use ego_transport::GrpcServerConfig;
 use kit_config::ConfigLoader;
 use persistent_entity::builder::EntityRuntimeBuilder;
 use persistent_entity::runtime::RuntimeConfig;
-use security_jwt::{Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, KeyResolver, LocalKeyResolver, VerificationKey};
+use security_jwt::{
+    Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, KeyResolver, LocalKeyResolver,
+    VerificationKey,
+};
 
 use crate::application::{RegisterUserImpl, RegisterUserTag};
 use crate::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore};
@@ -135,7 +139,9 @@ impl Validate for AppConfig {
         // tenants, so it needs a database pool sized above the single-tenant
         // default. Neither `RuntimeConfig::validate` nor `DatabaseConfig::validate`
         // can express this alone — it only exists at the AppConfig level.
-        if !self.runtime.single_tenant_mode && self.database.max_connections < MIN_MULTI_TENANT_CONNECTIONS {
+        if !self.runtime.single_tenant_mode
+            && self.database.max_connections < MIN_MULTI_TENANT_CONNECTIONS
+        {
             return Err(ConfigError::Invalid {
                 field: "database.max_connections".to_string(),
                 reason: format!(
@@ -228,9 +234,11 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
         VerificationKey::Hmac(DEV_SIGNING_KEY.to_vec()),
     ));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let authn: Arc<dyn AuthenticationProvider> = Arc::new(
-        Hs256AuthenticationProvider::try_new(config.jwt.clone(), resolver, clock)?,
-    );
+    let authn: Arc<dyn AuthenticationProvider> = Arc::new(Hs256AuthenticationProvider::try_new(
+        config.jwt.clone(),
+        resolver,
+        clock,
+    )?);
     let authz: Arc<dyn AuthorizationProvider> = Arc::new(ReferenceAllowAllAuthorization);
 
     let _scheduler = SchedulerService(&config.scheduler);
@@ -268,7 +276,8 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let read_side_handles = ReadSideHandles::new(read_side_store).with_logger(logger.clone());
 
     let register_user = Arc::new(
-        RegisterUserImpl::new(org_runtime, user_runtime.clone(), None).with_read_side_sink(read_side_sink),
+        RegisterUserImpl::new(org_runtime, user_runtime.clone(), None)
+            .with_read_side_sink(read_side_sink),
     );
 
     let mut builder = App::builder().security(authn.clone(), authz);
@@ -300,5 +309,9 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
         builder = builder.logger(logger);
     }
 
-    Ok(BuiltRuntime { app: builder.build()?, authn, read_side: read_side_handles })
+    Ok(BuiltRuntime {
+        app: builder.build()?,
+        authn,
+        read_side: read_side_handles,
+    })
 }

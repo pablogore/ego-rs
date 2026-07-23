@@ -44,7 +44,12 @@ impl UsersByTenantStore {
     /// Returns the current view for a tenant (empty default if nothing has
     /// been projected for it yet).
     pub fn view(&self, tenant_id: &str) -> TenantUsersView {
-        self.0.read().expect("UsersByTenantStore lock poisoned").get(tenant_id).cloned().unwrap_or_default()
+        self.0
+            .read()
+            .expect("UsersByTenantStore lock poisoned")
+            .get(tenant_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -65,7 +70,11 @@ impl UsersByTenantHandler {
 #[async_trait]
 impl Handler<Value> for UsersByTenantHandler {
     async fn handle(&self, events: &[EventStreamElement<Value>]) -> Result<(), ProjectionError> {
-        let mut guard = self.store.0.write().expect("UsersByTenantStore lock poisoned");
+        let mut guard = self
+            .store
+            .0
+            .write()
+            .expect("UsersByTenantStore lock poisoned");
 
         for event in events {
             match event.event_type() {
@@ -74,21 +83,36 @@ impl Handler<Value> for UsersByTenantHandler {
                         .payload
                         .get("email")
                         .and_then(Value::as_str)
-                        .ok_or_else(|| ProjectionError::poison_event("UserRegistered event missing email in payload"))?
+                        .ok_or_else(|| {
+                            ProjectionError::poison_event(
+                                "UserRegistered event missing email in payload",
+                            )
+                        })?
                         .to_string();
-                    guard.entry(event.tenant_id().to_string()).or_default().users.push(UserSummary {
-                        user_id: event.aggregate_id().to_string(),
-                        email,
-                    });
+                    guard
+                        .entry(event.tenant_id().to_string())
+                        .or_default()
+                        .users
+                        .push(UserSummary {
+                            user_id: event.aggregate_id().to_string(),
+                            email,
+                        });
                 }
                 "OrganizationEnsured" => {
                     let name = event
                         .payload
                         .get("name")
                         .and_then(Value::as_str)
-                        .ok_or_else(|| ProjectionError::poison_event("OrganizationEnsured event missing name in payload"))?
+                        .ok_or_else(|| {
+                            ProjectionError::poison_event(
+                                "OrganizationEnsured event missing name in payload",
+                            )
+                        })?
                         .to_string();
-                    guard.entry(event.tenant_id().to_string()).or_default().org_name = Some(name);
+                    guard
+                        .entry(event.tenant_id().to_string())
+                        .or_default()
+                        .org_name = Some(name);
                 }
                 other => {
                     return Err(ProjectionError::poison_event(format!(
@@ -109,7 +133,12 @@ mod tests {
 
     use super::*;
 
-    fn user_registered(tenant_id: &str, user_id: &str, email: &str, version: i64) -> EventStreamElement<Value> {
+    fn user_registered(
+        tenant_id: &str,
+        user_id: &str,
+        email: &str,
+        version: i64,
+    ) -> EventStreamElement<Value> {
         EventStreamElement::new(
             format!("UserRegistered:{user_id}:{version}"),
             user_id,
@@ -122,7 +151,11 @@ mod tests {
         )
     }
 
-    fn organization_ensured(tenant_id: &str, name: &str, version: i64) -> EventStreamElement<Value> {
+    fn organization_ensured(
+        tenant_id: &str,
+        name: &str,
+        version: i64,
+    ) -> EventStreamElement<Value> {
         EventStreamElement::new(
             format!("OrganizationEnsured:{tenant_id}:{version}"),
             tenant_id,
@@ -141,13 +174,22 @@ mod tests {
         let handler = UsersByTenantHandler::new(store.clone());
 
         handler
-            .handle(&[organization_ensured("tenant-a", "Acme", 1), user_registered("tenant-a", "user-1", "u@e.com", 2)])
+            .handle(&[
+                organization_ensured("tenant-a", "Acme", 1),
+                user_registered("tenant-a", "user-1", "u@e.com", 2),
+            ])
             .await
             .expect("handle succeeds");
 
         let view = store.view("tenant-a");
         assert_eq!(view.org_name.as_deref(), Some("Acme"));
-        assert_eq!(view.users, vec![UserSummary { user_id: "user-1".to_string(), email: "u@e.com".to_string() }]);
+        assert_eq!(
+            view.users,
+            vec![UserSummary {
+                user_id: "user-1".to_string(),
+                email: "u@e.com".to_string()
+            }]
+        );
     }
 
     #[tokio::test]
@@ -155,8 +197,14 @@ mod tests {
         let store = UsersByTenantStore::default();
         let handler = UsersByTenantHandler::new(store.clone());
 
-        handler.handle(&[user_registered("tenant-a", "user-1", "a@e.com", 1)]).await.unwrap();
-        handler.handle(&[user_registered("tenant-b", "user-2", "b@e.com", 1)]).await.unwrap();
+        handler
+            .handle(&[user_registered("tenant-a", "user-1", "a@e.com", 1)])
+            .await
+            .unwrap();
+        handler
+            .handle(&[user_registered("tenant-b", "user-2", "b@e.com", 1)])
+            .await
+            .unwrap();
 
         assert_eq!(store.view("tenant-a").users.len(), 1);
         assert_eq!(store.view("tenant-b").users.len(), 1);

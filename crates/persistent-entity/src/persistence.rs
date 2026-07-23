@@ -305,10 +305,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         let offset = self.version_offsets.get(stream_id).copied().unwrap_or(0);
-        let stream = self
-            .streams
-            .entry(stream_id.to_string())
-            .or_default();
+        let stream = self.streams.entry(stream_id.to_string()).or_default();
 
         let current_version = stream.len() as i64 + offset;
         if current_version != expected_version {
@@ -331,11 +328,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         stream_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
-        Ok(self
-            .streams
-            .get(stream_id)
-            .cloned()
-            .unwrap_or_default())
+        Ok(self.streams.get(stream_id).cloned().unwrap_or_default())
     }
 
     fn list_aggregate_ids(
@@ -378,7 +371,8 @@ impl Snapshot for InMemorySnapshotStore {
         version: i64,
         payload: serde_json::Value,
     ) -> Result<(), PersistenceError> {
-        self.snapshots.insert(stream_id.to_string(), (version, payload));
+        self.snapshots
+            .insert(stream_id.to_string(), (version, payload));
         Ok(())
     }
 

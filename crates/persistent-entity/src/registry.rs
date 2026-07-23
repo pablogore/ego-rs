@@ -327,7 +327,9 @@ mod tests {
             erased_probe(String::from("wrong-type"))
         }) {
             RouteOutcome::Existing { mailbox } => mailbox,
-            RouteOutcome::Inserted { .. } => panic!("must find the live entry, not insert a new one"),
+            RouteOutcome::Inserted { .. } => {
+                panic!("must find the live entry, not insert a new one")
+            }
         };
         assert!(
             !second_call_spawned.load(Ordering::SeqCst),
@@ -338,10 +340,11 @@ mod tests {
             "downcasting a usize-backed entry as String must fail closed, not fall through"
         );
 
-        let re_lookup = match registry.lookup_or_insert("triple-3", || panic!("must not spawn again")) {
-            RouteOutcome::Existing { mailbox } => mailbox,
-            RouteOutcome::Inserted { .. } => panic!("triple-3 must still be live"),
-        };
+        let re_lookup =
+            match registry.lookup_or_insert("triple-3", || panic!("must not spawn again")) {
+                RouteOutcome::Existing { mailbox } => mailbox,
+                RouteOutcome::Inserted { .. } => panic!("triple-3 must still be live"),
+            };
         assert!(
             Arc::ptr_eq(&original, &re_lookup),
             "the original entry must be untouched by the failed mismatch lookup"

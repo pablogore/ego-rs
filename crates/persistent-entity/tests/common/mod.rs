@@ -88,7 +88,8 @@ impl EventStore<TestEvent> for CountingEventStore {
         expected_version: i64,
         events: Vec<StoredEvent<TestEvent>>,
     ) -> Result<i64, PersistenceError> {
-        self.inner.append(aggregate_id, tenant_id, expected_version, events)
+        self.inner
+            .append(aggregate_id, tenant_id, expected_version, events)
     }
 
     fn load(

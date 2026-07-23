@@ -30,17 +30,31 @@ async fn lookup(
     provider: Arc<dyn ExternalDataProvider>,
     sku: &str,
 ) -> Result<CommandResult<PriceLooked, PricingState>, EntityError> {
-    let rt = RuntimeBuilder::new().register_data_provider("pricing", provider).unwrap().build();
+    let rt = RuntimeBuilder::new()
+        .register_data_provider("pricing", provider)
+        .unwrap()
+        .build();
     let access = rt
         .data_provider_access()
         .expect("a provider was registered — the facade must be built");
 
     let entity_runtime = Arc::new(EntityRuntimeBuilder::<PriceLooked>::new().build());
     let entity_ref = entity_runtime
-        .entity_ref::<PricingCommand, PricingState>("pricing", sku, Arc::new(PricingEntity::new(access)))
+        .entity_ref::<PricingCommand, PricingState>(
+            "pricing",
+            sku,
+            Arc::new(PricingEntity::new(access)),
+        )
         .unwrap();
 
-    entity_ref.send_command(PricingCommand::Lookup { sku: sku.to_string() }, ctx()).await
+    entity_ref
+        .send_command(
+            PricingCommand::Lookup {
+                sku: sku.to_string(),
+            },
+            ctx(),
+        )
+        .await
 }
 
 #[tokio::test]
@@ -78,6 +92,10 @@ async fn testkit_double_swaps_in_for_the_dogfood_provider_with_zero_handler_chan
         "unchanged PricingEntity code must return exactly the double's canned payload"
     );
     assert_eq!(events[0].cache_hit, canned.cache_hit);
-    assert_eq!(double.requests().len(), 1, "the double must observe exactly one fetch");
+    assert_eq!(
+        double.requests().len(),
+        1,
+        "the double must observe exactly one fetch"
+    );
     assert_eq!(double.requests()[0].key, "sku-xyz");
 }

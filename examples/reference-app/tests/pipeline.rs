@@ -9,7 +9,10 @@ use reference_app::{build_runtime, AppConfig};
 fn valid_app_config_passes_validate_and_builds_runtime() {
     let config = AppConfig::default();
 
-    assert!(config.validate().is_ok(), "default AppConfig should be valid");
+    assert!(
+        config.validate().is_ok(),
+        "default AppConfig should be valid"
+    );
 
     let runtime = build_runtime(&config);
     assert!(
@@ -52,7 +55,10 @@ fn build_runtime_registers_the_read_model_as_a_resolvable_projection() {
 
     let runtime = build_runtime(&config).expect("build_runtime succeeds");
     assert!(
-        runtime.app.resolve_projection::<UsersByTenantStore>().is_ok(),
+        runtime
+            .app
+            .resolve_projection::<UsersByTenantStore>()
+            .is_ok(),
         "UsersByTenantStore must be resolvable via the projection DI path after build"
     );
 }
@@ -101,7 +107,8 @@ fn build_runtime_registers_the_user_entity_runtime_as_resolvable() {
 // distinguishes "the DI handle writes into our runtime" from "the DI handle
 // writes into some independent, disconnected runtime".
 #[tokio::test]
-async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_production_register_flow() {
+async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_production_register_flow()
+{
     use std::sync::Arc;
 
     use ego_service_sdk::App;
@@ -110,15 +117,20 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
     use persistent_entity::command_context::CommandContext;
     use persistent_entity::entity_ref::EntityRef;
     use persistent_entity::persistent_entity::CommandResult;
-    use reference_app::application::{RegisterInput, RegisterUser, RegisterUserImpl, RegisterUserTag};
+    use reference_app::application::{
+        RegisterInput, RegisterUser, RegisterUserImpl, RegisterUserTag,
+    };
     use reference_app::domain::user::{UserCommand, UserEntity, UserRegistered, UserState};
 
     // Mirrors `build_runtime`'s AD-4 construction exactly (lib.rs:228-229) —
     // test-side reuse of the same construction, not new production wiring.
     let org_runtime = Arc::new(EntityRuntimeBuilder::new().build());
     let user_runtime = Arc::new(EntityRuntimeBuilder::new().build());
-    let service: Arc<dyn RegisterUser> =
-        Arc::new(RegisterUserImpl::new(org_runtime, user_runtime.clone(), None));
+    let service: Arc<dyn RegisterUser> = Arc::new(RegisterUserImpl::new(
+        org_runtime,
+        user_runtime.clone(),
+        None,
+    ));
 
     let principal = PrincipalBuilder::new().tenant("tenant-a").build();
     let fixture = ServiceTestFixture::builder()
@@ -140,7 +152,10 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
         org_name: "Acme".to_string(),
     };
     let result = proxy.register(ctx, input).await;
-    assert!(result.is_ok(), "production register flow must succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "production register flow must succeed: {result:?}"
+    );
     assert_eq!(
         user_runtime.active_count(),
         1,

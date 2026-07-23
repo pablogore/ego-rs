@@ -224,4 +224,3 @@ mod jwt_provider_config_validate_tests {
         assert!(config.validate().is_err());
     }
 }
-

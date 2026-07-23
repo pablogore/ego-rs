@@ -500,7 +500,12 @@ impl EffectStateStore for InMemoryEffectStore {
 
     async fn mark_succeeded(&self, id: EffectId) -> Result<(), EffectStoreError> {
         let mut states = self.states.lock().unwrap();
-        Self::transition(&mut states, id, &[EffectState::InFlight], EffectState::Succeeded)?;
+        Self::transition(
+            &mut states,
+            id,
+            &[EffectState::InFlight],
+            EffectState::Succeeded,
+        )?;
         Ok(())
     }
 
@@ -547,7 +552,10 @@ impl EffectStateStore for InMemoryEffectStore {
         let due = states
             .iter()
             .filter(|(_, record)| {
-                matches!(record.state, EffectState::Pending | EffectState::RetryableFailed)
+                matches!(
+                    record.state,
+                    EffectState::Pending | EffectState::RetryableFailed
+                )
             })
             .filter(|(_, record)| record.next_at.is_none_or(|next_at| next_at <= now))
             .take(limit)
@@ -1000,10 +1008,7 @@ mod tests {
     async fn claim_due_excludes_in_flight_and_terminal_effects() {
         let store = InMemoryEffectStore::new();
         let in_flight_id = EffectId::new();
-        store
-            .accept(accepted_effect(in_flight_id))
-            .await
-            .unwrap();
+        store.accept(accepted_effect(in_flight_id)).await.unwrap();
         store.mark_in_flight(in_flight_id).await.unwrap();
 
         let terminal_id = EffectId::new();
@@ -1067,8 +1072,14 @@ mod tests {
         let scope_b = scope("tenant-b", "uow-1:0");
         let fingerprint = fp("payload");
 
-        let outcome_a = store.reserve(&scope_a, EffectId::new(), fingerprint).await.unwrap();
-        let outcome_b = store.reserve(&scope_b, EffectId::new(), fingerprint).await.unwrap();
+        let outcome_a = store
+            .reserve(&scope_a, EffectId::new(), fingerprint)
+            .await
+            .unwrap();
+        let outcome_b = store
+            .reserve(&scope_b, EffectId::new(), fingerprint)
+            .await
+            .unwrap();
 
         assert_eq!(outcome_a, DedupOutcome::Fresh);
         assert_eq!(
@@ -1085,11 +1096,17 @@ mod tests {
         // second time (F-02's ownership-tracking `DedupOutcome`, post-rebase:
         // there is no more flat `Duplicate` variant).
         assert_eq!(
-            store.reserve(&scope_a, EffectId::new(), fingerprint).await.unwrap(),
+            store
+                .reserve(&scope_a, EffectId::new(), fingerprint)
+                .await
+                .unwrap(),
             DedupOutcome::OtherInProgress
         );
         assert_eq!(
-            store.reserve(&scope_b, EffectId::new(), fingerprint).await.unwrap(),
+            store
+                .reserve(&scope_b, EffectId::new(), fingerprint)
+                .await
+                .unwrap(),
             DedupOutcome::OtherInProgress
         );
     }
@@ -1098,12 +1115,16 @@ mod tests {
 
     #[test]
     fn error_taxonomy_distinguishes_transient_from_permanent_backend_failures() {
-        let transient = EffectStoreError::TemporarilyUnavailable("connection pool exhausted".into());
+        let transient =
+            EffectStoreError::TemporarilyUnavailable("connection pool exhausted".into());
         let permanent = EffectStoreError::Backend("corrupt record".into());
         let conflict = EffectStoreError::Conflict("optimistic lock lost".into());
 
         // A caller classifying retryability sees the three kinds as distinct.
-        assert!(matches!(transient, EffectStoreError::TemporarilyUnavailable(_)));
+        assert!(matches!(
+            transient,
+            EffectStoreError::TemporarilyUnavailable(_)
+        ));
         assert!(matches!(permanent, EffectStoreError::Backend(_)));
         assert!(matches!(conflict, EffectStoreError::Conflict(_)));
         assert_ne!(transient, permanent);

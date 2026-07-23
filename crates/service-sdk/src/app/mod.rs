@@ -63,7 +63,9 @@ use persistent_entity::persistent_entity::PersistentEntity;
 use persistent_entity::runtime::EntityRuntime;
 
 use crate::di::{AdapterRef, ConfigValue, EntityRuntimeRef, Injectable, ProjectionRef};
-use crate::runtime::{HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver};
+use crate::runtime::{
+    HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver,
+};
 
 pub use error::CompositionError;
 
@@ -85,19 +87,22 @@ type ServiceRegistrar =
 /// the missing tag and this requester.
 fn attribute_to<S: 'static>(err: crate::runtime::RuntimeError) -> crate::runtime::RuntimeError {
     match err {
-        crate::runtime::RuntimeError::DependencyNotFound { kind, type_name, service_name: None } => {
-            crate::runtime::RuntimeError::DependencyNotFound {
-                kind,
-                type_name,
-                service_name: Some(std::any::type_name::<S>()),
-            }
-        }
-        crate::runtime::RuntimeError::ServiceNotFound { type_name, required_by: None } => {
-            crate::runtime::RuntimeError::ServiceNotFound {
-                type_name,
-                required_by: Some(std::any::type_name::<S>()),
-            }
-        }
+        crate::runtime::RuntimeError::DependencyNotFound {
+            kind,
+            type_name,
+            service_name: None,
+        } => crate::runtime::RuntimeError::DependencyNotFound {
+            kind,
+            type_name,
+            service_name: Some(std::any::type_name::<S>()),
+        },
+        crate::runtime::RuntimeError::ServiceNotFound {
+            type_name,
+            required_by: None,
+        } => crate::runtime::RuntimeError::ServiceNotFound {
+            type_name,
+            required_by: Some(std::any::type_name::<S>()),
+        },
         other => other,
     }
 }
@@ -201,7 +206,13 @@ impl App {
     pub fn resolve_entity<E>(&self) -> Result<EntityRuntimeRef<E>, crate::runtime::RuntimeError>
     where
         E: PersistentEntity + 'static,
-        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        E::Event: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
     {
         self.runtime.inner().resolve_entity::<E>()
     }
@@ -242,7 +253,9 @@ impl App {
             let _ = self.runtime.shutdown_async().await;
             return Err(CompositionError::Startup(startup_err));
         }
-        Ok(RunningApp { runtime: self.runtime })
+        Ok(RunningApp {
+            runtime: self.runtime,
+        })
     }
 }
 
@@ -254,7 +267,10 @@ impl RunningApp {
     /// exactly (spec: "One failing shutdown participant does not hide
     /// others, and its error surfaces").
     pub async fn shutdown(self) -> Result<(), CompositionError> {
-        self.runtime.shutdown_async().await.map_err(CompositionError::Shutdown)
+        self.runtime
+            .shutdown_async()
+            .await
+            .map_err(CompositionError::Shutdown)
     }
 }
 
@@ -353,7 +369,13 @@ impl AppBuilder {
     pub fn entity<E>(mut self, runtime: Arc<EntityRuntime<E::Event>>) -> Self
     where
         E: PersistentEntity + 'static,
-        E::Event: DomainEvent + Clone + serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
+        E::Event: DomainEvent
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + Send
+            + Sync
+            + 'static,
     {
         if self.pending_error.is_some() {
             return self;
@@ -433,7 +455,10 @@ impl AppBuilder {
         // consumes `RuntimeBuilder` by value, but `self.runtime_builder` must
         // stay intact on the error path — cloning first means it's never
         // taken out of `self` at all, so there's nothing to restore.
-        let registration = self.runtime_builder.clone().register_effect_executor(effect_types, executor);
+        let registration = self
+            .runtime_builder
+            .clone()
+            .register_effect_executor(effect_types, executor);
         match registration {
             Ok(builder) => {
                 self.runtime_builder = builder;
@@ -459,7 +484,11 @@ impl AppBuilder {
             return self;
         }
         // Same clone-then-call reasoning as `.effect_executor()` above.
-        match self.runtime_builder.clone().register_data_provider(provider_id, provider) {
+        match self
+            .runtime_builder
+            .clone()
+            .register_data_provider(provider_id, provider)
+        {
             Ok(builder) => {
                 self.runtime_builder = builder;
                 self
@@ -491,16 +520,20 @@ impl AppBuilder {
     where
         S: Injectable + HasServiceTag + 'static,
     {
-        self.service_registrars.push(Box::new(move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
-            S::validate(scratch)
-                .map_err(attribute_to::<S>)
-                .map_err(CompositionError::Validation)?;
-            let instance = S::build(scratch)
-                .map_err(attribute_to::<S>)
-                .map_err(CompositionError::Validation)?;
-            let arc = S::into_service(Arc::new(instance));
-            builder.with_service::<S::Tag>(arc).map_err(CompositionError::Service)
-        }));
+        self.service_registrars.push(Box::new(
+            move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
+                S::validate(scratch)
+                    .map_err(attribute_to::<S>)
+                    .map_err(CompositionError::Validation)?;
+                let instance = S::build(scratch)
+                    .map_err(attribute_to::<S>)
+                    .map_err(CompositionError::Validation)?;
+                let arc = S::into_service(Arc::new(instance));
+                builder
+                    .with_service::<S::Tag>(arc)
+                    .map_err(CompositionError::Service)
+            },
+        ));
         self
     }
 
@@ -524,35 +557,42 @@ impl AppBuilder {
     /// type parameter against "whichever trait underlies this associated
     /// type"; only the call site, which names both `S` and the concrete
     /// trait together, can perform that coercion.
-    pub fn service_with_tag<S, Tag>(mut self, to_trait_object: fn(Arc<S>) -> Arc<Tag::Service>) -> Self
+    pub fn service_with_tag<S, Tag>(
+        mut self,
+        to_trait_object: fn(Arc<S>) -> Arc<Tag::Service>,
+    ) -> Self
     where
         Tag: Resolvable + 'static,
         S: Injectable + 'static,
     {
-        self.service_registrars.push(Box::new(move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
-            // Same attribution `RuntimeBuilder::try_build` already provides
-            // (AD-3/AD-7): a `DependencyNotFound` reaching here has
-            // `service_name: None` (nothing below this closure knows who's
-            // asking); fill it in with the requesting service's type name
-            // here, exactly as `try_build`'s validator loop does for
-            // `with_injectable`.
-            //
-            // Applied to BOTH `S::validate` and `S::build`'s errors (review
-            // F3): a hand-rolled `Injectable` with an incomplete
-            // `dependencies()` list, conditional resolution, or any other
-            // `DependencyNotFound` surfacing only during `build()` (not
-            // caught by `validate()`'s presence check) must still name the
-            // requesting service — the observable contract doesn't
-            // distinguish "caught by validate" from "caught by build".
-            S::validate(scratch)
-                .map_err(attribute_to::<S>)
-                .map_err(CompositionError::Validation)?;
-            let instance = S::build(scratch)
-                .map_err(attribute_to::<S>)
-                .map_err(CompositionError::Validation)?;
-            let arc = to_trait_object(Arc::new(instance));
-            builder.with_service::<Tag>(arc).map_err(CompositionError::Service)
-        }));
+        self.service_registrars.push(Box::new(
+            move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
+                // Same attribution `RuntimeBuilder::try_build` already provides
+                // (AD-3/AD-7): a `DependencyNotFound` reaching here has
+                // `service_name: None` (nothing below this closure knows who's
+                // asking); fill it in with the requesting service's type name
+                // here, exactly as `try_build`'s validator loop does for
+                // `with_injectable`.
+                //
+                // Applied to BOTH `S::validate` and `S::build`'s errors (review
+                // F3): a hand-rolled `Injectable` with an incomplete
+                // `dependencies()` list, conditional resolution, or any other
+                // `DependencyNotFound` surfacing only during `build()` (not
+                // caught by `validate()`'s presence check) must still name the
+                // requesting service — the observable contract doesn't
+                // distinguish "caught by validate" from "caught by build".
+                S::validate(scratch)
+                    .map_err(attribute_to::<S>)
+                    .map_err(CompositionError::Validation)?;
+                let instance = S::build(scratch)
+                    .map_err(attribute_to::<S>)
+                    .map_err(CompositionError::Validation)?;
+                let arc = to_trait_object(Arc::new(instance));
+                builder
+                    .with_service::<Tag>(arc)
+                    .map_err(CompositionError::Service)
+            },
+        ));
         self
     }
 
@@ -563,9 +603,13 @@ impl AppBuilder {
     /// the default registration path (G1) — prefer [`Self::service`]
     /// whenever construction can be expressed through `Injectable`.
     pub fn service_instance<Tag: Resolvable + 'static>(mut self, svc: Arc<Tag::Service>) -> Self {
-        self.service_registrars.push(Box::new(move |_scratch: &RuntimeInner, builder: RuntimeBuilder| {
-            builder.with_service::<Tag>(svc).map_err(CompositionError::Service)
-        }));
+        self.service_registrars.push(Box::new(
+            move |_scratch: &RuntimeInner, builder: RuntimeBuilder| {
+                builder
+                    .with_service::<Tag>(svc)
+                    .map_err(CompositionError::Service)
+            },
+        ));
         self
     }
 
@@ -613,7 +657,10 @@ mod tests {
             required_by: None,
         };
         match attribute_to::<StubAdapter>(err) {
-            crate::runtime::RuntimeError::ServiceNotFound { type_name, required_by } => {
+            crate::runtime::RuntimeError::ServiceNotFound {
+                type_name,
+                required_by,
+            } => {
                 assert_eq!(type_name, "MissingTag", "the missing tag must be preserved");
                 assert_eq!(
                     required_by,
@@ -727,9 +774,15 @@ mod tests {
 
         struct StubAuthn;
         impl AuthenticationProvider for StubAuthn {
-            fn authenticate(&self, _c: &Credential) -> Result<SecurityContext, AuthenticationError> {
+            fn authenticate(
+                &self,
+                _c: &Credential,
+            ) -> Result<SecurityContext, AuthenticationError> {
                 let subject = SubjectId::new("user:stub").unwrap();
-                Ok(SecurityContext::empty(Principal::new(PrincipalKind::User, subject)))
+                Ok(SecurityContext::empty(Principal::new(
+                    PrincipalKind::User,
+                    subject,
+                )))
             }
         }
         struct StubAuthz;
@@ -765,7 +818,10 @@ mod tests {
             .build()
             .expect("build succeeds");
 
-        assert!(app.runtime.logger().is_some(), "the registered logger must be present");
+        assert!(
+            app.runtime.logger().is_some(),
+            "the registered logger must be present"
+        );
     }
 
     // Review F1: `.observability()` is a thin `AppBuilder` pass-through for
@@ -778,7 +834,10 @@ mod tests {
         let app = App::builder()
             .observability(Arc::new(RecordingObservability::new()))
             .build();
-        assert!(app.is_ok(), "build must succeed with an observability hook registered");
+        assert!(
+            app.is_ok(),
+            "build must succeed with an observability hook registered"
+        );
     }
 
     // Review F1: `.effect_executor()` fails closed on a duplicate
@@ -803,20 +862,28 @@ mod tests {
     #[test]
     fn data_provider_registers_and_rejects_duplicate_ids() {
         use async_trait::async_trait;
-        use persistent_entity::data_provider_access::{DataProviderError, DataRequest, DataResponse};
+        use persistent_entity::data_provider_access::{
+            DataProviderError, DataRequest, DataResponse,
+        };
 
         struct StubProvider;
         #[async_trait]
         impl ExternalDataProvider for StubProvider {
             async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
-                Ok(DataResponse { payload: request.payload, cache_hit: false })
+                Ok(DataResponse {
+                    payload: request.payload,
+                    cache_hit: false,
+                })
             }
         }
 
         let ok = App::builder()
             .data_provider("provider-a", Arc::new(StubProvider))
             .build();
-        assert!(ok.is_ok(), "a single data provider registration must succeed");
+        assert!(
+            ok.is_ok(),
+            "a single data provider registration must succeed"
+        );
 
         let dup = App::builder()
             .data_provider("provider-b", Arc::new(StubProvider))
@@ -876,14 +943,18 @@ mod tests {
             .with_projection(Arc::new(StubProjection(42)))
             .unwrap()
             .build();
-        let resolved_via_runtime_builder =
-            via_runtime_builder.inner().resolve_projection::<StubProjection>().unwrap();
+        let resolved_via_runtime_builder = via_runtime_builder
+            .inner()
+            .resolve_projection::<StubProjection>()
+            .unwrap();
 
         let via_app_builder = App::builder()
             .projection(Arc::new(StubProjection(42)))
             .build()
             .expect("build succeeds");
-        let resolved_via_app_builder = via_app_builder.resolve_projection::<StubProjection>().unwrap();
+        let resolved_via_app_builder = via_app_builder
+            .resolve_projection::<StubProjection>()
+            .unwrap();
 
         assert_eq!(*resolved_via_runtime_builder, *resolved_via_app_builder);
     }
@@ -943,7 +1014,8 @@ mod tests {
             .inner()
             .resolve_entity::<TestEntity>()
             .expect("registered via RuntimeBuilder must resolve");
-        let expected_via_runtime_builder = EntityRuntimeRef::<TestEntity>::new(via_runtime_builder_rt);
+        let expected_via_runtime_builder =
+            EntityRuntimeRef::<TestEntity>::new(via_runtime_builder_rt);
         // review fix (reliability): `.is_ok()` alone doesn't prove either path
         // resolved to the runtime it was actually registered with, unlike the
         // sibling projection test above which asserts value equality — an
@@ -975,7 +1047,9 @@ mod tests {
     // nothing").
     #[test]
     fn build_starts_nothing_and_no_tokio_runtime_is_required() {
-        let app = App::builder().build().expect("build succeeds without Tokio");
+        let app = App::builder()
+            .build()
+            .expect("build succeeds without Tokio");
         assert!(
             app.runtime.effect_acceptor().is_none(),
             "no executor was registered and start() was never called"
@@ -999,14 +1073,17 @@ mod tests {
         let resolver = app.resolver();
         let via_resolver = resolver.logger().unwrap();
         let via_runtime = app.runtime.logger().unwrap();
-        assert!(Arc::ptr_eq(via_resolver, via_runtime), "resolver() must see the same registered logger");
+        assert!(
+            Arc::ptr_eq(via_resolver, via_runtime),
+            "resolver() must see the same registered logger"
+        );
     }
 
     // -- Phase 3: runtime lifecycle (App::start / RunningApp::shutdown) ----
 
+    use async_trait::async_trait;
     use ego_domain::ExternalEffectDescription;
     use ego_runtime::effects::{AttemptOutcome, EffectContext, ExternalEffectExecutor};
-    use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 

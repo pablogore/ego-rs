@@ -157,15 +157,11 @@ impl JwtValidationEngine {
                 Some(Value::String(iss)) if iss == expected_iss => {}
                 Some(_) => {
                     warn!(error = "invalid_token", "JWT validation failed");
-                    return Err(AuthenticationError::InvalidToken(
-                        "issuer mismatch".into(),
-                    ));
+                    return Err(AuthenticationError::InvalidToken("issuer mismatch".into()));
                 }
                 None => {
                     warn!(error = "invalid_token", "JWT validation failed");
-                    return Err(AuthenticationError::InvalidToken(
-                        "issuer mismatch".into(),
-                    ));
+                    return Err(AuthenticationError::InvalidToken("issuer mismatch".into()));
                 }
             }
         } else if all_claims.contains_key("iss") {
@@ -192,9 +188,7 @@ impl JwtValidationEngine {
             let any_match = expected_auds.iter().any(|ea| token_auds.contains(ea));
             if !any_match {
                 warn!(error = "invalid_token", "JWT validation failed");
-                return Err(AuthenticationError::InvalidToken(
-                    "aud mismatch".into(),
-                ));
+                return Err(AuthenticationError::InvalidToken("aud mismatch".into()));
             }
         } else if all_claims.contains_key("aud") {
             // B-2: expected_aud not configured — aud claim present but not validated
@@ -248,14 +242,20 @@ mod tests {
     use ego_domain::context::TenantId;
     use serde_json::json;
 
-    use crate::test_helpers::{fixed_clock, future_ts, hs256_secret, make_hs256_token, now_clock, past_ts};
+    use crate::test_helpers::{
+        fixed_clock, future_ts, hs256_secret, make_hs256_token, now_clock, past_ts,
+    };
 
     fn hs256_key() -> DecodingKey {
         DecodingKey::from_secret(&hs256_secret())
     }
 
     fn no_params<'a>() -> ValidationParams<'a> {
-        ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None }
+        ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -522,7 +522,11 @@ mod tests {
     fn iss_mismatch_returns_invalid_token() {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "wrong" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: Some("expected-iss"),
+            expected_aud: None,
+            leeway_seconds: None,
+        };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -538,8 +542,11 @@ mod tests {
     fn iss_absent_with_expected_returns_invalid_token() {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600) });
         let token = make_hs256_token(&claims);
-        let params =
-            ValidationParams { expected_iss: Some("expected-iss"), expected_aud: None, leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: Some("expected-iss"),
+            expected_aud: None,
+            leeway_seconds: None,
+        };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -560,8 +567,11 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": ["other-api"] });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params =
-            ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: Some(&expected_aud),
+            leeway_seconds: None,
+        };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -606,7 +616,11 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "my-api" });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: Some(&expected_aud),
+            leeway_seconds: None,
+        };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -627,7 +641,11 @@ mod tests {
         let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": 42 });
         let token = make_hs256_token(&claims);
         let expected_aud = vec!["my-api".to_string()];
-        let params = ValidationParams { expected_iss: None, expected_aud: Some(&expected_aud), leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: Some(&expected_aud),
+            leeway_seconds: None,
+        };
         let err = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -658,7 +676,10 @@ mod tests {
             now_clock().as_ref(),
         )
         .unwrap();
-        assert!(ctx.principal.roles.is_empty(), "roles should be empty for null value");
+        assert!(
+            ctx.principal.roles.is_empty(),
+            "roles should be empty for null value"
+        );
         assert_eq!(
             ctx.claims.custom.get("roles"),
             Some(&serde_json::Value::Null),
@@ -674,9 +695,14 @@ mod tests {
     fn expected_iss_none_does_not_validate_iss() {
         // Token carries a random issuer; expected_iss is None.
         // The token MUST be accepted — the warn! path is exercised, not rejection.
-        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "iss": "https://random.issuer.example" });
+        let claims =
+            json!({ "sub": "u1", "exp": future_ts(3600), "iss": "https://random.issuer.example" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: None,
+        };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -696,9 +722,14 @@ mod tests {
     fn expected_aud_none_does_not_validate_aud() {
         // Token carries an audience; expected_aud is None.
         // The token MUST be accepted — the warn! path is exercised, not rejection.
-        let claims = json!({ "sub": "u1", "exp": future_ts(3600), "aud": "some-unvalidated-service" });
+        let claims =
+            json!({ "sub": "u1", "exp": future_ts(3600), "aud": "some-unvalidated-service" });
         let token = make_hs256_token(&claims);
-        let params = ValidationParams { expected_iss: None, expected_aud: None, leeway_seconds: None };
+        let params = ValidationParams {
+            expected_iss: None,
+            expected_aud: None,
+            leeway_seconds: None,
+        };
         let ctx = JwtValidationEngine::validate(
             &token,
             &hs256_key(),
@@ -819,7 +850,9 @@ mod tests {
             fixed_clock(now).as_ref(),
         )
         .unwrap_err();
-        assert!(matches!(&err, AuthenticationError::InvalidToken(msg) if msg.contains("token not yet valid")));
+        assert!(
+            matches!(&err, AuthenticationError::InvalidToken(msg) if msg.contains("token not yet valid"))
+        );
     }
 
     // -----------------------------------------------------------------------

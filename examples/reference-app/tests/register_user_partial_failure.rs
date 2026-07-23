@@ -14,7 +14,9 @@ use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::persistent_entity::CommandResult;
 use reference_app::application::{RegisterInput, RegisterUser, RegisterUserTag};
-use reference_app::domain::tenant_org::{OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity};
+use reference_app::domain::tenant_org::{
+    OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity,
+};
 
 fn input() -> RegisterInput {
     RegisterInput {

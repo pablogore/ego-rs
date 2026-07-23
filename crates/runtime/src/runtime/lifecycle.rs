@@ -32,4 +32,3 @@ pub enum ExecutionState {
     /// Execution has failed. Terminal state — no further transitions.
     Failed,
 }
-

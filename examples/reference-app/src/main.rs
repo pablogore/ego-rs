@@ -40,7 +40,11 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
-    let BuiltRuntime { app, authn, read_side: read_side_handles } = build_runtime(&config)?;
+    let BuiltRuntime {
+        app,
+        authn,
+        read_side: read_side_handles,
+    } = build_runtime(&config)?;
 
     let query = read_side_handles.query.clone();
     let read_side_runtime = read_side_handles.spawn();

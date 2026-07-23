@@ -110,10 +110,19 @@ mod integration_tests {
         exporter.set_writers(Box::new(stdout.clone()), Box::new(CaptureBuffer::default()));
         exporter.init().expect("capture exporter initializes");
 
-        let logger = Arc::new(KITLogger::with_exporter_and_format(exporter, LogFormat::Json));
-        logger.log(Severity::Info, "record-1").expect("record 1 logs");
-        logger.log(Severity::Info, "record-2").expect("record 2 logs");
-        logger.log(Severity::Info, "record-3").expect("record 3 logs");
+        let logger = Arc::new(KITLogger::with_exporter_and_format(
+            exporter,
+            LogFormat::Json,
+        ));
+        logger
+            .log(Severity::Info, "record-1")
+            .expect("record 1 logs");
+        logger
+            .log(Severity::Info, "record-2")
+            .expect("record 2 logs");
+        logger
+            .log(Severity::Info, "record-3")
+            .expect("record 3 logs");
 
         let rt = RuntimeBuilder::new().with_logger(logger).build();
 

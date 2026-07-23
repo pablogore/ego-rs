@@ -258,7 +258,12 @@ mod tests {
         let error_debug = format!("{error:?}");
         let error_display = format!("{error}");
 
-        for rendered in [&request_debug, &response_debug, &error_debug, &error_display] {
+        for rendered in [
+            &request_debug,
+            &response_debug,
+            &error_debug,
+            &error_display,
+        ] {
             assert!(
                 !rendered.contains("secret-kid-123"),
                 "raw key leaked in: {rendered}"

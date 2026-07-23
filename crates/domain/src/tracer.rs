@@ -541,7 +541,10 @@ mod tests {
     #[test]
     fn parse_traceparent_rejects_all_zero_trace_id() {
         let header = "00-00000000000000000000000000000000-00f067aa0ba902b7-01";
-        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        assert_eq!(
+            parse_traceparent(header).unwrap_err(),
+            TraceParseError::InvalidFormat
+        );
         // from_inbound relies on the same parse — must also reject.
         assert!(TraceContext::from_inbound(header).is_err());
     }
@@ -549,13 +552,19 @@ mod tests {
     #[test]
     fn parse_traceparent_rejects_all_zero_parent_id() {
         let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01";
-        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        assert_eq!(
+            parse_traceparent(header).unwrap_err(),
+            TraceParseError::InvalidFormat
+        );
     }
 
     #[test]
     fn parse_traceparent_rejects_forbidden_version_ff() {
         let header = "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        assert_eq!(
+            parse_traceparent(header).unwrap_err(),
+            TraceParseError::InvalidFormat
+        );
     }
 
     #[test]
@@ -570,20 +579,29 @@ mod tests {
                 "version {v} must be rejected (EGO v1 accepts only version 00)"
             );
         }
-        assert!(parse_traceparent(W3C_VALID).is_ok(), "version 00 must be accepted");
+        assert!(
+            parse_traceparent(W3C_VALID).is_ok(),
+            "version 00 must be accepted"
+        );
     }
 
     #[test]
     fn parse_traceparent_rejects_malformed_flags() {
         let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz";
-        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        assert_eq!(
+            parse_traceparent(header).unwrap_err(),
+            TraceParseError::InvalidFormat
+        );
     }
 
     #[test]
     fn parse_traceparent_rejects_uppercase_ids_for_v00() {
         // W3C v1 (version 00) mandates lowercase hex for the id/flags fields.
         let header = "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01";
-        assert_eq!(parse_traceparent(header).unwrap_err(), TraceParseError::InvalidFormat);
+        assert_eq!(
+            parse_traceparent(header).unwrap_err(),
+            TraceParseError::InvalidFormat
+        );
     }
 
     // -----------------------------------------------------------------

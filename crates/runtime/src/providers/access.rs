@@ -81,7 +81,13 @@ fn hashed_key(key: &str) -> String {
 /// spec: "Fetch Observability Signals"). Never receives `payload`; never
 /// receives a `DataProviderError::Transient`/`Fatal` message string — only
 /// the already-classified [`ProviderOutcome`].
-fn log_fetch(provider_id: &str, key: &str, latency: Duration, cache_hit: bool, outcome: ProviderOutcome) {
+fn log_fetch(
+    provider_id: &str,
+    key: &str,
+    latency: Duration,
+    cache_hit: bool,
+    outcome: ProviderOutcome,
+) {
     info!(
         provider_id,
         key_hash = %hashed_key(key),
@@ -130,7 +136,10 @@ impl DataProviderAccess for RuntimeDataProviderAccess {
         };
 
         let result = provider.fetch(request).await;
-        let cache_hit = result.as_ref().map(|response| response.cache_hit).unwrap_or(false);
+        let cache_hit = result
+            .as_ref()
+            .map(|response| response.cache_hit)
+            .unwrap_or(false);
         log_fetch(
             provider_id,
             &key,
@@ -199,7 +208,8 @@ mod tests {
 
     impl tracing::field::Visit for FieldRecorder<'_> {
         fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name().to_string(), format!("{value:?}"));
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
         }
         fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
             self.0.insert(field.name().to_string(), value.to_string());
@@ -295,20 +305,38 @@ mod tests {
         let access = RuntimeDataProviderAccess::new(registry);
 
         let events = capture_events(async {
-            access.fetch("pricing", request("secret-sku-42")).await.unwrap();
+            access
+                .fetch("pricing", request("secret-sku-42"))
+                .await
+                .unwrap();
         })
         .await;
 
         assert_eq!(events.len(), 1, "exactly one event per fetch attempt");
         let event = find_message(&events, "data_provider_fetch");
 
-        assert_eq!(event.fields.get("provider_id").map(String::as_str), Some("pricing"));
-        assert_eq!(event.fields.get("cache_hit").map(String::as_str), Some("true"));
-        assert_eq!(event.fields.get("outcome").map(String::as_str), Some("success"));
+        assert_eq!(
+            event.fields.get("provider_id").map(String::as_str),
+            Some("pricing")
+        );
+        assert_eq!(
+            event.fields.get("cache_hit").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            event.fields.get("outcome").map(String::as_str),
+            Some("success")
+        );
         assert!(event.fields.contains_key("latency_ms"));
 
-        let key_hash = event.fields.get("key_hash").expect("key_hash field present");
-        assert_ne!(key_hash, "secret-sku-42", "the raw key must never appear in the signal");
+        let key_hash = event
+            .fields
+            .get("key_hash")
+            .expect("key_hash field present");
+        assert_ne!(
+            key_hash, "secret-sku-42",
+            "the raw key must never appear in the signal"
+        );
     }
 
     #[tokio::test]
@@ -325,7 +353,10 @@ mod tests {
             event.fields.get("outcome").map(String::as_str),
             Some("provider_missing")
         );
-        assert_eq!(event.fields.get("cache_hit").map(String::as_str), Some("false"));
+        assert_eq!(
+            event.fields.get("cache_hit").map(String::as_str),
+            Some("false")
+        );
     }
 
     /// PR1 review G-02 watch-item: `Transient`/`Fatal` carry provider-authored
@@ -342,7 +373,9 @@ mod tests {
         impl ExternalDataProvider for FailingProvider {
             async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
                 if request.key == "transient" {
-                    Err(DataProviderError::Transient(DISTINCTIVE_TRANSIENT_MSG.to_string()))
+                    Err(DataProviderError::Transient(
+                        DISTINCTIVE_TRANSIENT_MSG.to_string(),
+                    ))
                 } else {
                     Err(DataProviderError::Fatal(DISTINCTIVE_FATAL_MSG.to_string()))
                 }
@@ -350,7 +383,9 @@ mod tests {
         }
 
         let mut registry = ExternalDataProviderRegistry::new();
-        registry.register("flaky", Arc::new(FailingProvider)).unwrap();
+        registry
+            .register("flaky", Arc::new(FailingProvider))
+            .unwrap();
         let access = RuntimeDataProviderAccess::new(registry);
 
         let events = capture_events(async {

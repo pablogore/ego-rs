@@ -53,11 +53,16 @@ impl FromRef<ReadSideState> for UsersByTenantStore {
 /// above exists only to satisfy axum's substate `FromRef` requirement for
 /// the one route that needs both.
 pub fn build_router(state: AppState, users_by_tenant: UsersByTenantStore) -> Router {
-    let write_routes = Router::new().route("/register", post(register_handler)).with_state(state.clone());
+    let write_routes = Router::new()
+        .route("/register", post(register_handler))
+        .with_state(state.clone());
 
     let read_side_routes = Router::new()
         .route("/tenants/:tenant_id/users", get(users_by_tenant_handler))
-        .with_state(ReadSideState { app: state, query: users_by_tenant });
+        .with_state(ReadSideState {
+            app: state,
+            query: users_by_tenant,
+        });
 
     write_routes
         .merge(read_side_routes)

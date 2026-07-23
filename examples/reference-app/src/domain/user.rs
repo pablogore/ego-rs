@@ -176,7 +176,11 @@ impl PersistentEntity for UserEntity {
             .iter()
             .filter_map(|event| {
                 Some(ExternalEffectDescription {
-                    idempotency_key: IdempotencyKey::new(format!("welcome-email:{}", event.user_id)).ok()?,
+                    idempotency_key: IdempotencyKey::new(format!(
+                        "welcome-email:{}",
+                        event.user_id
+                    ))
+                    .ok()?,
                     effect_type: "user.welcome_email".to_string(),
                     payload: event.payload().clone().to_string().into_bytes(),
                     destination: format!("mailer://welcome/{}", event.user_id),
