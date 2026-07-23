@@ -274,7 +274,7 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let mut builder = App::builder().security(authn.clone(), authz);
     // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
     // query-side `UsersByTenantStore` — distinct from the untouched read-side
-    // *engine* path above (`ReadSideHandles`/`TagSchedulerImpl::spawn_projection`,
+    // *engine* path above (`ReadSideHandles`/`TagSchedulerImpl::spawn`,
     // which keeps producing into it). `UsersByTenantStore` is `Clone` over an
     // internal `Arc<RwLock<_>>` (read_side/projection.rs), so this clone
     // shares live state with the engine-fed store, not a frozen snapshot.

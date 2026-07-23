@@ -108,106 +108,11 @@ where
     }
 }
 
-impl<E> TagSchedulerImpl<E>
-where
-    E: Clone + Send + Sync + 'static,
-{
-    /// Additive convenience wrapper (post-CORE-018 review, Finding 8):
-    /// `start_projection` above processes one batch per call and returns —
-    /// this wraps it in the persistent poll-loop-with-graceful-stop pattern
-    /// that callers (e.g. `examples/reference-app`'s `ReadSideRuntime`) would
-    /// otherwise have to hand-roll themselves.
-    ///
-    /// `tag_provider` is called fresh on every iteration rather than being
-    /// captured as a fixed `Vec<(EventTag, String)>` once — required for
-    /// dynamic per-tenant tag discovery, where a tenant's tag only exists
-    /// once its first event has been written. Each yielded pair carries the
-    /// tag together with its own authoritative tenant, threaded straight
-    /// into that tag's session.
-    ///
-    /// On stop (`stop_signal` observes `true`), the loop finishes draining
-    /// whatever batch is currently in flight before the returned
-    /// `JoinHandle` resolves — the stop check only happens between
-    /// iterations, never during an in-progress `start_projection` call.
-    ///
-    /// `on_error` receives every error `start_projection` returns, so
-    /// callers can plug in their own logging/observability (this crate has
-    /// no logger dependency of its own).
-    #[deprecated(note = "use TagSchedulerImpl::spawn with ProjectionSpec")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn run_until_stopped<F, H, S, D, O, R>(
-        mut self,
-        tag_provider: F,
-        interval: Duration,
-        mut stop_signal: watch::Receiver<bool>,
-        projection_id: String,
-        handler: H,
-        read_store: S,
-        dedup_store: D,
-        offset_store: O,
-        reporter: R,
-        on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
-    ) -> tokio::task::JoinHandle<()>
-    where
-        F: Fn() -> Vec<(EventTag, String)> + Send + Sync + 'static,
-        H: Handler<E> + Clone + Send + Sync + 'static,
-        S: ReadSideStore<E> + Send + Sync + Clone + 'static,
-        D: DedupStore + Send + Sync + Clone + 'static,
-        O: OffsetStore + Send + Sync + Clone + 'static,
-        R: ProgressReporter + Clone + Send + Sync + 'static,
-    {
-        tokio::spawn(async move {
-            loop {
-                if *stop_signal.borrow() {
-                    break;
-                }
-
-                let tags = tag_provider();
-                if let Err(e) = self
-                    .start_projection(
-                        projection_id.clone(),
-                        tags,
-                        handler.clone(),
-                        read_store.clone(),
-                        dedup_store.clone(),
-                        offset_store.clone(),
-                        reporter.clone(),
-                    )
-                    .await
-                {
-                    on_error(e);
-                }
-
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    changed = stop_signal.changed() => {
-                        match changed {
-                            // Value changed to `true`: stop now.
-                            Ok(()) if *stop_signal.borrow() => break,
-                            // Value changed to something other than `true`: keep polling.
-                            Ok(()) => {}
-                            // Every `Sender` was dropped — no stop signal can ever
-                            // arrive again. Treat disconnection as an implicit stop
-                            // request; otherwise `changed()` on a closed channel
-                            // resolves immediately forever, turning this into an
-                            // unbounded busy loop that never respects `interval`.
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Handle to a projection poll loop spawned via
-/// [`TagSchedulerImpl::spawn_projection`].
+/// Handle to a projection poll loop spawned via [`TagSchedulerImpl::spawn`].
 ///
-/// Bundles the `JoinHandle` `run_until_stopped` returns together with the
-/// `watch` stop-signal sender `spawn_projection` creates on the caller's
-/// behalf, so a caller gets one ready-to-use handle instead of wiring the
-/// channel itself (CORE-026 Phase 3 — the spawn/stop lifecycle convenience
-/// wrapper).
+/// Bundles the loop's `JoinHandle` together with the `watch` stop-signal sender
+/// that [`TagSchedulerImpl::spawn`] creates on the caller's behalf, so a caller
+/// gets one ready-to-use handle instead of wiring the channel itself.
 pub struct ReadSideProjectionHandle {
     stop_tx: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -224,11 +129,9 @@ impl ReadSideProjectionHandle {
     }
 }
 
-/// Grouped configuration for spawning a projection poll loop, replacing the
-/// nine positional arguments of the deprecated
-/// [`TagSchedulerImpl::spawn_projection`] with a single builder (CORE-028 DX
-/// follow-up). The three boilerplate knobs are defaulted so the common case
-/// only names what it actually cares about:
+/// Grouped configuration for spawning a projection poll loop via
+/// [`TagSchedulerImpl::spawn`]. Three boilerplate knobs are defaulted so the
+/// common case only names what it actually cares about:
 ///
 /// - `reporter` defaults to [`NoopProgressReporter`] (the `R` type parameter's
 ///   default), swappable via the type-changing [`ProjectionSpec::reporter`];
@@ -237,8 +140,9 @@ impl ReadSideProjectionHandle {
 /// - `on_error` defaults to a no-op, overridable via
 ///   [`ProjectionSpec::on_error`].
 ///
-/// This is pure argument re-grouping — the spawned loop behaves identically to
-/// the positional API; see [`TagSchedulerImpl::spawn`].
+/// Build one with [`ProjectionSpec::new`] and hand it to
+/// [`TagSchedulerImpl::spawn`] — that is the single supported way to launch a
+/// projection.
 pub struct ProjectionSpec<F, H, S, D, O, R = NoopProgressReporter> {
     tag_provider: F,
     projection_id: String,
@@ -315,13 +219,28 @@ impl<E> TagSchedulerImpl<E>
 where
     E: Clone + Send + Sync + 'static,
 {
-    /// Spawn/stop lifecycle convenience wrapper driven by a [`ProjectionSpec`]:
-    /// creates the `watch` stop channel internally and spawns the same poll
-    /// loop as the deprecated [`spawn_projection`](Self::spawn_projection),
-    /// returning a single [`ReadSideProjectionHandle`]. This is the preferred
-    /// entry point — the spec groups the nine positional arguments and defaults
-    /// the boilerplate. Pure re-grouping: no behavior change.
-    #[allow(deprecated)]
+    /// Spawns a projection poll loop from a [`ProjectionSpec`] and returns a
+    /// single [`ReadSideProjectionHandle`]. This is the only supported entry
+    /// point for launching a projection: the spec groups the arguments and
+    /// defaults the boilerplate, and `spawn` creates the `watch` stop channel
+    /// internally so the caller never has to wire it.
+    ///
+    /// `tag_provider` is called fresh on every iteration rather than being
+    /// captured as a fixed `Vec<(EventTag, String)>` once — required for
+    /// dynamic per-tenant tag discovery, where a tenant's tag only exists
+    /// once its first event has been written. Each yielded pair carries the
+    /// tag together with its own authoritative tenant, threaded straight into
+    /// that tag's session.
+    ///
+    /// On stop (the handle's [`stop`](ReadSideProjectionHandle::stop) is called,
+    /// or the handle is dropped so the internal sender disconnects) the loop
+    /// finishes draining whatever batch is currently in flight before the task
+    /// resolves — the stop check only happens between iterations, never during
+    /// an in-progress `start_projection` call.
+    ///
+    /// `on_error` (from the spec) receives every error `start_projection`
+    /// returns, so callers can plug in their own logging/observability (this
+    /// crate has no logger dependency of its own).
     pub fn spawn<F, H, S, D, O, R>(
         self,
         spec: ProjectionSpec<F, H, S, D, O, R>,
@@ -346,73 +265,55 @@ where
             on_error,
         } = spec;
 
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let task = self.run_until_stopped(
-            tag_provider,
-            interval,
-            stop_rx,
-            projection_id,
-            handler,
-            read_store,
-            dedup_store,
-            offset_store,
-            reporter,
-            on_error,
-        );
-        ReadSideProjectionHandle { stop_tx, task }
-    }
+        let (stop_tx, mut stop_signal) = watch::channel(false);
+        let mut scheduler = self;
+        let task = tokio::spawn(async move {
+            loop {
+                if *stop_signal.borrow() {
+                    break;
+                }
 
-    /// Spawn/stop lifecycle convenience wrapper for a projection poll loop:
-    /// creates the `watch` stop channel internally and spawns
-    /// `run_until_stopped`, returning a single [`ReadSideProjectionHandle`]
-    /// instead of requiring the caller to wire the stop channel and keep the
-    /// `JoinHandle` around itself. The caller still supplies its own dedup
-    /// store, offset store, tag-discovery closure, and handler.
-    #[deprecated(note = "use TagSchedulerImpl::spawn with ProjectionSpec")]
-    #[allow(clippy::too_many_arguments, deprecated)]
-    pub fn spawn_projection<F, H, S, D, O, R>(
-        self,
-        tag_provider: F,
-        interval: Duration,
-        projection_id: String,
-        handler: H,
-        read_store: S,
-        dedup_store: D,
-        offset_store: O,
-        reporter: R,
-        on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
-    ) -> ReadSideProjectionHandle
-    where
-        F: Fn() -> Vec<(EventTag, String)> + Send + Sync + 'static,
-        H: Handler<E> + Clone + Send + Sync + 'static,
-        S: ReadSideStore<E> + Send + Sync + Clone + 'static,
-        D: DedupStore + Send + Sync + Clone + 'static,
-        O: OffsetStore + Send + Sync + Clone + 'static,
-        R: ProgressReporter + Clone + Send + Sync + 'static,
-    {
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let task = self.run_until_stopped(
-            tag_provider,
-            interval,
-            stop_rx,
-            projection_id,
-            handler,
-            read_store,
-            dedup_store,
-            offset_store,
-            reporter,
-            on_error,
-        );
+                let tags = tag_provider();
+                if let Err(e) = scheduler
+                    .start_projection(
+                        projection_id.clone(),
+                        tags,
+                        handler.clone(),
+                        read_store.clone(),
+                        dedup_store.clone(),
+                        offset_store.clone(),
+                        reporter.clone(),
+                    )
+                    .await
+                {
+                    on_error(e);
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    changed = stop_signal.changed() => {
+                        match changed {
+                            // Value changed to `true`: stop now.
+                            Ok(()) if *stop_signal.borrow() => break,
+                            // Value changed to something other than `true`: keep polling.
+                            Ok(()) => {}
+                            // Every `Sender` was dropped — no stop signal can ever
+                            // arrive again. Treat disconnection as an implicit stop
+                            // request; otherwise `changed()` on a closed channel
+                            // resolves immediately forever, turning this into an
+                            // unbounded busy loop that never respects `interval`.
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
         ReadSideProjectionHandle { stop_tx, task }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Several tests still exercise the deprecated `run_until_stopped` /
-    // `spawn_projection` shims on purpose, to prove the new `spawn` path stays
-    // behavior-compatible with them.
-    #![allow(deprecated)]
     use super::*;
     use ego_domain::read_side::event_stream::EventStreamElement;
     use ego_domain::read_side::offset::Offset;
@@ -531,149 +432,10 @@ mod tests {
         }
     }
 
-    /// (a) `tag_provider` is called fresh every iteration — not captured
-    /// once — proven by letting the loop run for several poll intervals
-    /// with an empty tag list (so no store/handler machinery is exercised)
-    /// and observing multiple calls before stop.
-    /// (b) stops gracefully via the watch signal.
-    #[tokio::test]
-    async fn run_until_stopped_calls_tag_provider_fresh_each_iteration_and_stops_gracefully() {
-        let provider = CountingProvider::default();
-        let provider_for_closure = provider.clone();
-
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
-
-        let handle = scheduler.run_until_stopped(
-            move || {
-                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
-                Vec::new() // empty tags: start_projection returns instantly
-            },
-            Duration::from_millis(5),
-            stop_rx,
-            "proj".to_string(),
-            CountingHandler { handled: handled.clone() },
-            FakeStore::default(),
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let _ = stop_tx.send(true);
-        handle.await.expect("task joins cleanly");
-
-        assert!(
-            provider.calls() >= 3,
-            "expected several fresh tag_provider calls across multiple poll iterations, got {}",
-            provider.calls()
-        );
-    }
-
-    /// (c) drains any in-flight batch before returning: the stop signal is
-    /// sent while `start_projection`'s (simulated slow) fetch is still
-    /// running, and the handler must still have been invoked — proving the
-    /// loop awaited the in-progress batch to completion rather than
-    /// aborting it — before the returned `JoinHandle` resolves.
-    #[tokio::test]
-    async fn run_until_stopped_drains_in_flight_batch_before_returning() {
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
-        let seen_tags: Arc<StdMutex<Vec<()>>> = Arc::new(StdMutex::new(Vec::new()));
-        let seen_tags_for_closure = seen_tags.clone();
-
-        let handle = scheduler.run_until_stopped(
-            move || {
-                seen_tags_for_closure.lock().unwrap().push(());
-                vec![(EventTag::new("tenant-a"), "tenant-a".to_string())]
-            },
-            Duration::from_millis(5),
-            stop_rx,
-            "proj".to_string(),
-            CountingHandler { handled: handled.clone() },
-            FakeStore {
-                fetch_delay: Duration::from_millis(60),
-            },
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        // Send stop while the first (slow) fetch is still in flight.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let _ = stop_tx.send(true);
-
-        let start = std::time::Instant::now();
-        handle.await.expect("task joins cleanly");
-
-        assert!(
-            start.elapsed() >= Duration::from_millis(45),
-            "expected the in-flight slow fetch to be awaited to completion, returned too fast: {:?}",
-            start.elapsed()
-        );
-        assert_eq!(
-            handled.load(Ordering::SeqCst),
-            1,
-            "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
-        );
-    }
-
-    /// Post-review Finding F-01: dropping every `watch::Sender` without ever
-    /// sending `true` must stop the loop, not spin it unbounded. Before the
-    /// fix, `stop_signal.changed()`'s `Result` was discarded in the
-    /// `select!`, so a closed channel (which makes `changed()` resolve
-    /// immediately with `Err` forever) bypassed `sleep(interval)` on every
-    /// iteration — an unthrottled busy loop that never terminates on its own.
-    #[tokio::test]
-    async fn run_until_stopped_terminates_when_stop_sender_is_dropped_without_sending() {
-        let provider = CountingProvider::default();
-        let provider_for_closure = provider.clone();
-
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
-
-        let handle = scheduler.run_until_stopped(
-            move || {
-                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
-                Vec::new()
-            },
-            Duration::from_millis(5),
-            stop_rx,
-            "proj".to_string(),
-            CountingHandler { handled: handled.clone() },
-            FakeStore::default(),
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        // Drop the sender WITHOUT sending `true` — the disconnection itself,
-        // not an explicit stop value, must be what ends the loop.
-        drop(stop_tx);
-
-        tokio::time::timeout(Duration::from_millis(200), handle)
-            .await
-            .expect("run_until_stopped must terminate when the stop channel is dropped, not spin forever")
-            .expect("task joins cleanly");
-
-        // Non-vacuousness guard: if the fix regressed to a busy loop, the
-        // task above would never have returned within the timeout at all —
-        // this assertion only runs on the success path, but keeps the
-        // provider handle alive so a future refactor can't silently drop it
-        // and weaken the test to "did the JoinHandle exist".
-        assert!(provider.calls() >= 1, "the loop must have run at least once before stopping");
-    }
-
-    /// Handler that always panics — used to prove `spawn_projection`'s
-    /// `stop()` surfaces a `JoinError` instead of swallowing it (CORE-018
-    /// Finding F-02's own lesson applied to the new spawn/stop lifecycle
-    /// wrapper).
+    /// Handler that always panics — used to prove `spawn`'s
+    /// [`stop`](ReadSideProjectionHandle::stop) surfaces a `JoinError` instead
+    /// of swallowing it (CORE-018 Finding F-02's lesson applied to the
+    /// spawn/stop lifecycle).
     #[derive(Clone)]
     struct PanickingHandler;
 
@@ -683,124 +445,17 @@ mod tests {
             &self,
             _events: &[EventStreamElement<serde_json::Value>],
         ) -> Result<(), ego_domain::read_side::error::ProjectionError> {
-            panic!("deliberate handler panic for spawn_projection JoinError test");
+            panic!("deliberate handler panic for spawn JoinError test");
         }
     }
 
-    /// CORE-026 Phase 3 (a): `spawn_projection` creates the stop channel
-    /// internally (no caller-managed `watch` pair) and still calls
-    /// `tag_provider` fresh every iteration, mirroring
-    /// `run_until_stopped_calls_tag_provider_fresh_each_iteration_and_stops_gracefully`
-    /// but through the spawn/stop lifecycle wrapper.
-    #[tokio::test]
-    async fn spawn_projection_calls_tag_provider_fresh_each_iteration_and_stops_gracefully() {
-        let provider = CountingProvider::default();
-        let provider_for_closure = provider.clone();
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
-
-        let handle = scheduler.spawn_projection(
-            move || {
-                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
-                Vec::new()
-            },
-            Duration::from_millis(5),
-            "proj".to_string(),
-            CountingHandler { handled: handled.clone() },
-            FakeStore::default(),
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        handle.stop().await.expect("task joins cleanly");
-
-        assert!(
-            provider.calls() >= 3,
-            "expected several fresh tag_provider calls across multiple poll iterations, got {}",
-            provider.calls()
-        );
-    }
-
-    /// CORE-026 Phase 3 (b): mirrors
-    /// `run_until_stopped_drains_in_flight_batch_before_returning` — `stop()`
-    /// must await the in-flight (slow) batch to completion before resolving,
-    /// not abort it.
-    #[tokio::test]
-    async fn spawn_projection_stop_drains_in_flight_batch_before_returning() {
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
-
-        let handle = scheduler.spawn_projection(
-            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            Duration::from_millis(5),
-            "proj".to_string(),
-            CountingHandler { handled: handled.clone() },
-            FakeStore { fetch_delay: Duration::from_millis(60) },
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        // Send stop while the first (slow) fetch is still in flight.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let start = std::time::Instant::now();
-        handle.stop().await.expect("task joins cleanly");
-
-        assert!(
-            start.elapsed() >= Duration::from_millis(45),
-            "expected the in-flight slow fetch to be awaited to completion, returned too fast: {:?}",
-            start.elapsed()
-        );
-        assert_eq!(
-            handled.load(Ordering::SeqCst),
-            1,
-            "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
-        );
-    }
-
-    /// CORE-026 Phase 3 (c) — the explicit F-02 callback: a handler panic
-    /// (surfacing as the spawned task's `JoinError`) must come back out of
-    /// `stop()`'s `Result`, not be silently discarded the way the original
-    /// hand-rolled `read_side/mod.rs` used to discard poll failures.
-    #[tokio::test]
-    async fn spawn_projection_stop_surfaces_join_error_instead_of_swallowing_it() {
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-
-        let handle = scheduler.spawn_projection(
-            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            Duration::from_millis(5),
-            "proj".to_string(),
-            PanickingHandler,
-            FakeStore::default(),
-            FakeDedup,
-            FakeOffset,
-            NoopProgressReporter,
-            |_e| {},
-        );
-
-        // Give the loop time to actually hit the panic before we stop it.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let result = handle.stop().await;
-        assert!(
-            result.as_ref().is_err_and(|e| e.is_panic()),
-            "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
-        );
-    }
-
-    /// CORE-028 DX follow-up: the `ProjectionSpec` builder groups the nine
-    /// positional `spawn_projection` args and defaults the boilerplate
-    /// (`NoopProgressReporter`, a no-op `on_error`, a 1s interval). Building a
-    /// spec with `ProjectionSpec::new` alone — touching none of the defaulted
-    /// fields — and driving it through `spawn` must exercise the exact same
-    /// poll loop: `tag_provider` is still called fresh each iteration and
-    /// `stop()` still drains gracefully, proving the default reporter/on_error
-    /// path is wired identically to the deprecated positional API.
+    /// (a) `tag_provider` is called fresh every iteration — not captured
+    /// once — proven by letting the loop run for several poll intervals with
+    /// an empty tag list (so no store/handler machinery is exercised) and
+    /// observing multiple calls before stop. (b) stops gracefully when the
+    /// handle's `stop()` is called. The spec touches none of the defaulted
+    /// fields (reporter/on_error left at their defaults), proving the default
+    /// path is wired correctly.
     #[tokio::test]
     async fn spawn_with_default_spec_calls_tag_provider_and_stops_gracefully() {
         let provider = CountingProvider::default();
@@ -817,7 +472,9 @@ mod tests {
                 provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
                 Vec::new()
             },
-            CountingHandler { handled: handled.clone() },
+            CountingHandler {
+                handled: handled.clone(),
+            },
             FakeStore::default(),
             FakeDedup,
             FakeOffset,
@@ -867,7 +524,9 @@ mod tests {
         let spec = ProjectionSpec::new(
             "proj",
             || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            CountingHandler { handled: handled.clone() },
+            CountingHandler {
+                handled: handled.clone(),
+            },
             FakeStore::default(),
             FakeDedup,
             FakeOffset,
@@ -883,6 +542,141 @@ mod tests {
         assert!(
             reporter.reports.load(Ordering::SeqCst) >= 1,
             "the custom reporter supplied via ProjectionSpec::reporter must have been driven at least once"
+        );
+    }
+
+    /// The spawn/stop lifecycle drains any in-flight batch before `stop()`
+    /// resolves: the stop signal is sent (via `stop()`) while a simulated slow
+    /// fetch is still running, and the handler must still have been invoked —
+    /// proving the loop awaited the in-progress batch to completion rather than
+    /// aborting it — before `stop()` returns.
+    #[tokio::test]
+    async fn spawn_stop_drains_in_flight_batch_before_returning() {
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let spec = ProjectionSpec::new(
+            "proj",
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
+            CountingHandler {
+                handled: handled.clone(),
+            },
+            FakeStore {
+                fetch_delay: Duration::from_millis(60),
+            },
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(Duration::from_millis(5));
+
+        let handle = scheduler.spawn(spec);
+
+        // Send stop while the first (slow) fetch is still in flight.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let start = std::time::Instant::now();
+        handle.stop().await.expect("task joins cleanly");
+
+        assert!(
+            start.elapsed() >= Duration::from_millis(45),
+            "expected the in-flight slow fetch to be awaited to completion, returned too fast: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            handled.load(Ordering::SeqCst),
+            1,
+            "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
+        );
+    }
+
+    /// Post-review Finding F-01, exercised through the public `spawn` API:
+    /// dropping the [`ReadSideProjectionHandle`] without calling `stop()` drops
+    /// the internal `watch::Sender`, and the poll loop must observe that
+    /// disconnection and terminate — not spin unbounded. Before the fix,
+    /// `stop_signal.changed()`'s `Result` was discarded in the `select!`, so a
+    /// closed channel (which makes `changed()` resolve immediately with `Err`
+    /// forever) bypassed `sleep(interval)` on every iteration — an unthrottled
+    /// busy loop that never terminates on its own.
+    ///
+    /// The task's `JoinHandle` is bundled inside the dropped handle, so we can't
+    /// await it directly; termination is proven observationally — once the loop
+    /// stops, `tag_provider` stops being called, so its call count must plateau
+    /// across two windows (a regressed busy loop would keep incrementing it).
+    #[tokio::test]
+    async fn spawn_terminates_when_handle_is_dropped_without_stopping() {
+        let provider = CountingProvider::default();
+        let provider_for_closure = provider.clone();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let handled = Arc::new(AtomicUsize::new(0));
+
+        let spec = ProjectionSpec::new(
+            "proj",
+            move || {
+                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            },
+            CountingHandler {
+                handled: handled.clone(),
+            },
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(Duration::from_millis(5));
+
+        let handle = scheduler.spawn(spec);
+
+        // Let the loop turn over a few times, then drop the handle WITHOUT
+        // stopping — the dropped sender's disconnection itself must end the
+        // loop.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(handle);
+
+        // Give the loop ample time to notice the drop and break, then sample
+        // the call count across two windows.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let after_drop = provider.calls();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let later = provider.calls();
+
+        assert!(
+            after_drop >= 1,
+            "the loop must have run at least once before the handle was dropped"
+        );
+        assert_eq!(
+            after_drop, later,
+            "after the handle (and its stop sender) was dropped the loop must have \
+             terminated; a still-growing tag_provider count means it kept spinning \
+             (F-01 busy-loop regression): {after_drop} then {later}"
+        );
+    }
+
+    /// Finding F-02 through the public `spawn` API: a handler panic surfaces as
+    /// the spawned task's `JoinError` and must come back out of `stop()`'s
+    /// `Result` rather than being silently discarded.
+    #[tokio::test]
+    async fn spawn_stop_surfaces_join_error_instead_of_swallowing_it() {
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+
+        let spec = ProjectionSpec::new(
+            "proj",
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
+            PanickingHandler,
+            FakeStore::default(),
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(Duration::from_millis(5));
+
+        let handle = scheduler.spawn(spec);
+
+        // Give the loop time to actually hit the panic before we stop it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let result = handle.stop().await;
+        assert!(
+            result.as_ref().is_err_and(|e| e.is_panic()),
+            "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
         );
     }
 
@@ -918,17 +712,24 @@ mod tests {
     #[tokio::test]
     async fn start_projection_threads_each_pairs_tenant_into_fetch() {
         let store = RecordingStore::default();
-        let mut scheduler =
-            TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        let mut scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
 
         scheduler
             .start_projection(
                 "proj".to_string(),
                 vec![
-                    (EventTag::new("users-by-tenant:tenant-a"), "tenant-a".to_string()),
-                    (EventTag::new("users-by-tenant:tenant-b"), "tenant-b".to_string()),
+                    (
+                        EventTag::new("users-by-tenant:tenant-a"),
+                        "tenant-a".to_string(),
+                    ),
+                    (
+                        EventTag::new("users-by-tenant:tenant-b"),
+                        "tenant-b".to_string(),
+                    ),
                 ],
-                CountingHandler { handled: Arc::new(AtomicUsize::new(0)) },
+                CountingHandler {
+                    handled: Arc::new(AtomicUsize::new(0)),
+                },
                 store.clone(),
                 FakeDedup,
                 FakeOffset,
@@ -939,11 +740,17 @@ mod tests {
 
         let seen = store.seen.lock().unwrap().clone();
         assert!(
-            seen.contains(&("tenant-a".to_string(), "users-by-tenant:tenant-a".to_string())),
+            seen.contains(&(
+                "tenant-a".to_string(),
+                "users-by-tenant:tenant-a".to_string()
+            )),
             "tenant-a's tag must reach fetch paired with tenant-a, got: {seen:?}"
         );
         assert!(
-            seen.contains(&("tenant-b".to_string(), "users-by-tenant:tenant-b".to_string())),
+            seen.contains(&(
+                "tenant-b".to_string(),
+                "users-by-tenant:tenant-b".to_string()
+            )),
             "tenant-b's tag must reach fetch paired with tenant-b, got: {seen:?}"
         );
     }

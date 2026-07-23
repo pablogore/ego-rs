@@ -40,7 +40,7 @@ flowchart TB
     end
 
     subgraph Read_Side_Pipeline["CQRS Read-Side Pipeline (ego-domain::read_side + ego-runtime::read_side)"]
-        P1["TagSchedulerImpl<br/>start_projection / run_until_stopped"] --> P2["BatchExecutor<br/>acquire backpressure permit"]
+        P1["TagSchedulerImpl<br/>start_projection / spawn"] --> P2["BatchExecutor<br/>acquire backpressure permit"]
         P2 --> P3["ReadSideSession<br/>fetch via ReadSideStore"]
         P3 --> P4["Handler::handle<br/>apply batch"]
         P4 --> P5["DedupStore + OffsetStore<br/>commit progress"]
@@ -992,13 +992,13 @@ impl<E> TagSchedulerImpl<E> {
 async fn start_projection(&mut self, projection_id: String, tags: Vec<EventTag>, tenant: String,
     handler: impl Handler<E> + Clone, read_store: impl ReadSideStore<E> + Clone, ..) -> Result<(), Box<dyn std::error::Error>>;
 
-// convenience wrapper — spawns a tokio task that loops start_projection on an interval
-// until a watch::Receiver<bool> stop signal fires, draining any in-flight batch first
-pub fn run_until_stopped<F, H, S, D, O, R>(
-    self, tag_provider: F, interval: Duration, stop_signal: watch::Receiver<bool>,
-    projection_id: String, tenant: String, handler: H, read_store: S, dedup_store: D,
-    offset_store: O, reporter: R, on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
-) -> tokio::task::JoinHandle<()>;
+// the single supported way to launch a projection: spawns a tokio task that
+// loops start_projection on an interval, draining any in-flight batch on stop,
+// and returns a ReadSideProjectionHandle (whose stop() signals + joins the loop).
+// Configuration is grouped in a ProjectionSpec (with defaulted reporter/interval/on_error).
+pub fn spawn<F, H, S, D, O, R>(
+    self, spec: ProjectionSpec<F, H, S, D, O, R>,
+) -> ReadSideProjectionHandle;
 ```
 
 `BatchExecutor<E>::execute_session` acquires a `Backpressure` permit (an `Arc<Semaphore>` wrapper with `acquire()`/`can_process()`) before running a `ReadSideSession`'s fetch → handle → dedup/offset-commit cycle.
@@ -1231,7 +1231,7 @@ Note: `crates/service-sdk/src/testing.rs` and `crates/service-sdk/src/reference.
 |------|----------|
 | `crates/runtime/src/lib.rs` | `Runtime` trait, `EffectInterpreter`, re-exports |
 | `crates/runtime/src/interpreter.rs` | `EffectInterpreter` trait, `interpret_composed`, `InterpretationError` |
-| `crates/runtime/src/read_side/scheduler.rs` | `TagSchedulerImpl`, `run_until_stopped` |
+| `crates/runtime/src/read_side/scheduler.rs` | `TagSchedulerImpl`, `ProjectionSpec`, `TagSchedulerImpl::spawn` |
 | `crates/runtime/src/read_side/batch_executor.rs` | `BatchExecutor<E>` |
 | `crates/runtime/src/read_side/backpressure.rs` | `Backpressure` |
 | `crates/runtime-tokio/src/lib.rs` | `TokioRuntime`, `TokioRuntimeBuilder`, `DefaultRuntime` — the real concrete `Runtime` impl |
