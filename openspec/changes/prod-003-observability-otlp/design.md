@@ -76,8 +76,11 @@ neither symbol appears outside the adapter module. Operational rules (also MUST 
 - **Orphaned** spans (started, never ended) are bounded by `OtlpConfig.max_in_flight_spans`
   (a `usize` cap on the live-span table). On overflow, a new `start_span` **drops the new
   span and emits a diagnostic warning** — it never evicts a live span, overwrites, or grows
-  unbounded. `TracerLifecycle::shutdown()` flushes the remaining pending spans and clears
-  the table.
+  unbounded. This is a **soft bound**: the capacity check and the insert are not atomic (no
+  global lock — see the non-blocking contract), so concurrent starts may briefly overshoot by
+  the number of racing starts. The table stays `O(max + concurrent_starts)`, never unbounded;
+  a hard cap is a non-goal (it would need the global synchronization the port forbids).
+  `TracerLifecycle::shutdown()` flushes the remaining pending spans and clears the table.
 
 ### ADR-6: Redaction at the port boundary (not in the adapter)
 `start_span` takes a domain `SpanAttributes` — an allow-list of non-sensitive typed

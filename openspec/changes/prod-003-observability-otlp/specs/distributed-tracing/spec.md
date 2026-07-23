@@ -78,16 +78,23 @@ pending (unended) spans and MUST clear the span table afterward.
 - GIVEN a tracer implementation (e.g. `NoopTracer` or a test spy) that implements only `Tracer`
 - THEN it MUST compile and be usable without implementing `TracerLifecycle`
 
-### Requirement: In-Flight Spans Are Bounded By A Configured Limit
+### Requirement: In-Flight Spans Are Bounded By A Configured Limit (Soft Bound)
 
 The live-span table MUST be bounded by a configured `max_in_flight_spans:
-usize`. When the table is at capacity and a new span is started, the
-implementation MUST **drop the new span and emit a diagnostic warning**. It
-MUST NOT evict a live span, overwrite an existing entry, or grow the table
-unbounded.
+usize`. When the table is observed at (or above) capacity as a new span is
+started, the implementation MUST **drop the new span and emit a diagnostic
+warning**. It MUST NOT evict a live span, overwrite an existing entry, or grow
+the table unbounded.
+
+This is a **soft bound**: to avoid a global lock across span start (see the
+non-blocking contract), the capacity check and the insert are not atomic, so
+concurrent starts MAY briefly overshoot `max_in_flight_spans` by the number of
+racing starts before the check takes effect. The table MUST stay `O(max_in_flight_spans + concurrent_starts)` — bounded and short-lived — never
+unbounded. A hard cap is an explicit non-goal (it would require the very
+global synchronization the port forbids).
 
 #### Scenario: starting a span over the in-flight limit drops it with a warning
-- GIVEN the live-span table already holds `max_in_flight_spans` unended spans
+- GIVEN the live-span table already holds `max_in_flight_spans` unended spans and no other start is in flight
 - WHEN a new span is started
 - THEN the new span is dropped, a diagnostic warning is emitted, and no existing live span is evicted or overwritten
 
@@ -185,9 +192,11 @@ payload data MUST NOT be expressible as `SpanAttributes`. The
 
 The `Tracer` trait signature (methods, parameters, return types) MUST NOT
 reference `opentelemetry` or any other vendor type; all such types MUST be
-confined to `infrastructure`. Implementations MUST NOT perform blocking
-operations (sync I/O, network calls, lock contention) inside any trait
-method, mirroring `Observability`'s non-blocking contract.
+confined to `infrastructure`. Implementations MUST NOT perform synchronous I/O
+or network calls inside any trait method, and MUST NOT hold a contended/global
+lock across exporter/SDK work; span bookkeeping MUST stay bounded and
+short-lived (a per-shard concurrent map is fine; a global mutex held across
+span construction/export is not).
 
 #### Scenario: Domain crate has no opentelemetry symbols
 - GIVEN the `ego-domain` crate source, including `tracer.rs`
