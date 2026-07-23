@@ -50,8 +50,8 @@ Chain strategy: pending
 
 ## Phase 4: Runtime Wiring
 
-- [ ] TASK-013 RED: failing test — `RuntimeBuilder::with_tracer(Arc<dyn Tracer>)` registers `TracingInterceptor`; omitted ⇒ `NoopTracer` default, behavior byte-identical.
-- [ ] TASK-014 GREEN: implement `with_tracer` in `builder.rs` + thread `tracer` through `runtime_builder.rs` (mirror `with_observability`); the runtime owns an optional `Arc<dyn TracerLifecycle>` and calls `shutdown()` on teardown (not a `Tracer` method). AC: TASK-013 green.
+- [x] TASK-013 RED: failing test — `RuntimeBuilder::with_tracer(Arc<dyn Tracer>)` registers `TracingInterceptor`; omitted ⇒ `NoopTracer` default, behavior byte-identical.
+- [x] TASK-014 GREEN: implement `with_tracer` in `builder.rs` + thread `tracer` through `runtime_builder.rs` (mirror `with_observability`); the runtime owns an optional `Arc<dyn TracerLifecycle>` and calls `shutdown()` on teardown (not a `Tracer` method). AC: TASK-013 green.
 
 ## Phase 5: Outbound HTTP Propagation
 
