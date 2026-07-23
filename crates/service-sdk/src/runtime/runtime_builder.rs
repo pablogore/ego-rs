@@ -334,6 +334,8 @@ impl RuntimeInner {
     /// `security_providers` skip the authorization check. TASK-014 itself —
     /// making `issue_cross_tenant_permit` run a real `AuthorizationProvider`
     /// check — is still pending.
+    // Sole runtime wiring constructor; a params struct is a larger refactor out of scope.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new_with_logger(
         registry: ServiceRegistry,
         interceptor_chain: Arc<InterceptorChain>,

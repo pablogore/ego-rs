@@ -782,10 +782,8 @@ fn result_error_type(ty: &syn::Type) -> Option<&syn::Type> {
 }
 
 fn extract_error_types(ty: &syn::Type) -> proc_macro2::TokenStream {
-    if let Some(err_ty) = result_error_type(ty) {
-        if let syn::Type::Path(error_path) = err_ty {
-            return quote! { vec![stringify!(#error_path).to_string()] };
-        }
+    if let Some(syn::Type::Path(error_path)) = result_error_type(ty) {
+        return quote! { vec![stringify!(#error_path).to_string()] };
     }
     quote! { vec![] }
 }

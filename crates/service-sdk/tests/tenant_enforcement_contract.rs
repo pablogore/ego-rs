@@ -154,7 +154,7 @@ async fn unscoped_op_proceeds_normally_without_any_tenant() {
     let ctx = ServiceContext::new();
     let result = proxy.unscoped_op(ctx).await;
 
-    assert_eq!(result.unwrap(), true, "unscoped op proceeds with no tenant error");
+    assert!(result.unwrap(), "unscoped op proceeds with no tenant error");
 }
 
 // ---------------------------------------------------------------------------

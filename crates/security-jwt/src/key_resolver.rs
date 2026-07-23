@@ -146,6 +146,9 @@ mod fixture_pin_tests {
     const _EC_OTHER_PRIVATE: &str = include_str!("../tests/fixtures/test_ec_other_private.pem");
     const _EC_OTHER_PUBLIC: &str = include_str!("../tests/fixtures/test_ec_other_public.pem");
 
+    // fixtures are include_str! consts; the assert documents intent even though
+    // clippy can prove non-emptiness at compile time.
+    #[allow(clippy::const_is_empty)]
     #[test]
     fn ec_fixtures_are_non_empty() {
         assert!(!_EC_PRIVATE.is_empty());

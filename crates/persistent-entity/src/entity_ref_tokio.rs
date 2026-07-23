@@ -114,6 +114,9 @@ where
     /// (ADR-002) — a programming error (mismatched `entity_type`/command
     /// type). This is never treated as "no live entry" and never falls
     /// through to a competing spawn.
+    // Wiring constructor for the actor's full dependency set; splitting into a
+    // params struct is a larger refactor out of scope for this change.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         triple: EntityTriple,
         registry: Arc<EntityRegistry>,

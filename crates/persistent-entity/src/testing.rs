@@ -27,6 +27,8 @@ pub struct TestStore;
 
 impl TestStore {
     /// Returns a new, empty store — each test should create its own.
+    // Test helper: `new` intentionally returns a shared store handle, not `Self`.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Arc<Mutex<HashMap<String, TestState>>> {
         Arc::new(Mutex::new(HashMap::new()))
     }
@@ -167,6 +169,8 @@ pub struct TestEntityRef {
 
 impl TestEntityRef {
     /// Create a new test entity reference.
+    // Mirrors the production constructor's dependency set; params struct is out of scope.
+    #[allow(clippy::too_many_arguments)]
     pub fn new<C, E, S>(
         triple: EntityTriple,
         registry: Arc<EntityRegistry>,

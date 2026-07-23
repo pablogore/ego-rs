@@ -34,19 +34,14 @@ impl Default for LoggingSettings {
 }
 
 /// Mirrors config-models' logging format strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormatSetting {
+    #[default]
     Json,
     Pretty,
     Compact,
     Text,
-}
-
-impl Default for LogFormatSetting {
-    fn default() -> Self {
-        LogFormatSetting::Json
-    }
 }
 
 /// Holds the config already materialized by `kit_config::ConfigLoader`

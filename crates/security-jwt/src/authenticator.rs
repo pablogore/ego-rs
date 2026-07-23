@@ -109,6 +109,8 @@ fn ec_decoding_key(pem: &str) -> Result<DecodingKey, AuthenticationError> {
         .map_err(|e| AuthenticationError::InvalidToken(format!("bad EC public key: {e}")))
 }
 
+// Internal fan-in of validation inputs; grouping into a struct is out of scope.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn authenticate_inner(
     token: &str,
     config: &JwtProviderConfig,
@@ -444,6 +446,8 @@ mod tests {
     }
 
     impl CapturingResolver {
+        // Test helper returns the resolver plus a captured-kid handle; type alias out of scope.
+        #[allow(clippy::type_complexity)]
         fn new(
             key: VerificationKey,
             expected_alg: Option<JwtAlgorithm>,
