@@ -317,33 +317,34 @@ where
 
 #[cfg(test)]
 mod tests {
+    // These tests are deterministic and event-driven: the loop's collaborators
+    // (tag_provider, handler, reporter, store) signal over `mpsc` channels, and
+    // each test awaits those signals under a generous, load-immune timeout. They
+    // deliberately avoid "sleep a fixed window, then count iterations / assert an
+    // elapsed budget" — that pattern conflates loop liveness with machine load
+    // and flakes under `cargo test --workspace` (see issue #224).
     use super::*;
     use ego_domain::read_side::event_stream::EventStreamElement;
     use ego_domain::read_side::offset::Offset;
     use ego_domain::read_side::progress::NoopProgressReporter;
     use ego_domain::read_side::store::ReadSideStoreError;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use tokio::sync::mpsc;
 
+    /// A per-recv ceiling on how long we wait for an expected signal. A healthy
+    /// loop (millisecond interval) produces its next signal near-instantly; this
+    /// is only a backstop so a genuinely stuck/regressed loop fails as a timeout
+    /// instead of hanging forever.
+    const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Narrow poll interval so the loop turns over quickly within each test.
+    const FAST_INTERVAL: Duration = Duration::from_millis(1);
+
+    /// Fake store that returns no events for empty tag lists (fast path used by
+    /// the "fresh tag_provider per iteration" / termination tests) and one real
+    /// event when given a tag (used by the reporter test).
     #[derive(Clone, Default)]
-    struct CountingProvider {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl CountingProvider {
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    /// Store that returns no events for empty tag lists (fast path used by
-    /// the "fresh tag_provider per iteration" test) and, when given a tag,
-    /// sleeps before returning one real event (slow path used by the
-    /// "drains the in-flight batch" test).
-    #[derive(Clone, Default)]
-    struct FakeStore {
-        fetch_delay: Duration,
-    }
+    struct FakeStore;
 
     #[async_trait]
     impl ReadSideStore<serde_json::Value> for FakeStore {
@@ -354,9 +355,39 @@ mod tests {
             _offset: Option<&Offset>,
             _batch_size: usize,
         ) -> Result<Vec<EventStreamElement<serde_json::Value>>, ReadSideStoreError> {
-            if !self.fetch_delay.is_zero() {
-                tokio::time::sleep(self.fetch_delay).await;
-            }
+            Ok(vec![EventStreamElement::new(
+                "event-1",
+                "agg-1",
+                "tenant-a",
+                "Something",
+                serde_json::json!({}),
+                1,
+                chrono::Utc::now(),
+                vec![tag.clone()],
+            )])
+        }
+    }
+
+    /// Store that signals the instant a fetch begins, then blocks on a
+    /// caller-controlled delay, so a test can deterministically observe a batch
+    /// being *in flight* and request stop while it still is.
+    #[derive(Clone)]
+    struct InFlightSignalingStore {
+        started_tx: mpsc::UnboundedSender<()>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl ReadSideStore<serde_json::Value> for InFlightSignalingStore {
+        async fn fetch(
+            &self,
+            _tenant: &str,
+            tag: &EventTag,
+            _offset: Option<&Offset>,
+            _batch_size: usize,
+        ) -> Result<Vec<EventStreamElement<serde_json::Value>>, ReadSideStoreError> {
+            let _ = self.started_tx.send(());
+            tokio::time::sleep(self.delay).await;
             Ok(vec![EventStreamElement::new(
                 "event-1",
                 "agg-1",
@@ -419,28 +450,48 @@ mod tests {
         }
     }
 
+    /// Handler that succeeds silently — used where the tag stream is empty (so
+    /// it is never actually invoked) or where the handler is not the subject.
     #[derive(Clone)]
-    struct CountingHandler {
-        handled: Arc<AtomicUsize>,
-    }
+    struct NoopHandler;
 
     #[async_trait]
-    impl Handler<serde_json::Value> for CountingHandler {
+    impl Handler<serde_json::Value> for NoopHandler {
         async fn handle(
             &self,
             _events: &[EventStreamElement<serde_json::Value>],
         ) -> Result<(), ego_domain::read_side::error::ProjectionError> {
-            self.handled.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
-    /// Handler that always panics — used to prove `spawn`'s
-    /// [`stop`](ReadSideProjectionHandle::stop) surfaces a `JoinError` instead
-    /// of swallowing it (CORE-018 Finding F-02's lesson applied to the
-    /// spawn/stop lifecycle).
+    /// Handler that signals each time it runs, so a test can prove a batch's
+    /// handler actually executed (e.g. that an in-flight batch was drained).
     #[derive(Clone)]
-    struct PanickingHandler;
+    struct SignalHandler {
+        ran_tx: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl Handler<serde_json::Value> for SignalHandler {
+        async fn handle(
+            &self,
+            _events: &[EventStreamElement<serde_json::Value>],
+        ) -> Result<(), ego_domain::read_side::error::ProjectionError> {
+            let _ = self.ran_tx.send(());
+            Ok(())
+        }
+    }
+
+    /// Handler that signals it was entered and then panics — used to prove
+    /// `stop()` surfaces the resulting `JoinError` instead of swallowing it
+    /// (CORE-018 Finding F-02). The signal removes any need to "sleep to let the
+    /// panic happen": the test waits for the signal, so the panic is guaranteed
+    /// to have been reached before it stops.
+    #[derive(Clone)]
+    struct PanickingHandler {
+        entered_tx: mpsc::UnboundedSender<()>,
+    }
 
     #[async_trait]
     impl Handler<serde_json::Value> for PanickingHandler {
@@ -448,210 +499,204 @@ mod tests {
             &self,
             _events: &[EventStreamElement<serde_json::Value>],
         ) -> Result<(), ego_domain::read_side::error::ProjectionError> {
+            let _ = self.entered_tx.send(());
             panic!("deliberate handler panic for spawn JoinError test");
         }
     }
 
-    /// (a) `tag_provider` is called fresh every iteration — not captured
-    /// once — proven by letting the loop run for several poll intervals with
-    /// an empty tag list (so no store/handler machinery is exercised) and
-    /// observing multiple calls before stop. (b) stops gracefully when the
-    /// handle's `stop()` is called. The spec touches none of the defaulted
-    /// fields (reporter/on_error left at their defaults), proving the default
-    /// path is wired correctly.
-    #[tokio::test]
-    async fn spawn_with_default_spec_calls_tag_provider_and_stops_gracefully() {
-        let provider = CountingProvider::default();
-        let provider_for_closure = provider.clone();
-        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
+    /// Progress reporter that signals every completed batch, so a test can prove
+    /// a custom reporter was actually driven through the session machinery.
+    #[derive(Clone)]
+    struct ChannelReporter {
+        reported_tx: mpsc::UnboundedSender<()>,
+    }
 
-        // Only the required args — reporter, on_error and interval are left at
-        // their spec defaults, then the interval is narrowed so the loop turns
-        // over several times within the test window.
+    impl ProgressReporter for ChannelReporter {
+        fn on_batch_completed(
+            &self,
+            _projection_id: &str,
+            _tag: &EventTag,
+            _count: usize,
+            _offset: &Offset,
+        ) {
+            let _ = self.reported_tx.send(());
+        }
+    }
+
+    /// Awaits one signal from `rx` under [`SIGNAL_TIMEOUT`], panicking with
+    /// `context` on timeout (loop never produced the signal) or on channel close
+    /// (the loop terminated unexpectedly early).
+    async fn expect_signal(rx: &mut mpsc::UnboundedReceiver<()>, context: &str) {
+        tokio::time::timeout(SIGNAL_TIMEOUT, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: no signal within {SIGNAL_TIMEOUT:?}"))
+            .unwrap_or_else(|| panic!("{context}: channel closed before the signal arrived"));
+    }
+
+    /// (a) `tag_provider` is called fresh every iteration — proven by receiving
+    /// several distinct invocation signals rather than sleeping a window and
+    /// counting. (b) stops gracefully: `stop()` joins the loop task without a
+    /// panic. The spec touches none of the defaulted fields (reporter/on_error),
+    /// proving the default path is wired correctly.
+    #[tokio::test]
+    async fn spawn_with_default_spec_calls_tag_provider_fresh_each_iteration_and_stops_gracefully()
+    {
+        let (calls_tx, mut calls_rx) = mpsc::unbounded_channel::<()>();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+
         let spec = ProjectionSpec::new(
             "proj",
             move || {
-                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
-                Vec::new()
+                let _ = calls_tx.send(());
+                Vec::new() // empty tags: start_projection returns instantly
             },
-            CountingHandler {
-                handled: handled.clone(),
-            },
-            FakeStore::default(),
+            NoopHandler,
+            FakeStore,
             FakeDedup,
             FakeOffset,
         )
-        .interval(Duration::from_millis(5));
+        .interval(FAST_INTERVAL);
 
         let handle = scheduler.spawn(spec);
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        handle.stop().await.expect("task joins cleanly");
+        // Fresh call per iteration: require several distinct invocations.
+        for i in 0..3 {
+            expect_signal(&mut calls_rx, &format!("tag_provider iteration {i}")).await;
+        }
 
-        assert!(
-            provider.calls() >= 3,
-            "expected several fresh tag_provider calls across multiple poll iterations, got {}",
-            provider.calls()
-        );
+        handle.stop().await.expect("task joins cleanly");
     }
 
     /// The `ProjectionSpec::reporter` type-changing builder swaps the default
     /// `NoopProgressReporter` for a caller-supplied reporter, and `spawn` must
-    /// actually drive that reporter through the same session machinery — proven
-    /// by a recording reporter observing at least one completed batch for a
-    /// real (non-empty) tag stream.
+    /// actually drive it through the session machinery — proven by the reporter
+    /// signalling at least one completed batch for a real (non-empty) tag stream.
     #[tokio::test]
     async fn spawn_with_custom_reporter_spec_drives_the_reporter() {
-        #[derive(Clone, Default)]
-        struct RecordingReporter {
-            reports: Arc<AtomicUsize>,
-        }
-
-        impl ProgressReporter for RecordingReporter {
-            fn on_batch_completed(
-                &self,
-                _projection_id: &str,
-                _tag: &EventTag,
-                _count: usize,
-                _offset: &Offset,
-            ) {
-                self.reports.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let reporter = RecordingReporter::default();
+        let (reported_tx, mut reported_rx) = mpsc::unbounded_channel::<()>();
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
 
         let spec = ProjectionSpec::new(
             "proj",
             || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            CountingHandler {
-                handled: handled.clone(),
-            },
-            FakeStore::default(),
+            NoopHandler,
+            FakeStore,
             FakeDedup,
             FakeOffset,
         )
-        .interval(Duration::from_millis(5))
-        .reporter(reporter.clone());
+        .interval(FAST_INTERVAL)
+        .reporter(ChannelReporter { reported_tx });
 
         let handle = scheduler.spawn(spec);
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        handle.stop().await.expect("task joins cleanly");
+        expect_signal(&mut reported_rx, "custom reporter driven").await;
 
-        assert!(
-            reporter.reports.load(Ordering::SeqCst) >= 1,
-            "the custom reporter supplied via ProjectionSpec::reporter must have been driven at least once"
-        );
+        handle.stop().await.expect("task joins cleanly");
     }
 
-    /// The spawn/stop lifecycle drains any in-flight batch before `stop()`
-    /// resolves: the stop signal is sent (via `stop()`) while a simulated slow
-    /// fetch is still running, and the handler must still have been invoked —
-    /// proving the loop awaited the in-progress batch to completion rather than
-    /// aborting it — before `stop()` returns.
+    /// `stop()` drains any in-flight batch before returning: stop is requested
+    /// while a fetch is provably still in flight, and the batch's handler must
+    /// still run to completion — proving the loop awaited the in-progress batch
+    /// (the stop check only happens between iterations) rather than aborting it.
     #[tokio::test]
     async fn spawn_stop_drains_in_flight_batch_before_returning() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel::<()>();
+        let (ran_tx, mut ran_rx) = mpsc::unbounded_channel::<()>();
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
 
         let spec = ProjectionSpec::new(
             "proj",
             || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            CountingHandler {
-                handled: handled.clone(),
-            },
-            FakeStore {
-                fetch_delay: Duration::from_millis(60),
+            SignalHandler { ran_tx },
+            InFlightSignalingStore {
+                started_tx,
+                // Simulated fetch latency: only needs to keep the batch in flight
+                // across the stop request. Not a timed assertion — its exact value
+                // never gates the test.
+                delay: Duration::from_millis(50),
             },
             FakeDedup,
             FakeOffset,
         )
-        .interval(Duration::from_millis(5));
+        .interval(FAST_INTERVAL);
 
         let handle = scheduler.spawn(spec);
 
-        // Send stop while the first (slow) fetch is still in flight.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // The batch is now provably in flight (fetch started, mid-delay).
+        expect_signal(&mut started_rx, "fetch in flight").await;
 
-        let start = std::time::Instant::now();
+        // Request stop mid-batch and await the loop's task. If the in-flight
+        // batch was drained (not aborted), its handler ran — proven by the signal.
         handle.stop().await.expect("task joins cleanly");
-
-        assert!(
-            start.elapsed() >= Duration::from_millis(45),
-            "expected the in-flight slow fetch to be awaited to completion, returned too fast: {:?}",
-            start.elapsed()
-        );
-        assert_eq!(
-            handled.load(Ordering::SeqCst),
-            1,
-            "the in-flight batch's handler must have run exactly once, proving it was drained, not aborted"
-        );
+        expect_signal(
+            &mut ran_rx,
+            "in-flight batch handler must run (drained, not aborted)",
+        )
+        .await;
     }
 
-    /// Post-review Finding F-01, exercised through the public `spawn` API:
-    /// dropping the [`ReadSideProjectionHandle`] without calling `stop()` drops
-    /// the internal `watch::Sender`, and the poll loop must observe that
-    /// disconnection and terminate — not spin unbounded. Before the fix,
-    /// `stop_signal.changed()`'s `Result` was discarded in the `select!`, so a
-    /// closed channel (which makes `changed()` resolve immediately with `Err`
-    /// forever) bypassed `sleep(interval)` on every iteration — an unthrottled
-    /// busy loop that never terminates on its own.
+    /// Post-review Finding F-01, through the public `spawn` API: dropping the
+    /// [`ReadSideProjectionHandle`] without calling `stop()` drops the internal
+    /// `watch::Sender`, and the loop must observe that disconnection and
+    /// terminate — not spin unbounded (before the fix, the discarded `Err` from
+    /// `changed()` on a closed channel bypassed the interval into a busy loop).
     ///
-    /// The task's `JoinHandle` is bundled inside the dropped handle, so we can't
-    /// await it directly; termination is proven observationally — once the loop
-    /// stops, `tag_provider` stops being called, so its call count must plateau
-    /// across two windows (a regressed busy loop would keep incrementing it).
+    /// Deterministic proof via channel closure: the `tag_provider` closure holds
+    /// the only sender, so once the loop terminates and drops the closure the
+    /// channel closes and `recv()` yields `None`. A busy-loop regression would
+    /// instead keep sending unboundedly; the drain is bounded so that case fails
+    /// fast instead of hanging.
     #[tokio::test]
     async fn spawn_terminates_when_handle_is_dropped_without_stopping() {
-        let provider = CountingProvider::default();
-        let provider_for_closure = provider.clone();
+        let (calls_tx, mut calls_rx) = mpsc::unbounded_channel::<()>();
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
-        let handled = Arc::new(AtomicUsize::new(0));
 
         let spec = ProjectionSpec::new(
             "proj",
             move || {
-                provider_for_closure.calls.fetch_add(1, Ordering::SeqCst);
+                let _ = calls_tx.send(());
                 Vec::new()
             },
-            CountingHandler {
-                handled: handled.clone(),
-            },
-            FakeStore::default(),
+            NoopHandler,
+            FakeStore,
             FakeDedup,
             FakeOffset,
         )
-        .interval(Duration::from_millis(5));
+        .interval(FAST_INTERVAL);
 
         let handle = scheduler.spawn(spec);
 
-        // Let the loop turn over a few times, then drop the handle WITHOUT
-        // stopping — the dropped sender's disconnection itself must end the
-        // loop.
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Confirm the loop is actively iterating before dropping the handle.
+        for _ in 0..2 {
+            expect_signal(&mut calls_rx, "loop iterating before drop").await;
+        }
+
+        // Drop WITHOUT stopping — the disconnected stop sender must end the loop.
         drop(handle);
 
-        // Give the loop ample time to notice the drop and break, then sample
-        // the call count across two windows.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let after_drop = provider.calls();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let later = provider.calls();
-
-        assert!(
-            after_drop >= 1,
-            "the loop must have run at least once before the handle was dropped"
-        );
-        assert_eq!(
-            after_drop, later,
-            "after the handle (and its stop sender) was dropped the loop must have \
-             terminated; a still-growing tag_provider count means it kept spinning \
-             (F-01 busy-loop regression): {after_drop} then {later}"
-        );
+        // A terminated loop drops the tag_provider (last sender) → channel
+        // closes → recv() eventually yields None. Bound the drain so a
+        // busy-loop regression trips the cap instead of looping here forever.
+        const BUSY_LOOP_CAP: usize = 1000;
+        let mut drained = 0usize;
+        loop {
+            match tokio::time::timeout(SIGNAL_TIMEOUT, calls_rx.recv()).await {
+                Ok(Some(())) => {
+                    drained += 1;
+                    assert!(
+                        drained < BUSY_LOOP_CAP,
+                        "loop kept emitting {BUSY_LOOP_CAP}+ times after the handle was dropped \
+                         — it did not terminate (F-01 busy-loop regression)"
+                    );
+                }
+                // Channel closed: the loop terminated and dropped tag_provider.
+                Ok(None) => break,
+                Err(_) => panic!(
+                    "loop neither terminated nor closed its channel within {SIGNAL_TIMEOUT:?} \
+                     after the handle was dropped (F-01)"
+                ),
+            }
+        }
     }
 
     /// Finding F-02 through the public `spawn` API: a handler panic surfaces as
@@ -659,22 +704,24 @@ mod tests {
     /// `Result` rather than being silently discarded.
     #[tokio::test]
     async fn spawn_stop_surfaces_join_error_instead_of_swallowing_it() {
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
 
         let spec = ProjectionSpec::new(
             "proj",
             || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
-            PanickingHandler,
-            FakeStore::default(),
+            PanickingHandler { entered_tx },
+            FakeStore,
             FakeDedup,
             FakeOffset,
         )
-        .interval(Duration::from_millis(5));
+        .interval(FAST_INTERVAL);
 
         let handle = scheduler.spawn(spec);
 
-        // Give the loop time to actually hit the panic before we stop it.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The handler signals immediately before panicking, so once we observe
+        // this the task is guaranteed to panic — no fixed sleep needed.
+        expect_signal(&mut entered_rx, "panicking handler reached").await;
 
         let result = handle.stop().await;
         assert!(
@@ -730,9 +777,7 @@ mod tests {
                         "tenant-b".to_string(),
                     ),
                 ],
-                CountingHandler {
-                    handled: Arc::new(AtomicUsize::new(0)),
-                },
+                NoopHandler,
                 store.clone(),
                 FakeDedup,
                 FakeOffset,
