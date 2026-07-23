@@ -3,9 +3,10 @@
 //!
 //! ## Span-table semantics (ADR-5)
 //!
-//! The adapter holds a thread-safe `Map<SpanId, otel span>` keyed by the
-//! domain [`ego_domain::SpanId`] supplied as an argument to `start_span`/
-//! `end_span` — bookkeeping, never thread-local/ambient context propagation:
+//! The adapter holds a thread-safe `Map<SpanId, in-progress span record>`
+//! keyed by the domain [`ego_domain::SpanId`] supplied as an argument to
+//! `start_span`/`end_span` — bookkeeping, never thread-local/ambient context
+//! propagation:
 //!
 //! - `end_span` is **idempotent per `SpanId`**: the first call closes and
 //!   exports the span and removes it from the table; a later call for the
@@ -29,15 +30,13 @@ use ego_domain::{
     Tracer, TracerLifecycle,
 };
 use opentelemetry::trace::{
-    Span as OtelSpanTrait, SpanBuilder, SpanContext as OtelSpanContext, SpanId as OtelSpanId,
-    Status as OtelStatus, TraceContextExt, TraceFlags, TraceId as OtelTraceId,
-    Tracer as OtelTracerTrait, TracerProvider as OtelTracerProviderTrait, TraceState,
+    SpanContext as OtelSpanContext, SpanId as OtelSpanId, SpanKind as OtelSpanKind,
+    Status as OtelStatus, TraceFlags, TraceId as OtelTraceId, TraceState,
 };
-use opentelemetry::{Context as OtelContext, KeyValue};
+use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{SpanExporter as OtlpSpanExporter, WithExportConfig};
-use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator, SdkTracer, SdkTracerProvider, Span as SdkSpan};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use opentelemetry_sdk::trace::{BatchSpanProcessor, SpanData, SpanProcessor};
+use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
 // Lossless domain <-> otel id conversion (TASK-022/023)
@@ -77,65 +76,6 @@ fn from_otel_span_id(id: OtelSpanId) -> DomainSpanId {
 }
 
 // ---------------------------------------------------------------------------
-// DomainIdGenerator — forces the exported span's OWN span_id to the domain's
-// (PROD-003 PR5 correctness fix)
-// ---------------------------------------------------------------------------
-//
-// `opentelemetry_sdk::trace::SdkTracer::build_with_context` never accepts a
-// caller-supplied span id: it always calls the provider's configured
-// `IdGenerator::new_span_id()` exactly once, synchronously, to mint the new
-// span's own id (see `opentelemetry_sdk` 0.32's `Tracer::build_with_context`).
-// `parent_context()` below only forces the PARENT link (trace_id +
-// parent_span_id) via a remote `SpanContext` — it cannot influence the new
-// span's own id at all, since `opentelemetry`'s public `SpanBuilder` has no
-// `span_id`/`trace_id` field or setter in this version.
-//
-// This adapter-internal `IdGenerator` closes that gap: `start_span` pushes
-// the domain-derived id onto a queue immediately before calling
-// `build_with_context`, and `new_span_id()` pops it. This is bookkeeping
-// confined to the adapter (ADR-5) — it does NOT read
-// `Context::current()`/`Span::current()` or any other ambient/thread-local
-// framework state; the only input is the explicit id pushed by `start_span`.
-#[derive(Debug, Default)]
-struct DomainIdGenerator {
-    next_span_ids: Arc<Mutex<VecDeque<OtelSpanId>>>,
-}
-
-impl DomainIdGenerator {
-    fn new() -> (Self, Arc<Mutex<VecDeque<OtelSpanId>>>) {
-        let queue = Arc::new(Mutex::new(VecDeque::new()));
-        (
-            Self {
-                next_span_ids: queue.clone(),
-            },
-            queue,
-        )
-    }
-}
-
-impl IdGenerator for DomainIdGenerator {
-    fn new_trace_id(&self) -> OtelTraceId {
-        // Never used to mint a child span's trace id in practice: every
-        // span built here goes through `parent_context()`, which supplies
-        // an active remote span context, so `build_with_context` takes the
-        // trace id from the parent context instead of calling this method.
-        // Falls back to the default random generator for defense in depth
-        // (e.g. if `opentelemetry_sdk` internals ever change).
-        RandomIdGenerator::default().new_trace_id()
-    }
-
-    fn new_span_id(&self) -> OtelSpanId {
-        let mut queue = self
-            .next_span_ids
-            .lock()
-            .expect("DomainIdGenerator queue mutex poisoned");
-        queue
-            .pop_front()
-            .unwrap_or_else(|| RandomIdGenerator::default().new_span_id())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // OtlpConfig
 // ---------------------------------------------------------------------------
 
@@ -151,7 +91,10 @@ pub enum OtlpProtocol {
 /// Configuration for [`OtlpTracer`].
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
-    /// The OTLP collector endpoint (e.g. `http://localhost:4317`).
+    /// The OTLP collector endpoint. For `Grpc` this is the base gRPC endpoint
+    /// (e.g. `http://localhost:4317`). For `Http` it is used verbatim as the
+    /// traces URL — the exporter does NOT append `/v1/traces`, so pass the full
+    /// path (e.g. `http://localhost:4318/v1/traces`).
     pub endpoint: String,
     /// The wire transport to export over.
     pub protocol: OtlpProtocol,
@@ -174,34 +117,47 @@ fn build_exporter(config: &OtlpConfig) -> Result<OtlpSpanExporter, opentelemetry
 }
 
 // ---------------------------------------------------------------------------
+// InProgressSpan — bookkeeping record for a started-but-not-yet-ended span
+// ---------------------------------------------------------------------------
+
+/// Everything `end_span` needs to build the exported `SpanData` directly,
+/// captured at `start_span` time. Deliberately plain data — no SDK span
+/// object, no OTel call is involved in producing or holding this record.
+struct InProgressSpan {
+    trace_id: DomainTraceId,
+    span_id: DomainSpanId,
+    parent_span_id: Option<DomainSpanId>,
+    name: String,
+    start_time: SystemTime,
+    attributes: Vec<KeyValue>,
+}
+
+// ---------------------------------------------------------------------------
 // OtlpTracer
 // ---------------------------------------------------------------------------
 
 /// OTLP-backed `Tracer` + `TracerLifecycle` adapter.
 ///
-/// Holds a `Mutex<HashMap<DomainSpanId, SdkSpan>>` span table keyed by the
-/// argument-supplied domain [`ego_domain::SpanId`] (ADR-5) — bookkeeping
-/// only, never ambient/thread-local context.
+/// Holds a [`dashmap::DashMap<DomainSpanId, InProgressSpan>`] span table
+/// keyed by the argument-supplied domain [`ego_domain::SpanId`] (ADR-5) —
+/// bookkeeping only, never ambient/thread-local context. `DashMap` gives
+/// per-shard locking, so `start_span`/`end_span` never hold one contended,
+/// global lock — and, critically, no lock is ever held across `opentelemetry`
+/// SDK/exporter work: `start_span` does not call into OTel at all, and
+/// `end_span` releases its shard guard (via `DashMap::remove`) before handing
+/// the built `SpanData` to the span processor's `on_end`.
 ///
-/// The exported span is **fully domain-identified**: `trace_id`, its OWN
-/// `span_id`, and `parent_span_id` are all forced to the values carried by
-/// the domain [`ego_domain::TraceContext`] passed to `start_span` — none of
-/// the three is left to the SDK's default random `IdGenerator`. `trace_id`/
-/// `parent_span_id` are forced via the remote `SpanContext` built by
-/// `parent_context()`; the span's own `span_id` is forced via the adapter's
-/// [`DomainIdGenerator`], since `opentelemetry`'s `SpanBuilder` has no
-/// `span_id` field or setter to set it directly. This is what makes
+/// The exported span is built **directly** from the domain ids recorded in
+/// the `InProgressSpan`, with no OTel `Tracer`/`IdGenerator` involved:
+/// `span_context.span_id()`, `span_context.trace_id()`, and
+/// `parent_span_id` are all forced to the values carried by the domain
+/// [`ego_domain::TraceContext`] passed to `start_span`. This is what makes
 /// cross-service propagation correct: the `span_id` this adapter exports is
 /// the exact same id `to_traceparent()` propagates downstream as the next
 /// service's `parent_span_id`, so the collector can stitch the link.
 pub struct OtlpTracer {
-    tracer: SdkTracer,
-    provider: SdkTracerProvider,
-    table: Mutex<HashMap<DomainSpanId, SdkSpan>>,
-    /// Shared with the `DomainIdGenerator` wired into `provider`'s config —
-    /// `start_span` pushes the next span's forced id here (see
-    /// `DomainIdGenerator` doc comment for the single-consumer guarantee).
-    next_span_ids: Arc<Mutex<VecDeque<OtelSpanId>>>,
+    processor: Box<dyn SpanProcessor>,
+    table: dashmap::DashMap<DomainSpanId, InProgressSpan>,
     max_in_flight_spans: usize,
 }
 
@@ -215,45 +171,24 @@ impl std::fmt::Debug for OtlpTracer {
 
 impl OtlpTracer {
     /// Construct an `OtlpTracer` wired to the OTLP collector described by
-    /// `config`. Building the exporter/provider is lazy: this MUST NOT panic
-    /// or block even when no collector is reachable at `config.endpoint` —
-    /// the underlying gRPC channel/HTTP client connect lazily on first
-    /// export, and export itself happens on a background batch processor
-    /// (never on the `start_span`/`end_span` call path).
+    /// `config`. Building the exporter/processor is lazy: this MUST NOT
+    /// panic or block even when no collector is reachable at
+    /// `config.endpoint` — the underlying gRPC channel/HTTP client connect
+    /// lazily on first export, and export itself happens on a background
+    /// batch processor (never on the `start_span`/`end_span` call path).
     pub fn new(config: OtlpConfig) -> Result<Self, opentelemetry_otlp::ExporterBuildError> {
         let exporter = build_exporter(&config)?;
-        let (id_generator, next_span_ids) = DomainIdGenerator::new();
-        let provider = SdkTracerProvider::builder()
-            .with_id_generator(id_generator)
-            .with_batch_exporter(exporter)
-            .build();
-        Ok(Self::from_provider(
-            provider,
-            next_span_ids,
-            config.max_in_flight_spans,
-        ))
+        let processor = BatchSpanProcessor::builder(exporter).build();
+        Ok(Self::from_processor(processor, config.max_in_flight_spans))
     }
 
-    /// Build directly from an already-configured `SdkTracerProvider` (e.g.
-    /// one wired to an in-memory exporter for tests) plus the queue handle
-    /// shared with the `DomainIdGenerator` that provider was built with. Not
-    /// part of the public port — an infra-internal test/construction seam.
-    ///
-    /// Callers MUST build `provider` with `.with_id_generator(id_generator)`
-    /// using the `DomainIdGenerator` paired with `next_span_ids` (i.e. the
-    /// two halves returned together by `DomainIdGenerator::new()`) — passing
-    /// mismatched halves silently falls back to random span ids.
-    fn from_provider(
-        provider: SdkTracerProvider,
-        next_span_ids: Arc<Mutex<VecDeque<OtelSpanId>>>,
-        max_in_flight_spans: usize,
-    ) -> Self {
-        let tracer = provider.tracer("ego-rs");
+    /// Build directly from an already-configured [`SpanProcessor`] (e.g. one
+    /// wired to an in-memory exporter for tests). Not part of the public
+    /// port — an infra-internal test/construction seam.
+    fn from_processor(processor: impl SpanProcessor + 'static, max_in_flight_spans: usize) -> Self {
         Self {
-            tracer,
-            provider,
-            table: Mutex::new(HashMap::new()),
-            next_span_ids,
+            processor: Box::new(processor),
+            table: dashmap::DashMap::new(),
             max_in_flight_spans,
         }
     }
@@ -262,28 +197,8 @@ impl OtlpTracer {
     /// Test/diagnostic seam.
     #[cfg(test)]
     fn in_flight_count(&self) -> usize {
-        self.table.lock().expect("span table mutex poisoned").len()
+        self.table.len()
     }
-}
-
-/// Build the otel parent `Context` for a new span from the domain
-/// `TraceContext`: `trace_id` is forced to the domain's `trace_id` (so the
-/// exported span always carries EGO's own trace identity, root or not), and
-/// `parent_span_id` is the domain's `parent_span_id` when present (else
-/// `SpanId::INVALID`, correctly representing a root span to the SDK).
-fn parent_context(ctx: &TraceContext) -> OtelContext {
-    let parent_span_id = ctx
-        .parent_span_id()
-        .map(to_otel_span_id)
-        .unwrap_or(OtelSpanId::INVALID);
-    let span_context = OtelSpanContext::new(
-        to_otel_trace_id(ctx.trace_id()),
-        parent_span_id,
-        TraceFlags::SAMPLED,
-        true,
-        TraceState::NONE,
-    );
-    OtelContext::new().with_remote_span_context(span_context)
 }
 
 /// Map the redaction-safe domain [`SpanAttributes`] allow-list to OTel
@@ -303,9 +218,12 @@ fn to_otel_attributes(attrs: &SpanAttributes) -> Vec<KeyValue> {
 impl Tracer for OtlpTracer {
     fn start_span(&self, ctx: &TraceContext, name: &str, attrs: SpanAttributes) {
         let key = ctx.span_id();
-        let mut table = self.table.lock().expect("span table mutex poisoned");
 
-        if table.contains_key(&key) {
+        // No OTel call anywhere in this method, no lock held across SDK/
+        // exporter work: `DashMap` gives per-shard locking for the
+        // contains_key/len/insert bookkeeping below, and none of it touches
+        // `opentelemetry`.
+        if self.table.contains_key(&key) {
             tracing::warn!(
                 span_id = %key.to_hex(),
                 "OtlpTracer::start_span: duplicate start for a still-live span id; ignoring"
@@ -313,7 +231,12 @@ impl Tracer for OtlpTracer {
             return;
         }
 
-        if table.len() >= self.max_in_flight_spans {
+        // Soft bound: a benign TOCTOU race between this length check and the
+        // insert below is acceptable (this is bookkeeping capacity, not a
+        // hard safety invariant) — it trades a global lock for the rare
+        // possibility of a slightly-over-capacity table under concurrent
+        // racing starts.
+        if self.table.len() >= self.max_in_flight_spans {
             tracing::warn!(
                 span_id = %key.to_hex(),
                 max_in_flight_spans = self.max_in_flight_spans,
@@ -322,64 +245,93 @@ impl Tracer for OtlpTracer {
             return;
         }
 
-        let parent_cx = parent_context(ctx);
-        let builder =
-            SpanBuilder::from_name(name.to_string()).with_attributes(to_otel_attributes(&attrs));
-
-        // Force the exported span's OWN id to the domain span id (PR5 fix):
-        // push it onto the queue the `DomainIdGenerator` drains from. Safe
-        // because `table`'s lock (held for this whole function) serializes
-        // every `start_span` call across threads, so no other thread's push
-        // can land between this push and the pop that
-        // `build_with_context` performs synchronously, on this thread,
-        // exactly once, immediately below.
-        self.next_span_ids
-            .lock()
-            .expect("DomainIdGenerator queue mutex poisoned")
-            .push_back(to_otel_span_id(key));
-
-        let span = self.tracer.build_with_context(builder, &parent_cx);
-        table.insert(key, span);
+        self.table.insert(
+            key,
+            InProgressSpan {
+                trace_id: ctx.trace_id(),
+                span_id: key,
+                parent_span_id: ctx.parent_span_id(),
+                name: name.to_string(),
+                start_time: SystemTime::now(),
+                attributes: to_otel_attributes(&attrs),
+            },
+        );
     }
 
-    fn end_span(&self, span: DomainSpanId, outcome: SpanOutcome) {
-        let mut table = self.table.lock().expect("span table mutex poisoned");
-        let Some(mut live) = table.remove(&span) else {
+    fn end_span(&self, span_id: DomainSpanId, outcome: SpanOutcome) {
+        // `DashMap::remove` returns the owned entry and releases its shard
+        // guard before we ever touch `opentelemetry` — no table lock is held
+        // across the `SpanData` construction or the `on_end` call below.
+        let Some((_, record)) = self.table.remove(&span_id) else {
             // Idempotent: already ended, or never started. No-op either way.
             return;
         };
-        drop(table);
 
-        match outcome {
-            SpanOutcome::Ok => {}
-            SpanOutcome::Error { status_message } => {
-                live.set_status(OtelStatus::error(status_message));
-            }
-        }
-        live.end();
+        let status = match outcome {
+            SpanOutcome::Ok => OtelStatus::Ok,
+            SpanOutcome::Error { status_message } => OtelStatus::error(status_message),
+        };
+        self.processor.on_end(build_span_data(record, status));
+    }
+}
+
+/// Build the exported `SpanData` directly from a domain-identified
+/// [`InProgressSpan`] record — no SDK `Tracer`/`IdGenerator` involved.
+/// `span_context.span_id()`/`trace_id()` and `parent_span_id` are all forced
+/// to the domain ids captured by `start_span` (PROD-003 PR5 fix).
+fn build_span_data(record: InProgressSpan, status: OtelStatus) -> SpanData {
+    let span_context = OtelSpanContext::new(
+        to_otel_trace_id(record.trace_id),
+        to_otel_span_id(record.span_id),
+        TraceFlags::SAMPLED,
+        false,
+        TraceState::NONE,
+    );
+    let parent_span_id = record
+        .parent_span_id
+        .map(to_otel_span_id)
+        .unwrap_or(OtelSpanId::INVALID);
+
+    SpanData {
+        span_context,
+        parent_span_id,
+        parent_span_is_remote: record.parent_span_id.is_some(),
+        span_kind: OtelSpanKind::Server,
+        name: record.name.into(),
+        start_time: record.start_time,
+        end_time: SystemTime::now(),
+        attributes: record.attributes,
+        dropped_attributes_count: 0,
+        events: Default::default(),
+        links: Default::default(),
+        status,
+        instrumentation_scope: InstrumentationScope::builder("ego-rs").build(),
     }
 }
 
 impl TracerLifecycle for OtlpTracer {
     /// Flush all pending (unended) spans and clear the span table (ADR-9).
     ///
-    /// This ends every orphaned span still in the table (so its data reaches
-    /// the configured `SpanExporter`) and force-flushes the underlying
-    /// provider so the export is not left sitting in the batch processor's
-    /// queue. It deliberately does NOT tear down the `SdkTracerProvider`
-    /// itself (no exporter/processor shutdown): the domain contract for
-    /// `shutdown` is "flush pending + clear the table", not "the process is
-    /// exiting and connections must close" — and leaving the provider live
-    /// keeps a caller-visible re-flush idempotent rather than turning any
-    /// later export into a silent post-shutdown no-op.
+    /// This exports every orphaned span still in the table directly (via the
+    /// span processor's `on_end`, building `SpanData` exactly like a normal
+    /// `end_span` — but with `Status::Unset`, since these spans were never
+    /// explicitly ended with an outcome) and force-flushes the processor so
+    /// the export is not left sitting in the batch processor's queue. It
+    /// deliberately does NOT tear down the span processor itself: the domain
+    /// contract for `shutdown` is "flush pending + clear the table", not
+    /// "the process is exiting and connections must close" — and leaving
+    /// the processor live keeps a caller-visible re-flush idempotent rather
+    /// than turning any later export into a silent post-shutdown no-op.
     fn shutdown(&self) {
-        let mut table = self.table.lock().expect("span table mutex poisoned");
-        for (_, mut span) in table.drain() {
-            span.end();
+        let orphaned_keys: Vec<DomainSpanId> = self.table.iter().map(|entry| *entry.key()).collect();
+        for span_id in orphaned_keys {
+            if let Some((_, record)) = self.table.remove(&span_id) {
+                self.processor
+                    .on_end(build_span_data(record, OtelStatus::Unset));
+            }
         }
-        drop(table);
 
-        if let Err(err) = self.provider.force_flush() {
+        if let Err(err) = self.processor.force_flush() {
             tracing::warn!(error = %err, "OtlpTracer::shutdown: force-flushing pending spans reported an error");
         }
     }
@@ -389,7 +341,7 @@ impl TracerLifecycle for OtlpTracer {
 mod tests {
     use super::*;
     use ego_domain::TraceContext;
-    use opentelemetry_sdk::trace::{BatchSpanProcessor, InMemorySpanExporter, InMemorySpanExporterBuilder};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, InMemorySpanExporterBuilder};
     use std::time::Duration;
 
     /// Build an `OtlpTracer` wired to an in-memory exporter (no live
@@ -400,18 +352,15 @@ mod tests {
     /// stub server is heavyweight for a unit-test suite, so this uses
     /// `opentelemetry_sdk`'s in-memory `SpanExporter` test double instead —
     /// it proves the OTLP adapter's span table hands completed spans to
-    /// WHATEVER `SpanExporter` the provider is configured with, independent
-    /// of the wire transport (which is exercised separately, without a live
-    /// endpoint, by `otlp_tracer_can_be_constructed_for_each_protocol`).
+    /// WHATEVER `SpanProcessor`/`SpanExporter` the adapter is configured
+    /// with, independent of the wire transport (which is exercised
+    /// separately, without a live endpoint, by
+    /// `otlp_tracer_can_be_constructed_for_each_protocol`).
     fn otlp_tracer_with_in_memory_exporter(max_in_flight_spans: usize) -> (OtlpTracer, InMemorySpanExporter) {
         let exporter = InMemorySpanExporterBuilder::new().build();
-        let (id_generator, next_span_ids) = DomainIdGenerator::new();
-        let provider = SdkTracerProvider::builder()
-            .with_id_generator(id_generator)
-            .with_span_processor(BatchSpanProcessor::builder(exporter.clone()).build())
-            .build();
+        let processor = BatchSpanProcessor::builder(exporter.clone()).build();
         (
-            OtlpTracer::from_provider(provider, next_span_ids, max_in_flight_spans),
+            OtlpTracer::from_processor(processor, max_in_flight_spans),
             exporter,
         )
     }
@@ -450,7 +399,7 @@ mod tests {
 
         assert_eq!(tracer.in_flight_count(), 0, "second end must be a no-op");
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -468,7 +417,7 @@ mod tests {
 
         assert_eq!(tracer.in_flight_count(), 0);
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         assert_eq!(
@@ -496,7 +445,7 @@ mod tests {
 
         tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -573,7 +522,7 @@ mod tests {
         );
 
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -601,7 +550,7 @@ mod tests {
         tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
 
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -674,9 +623,9 @@ mod tests {
 
     #[tokio::test]
     async fn otlp_tracer_can_be_constructed_for_each_protocol_without_a_live_collector() {
-        // Building the exporter/provider must not panic or block even though
-        // nothing is listening at these endpoints — gRPC channels and the
-        // HTTP client connect lazily; the batch processor exports in the
+        // Building the exporter/processor must not panic or block even
+        // though nothing is listening at these endpoints — gRPC channels and
+        // the HTTP client connect lazily; the batch processor exports in the
         // background, never during construction. Requires a Tokio runtime
         // context (the tonic channel/hyper-util client resolve the current
         // reactor at construction time, even though they do not connect).
@@ -703,7 +652,7 @@ mod tests {
         tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
 
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -726,7 +675,7 @@ mod tests {
         tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
 
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();
@@ -749,10 +698,10 @@ mod tests {
 
     #[test]
     fn two_sequential_spans_each_export_with_their_own_distinct_domain_span_id() {
-        // Triangulation: proves `DomainIdGenerator` is not just returning a
-        // fixed/hardcoded id — two DIFFERENT domain span ids, started and
-        // ended one after another on the queue, must each come back out on
-        // their OWN exported span, never swapped or reused.
+        // Triangulation: proves the exported span_id is not just a
+        // fixed/hardcoded value — two DIFFERENT domain span ids, started and
+        // ended one after another, must each come back out on their OWN
+        // exported span, never swapped or reused.
         let (tracer, exporter) = otlp_tracer_with_in_memory_exporter(4);
         let ctx_a = TraceContext::root();
         let ctx_b = TraceContext::root();
@@ -768,7 +717,7 @@ mod tests {
         tracer.end_span(ctx_b.span_id(), SpanOutcome::Ok);
 
         tracer
-            .provider
+            .processor
             .force_flush()
             .expect("in-memory exporter flush must not fail");
         let finished = exporter.get_finished_spans().unwrap();

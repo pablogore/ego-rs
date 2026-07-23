@@ -27,9 +27,13 @@
 //!
 //! ## Non-blocking
 //!
-//! `Tracer` implementations MUST NOT perform blocking operations (sync I/O,
-//! network calls, lock contention) inside any trait method, mirroring
-//! `Observability`'s non-blocking contract.
+//! `Tracer` implementations MUST NOT perform synchronous I/O or network calls
+//! inside any trait method, and MUST NOT hold a contended/global lock across
+//! exporter/SDK work; span bookkeeping MUST stay bounded and short-lived. This
+//! is the precise property an exporter-backed adapter must satisfy — a
+//! per-shard concurrent map for bookkeeping is fine; a global mutex held
+//! across span construction/export is not. (A sharper statement of
+//! `Observability`'s non-blocking intent.)
 
 use rand::RngCore;
 use std::time::Duration;
@@ -345,9 +349,9 @@ pub enum SpanOutcome {
 ///
 /// # Non-blocking
 ///
-/// Implementations MUST NOT perform blocking operations (sync I/O, network
-/// calls, lock contention) inside any method on this trait, mirroring
-/// `Observability`'s non-blocking contract.
+/// Implementations MUST NOT perform synchronous I/O or network calls inside
+/// any method on this trait, and MUST NOT hold a contended/global lock across
+/// exporter/SDK work; span bookkeeping MUST stay bounded and short-lived.
 pub trait Tracer: Send + Sync {
     /// Start a span for `ctx`. Returns nothing: the authoritative span
     /// identity is `ctx.span_id()` (`TraceContext::span_id()`), so there is

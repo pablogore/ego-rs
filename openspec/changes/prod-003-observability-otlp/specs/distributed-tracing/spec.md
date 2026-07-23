@@ -185,9 +185,11 @@ payload data MUST NOT be expressible as `SpanAttributes`. The
 
 The `Tracer` trait signature (methods, parameters, return types) MUST NOT
 reference `opentelemetry` or any other vendor type; all such types MUST be
-confined to `infrastructure`. Implementations MUST NOT perform blocking
-operations (sync I/O, network calls, lock contention) inside any trait
-method, mirroring `Observability`'s non-blocking contract.
+confined to `infrastructure`. Implementations MUST NOT perform synchronous I/O
+or network calls inside any trait method, and MUST NOT hold a contended/global
+lock across exporter/SDK work; span bookkeeping MUST stay bounded and
+short-lived (a per-shard concurrent map is fine; a global mutex held across
+span construction/export is not).
 
 #### Scenario: Domain crate has no opentelemetry symbols
 - GIVEN the `ego-domain` crate source, including `tracer.rs`
