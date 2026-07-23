@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 pub mod application;
 pub mod domain;
+pub mod outbound;
 pub mod ports;
 pub mod providers;
 pub mod read_side;

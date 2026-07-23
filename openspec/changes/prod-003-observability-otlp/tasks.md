@@ -53,12 +53,19 @@ Chain strategy: pending
 - [x] TASK-013 RED: failing test — `RuntimeBuilder::with_tracer(Arc<dyn Tracer>)` registers `TracingInterceptor`; omitted ⇒ `NoopTracer` default, behavior byte-identical.
 - [x] TASK-014 GREEN: implement `with_tracer` in `builder.rs` + thread `tracer` through `runtime_builder.rs` (mirror `with_observability`); the runtime owns an optional `Arc<dyn TracerLifecycle>` and calls `shutdown()` on teardown (not a `Tracer` method). AC: TASK-013 green.
 
-## Phase 5: Outbound HTTP Propagation
+## Phase 5: HTTP Trace-Context — Ingress Origination + Outbound Propagation
 
-- [ ] TASK-015 RED: failing test in `crates/transport` — helper builds `traceparent` header from an explicitly-passed `TraceContext` (`ctx.trace_context().to_traceparent()`), no ambient lookup, and starts no span.
-- [ ] TASK-016 GREEN: implement `crates/transport/src/propagation.rs` header-builder helper + `pub mod propagation;` in `lib.rs`. AC: TASK-015 green.
-- [ ] TASK-017 RED: failing test at a reference-app outbound call site (new `examples/reference-app/tests/outbound_trace_propagation.rs`) proving the outgoing request carries `traceparent` equal to `ctx.trace_context().to_traceparent()` and no new span is started.
-- [ ] TASK-018 GREEN: wire the reference-app outbound call site to apply the propagation helper. AC: TASK-017 green.
+### Ingress origination (SS-4 — added post-verify: `service-sdk/spec.md` "Trace-Context Originates At HTTP Ingress" had no covering task; without it the feature originates no trace in production)
+
+- [x] TASK-014a RED: failing test at the HTTP ingress boundary — the request→`ServiceContext` path originates a `TraceContext` exactly once: `TraceContext::from_inbound(traceparent)` when an inbound `traceparent` header is present, else `TraceContext::root()`, attached via `ServiceContext::with_trace_context`. No ambient lookup.
+- [x] TASK-014b GREEN: implement ingress origination at the HTTP handler boundary and attach the `TraceContext` to the `ServiceContext` threaded downstream. AC: TASK-014a green — a request carrying an inbound `traceparent` continues that trace (parent linkage); one without starts a fresh root.
+
+### Outbound propagation
+
+- [x] TASK-015 RED: failing test in `crates/transport` — helper builds `traceparent` header from an explicitly-passed `TraceContext` (`ctx.trace_context().to_traceparent()`), no ambient lookup, and starts no span.
+- [x] TASK-016 GREEN: implement `crates/transport/src/propagation.rs` header-builder helper + `pub mod propagation;` in `lib.rs`. AC: TASK-015 green.
+- [x] TASK-017 RED: failing test at a reference-app outbound call site (new `examples/reference-app/tests/outbound_trace_propagation.rs`) proving the outgoing request carries `traceparent` equal to `ctx.trace_context().to_traceparent()` and no new span is started.
+- [x] TASK-018 GREEN: wire the reference-app outbound call site to apply the propagation helper. AC: TASK-017 green.
 
 ## Phase 6: Infrastructure OTLP Adapter
 

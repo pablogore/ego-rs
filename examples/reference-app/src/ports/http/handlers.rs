@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use ego_service_sdk::context::ServiceContext;
+use ego_transport::propagation::originate_trace_context;
 use ego_transport::{AppState, AuthenticatedContext, TransportError};
 use kitlogger_log_domain::Severity;
 
@@ -54,6 +55,7 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
 pub async fn register_handler(
     State(state): State<AppState>,
     AuthenticatedContext(security): AuthenticatedContext,
+    headers: HeaderMap,
     Json(input): Json<RegisterInput>,
 ) -> Result<(StatusCode, Json<RegisterOutput>), TransportError> {
     log(&state, Severity::Info, &format!("POST /register: user_id={}", input.user_id));
@@ -63,9 +65,16 @@ pub async fn register_handler(
         .resolve::<RegisterUserTag>()
         .map_err(|_| TransportError::Internal)?;
 
+    // PROD-003 (service-sdk spec: "Trace-Context Originates At HTTP Ingress"):
+    // origination happens exactly once, here, at the HTTP handler boundary —
+    // continues an inbound `traceparent` when present and well-formed, else
+    // starts a fresh root trace. Attached explicitly; no ambient lookup.
+    let trace_context = originate_trace_context(&headers);
+
     let ctx = ServiceContext::new()
         .with_security(Arc::new(security))
-        .with_tenant_id(input.tenant_id.clone());
+        .with_tenant_id(input.tenant_id.clone())
+        .with_trace_context(trace_context);
 
     let user_id = input.user_id.clone();
     match proxy.register(ctx, input).await {

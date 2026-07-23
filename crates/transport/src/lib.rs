@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod error;
+pub mod propagation;
 pub mod security;
 pub mod server;
 pub mod state;
