@@ -288,23 +288,37 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         (ctx, call_args)
                     };
 
-                // CORE-008A TASK-012: the context parameter's binding is `mut` only for
-                // `#[tenant_scoped]` methods, which call `enforce_tenant(&mut ctx_param)`.
-                // Unmarked operations no longer touch enforce_tenant at all (code-review
-                // fix) and must keep a plain binding — an unconditional `mut` here would
-                // produce an `unused_mut` warning on every unmarked operation.
+                // #212 (PROD-003 follow-up): the context parameter is always rebound at
+                // the top of the body via `with_operation_name` (see
+                // `operation_name_binding` below). `enforce_tenant(&mut ctx_param)` takes
+                // its `&mut` from that rebinding, so the incoming parameter itself is only
+                // ever moved (never mutated in place) and must keep a plain binding — a
+                // `mut` here would now be `unused_mut`. The `mut` that `#[tenant_scoped]`
+                // needs lives on the rebinding instead (CORE-008A TASK-012).
                 let sig_params: Vec<proc_macro2::TokenStream> = arg_names
                     .iter()
                     .zip(arg_types.iter())
-                    .enumerate()
-                    .map(|(i, (name, ty))| {
-                        if Some(i) == ctx_param_idx && has_tenant_scoped {
-                            quote! { mut #name: #ty }
-                        } else {
-                            quote! { #name: #ty }
-                        }
-                    })
+                    .map(|(name, ty)| quote! { #name: #ty })
                     .collect();
+
+                // #212 (PROD-003 follow-up): stamp the dispatched operation's name onto the
+                // context once, right after it is bound and before any downstream consumer
+                // (the #[authorize]/#[tenant_scoped] guards, on_request, the inner handler,
+                // on_response/on_error) observes it — so the TracingInterceptor names the
+                // request-boundary span after the operation. The context param is owned, so
+                // consuming `with_operation_name` and rebinding is free; the rebinding is
+                // `mut` only for #[tenant_scoped] operations, which take `&mut ctx_param`
+                // for `enforce_tenant` (a `mut` on any other operation would be unused).
+                // Skipped for the parameterless phantom-ctx case (no real context to stamp).
+                let operation_name_binding = if ctx_param_idx.is_some() {
+                    if has_tenant_scoped {
+                        quote! { let mut #ctx_param = #ctx_param.with_operation_name(stringify!(#method_name)); }
+                    } else {
+                        quote! { let #ctx_param = #ctx_param.with_operation_name(stringify!(#method_name)); }
+                    }
+                } else {
+                    quote! {}
+                };
 
                 // Authorization guards emit .await — only async methods are valid targets.
                 if let Some(ref _args) = maybe_authorize {
@@ -471,6 +485,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
 
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#sig_params),*) #return_type {
+                        #operation_name_binding
                         #authorize_guard
                         #enforce_tenant_block
                         let inner_ref = self.inner.clone();

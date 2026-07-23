@@ -112,6 +112,15 @@ pub struct ServiceContext {
     /// [`ServiceContext::with_trace_context`], read via
     /// [`ServiceContext::trace_context`].
     trace_context: Option<TraceContext>,
+    /// The operation (service method) name for this invocation, carried as
+    /// invocation metadata (PROD-003 follow-up, #212). Populated by the
+    /// generated service proxy so the `TracingInterceptor` can name the
+    /// request-boundary span after the dispatched operation instead of a fixed
+    /// generic name. Private (mirroring the other metadata fields): set via
+    /// [`ServiceContext::with_operation_name`], read via
+    /// [`ServiceContext::operation_name`]. `None` for contexts built manually
+    /// or in tests (no proxy), which fall back to the generic span name.
+    operation_name: Option<Arc<str>>,
 }
 
 impl ServiceContext {
@@ -133,6 +142,7 @@ impl ServiceContext {
             logger: None,
             resolved_tenant: None,
             trace_context: None,
+            operation_name: None,
         }
     }
 
@@ -420,6 +430,35 @@ impl ServiceContext {
         self.trace_context.as_ref()
     }
 
+    /// Sets the operation (service method) name for this invocation
+    /// (PROD-003 follow-up, #212).
+    ///
+    /// This is invocation metadata populated by the generated service proxy —
+    /// the `TracingInterceptor` reads it via [`ServiceContext::operation_name`]
+    /// to name the request-boundary span after the dispatched operation. It
+    /// carries no ambient state and does not affect tenant, security, or trace
+    /// identity.
+    ///
+    /// # Arguments
+    /// * `name` - The operation name to set
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the operation name set
+    pub fn with_operation_name(mut self, name: impl Into<Arc<str>>) -> Self {
+        self.operation_name = Some(name.into());
+        self
+    }
+
+    /// Gets the operation (service method) name for this invocation, if set
+    /// (PROD-003 follow-up, #212).
+    ///
+    /// # Returns
+    /// The operation name if populated by the generated proxy, or `None` for
+    /// contexts built manually / in tests without a proxy
+    pub fn operation_name(&self) -> Option<&str> {
+        self.operation_name.as_deref()
+    }
+
     /// Requires that security be enabled in the runtime.
     ///
     /// This method should be called by service handlers that need to ensure
@@ -460,6 +499,7 @@ impl std::fmt::Debug for ServiceContext {
             .field("logger", &self.logger.is_some())
             .field("resolved_tenant", &self.resolved_tenant)
             .field("trace_context", &self.trace_context)
+            .field("operation_name", &self.operation_name)
             .finish()
     }
 }
@@ -710,6 +750,36 @@ mod tests {
     fn trace_context_is_none_by_default() {
         let ctx = ServiceContext::new();
         assert_eq!(ctx.trace_context(), None);
+    }
+
+    // -- PROD-003 follow-up (#212): operation-level span naming carried as
+    // invocation metadata on the context (populated by the generated proxy).
+
+    #[test]
+    fn operation_name_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert_eq!(ctx.operation_name(), None);
+    }
+
+    #[test]
+    fn with_operation_name_round_trips() {
+        let ctx = ServiceContext::new().with_operation_name("register");
+        assert_eq!(ctx.operation_name(), Some("register"));
+    }
+
+    #[test]
+    fn operation_name_does_not_affect_correlation_or_trace_context() {
+        use ego_domain::TraceContext;
+
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new()
+            .with_correlation_id("corr-1")
+            .with_trace_context(tc)
+            .with_operation_name("register");
+
+        assert_eq!(ctx.operation_name(), Some("register"));
+        assert_eq!(ctx.correlation_id(), Some("corr-1"));
+        assert_eq!(ctx.trace_context(), Some(&tc));
     }
 
     // FR-010: with_tenant_id() only ever writes tenant_id, never
