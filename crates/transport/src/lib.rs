@@ -8,12 +8,14 @@
 
 pub mod config;
 pub mod error;
+pub mod propagation;
 pub mod security;
 pub mod server;
 pub mod state;
 
 pub use config::GrpcServerConfig;
 pub use error::TransportError;
+pub use propagation::TraceContextExtractor;
 pub use security::AuthenticatedContext;
 pub use server::serve;
 pub use state::AppState;
