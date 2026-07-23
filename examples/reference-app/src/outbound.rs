@@ -11,21 +11,24 @@
 //! here — the transport remains propagation-only (ADR-7); the span stays
 //! owned by the request-boundary interceptor.
 
-use axum::http::{HeaderValue, Request};
+use axum::http::Request;
 use ego_service_sdk::context::ServiceContext;
-use ego_transport::propagation::traceparent_header;
+use ego_transport::propagation::{traceparent_header, TRACEPARENT_HEADER};
 
 /// Builds a representative outbound `GET` request, injecting the
 /// `traceparent` header from `ctx` when a `TraceContext` is attached.
 /// Obtains the trace-context EXPLICITLY from `ctx` (no ambient lookup) and
 /// starts no span.
-pub fn build_outbound_request(ctx: &ServiceContext, uri: &str) -> Request<()> {
+///
+/// Returns `Err` when `uri` (caller-supplied) is not a valid request URI, or
+/// in the (practically unreachable) case `to_traceparent()`'s hex output is
+/// somehow not a valid header value — axum's `Builder::header` accepts a
+/// plain `String` and carries either failure through to `.body()`'s
+/// `Result` rather than panicking.
+pub fn build_outbound_request(ctx: &ServiceContext, uri: &str) -> Result<Request<()>, axum::http::Error> {
     let mut builder = Request::get(uri);
     if let Some(header_value) = traceparent_header(ctx) {
-        builder = builder.header(
-            "traceparent",
-            HeaderValue::from_str(&header_value).expect("to_traceparent() always produces a valid header value"),
-        );
+        builder = builder.header(TRACEPARENT_HEADER, header_value);
     }
-    builder.body(()).expect("GET request with only a URI and headers is always valid")
+    builder.body(())
 }

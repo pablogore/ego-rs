@@ -20,7 +20,7 @@ fn outbound_request_carries_the_traceparent_header_from_the_context() {
     let tc = TraceContext::root();
     let ctx = ServiceContext::new().with_trace_context(tc);
 
-    let request = build_outbound_request(&ctx, "https://example.invalid/pricing");
+    let request = build_outbound_request(&ctx, "https://example.invalid/pricing").expect("valid uri");
 
     assert_eq!(
         request.headers().get("traceparent").and_then(|v| v.to_str().ok()),
@@ -32,7 +32,7 @@ fn outbound_request_carries_the_traceparent_header_from_the_context() {
 fn outbound_request_has_no_traceparent_header_when_context_has_no_trace_context() {
     let ctx = ServiceContext::new();
 
-    let request = build_outbound_request(&ctx, "https://example.invalid/pricing");
+    let request = build_outbound_request(&ctx, "https://example.invalid/pricing").expect("valid uri");
 
     assert!(request.headers().get("traceparent").is_none());
 }
