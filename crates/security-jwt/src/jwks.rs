@@ -266,7 +266,7 @@ fn der_integer(bytes: &[u8]) -> Vec<u8> {
     // X.690 §8.3.1: INTEGER must have at least one content octet — callers must
     // validate non-empty before calling (rsa_components_to_pem and ec guard above).
     debug_assert!(!bytes.is_empty(), "der_integer: empty input produces invalid DER 02 00");
-    let needs_pad = bytes.first().map_or(false, |b| b & 0x80 != 0);
+    let needs_pad = bytes.first().is_some_and(|b| b & 0x80 != 0);
     let mut content: Vec<u8> = if needs_pad { vec![0x00] } else { vec![] };
     content.extend_from_slice(bytes);
     let mut v = vec![0x02];
@@ -697,6 +697,8 @@ mod tests {
         use std::sync::Mutex;
 
         struct RotatingJwks {
+            // Test fixture: nested rounds-of-keys shape; extracting a type alias is out of scope.
+            #[allow(clippy::type_complexity)]
             rounds: Mutex<Vec<Vec<(Option<String>, VerificationKey)>>>,
         }
         #[async_trait]
@@ -810,6 +812,8 @@ mod tests {
         use std::sync::Mutex;
 
         struct TwoRoundJwks {
+            // Test fixture: nested rounds-of-keys shape; extracting a type alias is out of scope.
+            #[allow(clippy::type_complexity)]
             rounds: Mutex<Vec<Vec<(Option<String>, VerificationKey)>>>,
         }
         #[async_trait]
@@ -949,6 +953,8 @@ mod tests {
         // After force_refresh replaces [A,B] with [B,C], A must not be in the cache.
         use std::sync::Mutex;
         struct TwoRoundJwks {
+            // Test fixture: nested rounds-of-keys shape; extracting a type alias is out of scope.
+            #[allow(clippy::type_complexity)]
             rounds: Mutex<Vec<Vec<(Option<String>, VerificationKey)>>>,
         }
         #[async_trait]

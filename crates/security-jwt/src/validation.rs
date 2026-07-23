@@ -203,9 +203,8 @@ impl JwtValidationEngine {
 
         // Convert raw claims to ClaimSet and delegate to mapper (INV-3).
         let claim_set = claims_map_to_claim_set(all_claims);
-        let (principal, claims) = mapper.map(&claim_set).map_err(|e| {
+        let (principal, claims) = mapper.map(&claim_set).inspect_err(|_e| {
             warn!(error = "principal_mapping_failed", "JWT validation failed");
-            e
         })?;
 
         Ok(SecurityContext::new(principal, claims))
