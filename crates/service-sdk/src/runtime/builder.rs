@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_domain::event::DomainEvent;
-use ego_domain::Observability;
+use ego_domain::{Observability, Tracer, TracerLifecycle};
 use ego_runtime::effects::{
     DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
     ExternalEffectExecutor, InMemoryEffectStore, RuntimeEffectAcceptor,
@@ -24,7 +24,7 @@ use persistent_entity::runtime::EntityRuntime;
 
 use crate::contract::{ServiceContract, VersionConstraint};
 use crate::di::{DuplicateEntity, DuplicateProjection, Injectable};
-use crate::interceptor::InterceptorChain;
+use crate::interceptor::{InterceptorChain, TracingInterceptor};
 use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
 use crate::runtime::runtime_builder::{DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner};
@@ -92,6 +92,20 @@ pub struct RuntimeBuilder {
     /// AD-2). Default `None` — behaviorally identical to today, before this
     /// change existed.
     observability: Option<Arc<dyn Observability>>,
+    /// The `Tracer` used to drive spans (PROD-003 Phase 4). Default `None` —
+    /// behaviorally identical to today: no `TracingInterceptor` is wired into
+    /// the interceptor chain at all when this is `None` (not even a
+    /// `NoopTracer`-backed one running for nothing). Set via
+    /// [`RuntimeBuilder::with_tracer`] or [`RuntimeBuilder::with_traced`].
+    tracer: Option<Arc<dyn Tracer>>,
+    /// The `TracerLifecycle` owned SOLELY for a single `shutdown()` on
+    /// teardown (design.md ADR-9) — `shutdown` is exporter/operational
+    /// lifecycle, not a domain tracing call, so it is a deliberately separate
+    /// field from `tracer` above: `NoopTracer` and lifecycle-less `Tracer`
+    /// spies never need to supply one. Default `None` — no async teardown
+    /// hook is registered at all when this is `None`. Set via
+    /// [`RuntimeBuilder::with_tracer_lifecycle`] or [`RuntimeBuilder::with_traced`].
+    tracer_lifecycle: Option<Arc<dyn TracerLifecycle>>,
     /// Executors registered via [`RuntimeBuilder::register_effect_executor`]
     /// (CORE-019 Phase 9). Empty by default — the zero-cost gate `build()`
     /// checks to decide whether to construct the external-effects subsystem
@@ -134,6 +148,8 @@ impl RuntimeBuilder {
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             validators: Vec::new(),
             observability: None,
+            tracer: None,
+            tracer_lifecycle: None,
             effect_executors: ExecutorRegistry::new(),
             delivery_config: DeliveryConfig::default(),
             effect_drain_deadline: DEFAULT_EFFECT_DRAIN_DEADLINE,
@@ -285,6 +301,52 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers the `Tracer` used to produce spans (PROD-003 Phase 4).
+    /// `build()` wires a [`TracingInterceptor`] backed by `tracer` into the
+    /// runtime's interceptor chain automatically — and ONLY when this method
+    /// was called. When never called, the interceptor chain has no
+    /// tracing interceptor at all (AD-2-style default): behavior is
+    /// byte-for-byte identical to before this change existed, not merely
+    /// "traces via a silent `NoopTracer`".
+    ///
+    /// This is the lifecycle-less path: pass `NoopTracer`, a test spy, or any
+    /// `Tracer` implementor that has nothing to shut down. An implementor
+    /// that ALSO owns exporter lifecycle (the OTLP adapter, PR5) should use
+    /// [`RuntimeBuilder::with_traced`] instead, so its `shutdown()` is never
+    /// forgotten.
+    pub fn with_tracer(mut self, tracer: Arc<dyn Tracer>) -> Self {
+        self.tracer = Some(tracer);
+        self
+    }
+
+    /// Registers the `TracerLifecycle` owned for a single `shutdown()` on
+    /// teardown (design.md ADR-9). `shutdown` is exporter/operational
+    /// lifecycle, not a domain tracing call — this is deliberately a
+    /// SEPARATE setter from [`RuntimeBuilder::with_tracer`] so `NoopTracer`,
+    /// test spies, and any lifecycle-less `Tracer` are never forced to
+    /// supply one. `build()` registers `lifecycle.shutdown()` as EXACTLY ONE
+    /// async teardown hook (via the same `register_async_teardown` mechanism
+    /// [`RuntimeBuilder::register_data_provider`] already uses) — never
+    /// twice, even if `Runtime::shutdown_async` itself is called more than
+    /// once. When never called, no hook is registered at all.
+    pub fn with_tracer_lifecycle(mut self, lifecycle: Arc<dyn TracerLifecycle>) -> Self {
+        self.tracer_lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Convenience wiring for a single value that implements BOTH `Tracer`
+    /// and `TracerLifecycle` — the OTLP adapter's shape (PR5). Sets both
+    /// [`RuntimeBuilder::with_tracer`] and
+    /// [`RuntimeBuilder::with_tracer_lifecycle`] from the SAME `Arc<T>`,
+    /// guaranteeing the registered lifecycle shuts down exactly the tracer
+    /// that created the spans — preventing the footgun of wiring a tracer
+    /// but forgetting its matching lifecycle (two independent setter calls
+    /// that could otherwise be pointed at two different instances).
+    pub fn with_traced<T: Tracer + TracerLifecycle + 'static>(self, traced: Arc<T>) -> Self {
+        self.with_tracer(traced.clone() as Arc<dyn Tracer>)
+            .with_tracer_lifecycle(traced as Arc<dyn TracerLifecycle>)
+    }
+
     /// Registers `executor` as the sole owner of every `effect_type` in
     /// `effect_types` (CORE-019 Phase 9, design.md §6.4's builder sugar).
     /// Fails closed on a duplicate `effect_type` — the already-shipped
@@ -413,10 +475,26 @@ impl RuntimeBuilder {
             };
         let data_providers_for_teardown = self.data_providers_for_teardown;
 
+        // PROD-003 Phase 4 (TASK-013/014): wire a `TracingInterceptor` into
+        // the interceptor chain ONLY when a `tracer` was registered. Omitted
+        // ⇒ the chain built here is exactly the same empty
+        // `InterceptorChain::new()` `RuntimeBuilder::new()` already produces
+        // (there is no other way to populate `self.interceptor_chain` before
+        // `build()` today) — byte-identical to before this change existed,
+        // not a `NoopTracer`-backed interceptor running for nothing.
+        let interceptor_chain = if let Some(tracer) = &self.tracer {
+            let mut chain = InterceptorChain::new();
+            chain.add_interceptor(Arc::new(TracingInterceptor::new(tracer.clone())));
+            Arc::new(chain)
+        } else {
+            self.interceptor_chain
+        };
+        let tracer_lifecycle = self.tracer_lifecycle;
+
         let runtime = Runtime {
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
-                self.interceptor_chain,
+                interceptor_chain,
                 security_providers,
                 DependencyTable::with_registrations(RegisteredDependencies {
                     adapters: self.adapters,
@@ -445,6 +523,22 @@ impl RuntimeBuilder {
                 for provider in data_providers_for_teardown {
                     provider.shutdown().await;
                 }
+                Ok(())
+            });
+        }
+
+        // PROD-003 Phase 4 (TASK-014): register the tracer's lifecycle
+        // shutdown as EXACTLY ONE async teardown hook — never twice, even if
+        // `Runtime::shutdown_async` is triggered more than once, because
+        // `shutdown_async` drains `async_teardown` via `mem::take`: a hook
+        // runs at most once no matter how many times `shutdown_async` itself
+        // is called (a second call finds an already-emptied hook list). No
+        // hook is registered at all when no `tracer_lifecycle` was set — the
+        // zero-cost path incurs no extra hook, mirroring the data-provider
+        // teardown gate above.
+        if let Some(lifecycle) = tracer_lifecycle {
+            runtime.register_async_teardown(async move {
+                lifecycle.shutdown();
                 Ok(())
             });
         }
@@ -2044,5 +2138,216 @@ mod tests {
         rt.shutdown_async().await.expect("shutdown_async succeeds");
 
         assert_eq!(provider.shutdown_call_count(), 1);
+    }
+
+    // -- PROD-003 Phase 4 (TASK-013/014): RuntimeBuilder::with_tracer /
+    // with_tracer_lifecycle / with_traced wiring ----------------------------
+    //
+    // Ownership split (design.md ADR-9): `tracer` (used to build the
+    // `TracingInterceptor`) and `tracer_lifecycle` (owned ONLY for a single
+    // `shutdown()` on teardown) are two separate optional fields — `shutdown`
+    // is exporter lifecycle, not a domain tracing call, so `NoopTracer`, test
+    // spies, and any lifecycle-less `Tracer` never need to know it.
+
+    use ego_domain::{SpanAttributes, SpanId, SpanOutcome, TraceContext, Tracer, TracerLifecycle};
+
+    use crate::context::ServiceContext;
+    use crate::interceptor::InterceptorChain;
+
+    /// Spy `Tracer`: records every `start_span` call so tests can assert the
+    /// `TracingInterceptor` actually fired through the runtime's interceptor
+    /// chain.
+    struct SpyTracer {
+        start_calls: AtomicUsize,
+    }
+
+    impl SpyTracer {
+        fn new() -> Self {
+            Self {
+                start_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn start_call_count(&self) -> usize {
+            self.start_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Tracer for SpyTracer {
+        fn start_span(&self, _ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn end_span(&self, _span: SpanId, _outcome: SpanOutcome) {}
+    }
+
+    /// Spy `TracerLifecycle`: an `AtomicUsize` shutdown counter proving
+    /// `Runtime::shutdown_async` invokes `shutdown()` EXACTLY once — even if
+    /// `shutdown_async` itself is called more than once (single-shutdown
+    /// guarantee).
+    struct SpyTracerLifecycle {
+        shutdown_calls: AtomicUsize,
+    }
+
+    impl SpyTracerLifecycle {
+        fn new() -> Self {
+            Self {
+                shutdown_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn shutdown_call_count(&self) -> usize {
+            self.shutdown_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TracerLifecycle for SpyTracerLifecycle {
+        fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A double implementing BOTH `Tracer` and `TracerLifecycle` from the
+    /// same concrete type — stands in for the OTLP adapter (PR5) that
+    /// `with_traced` is the wiring seam for.
+    struct TracedDouble {
+        start_calls: AtomicUsize,
+        shutdown_calls: AtomicUsize,
+    }
+
+    impl TracedDouble {
+        fn new() -> Self {
+            Self {
+                start_calls: AtomicUsize::new(0),
+                shutdown_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Tracer for TracedDouble {
+        fn start_span(&self, _ctx: &TraceContext, _name: &str, _attrs: SpanAttributes) {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn end_span(&self, _span: SpanId, _outcome: SpanOutcome) {}
+    }
+
+    impl TracerLifecycle for TracedDouble {
+        fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn ctx_with_root_trace() -> ServiceContext {
+        ServiceContext::new().with_trace_context(TraceContext::root())
+    }
+
+    #[tokio::test]
+    async fn with_tracer_wires_a_tracing_interceptor_into_the_chain() {
+        let tracer = Arc::new(SpyTracer::new());
+        let rt = RuntimeBuilder::new().with_tracer(tracer.clone() as Arc<dyn Tracer>).build();
+
+        let ctx = ctx_with_root_trace();
+        rt.inner()
+            .interceptor_chain
+            .on_request(&ctx)
+            .await
+            .expect("on_request succeeds");
+
+        assert_eq!(
+            tracer.start_call_count(),
+            1,
+            "with_tracer must wire a TracingInterceptor that drives the supplied Tracer"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_with_tracer_no_interceptor_is_wired_and_behavior_is_unchanged() {
+        // Omitted ⇒ byte-identical to today: no TracingInterceptor is added
+        // at all (not even a NoopTracer-backed one running for nothing).
+        let rt = RuntimeBuilder::new().build();
+
+        let ctx = ctx_with_root_trace();
+        rt.inner()
+            .interceptor_chain
+            .on_request(&ctx)
+            .await
+            .expect("on_request succeeds with an empty chain");
+
+        // No tracer was ever wired, so there is nothing to assert calls
+        // against — the interceptor chain itself must report zero wired
+        // interceptors (default `RuntimeBuilder::new()` behavior,
+        // pre-PROD-003, unchanged).
+        assert_eq!(
+            format!("{:?}", rt.inner().interceptor_chain),
+            format!("{:?}", InterceptorChain::new()),
+            "with no tracer registered, the interceptor chain must remain exactly as empty as \
+             RuntimeBuilder::new()'s default — no TracingInterceptor wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_invokes_tracer_lifecycle_shutdown_exactly_once() {
+        let lifecycle = Arc::new(SpyTracerLifecycle::new());
+        let rt = RuntimeBuilder::new()
+            .with_tracer_lifecycle(lifecycle.clone() as Arc<dyn TracerLifecycle>)
+            .build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(lifecycle.shutdown_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_called_twice_still_shuts_down_tracer_lifecycle_exactly_once() {
+        let lifecycle = Arc::new(SpyTracerLifecycle::new());
+        let rt = RuntimeBuilder::new()
+            .with_tracer_lifecycle(lifecycle.clone() as Arc<dyn TracerLifecycle>)
+            .build();
+
+        rt.shutdown_async().await.expect("first shutdown_async succeeds");
+        rt.shutdown_async().await.expect("second shutdown_async succeeds");
+
+        assert_eq!(
+            lifecycle.shutdown_call_count(),
+            1,
+            "shutdown must never run twice, even when shutdown_async is triggered more than once"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_async_with_no_tracer_lifecycle_registers_no_hook() {
+        let rt = RuntimeBuilder::new().build();
+        let started = Instant::now();
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "no tracer_lifecycle was registered — shutdown must not wait on anything tracer-related"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_traced_sets_both_tracer_and_tracer_lifecycle_from_the_same_instance() {
+        let traced = Arc::new(TracedDouble::new());
+        let rt = RuntimeBuilder::new().with_traced(traced.clone()).build();
+
+        let ctx = ctx_with_root_trace();
+        rt.inner()
+            .interceptor_chain
+            .on_request(&ctx)
+            .await
+            .expect("on_request succeeds");
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(
+            traced.start_calls.load(Ordering::SeqCst),
+            1,
+            "with_traced must wire the same instance as the span-producing Tracer"
+        );
+        assert_eq!(
+            traced.shutdown_calls.load(Ordering::SeqCst),
+            1,
+            "with_traced must wire the same instance as the TracerLifecycle shut down on teardown"
+        );
     }
 }
