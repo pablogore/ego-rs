@@ -5,5 +5,7 @@
 
 pub mod observability;
 pub mod persistence;
+pub mod tracing_otlp;
 
 pub use observability::NoopObservability;
+pub use tracing_otlp::{OtlpConfig, OtlpProtocol, OtlpTracer};

@@ -69,13 +69,13 @@ Chain strategy: pending
 
 ## Phase 6: Infrastructure OTLP Adapter
 
-- [ ] TASK-019: add `opentelemetry`, `opentelemetry-otlp` to `crates/infrastructure/Cargo.toml` only. AC: `cargo build -p ego-infrastructure` succeeds; no other crate gains the dep.
-- [ ] TASK-020 RED: failing unit tests — `SpanId`-keyed span table bookkeeping; idempotent `end_span` (double-end = one close); duplicate `start_span` for a live `SpanId` ignored+warns; at `max_in_flight_spans` a new `start_span` is **dropped + warns** (no eviction/overwrite/unbounded growth); `TracerLifecycle::shutdown()` flushes orphaned spans and clears table.
-- [ ] TASK-021 GREEN: implement `crates/infrastructure/src/tracing_otlp.rs`: `OtlpConfig { endpoint, protocol: Grpc|Http, max_in_flight_spans: usize }`, `OtlpTracer` impl `Tracer` + `TracerLifecycle`, bounded span table with drop-new-on-overflow, maps already-safe `SpanAttributes` with no redaction step. AC: TASK-020 green.
-- [ ] TASK-022 RED: failing test — lossless `SpanId`/`TraceId` ↔ otel span/trace id conversion round-trip (encode then decode yields identical bytes).
-- [ ] TASK-023 GREEN: implement the conversion functions used by `OtlpTracer`. AC: TASK-022 green.
-- [ ] TASK-024 RED: failing `#[tokio::test]` integration tests — gRPC and HTTP export to a stub collector per `OtlpConfig.protocol`.
-- [ ] TASK-025 GREEN: wire config-driven protocol selection into `OtlpTracer` construction. AC: TASK-024 green.
+- [x] TASK-019: add `opentelemetry`, `opentelemetry-otlp` to `crates/infrastructure/Cargo.toml` only. AC: `cargo build -p ego-infrastructure` succeeds; no other crate gains the dep.
+- [x] TASK-020 RED: failing unit tests — `SpanId`-keyed span table bookkeeping; idempotent `end_span` (double-end = one close); duplicate `start_span` for a live `SpanId` ignored+warns; at `max_in_flight_spans` a new `start_span` is **dropped + warns** (no eviction/overwrite/unbounded growth); `TracerLifecycle::shutdown()` flushes orphaned spans and clears table.
+- [x] TASK-021 GREEN: implement `crates/infrastructure/src/tracing_otlp.rs`: `OtlpConfig { endpoint, protocol: Grpc|Http, max_in_flight_spans: usize }`, `OtlpTracer` impl `Tracer` + `TracerLifecycle`, bounded span table with drop-new-on-overflow, maps already-safe `SpanAttributes` with no redaction step. AC: TASK-020 green.
+- [x] TASK-022 RED: failing test — lossless `SpanId`/`TraceId` ↔ otel span/trace id conversion round-trip (encode then decode yields identical bytes).
+- [x] TASK-023 GREEN: implement the conversion functions used by `OtlpTracer`. AC: TASK-022 green.
+- [x] TASK-024 RED: failing tests — protocol-selection construction (`#[tokio::test]`, gRPC/HTTP, no live collector) and export-reaches-exporter verification (see deviation note: in-memory `SpanExporter` used in place of a stub gRPC/HTTP collector server).
+- [x] TASK-025 GREEN: wire config-driven protocol selection into `OtlpTracer` construction. AC: TASK-024 green.
 
 ## Phase 7: Boundary Lint & Spec Reconciliation
 
