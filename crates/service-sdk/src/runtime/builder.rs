@@ -24,6 +24,8 @@ use persistent_entity::runtime::EntityRuntime;
 
 use crate::contract::{ServiceContract, VersionConstraint};
 use crate::di::{DuplicateEntity, DuplicateProjection, Injectable};
+use crate::health::{HealthAggregationConfig, HealthAggregator, HealthRegistry};
+use crate::implementation::LifecycleManaged;
 use crate::interceptor::{InterceptorChain, TracingInterceptor};
 use crate::registry::{RegistryError, ServiceRegistry};
 use crate::runtime::logger::TeardownStack;
@@ -140,6 +142,14 @@ pub struct RuntimeBuilder {
     /// into `RuntimeDataProviderAccess` and is no longer iterable once
     /// `build()` constructs the facade.
     data_providers_for_teardown: Vec<Arc<dyn ExternalDataProvider>>,
+    /// Lifecycle-managed components registered via
+    /// [`RuntimeBuilder::with_lifecycle_component`] (PROD-005 PR2
+    /// TASK-018/019). `build()` folds every registered component's
+    /// `LifecycleManaged::health_contributors()` into ONE runtime-owned
+    /// [`HealthRegistry`] — a component that contributes none (the trait's
+    /// default) leaves aggregation unaffected. Data providers are NOT
+    /// registered here (PR3: `ProviderHealthContributor` doesn't exist yet).
+    lifecycle_components: Vec<Arc<dyn LifecycleManaged>>,
 }
 
 impl RuntimeBuilder {
@@ -166,7 +176,19 @@ impl RuntimeBuilder {
             data_provider_registry: ExternalDataProviderRegistry::new(),
             provider_access_config: ProviderAccessConfig::default(),
             data_providers_for_teardown: Vec::new(),
+            lifecycle_components: Vec::new(),
         }
+    }
+
+    /// Registers a lifecycle-managed component whose
+    /// `LifecycleManaged::health_contributors()` are folded into the built
+    /// runtime's single [`HealthRegistry`] (PROD-005 PR2 TASK-018/019). A
+    /// component that never overrides `health_contributors()` (the trait's
+    /// default, empty `Vec`) is safe to register — it simply contributes
+    /// nothing to health aggregation.
+    pub fn with_lifecycle_component(mut self, component: Arc<dyn LifecycleManaged>) -> Self {
+        self.lifecycle_components.push(component);
+        self
     }
 
     /// Registers authentication and authorization providers for this runtime.
@@ -527,7 +549,23 @@ impl RuntimeBuilder {
         };
         let tracer_lifecycle = self.tracer_lifecycle;
 
+        // PROD-005 PR2 (TASK-018/019): fold every registered lifecycle
+        // component's health contributors into ONE runtime-owned registry.
+        // A component contributing none (the `LifecycleManaged` default)
+        // leaves aggregation unaffected — this is the zero-cost path when no
+        // component ever registers a contributor.
+        let health_contributors = self
+            .lifecycle_components
+            .iter()
+            .flat_map(|component| component.health_contributors())
+            .collect();
+        let health_aggregator = Arc::new(HealthAggregator::new(
+            HealthRegistry::from_contributors(health_contributors),
+            HealthAggregationConfig::default(),
+        ));
+
         let runtime = Runtime {
+            health_aggregator,
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
                 interceptor_chain,
@@ -629,12 +667,50 @@ impl Default for RuntimeBuilder {
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
+    /// The runtime-owned health aggregator (PROD-005 PR2 TASK-018/019),
+    /// built once by [`RuntimeBuilder::build`] from every registered
+    /// lifecycle component's `health_contributors()`. Cheap to clone (an
+    /// `Arc`), consistent with the rest of this handle.
+    health_aggregator: Arc<HealthAggregator>,
 }
 
 impl Runtime {
     /// Returns a reference to the inner [`RuntimeInner`].
     pub fn inner(&self) -> &Arc<RuntimeInner> {
         &self.inner
+    }
+
+    /// Process-internal liveness check (PROD-005 PR2 TASK-014/015).
+    ///
+    /// Takes NO registry/aggregator argument and consults NO contributor —
+    /// liveness answers only "is the process alive and able to make
+    /// progress", never "are my dependencies healthy" (that's
+    /// [`Runtime::readiness`]/[`Runtime::startup`]). Always
+    /// [`ego_domain::health::HealthStatus::Healthy`] with an empty
+    /// contributor list, unaffected by anything registered on this runtime's
+    /// [`HealthAggregator`].
+    pub fn liveness(&self) -> ego_domain::health::HealthReport {
+        ego_domain::health::HealthReport {
+            probe: ego_domain::health::ProbeKind::Liveness,
+            status: ego_domain::health::HealthStatus::Healthy,
+            contributors: Vec::new(),
+        }
+    }
+
+    /// Evaluates every registered lifecycle component's health contributors
+    /// and folds them into a readiness [`ego_domain::health::HealthReport`]
+    /// (PROD-005 PR2 TASK-018/019). Delegates entirely to this runtime's
+    /// [`HealthAggregator`] — see [`HealthAggregator::readiness`].
+    pub async fn readiness(&self) -> ego_domain::health::HealthReport {
+        self.health_aggregator.readiness().await
+    }
+
+    /// Evaluates every registered lifecycle component's health contributors
+    /// and folds them into a startup [`ego_domain::health::HealthReport`]
+    /// (PROD-005 PR2 TASK-018/019). Uses the IDENTICAL fold as
+    /// [`Runtime::readiness`] — see [`HealthAggregator::startup`].
+    pub async fn startup(&self) -> ego_domain::health::HealthReport {
+        self.health_aggregator.startup().await
     }
 
     /// Returns the registered security providers, if any.
@@ -1338,6 +1414,109 @@ mod tests {
             *rt.inner().resolve_config::<StubConfigD>().unwrap(),
             StubConfigD("d".to_string())
         );
+    }
+
+    // -- PROD-005 PR2 TASK-014/015: Runtime::liveness ------------------------
+
+    use ego_domain::health::{
+        DependencyRequirement, HealthCheck, HealthContributor, HealthStatus, ProbeKind,
+    };
+
+    struct AlwaysUnhealthyRequired;
+
+    #[async_trait]
+    impl HealthContributor for AlwaysUnhealthyRequired {
+        fn name(&self) -> &str {
+            "always-unhealthy-required"
+        }
+
+        fn requirement(&self) -> DependencyRequirement {
+            DependencyRequirement::Required
+        }
+
+        async fn check(&self) -> HealthCheck {
+            HealthCheck {
+                status: HealthStatus::Unhealthy,
+                code: None,
+            }
+        }
+    }
+
+    /// A `LifecycleManaged` component whose sole contributor is Required +
+    /// Unhealthy — used to prove `Runtime::liveness()` is completely
+    /// unaffected by it (liveness consults no contributor/registry at all).
+    struct UnhealthyLifecycleComponent;
+
+    #[async_trait]
+    impl crate::implementation::LifecycleManaged for UnhealthyLifecycleComponent {
+        fn health_contributors(&self) -> Vec<Arc<dyn HealthContributor>> {
+            vec![Arc::new(AlwaysUnhealthyRequired)]
+        }
+    }
+
+    #[test]
+    fn liveness_is_healthy_and_tagged_liveness_probe() {
+        let rt = RuntimeBuilder::new().build();
+        let report = rt.liveness();
+        assert_eq!(report.probe, ProbeKind::Liveness);
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.contributors.is_empty());
+    }
+
+    #[test]
+    fn liveness_takes_no_registry_and_is_unaffected_by_a_required_unhealthy_contributor() {
+        // `liveness()` is a zero-argument call on `Runtime` — it cannot be
+        // handed a registry even if one exists on this runtime.
+        let rt = RuntimeBuilder::new()
+            .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
+            .build();
+
+        let report = rt.liveness();
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.contributors.is_empty());
+    }
+
+    // -- PROD-005 PR2 TASK-018/019: builder collects lifecycle contributors --
+
+    #[tokio::test]
+    async fn build_collects_health_contributors_from_registered_lifecycle_components() {
+        let rt = RuntimeBuilder::new()
+            .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(report.probe, ProbeKind::Readiness);
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.contributors.len(), 1);
+        assert_eq!(report.contributors[0].name, "always-unhealthy-required");
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_component_contributing_none_leaves_aggregation_unaffected() {
+        struct NoContributors;
+        #[async_trait]
+        impl crate::implementation::LifecycleManaged for NoContributors {
+            // Default `health_contributors()` -> empty.
+        }
+
+        let rt = RuntimeBuilder::new()
+            .with_lifecycle_component(Arc::new(NoContributors))
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.contributors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_without_any_lifecycle_component_yields_healthy_empty_readiness() {
+        let rt = RuntimeBuilder::new().build();
+        let report = rt.readiness().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.contributors.is_empty());
     }
 
     // -- CORE-120: unregistered type unchanged behavior ----------------------
