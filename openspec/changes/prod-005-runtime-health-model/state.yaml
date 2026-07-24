@@ -1,0 +1,41 @@
+change_id: PROD-005
+title: Runtime Health Model
+status: in_progress
+artifact_store_mode: openspec
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: skipped
+    note: exploration happened in conversation; no explore.md artifact was produced
+  spec:
+    status: complete
+    artifact: specs/
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
+
+notes: |
+  Renamed from "Health, Readiness and Startup" (ROADMAP.md:651, HTTP-first) to
+  "Runtime Health Model": a transport-agnostic, framework-level health/readiness/
+  startup model in Ego's core, with all transport (HTTP/gRPC/GraphQL/broker/CLI/TUI)
+  left to adapters. Seven decisions are frozen by the architect in proposal.md.
+  The one open fork (HealthContributor async shape A/B/C) was resolved in design as
+  Option A (#[async_trait] HealthContributor in ego-domain). spec, design, and tasks
+  are complete and reconciled after a senior-architect surgical review (probe-
+  independent check(); readiness()/startup()-only aggregator with structurally
+  unreachable liveness; identity-preserving global budget; single registration
+  authority; type-contract closed-set guarantee). apply is next (PR1 first).
+  ROADMAP.md is intentionally NOT edited in this phase.
