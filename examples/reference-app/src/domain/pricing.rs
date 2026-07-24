@@ -155,13 +155,12 @@ impl PersistentEntity for PricingEntity {
                 // type.
                 let response = self
                     .access
-                    .fetch(
-                        "pricing",
-                        DataRequest {
-                            key: sku.clone(),
-                            payload: Vec::new(),
-                        },
-                    )
+                    // Tenant-agnostic fetch (issue #234): this dogfood provider
+                    // serves a single logical catalog, so it uses the
+                    // single-tenant path (`DataRequest::new`); a tenant-scoped
+                    // handler would carry the authoritative tenant with
+                    // `DataRequest::for_tenant`.
+                    .fetch("pricing", DataRequest::new(sku.clone(), Vec::new()))
                     .await
                     .map_err(|e| EntityError::Internal(e.to_string()))?;
                 Ok(vec![PriceLooked::new(

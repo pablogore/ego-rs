@@ -21,6 +21,8 @@ pub mod access;
 pub mod provider;
 pub mod registry;
 
-pub use access::{ProviderOutcome, RuntimeDataProviderAccess};
-pub use provider::ExternalDataProvider;
+pub use access::{
+    ProviderAccessConfig, ProviderOutcome, ProviderSubsystemReadiness, RuntimeDataProviderAccess,
+};
+pub use provider::{ExternalDataProvider, ProviderHealth};
 pub use registry::{DuplicateProviderId, ExternalDataProviderRegistry};

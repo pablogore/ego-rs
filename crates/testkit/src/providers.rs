@@ -78,10 +78,7 @@ mod tests {
     use super::*;
 
     fn request(key: &str) -> DataRequest {
-        DataRequest {
-            key: key.to_string(),
-            payload: vec![1, 2, 3],
-        }
+        DataRequest::new(key, vec![1, 2, 3])
     }
 
     #[tokio::test]
