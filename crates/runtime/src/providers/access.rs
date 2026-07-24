@@ -61,6 +61,16 @@ pub const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 /// #234): the per-attempt I/O timeout and the retry policy for transient
 /// failures. Reuses the effects [`RetryPolicy`] verbatim rather than defining
 /// a second, incompatible backoff model.
+///
+/// **Behavior change (issue #234):** [`ProviderAccessConfig::default`] enables
+/// retries (`RetryPolicy::default` = 3 retries). Before #234 a `Transient`
+/// failure returned immediately; now every fetch under the default config
+/// retries `Transient`/`Timeout` up to 3 times with backoff. Because the
+/// timeout is *per attempt* (not a whole-call deadline), the worst-case
+/// latency of a failing fetch grows to roughly `(max_attempts + 1) * timeout`
+/// plus the summed backoff. This is API-compatible but not behavior-identical;
+/// pass a config with [`RetryPolicy::none`] to restore the pre-#234
+/// return-immediately behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAccessConfig {
     /// Per-attempt timeout. Each individual attempt (initial or retry) is
@@ -68,7 +78,9 @@ pub struct ProviderAccessConfig {
     pub timeout: Duration,
     /// Retry policy for retryable failures (`Transient` and `Timeout`). Its
     /// `max_attempts` bounds the number of retries — total attempts are
-    /// `max_attempts + 1`. Use [`RetryPolicy::none`] to disable retries.
+    /// `max_attempts + 1`. Defaults (via [`ProviderAccessConfig::default`]) to
+    /// [`RetryPolicy::default`] (3 retries) — see the type-level note on the
+    /// resulting behavior change. Use [`RetryPolicy::none`] to disable retries.
     pub retry: RetryPolicy,
 }
 
@@ -318,9 +330,19 @@ impl RuntimeDataProviderAccess {
     /// health check must be cheap and non-blocking (see the trait method's
     /// contract), so no fan-out is warranted. Result is sorted by
     /// `provider_id` for a deterministic snapshot.
+    ///
+    /// This deliberately **trusts** the trait contract: `health()` gets no
+    /// per-provider timeout here, so a provider that violates the contract and
+    /// blocks indefinitely stalls the whole poll (and later providers are never
+    /// reached). That is an accepted limitation of this minimal surface — a
+    /// per-health timeout is intentionally deferred until this query feeds a
+    /// real service-level `/ready` mechanism (which does not exist in the repo
+    /// yet). Do not add one here without that consumer; it would bloat #234.
     pub async fn readiness(&self) -> ProviderSubsystemReadiness {
         let mut providers = Vec::new();
         for (id, provider) in self.registry.iter() {
+            // Trusts the cheap/non-blocking `health()` contract — no timeout
+            // guard here (see the method-level note).
             providers.push((id.to_string(), provider.health().await));
         }
         providers.sort_by(|(a, _), (b, _)| a.cmp(b));
