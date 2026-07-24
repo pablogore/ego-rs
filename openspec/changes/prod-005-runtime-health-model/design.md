@@ -58,27 +58,36 @@ Migration path for any future/test consumer: query the aggregator's global
 
 ### ADR-3: Deterministic aggregation is `aggregate(probe, reports)`
 
-Aggregation is NOT a bare `fold(status, requirement)`; it is a function of the
-probe: `aggregate(probe, reports)` = a probe-independent per-contributor fold
-followed by a probe-specific interpretation step. `check()` is
+`aggregate(probe, reports)` performs the SAME per-contributor fold over
+`(status, requirement)` for EVERY probe and only tags the resulting
+`HealthReport.probe`. The fold is IDENTICAL for `readiness()` and `startup()`;
+there is NO probe-specific interpretation or status-remap step. `check()` is
 **probe-independent** — a contributor produces the same `HealthCheck` regardless
-of which probe is aggregating, MUST NOT receive or branch on `ProbeKind`, and all
-probe-specific meaning is applied EXCLUSIVELY at aggregation.
+of which probe is aggregating, MUST NOT receive or branch on `ProbeKind`.
 
-**Per-contributor fold (probe-independent):** severity lattice
-`Unhealthy > Degraded > Healthy`; `(Healthy,_)→Healthy`; `(Degraded,_)→Degraded`;
-`(Unhealthy,Required)→Unhealthy`; `(Unhealthy,Optional)→Degraded`
-(optional-unhealthy is clamped, never global Unhealthy). Global = `max` over
-contributions (commutative, associative → order-independent, so identical inputs
-always yield the identical aggregate; empty set → Healthy).
+**Per-contributor fold (probe-independent, identical for both probes):**
+severity lattice `Unhealthy > Degraded > Healthy`; `(Healthy,_)→Healthy`;
+`(Degraded,_)→Degraded`; `(Unhealthy,Required)→Unhealthy`;
+`(Unhealthy,Optional)→Degraded` (optional-unhealthy is clamped, never global
+Unhealthy). Global = `max` over contributions (commutative, associative →
+order-independent, so identical inputs always yield the identical aggregate;
+empty set → Healthy).
 
-**Probe-specific interpretation of `InitializationPending`:**
-- **Readiness**: a contributor reporting `InitializationPending` is interpreted
-  as unhealthy for readiness — Required+pending → global `Unhealthy`;
-  Optional+pending → `Degraded` (consistent with the Required/Optional rules).
-- **Startup**: `InitializationPending` is interpreted as "not complete / still
-  starting" — a distinct startup-incomplete outcome, NOT conflated with a
-  steady-state failure.
+**Frozen principle — `InitializationPending` never alters the lattice:**
+`InitializationPending` does NOT alter the lattice rules. The contributor
+continues to report `Unhealthy`; `DependencyRequirement` determines `Unhealthy`
+vs `Degraded`, and `HealthCode::InitializationPending` preserves the "still
+initializing" semantics. The Startup outcome is expressed via the contribution
+to the global status plus the per-contributor `ContributorReport.code`, not via
+a different global status. The frozen contract:
+
+| Contributor during `startup()` | Contribution to global status | ContributorReport.code |
+|---|---|---|
+| Required + initializing | Unhealthy | InitializationPending |
+| Optional + initializing | Degraded | InitializationPending |
+| Required + real failure | Unhealthy | DependencyFailure |
+| Optional + real failure | Degraded | DependencyFailure |
+| Healthy | Healthy | None |
 
 Satisfies constraint 4 and the determinism scenarios.
 
@@ -115,15 +124,20 @@ hangs (constraint 5).
 
 ### ADR-6: Startup vs steady-state readiness
 
-`ProbeKind { Liveness, Readiness, Startup }` tags each report. A registered but
+`ProbeKind { Liveness, Readiness, Startup }` tags each report. Startup and
+readiness produce the SAME `HealthStatus` and the SAME `ContributorReport`; the
+only difference is the `ProbeKind` tag and the semantic moment of consumption
+(startup gate vs steady-state readiness gate). A registered but
 not-yet-initialized contributor returns the SAME probe-independent
-`HealthCheck { Unhealthy, Some(HealthCode::InitializationPending) }` regardless of
-which probe is aggregating — `check()` never branches on the probe. The distinct
-code makes "still starting" distinguishable from a steady-state
-`DependencyFailure`. Interpretation happens EXCLUSIVELY at aggregation (ADR-3):
-Startup treats `InitializationPending` as "not complete / still starting",
-Readiness treats it as unhealthy — same data, probe-specific interpretation
-applied aggregation-side (constraint 6).
+`HealthCheck { status: Unhealthy, code: Some(HealthCode::InitializationPending) }`
+regardless of which probe is aggregating — `check()` never branches on the probe.
+
+`HealthCode::InitializationPending` is what distinguishes "not ready because
+still starting" from "not ready because a dependency failed"
+(`DependencyFailure`) — WITHOUT inventing a `Starting` fourth state. Both codes
+sit at the SAME status (Required → global `Unhealthy`; Optional → `Degraded`);
+the code on the `ContributorReport`, not a different global status, carries the
+distinction (constraint 6).
 
 ### ADR-7: Single registration authority, multiple sources
 
@@ -146,8 +160,8 @@ aggregator is not mutated by subsystems after construction.
     HealthAggregator::readiness() / ::startup():   [NO aggregate(ProbeKind) — liveness cannot enter here]
       HealthAggregator ──fan-out(FuturesUnordered)──▶ [C1.check() … Cn.check()]  (probe-independent; each timeout-bounded)
              │  provider Ci = ProviderHealthContributor(Arc<dyn ExternalDataProvider>)
-             ├── per-contributor fold(status,requirement)               (probe-independent)
-             └── probe-specific interpretation of InitializationPending  ─▶ HealthReport { ProbeKind, HealthStatus, Vec<ContributorReport> }
+             ├── per-contributor fold(status,requirement)   (identical for readiness/startup)
+             └── tag ProbeKind (no status remap)  ─▶ HealthReport { ProbeKind, HealthStatus, Vec<ContributorReport> }
 
 ### Sequence: readiness aggregation
 
@@ -159,8 +173,8 @@ aggregator is not mutated by subsystems after construction.
       │              │◀── Healthy ───────────│                              
       │              │◀── Elapsed ⇒ (Unhealthy,Timeout) ──│  (does not block C1/C3)
       │              │◀── (Unhealthy,InitializationPending) ─────────│  (same check() for any probe)
-      │              ├ per-contributor fold (probe-independent): max over contributions
-      │              ├ probe-specific interpretation of InitializationPending (aggregation-side)
+      │              ├ per-contributor fold (identical for readiness/startup): max over contributions
+      │              ├ tag ProbeKind (no status remap)
       │◀─ HealthReport(Readiness, status, [reports]) ─┤                     
 
 ## File Changes
@@ -196,8 +210,9 @@ pub trait HealthContributor: Send + Sync {   // object-safe; NO liveness method
     fn name(&self) -> &str;
     fn requirement(&self) -> DependencyRequirement;
     /// Probe-independent: returns the SAME HealthCheck regardless of probe.
-    /// Contributors MUST NOT receive or branch on ProbeKind; probe-specific
-    /// interpretation (e.g. of InitializationPending) is applied aggregation-side.
+    /// Contributors MUST NOT receive or branch on ProbeKind. Aggregation runs
+    /// the SAME fold for every probe and only tags HealthReport.probe;
+    /// InitializationPending never alters the lattice.
     async fn check(&self) -> HealthCheck;
 }
 
@@ -205,8 +220,10 @@ pub trait HealthContributor: Send + Sync {   // object-safe; NO liveness method
 impl HealthAggregator {
     // The ONLY aggregatable probes; there is NO aggregate(ProbeKind), so
     // ProbeKind::Liveness cannot be expressed as an aggregation call.
-    pub async fn readiness(&self) -> HealthReport; // interprets InitializationPending as unhealthy
-    pub async fn startup(&self) -> HealthReport;   // interprets InitializationPending as "not complete"
+    // Both run the SAME fold and only tag HealthReport.probe; identical status,
+    // identical ContributorReports. InitializationPending never alters the lattice.
+    pub async fn readiness(&self) -> HealthReport; // ProbeKind::Readiness
+    pub async fn startup(&self) -> HealthReport;   // ProbeKind::Startup
 }
 // Liveness lives on the runtime — no registry, consults no contributor (ADR-4):
 impl Runtime { pub fn liveness(&self) -> HealthReport; } // RuntimeInner internal check

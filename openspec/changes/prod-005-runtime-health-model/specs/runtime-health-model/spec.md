@@ -53,9 +53,11 @@ to `Unhealthy`; the aggregate SHOULD surface as `Degraded` instead. Given
 the same set of contributor reports, the aggregator MUST always produce the
 same global result. A contributor's check MUST be probe-independent: it produces
 the same result regardless of which probe (readiness or startup) is aggregating,
-and MUST NOT receive or branch on the probe kind. Probe-specific interpretation
-of a pending/initialization state is applied during aggregation, not inside the
-contributor's check.
+and MUST NOT receive or branch on the probe kind. `HealthCode::InitializationPending`
+MUST NOT change the lattice: the contributor reports `Unhealthy`,
+`DependencyRequirement` drives `Unhealthy` vs `Degraded`, and the `HealthCode` is
+preserved in the `ContributorReport`. The fold MUST be identical regardless of
+probe.
 
 #### Scenario: Required contributor Unhealthy forces global Unhealthy
 - GIVEN a `Required` contributor reporting `HealthStatus::Unhealthy`
@@ -157,22 +159,41 @@ privileged over another.
 A `HealthContributor` MUST become known to the aggregator only through
 explicit registration integrated with the runtime's lifecycle. Startup/
 initialization state MUST be observable as a distinct condition from
-steady-state readiness. This distinction MUST be applied during aggregation:
-readiness interprets a pending/initialization contribution as unhealthy, while
-startup interprets it as still-initializing — the contributor's check itself
-remains probe-independent.
+steady-state readiness. This distinct condition MUST be carried by
+`ProbeKind::Startup` together with `ContributorReport.code == InitializationPending`,
+NOT by a different global `HealthStatus`. The contributor's check remains
+probe-independent, and the fold is identical for readiness and startup:
+`InitializationPending` does not alter the lattice — `DependencyRequirement`
+alone drives `Unhealthy` vs `Degraded`, while the `HealthCode` preserved on the
+`ContributorReport` distinguishes "still initializing" from a real dependency
+failure.
 
 #### Scenario: An unregistered contributor is never aggregated
 - GIVEN a contributor implementation that exists but was never registered
 - WHEN readiness is aggregated
 - THEN it has no effect on the global report
 
-#### Scenario: A not-yet-initialized contributor reports a distinct pending state
-- GIVEN a registered contributor still completing startup/initialization
-- WHEN readiness is aggregated before that contributor finishes
-  initializing
-- THEN its contribution is distinguishable as pending-initialization, not
-  conflated with a steady-state failure
+#### Scenario: A required initializing contributor is Unhealthy with a pending code
+- GIVEN a registered `Required` contributor still completing startup,
+  reporting `HealthStatus::Unhealthy` with `HealthCode::InitializationPending`
+- WHEN startup is aggregated
+- THEN the global report status is `Unhealthy` and the contributor's
+  `ContributorReport.code` is `InitializationPending`
+
+#### Scenario: An optional initializing contributor is Degraded with a pending code
+- GIVEN a registered `Optional` contributor still completing startup,
+  reporting `HealthStatus::Unhealthy` with `HealthCode::InitializationPending`
+- WHEN startup is aggregated
+- THEN the global report status is `Degraded` and the contributor's
+  `ContributorReport.code` is `InitializationPending`
+
+#### Scenario: A pending code is distinguishable from a real dependency failure at the same status
+- GIVEN a `Required` contributor reporting `Unhealthy` with
+  `HealthCode::DependencyFailure` (a real failure, not initialization)
+- WHEN startup is aggregated
+- THEN the global report status is `Unhealthy` — the same status a required
+  initializing contributor produces — but the `ContributorReport.code` is
+  `DependencyFailure`, distinguishing it from `InitializationPending`
 
 ### Requirement: TestKit Provides Same-Contract Health Test Support
 
