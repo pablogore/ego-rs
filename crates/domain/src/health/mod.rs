@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 /// The probe under which a health evaluation is being performed.
 ///
-/// Kubernetes-style probe taxonomy. Purely semantic — contributors never
+/// Health probe taxonomy. Purely semantic — contributors never
 /// receive or branch on this value (see [`HealthContributor::check`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeKind {
