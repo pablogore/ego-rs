@@ -11,7 +11,7 @@ use ego_runtime::effects::{
     ExternalEffectExecutor, InMemoryEffectStore, RuntimeEffectAcceptor,
 };
 use ego_runtime::providers::{
-    DuplicateProviderId, ExternalDataProvider, ExternalDataProviderRegistry,
+    DuplicateProviderId, ExternalDataProvider, ExternalDataProviderRegistry, ProviderAccessConfig,
     RuntimeDataProviderAccess,
 };
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -127,6 +127,11 @@ pub struct RuntimeBuilder {
     /// by default — the zero-cost gate `build()` checks to decide whether to
     /// construct the `RuntimeDataProviderAccess` facade at all (AD-006).
     data_provider_registry: ExternalDataProviderRegistry,
+    /// Cross-cutting timeout/retry policy for the provider access chokepoint
+    /// (issue #234), applied to `RuntimeDataProviderAccess` at `build()`.
+    /// Defaults to [`ProviderAccessConfig::default`]; only meaningful once at
+    /// least one provider is registered.
+    provider_access_config: ProviderAccessConfig,
     /// Every provider registered via
     /// [`RuntimeBuilder::register_data_provider`], kept alongside the
     /// registry above purely so `build()` can drive each one's `shutdown()`
@@ -159,6 +164,7 @@ impl RuntimeBuilder {
             delivery_config: DeliveryConfig::default(),
             effect_drain_deadline: DEFAULT_EFFECT_DRAIN_DEADLINE,
             data_provider_registry: ExternalDataProviderRegistry::new(),
+            provider_access_config: ProviderAccessConfig::default(),
             data_providers_for_teardown: Vec::new(),
         }
     }
@@ -419,6 +425,16 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
+    /// Configures the [`ProviderAccessConfig`] (per-attempt timeout + retry
+    /// policy) applied uniformly at the provider access chokepoint (issue
+    /// #234). Defaults to [`ProviderAccessConfig::default`]; only meaningful
+    /// once at least one provider is registered via
+    /// [`RuntimeBuilder::register_data_provider`].
+    pub fn with_provider_access_config(mut self, config: ProviderAccessConfig) -> Self {
+        self.provider_access_config = config;
+        self
+    }
+
     /// Configures the [`DeliveryConfig`] used by the external-effects delivery
     /// pipeline. Defaults to [`DeliveryConfig::default`] (AD-5 backoff,
     /// `Deferred` runner mode) — only meaningful once at least one executor
@@ -488,8 +504,9 @@ impl RuntimeBuilder {
             if self.data_provider_registry.is_empty() {
                 None
             } else {
-                Some(Arc::new(RuntimeDataProviderAccess::new(
+                Some(Arc::new(RuntimeDataProviderAccess::with_config(
                     self.data_provider_registry,
+                    self.provider_access_config,
                 )))
             };
         let data_providers_for_teardown = self.data_providers_for_teardown;
@@ -2198,13 +2215,7 @@ mod tests {
             .data_provider_access()
             .expect("a provider was registered — the facade must be constructed");
         let response = access
-            .fetch(
-                "pricing",
-                DataRequest {
-                    key: "sku-1".to_string(),
-                    payload: vec![1, 2, 3],
-                },
-            )
+            .fetch("pricing", DataRequest::new("sku-1", vec![1, 2, 3]))
             .await
             .unwrap();
         assert_eq!(response.payload, vec![1, 2, 3]);

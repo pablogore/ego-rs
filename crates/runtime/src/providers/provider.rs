@@ -12,6 +12,26 @@
 use async_trait::async_trait;
 use persistent_entity::data_provider_access::{DataProviderError, DataRequest, DataResponse};
 
+/// A provider's self-reported readiness (issue #234).
+///
+/// This is **provider-level** health — whether *this* provider can currently
+/// serve fetches — and is deliberately kept distinct from *process* liveness:
+/// a provider reporting [`ProviderHealth::Unhealthy`] means its backing
+/// dependency is degraded or unavailable, never that the process is dead or
+/// should terminate. There is intentionally no free-text reason field: like a
+/// [`DataProviderError::Fatal`] message, an arbitrary provider-authored string
+/// could leak sensitive detail into a readiness signal, so health is a closed,
+/// non-leaking classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderHealth {
+    /// Ready to serve fetches.
+    Healthy,
+    /// Registered but currently unable to serve reliably (its backing
+    /// dependency is degraded or unavailable). Not a statement about process
+    /// liveness.
+    Unhealthy,
+}
+
 /// One provider = one kind of external data, registered under a
 /// `provider_id` (see [`super::registry::ExternalDataProviderRegistry`]).
 /// Object-safe — stored behind `Arc<dyn ExternalDataProvider>`.
@@ -20,6 +40,18 @@ pub trait ExternalDataProvider: Send + Sync {
     /// Fetches data for `request`. May perform real I/O — there is no
     /// cache-first precondition (AD-006).
     async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError>;
+
+    /// Reports whether this provider is ready to serve (issue #234). Default
+    /// [`ProviderHealth::Healthy`], mirroring [`Self::shutdown`]'s default
+    /// no-op: a provider with no active health check to run remains valid and
+    /// is treated as ready — implementing this method is purely opt-in, so
+    /// existing providers keep compiling and behaving unchanged. A provider
+    /// that *does* have a cheap liveness signal (a warm connection pool, a
+    /// cached JWKS document, ...) overrides this; it MUST NOT perform an
+    /// expensive fetch just to answer, and MUST NOT block indefinitely.
+    async fn health(&self) -> ProviderHealth {
+        ProviderHealth::Healthy
+    }
 
     /// Tears down any long-lived resource (HTTP pool, gRPC channel, Redis/S3
     /// client, ...). Default no-op; driven by `register_async_teardown`
@@ -59,16 +91,14 @@ mod tests {
             },
         });
 
-        let response = provider
-            .fetch(DataRequest {
-                key: "k".to_string(),
-                payload: vec![],
-            })
-            .await
-            .unwrap();
+        let response = provider.fetch(DataRequest::new("k", vec![])).await.unwrap();
 
         assert_eq!(response.payload, vec![9, 9]);
         assert!(response.cache_hit);
+        // The default `health()` is reachable through the trait object and
+        // reports `Healthy` — proving the new method keeps the trait
+        // object-safe (issue #234).
+        assert_eq!(provider.health().await, ProviderHealth::Healthy);
     }
 
     /// Triangulation: a distinct provider instance carrying a different
@@ -84,15 +114,62 @@ mod tests {
         });
 
         let response = provider
-            .fetch(DataRequest {
-                key: "other".to_string(),
-                payload: vec![],
-            })
+            .fetch(DataRequest::new("other", vec![]))
             .await
             .unwrap();
 
         assert_eq!(response.payload, vec![1]);
         assert!(!response.cache_hit);
+    }
+
+    /// A provider that overrides `health()` to report `Unhealthy` — proves the
+    /// default is genuinely overridable and that an unhealthy provider is a
+    /// valid, still-usable trait object (its `fetch` is unaffected). Issue #234.
+    #[tokio::test]
+    async fn a_provider_may_override_health_to_report_unhealthy() {
+        struct UnhealthyProvider;
+
+        #[async_trait]
+        impl ExternalDataProvider for UnhealthyProvider {
+            async fn fetch(
+                &self,
+                _request: DataRequest,
+            ) -> Result<DataResponse, DataProviderError> {
+                Ok(DataResponse {
+                    payload: vec![],
+                    cache_hit: false,
+                })
+            }
+            async fn health(&self) -> ProviderHealth {
+                ProviderHealth::Unhealthy
+            }
+        }
+
+        let provider: Arc<dyn ExternalDataProvider> = Arc::new(UnhealthyProvider);
+        assert_eq!(provider.health().await, ProviderHealth::Unhealthy);
+    }
+
+    /// A provider that implements only `fetch` (no `health` override) reports
+    /// `Healthy` — the opt-in default that keeps every pre-#234 provider valid.
+    #[tokio::test]
+    async fn a_provider_without_a_health_override_defaults_to_healthy() {
+        struct FetchOnlyProvider;
+
+        #[async_trait]
+        impl ExternalDataProvider for FetchOnlyProvider {
+            async fn fetch(
+                &self,
+                _request: DataRequest,
+            ) -> Result<DataResponse, DataProviderError> {
+                Ok(DataResponse {
+                    payload: vec![],
+                    cache_hit: false,
+                })
+            }
+        }
+
+        let provider: Arc<dyn ExternalDataProvider> = Arc::new(FetchOnlyProvider);
+        assert_eq!(provider.health().await, ProviderHealth::Healthy);
     }
 
     /// Proves `shutdown`'s default no-op exists and runs without requiring
