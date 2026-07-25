@@ -5,7 +5,9 @@
 use crate::contract::{ContractVersion, ServiceDescriptor};
 use crate::error::Result as ServiceResult;
 use async_trait::async_trait;
+use ego_domain::health::HealthContributor;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Service implementation trait.
 ///
@@ -51,6 +53,15 @@ pub trait LifecycleManaged: Send + Sync {
     async fn shutdown(&self) -> ServiceResult<()> {
         Ok(())
     }
+
+    /// Returns this component's health contributors, if any (PROD-005 PR2
+    /// TASK-016/017). The default implementation returns an empty `Vec` —
+    /// non-breaking: every existing implementor compiles unchanged and
+    /// contributes nothing to health aggregation unless it explicitly
+    /// overrides this method.
+    fn health_contributors(&self) -> Vec<Arc<dyn HealthContributor>> {
+        Vec::new()
+    }
 }
 
 /// Service factory trait.
@@ -90,5 +101,60 @@ mod tests {
         fn descriptor(&self) -> &ServiceDescriptor {
             &self.descriptor
         }
+    }
+
+    // -- TASK-016/017: LifecycleManaged::health_contributors default --------
+
+    use ego_domain::health::{DependencyRequirement, HealthCheck, HealthContributor, HealthStatus};
+    use std::sync::Arc;
+
+    struct DefaultLifecycle;
+
+    #[async_trait]
+    impl LifecycleManaged for DefaultLifecycle {
+        // Uses the default `health_contributors()` — no override.
+    }
+
+    struct StubHealthContributor;
+
+    #[async_trait]
+    impl HealthContributor for StubHealthContributor {
+        fn name(&self) -> &str {
+            "stub"
+        }
+
+        fn requirement(&self) -> DependencyRequirement {
+            DependencyRequirement::Required
+        }
+
+        async fn check(&self) -> HealthCheck {
+            HealthCheck {
+                status: HealthStatus::Healthy,
+                code: None,
+            }
+        }
+    }
+
+    struct ContributingLifecycle;
+
+    #[async_trait]
+    impl LifecycleManaged for ContributingLifecycle {
+        fn health_contributors(&self) -> Vec<Arc<dyn HealthContributor>> {
+            vec![Arc::new(StubHealthContributor)]
+        }
+    }
+
+    #[test]
+    fn default_health_contributors_is_empty() {
+        let component = DefaultLifecycle;
+        assert!(component.health_contributors().is_empty());
+    }
+
+    #[test]
+    fn overridden_health_contributors_returns_non_empty() {
+        let component = ContributingLifecycle;
+        let contributors = component.health_contributors();
+        assert_eq!(contributors.len(), 1);
+        assert_eq!(contributors[0].name(), "stub");
     }
 }
