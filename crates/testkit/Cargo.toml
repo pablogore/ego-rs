@@ -15,6 +15,9 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# PROD-005 PR3: StaticHealthContributor's optional `delay` uses
+# `tokio::time::sleep` before returning its canned HealthCheck.
+tokio = { version = "1.0", features = ["time"] }
 ego-domain = { path = "../domain" }
 ego-runtime = { path = "../runtime" }
 ego-security-sdk = { path = "../security-sdk" }
@@ -27,4 +30,6 @@ kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", bra
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
-tokio = { version = "1.0", features = ["macros", "rt"] }
+# PROD-005 PR3: `#[tokio::test(start_paused = true)]` for deterministic
+# virtual-time `StaticHealthContributor` delay tests.
+tokio = { version = "1.0", features = ["macros", "rt", "test-util"] }

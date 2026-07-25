@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_domain::event::DomainEvent;
+use ego_domain::health::HealthContributor;
 use ego_domain::{Observability, Tracer, TracerLifecycle};
 use ego_runtime::effects::{
     DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
@@ -12,7 +13,7 @@ use ego_runtime::effects::{
 };
 use ego_runtime::providers::{
     DuplicateProviderId, ExternalDataProvider, ExternalDataProviderRegistry, ProviderAccessConfig,
-    RuntimeDataProviderAccess,
+    ProviderHealthContributor, RuntimeDataProviderAccess,
 };
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
@@ -147,8 +148,10 @@ pub struct RuntimeBuilder {
     /// TASK-018/019). `build()` folds every registered component's
     /// `LifecycleManaged::health_contributors()` into ONE runtime-owned
     /// [`HealthRegistry`] — a component that contributes none (the trait's
-    /// default) leaves aggregation unaffected. Data providers are NOT
-    /// registered here (PR3: `ProviderHealthContributor` doesn't exist yet).
+    /// default) leaves aggregation unaffected. Every registered data
+    /// provider is ALSO folded into that same registry, adapted via
+    /// `ego_runtime::providers::ProviderHealthContributor` (PROD-005 PR3
+    /// TASK-023) — see `build()`.
     lifecycle_components: Vec<Arc<dyn LifecycleManaged>>,
 }
 
@@ -516,6 +519,24 @@ impl RuntimeBuilder {
             )))
         };
 
+        // PROD-005 PR3 (TASK-023): adapt every registered provider into a
+        // `ProviderHealthContributor`, identified by the same `provider_id`
+        // it was registered under, BEFORE `self.data_provider_registry` is
+        // moved into `RuntimeDataProviderAccess` below. This is the single
+        // registration authority (ADR-7) for provider health — folded into
+        // the SAME runtime-owned `HealthRegistry` as
+        // `lifecycle_components`'s contributors, not a second channel.
+        let provider_health_contributors: Vec<Arc<dyn HealthContributor>> = self
+            .data_provider_registry
+            .iter()
+            .map(|(provider_id, provider)| {
+                Arc::new(ProviderHealthContributor::new(
+                    provider_id.to_string(),
+                    provider.clone(),
+                )) as Arc<dyn HealthContributor>
+            })
+            .collect();
+
         // CORE-019A Phase 4 zero-cost gate (AD-006), mirroring the
         // effect-executors gate above: construct the
         // `RuntimeDataProviderAccess` facade ONLY when at least one provider
@@ -549,15 +570,18 @@ impl RuntimeBuilder {
         };
         let tracer_lifecycle = self.tracer_lifecycle;
 
-        // PROD-005 PR2 (TASK-018/019): fold every registered lifecycle
-        // component's health contributors into ONE runtime-owned registry.
-        // A component contributing none (the `LifecycleManaged` default)
-        // leaves aggregation unaffected — this is the zero-cost path when no
-        // component ever registers a contributor.
+        // PROD-005 PR2 (TASK-018/019) + PR3 (TASK-023): fold every registered
+        // lifecycle component's health contributors AND every registered
+        // data provider's `ProviderHealthContributor` into ONE runtime-owned
+        // registry — the single registration authority (ADR-7). A component
+        // contributing none (the `LifecycleManaged` default) leaves
+        // aggregation unaffected; a build with no lifecycle components and no
+        // registered providers is still the zero-cost path.
         let health_contributors = self
             .lifecycle_components
             .iter()
             .flat_map(|component| component.health_contributors())
+            .chain(provider_health_contributors)
             .collect();
         let health_aggregator = Arc::new(HealthAggregator::new(
             HealthRegistry::from_contributors(health_contributors),
