@@ -145,14 +145,19 @@ async fn collect_reports(
 ) -> Vec<ContributorReport> {
     let per_contributor = config.per_contributor;
 
+    // Each in-flight future carries an internal positional `id` alongside its
+    // report. `id` — never `name()` — is the bookkeeping key: PR1 does not
+    // guarantee `name()` uniqueness (it is public metadata), so keying by name
+    // would collapse two same-named contributors and silently drop one.
     let mut in_flight: FuturesUnordered<_> = registry
         .contributors()
         .iter()
         .cloned()
-        .map(|contributor| async move {
+        .enumerate()
+        .map(|(id, contributor)| async move {
             let name = contributor.name().to_string();
             let requirement = contributor.requirement();
-            match tokio::time::timeout(per_contributor, contributor.check()).await {
+            let report = match tokio::time::timeout(per_contributor, contributor.check()).await {
                 Ok(check) => ContributorReport {
                     name,
                     status: check.status,
@@ -165,26 +170,29 @@ async fn collect_reports(
                     requirement,
                     code: Some(HealthCode::Timeout),
                 },
-            }
+            };
+            (id, report)
         })
         .collect();
 
     let Some(global_budget) = config.global_budget else {
         let mut reports = Vec::with_capacity(in_flight.len());
-        while let Some(report) = in_flight.next().await {
+        while let Some((_id, report)) = in_flight.next().await {
             reports.push(report);
         }
         return reports;
     };
 
     // Retain (name, requirement) identity for every registered contributor
-    // up front, so a contributor STILL PENDING when the global budget
-    // elapses can still be attributed a synthetic report — the global
-    // timeout must never collapse into a single, contributor-less error.
-    let mut pending: std::collections::HashMap<String, DependencyRequirement> = registry
+    // up front, keyed by internal `id`, so a contributor STILL PENDING when
+    // the global budget elapses can still be attributed a synthetic report —
+    // the global timeout must never collapse into a single, contributor-less
+    // error, and same-named contributors must each survive.
+    let mut pending: std::collections::HashMap<usize, (String, DependencyRequirement)> = registry
         .contributors()
         .iter()
-        .map(|c| (c.name().to_string(), c.requirement()))
+        .enumerate()
+        .map(|(id, c)| (id, (c.name().to_string(), c.requirement())))
         .collect();
 
     let mut reports = Vec::with_capacity(pending.len());
@@ -196,8 +204,8 @@ async fn collect_reports(
             biased;
             next = in_flight.next() => {
                 match next {
-                    Some(report) => {
-                        pending.remove(&report.name);
+                    Some((id, report)) => {
+                        pending.remove(&id);
                         reports.push(report);
                         if pending.is_empty() {
                             break;
@@ -207,7 +215,7 @@ async fn collect_reports(
                 }
             }
             _ = &mut sleep => {
-                for (name, requirement) in pending.drain() {
+                for (_id, (name, requirement)) in pending.drain() {
                     reports.push(ContributorReport {
                         name,
                         status: HealthStatus::Unhealthy,
@@ -675,5 +683,48 @@ mod tests {
         assert_eq!(report.contributors.len(), 1);
         assert_eq!(report.contributors[0].code, None);
         assert_eq!(report.status, HealthStatus::Healthy);
+    }
+
+    /// PR1 does NOT guarantee `HealthContributor::name()` is unique — it is
+    /// public metadata, not an identity key. Two contributors sharing a name
+    /// must EACH be preserved when the global budget expires while both are
+    /// pending; internal bookkeeping keyed by name would collapse them into
+    /// one, silently dropping a registered contributor from the report.
+    #[tokio::test(start_paused = true)]
+    async fn two_contributors_with_same_name_are_preserved_when_global_budget_expires() {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(HangingContributor {
+                name: "db".to_string(),
+                requirement: DependencyRequirement::Required,
+            }),
+            Arc::new(HangingContributor {
+                name: "db".to_string(),
+                requirement: DependencyRequirement::Optional,
+            }),
+        ]);
+        let config = HealthAggregationConfig {
+            per_contributor: Duration::from_secs(60),
+            global_budget: Some(Duration::from_millis(100)),
+        };
+        let aggregator = HealthAggregator::new(registry, config);
+
+        let report = aggregator.readiness().await;
+
+        // Both same-named contributors must be attributable — not deduped.
+        assert_eq!(report.contributors.len(), 2);
+        assert_eq!(
+            report
+                .contributors
+                .iter()
+                .filter(|c| c.name == "db")
+                .count(),
+            2
+        );
+        for c in &report.contributors {
+            assert_eq!(c.status, HealthStatus::Unhealthy);
+            assert_eq!(c.code, Some(HealthCode::Timeout));
+        }
+        // Required + Timeout -> global Unhealthy.
+        assert_eq!(report.status, HealthStatus::Unhealthy);
     }
 }
