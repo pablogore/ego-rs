@@ -60,18 +60,6 @@ impl ExternalDataProviderRegistry {
     pub fn get(&self, provider_id: &str) -> Option<Arc<dyn ExternalDataProvider>> {
         self.providers.get(provider_id).cloned()
     }
-
-    /// Iterates every registered `(provider_id, provider)` pair (issue #234).
-    ///
-    /// One entry per registered id — health participation is now expressed
-    /// per-id via `ego_runtime::providers::ProviderHealthContributor`, folded
-    /// into the runtime-owned `HealthAggregator`
-    /// (`ego_service_sdk::runtime::builder::RuntimeBuilder::register_data_provider`,
-    /// PROD-005 PR3), not through a separate provider-subsystem readiness
-    /// query. Order is unspecified (backed by a `HashMap`).
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn ExternalDataProvider>)> {
-        self.providers.iter().map(|(id, p)| (id.as_str(), p))
-    }
 }
 
 #[cfg(test)]
