@@ -39,7 +39,12 @@ pub trait Service: Send + Sync {
 ///
 /// This trait is separate from [`Service`] so that the `Service` trait remains minimal.
 /// Only components that explicitly need startup/teardown hooks implement this.
-/// The runtime drives `initialize()` on startup and `shutdown()` on teardown in reverse order.
+///
+/// The runtime currently consumes only [`health_contributors()`](Self::health_contributors)
+/// (folded into the runtime-owned health aggregator by the builder).
+/// [`initialize()`](Self::initialize) and [`shutdown()`](Self::shutdown) are
+/// opt-in hooks that the runtime does not yet drive — implementing them has no
+/// effect on startup or teardown today.
 #[async_trait]
 pub trait LifecycleManaged: Send + Sync {
     /// Called once by the runtime when the component is starting up.
