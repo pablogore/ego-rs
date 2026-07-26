@@ -7,6 +7,8 @@ edition = "2021"
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7" }
+# PROD-005 PR2: concurrent health-contributor fan-out (FuturesUnordered).
+futures = "0.3"
 semver = "1"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +25,10 @@ persistent-entity = { path = "../persistent-entity" }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
+# PROD-005 PR2: `#[tokio::test(start_paused = true)]` for deterministic
+# virtual-time health-aggregation timeout tests (feature unifies with the
+# main `tokio` dependency above for test builds).
+tokio = { version = "1.0", features = ["test-util"] }
 # CORE-025 TASK-020: the acceptance walkthrough's TestKit scenario needs
 # ego-testkit, which itself depends on ego-service-sdk normally. This is a
 # dev-dependency-only cycle (allowed by Cargo — dev-deps are excluded from

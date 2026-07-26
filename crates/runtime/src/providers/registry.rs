@@ -60,17 +60,6 @@ impl ExternalDataProviderRegistry {
     pub fn get(&self, provider_id: &str) -> Option<Arc<dyn ExternalDataProvider>> {
         self.providers.get(provider_id).cloned()
     }
-
-    /// Iterates every registered `(provider_id, provider)` pair (issue #234).
-    ///
-    /// The enumeration the provider-subsystem readiness query
-    /// ([`super::access::RuntimeDataProviderAccess::readiness`]) polls: one
-    /// entry per registered id, so "registered = participates in readiness"
-    /// holds without a separate required/optional concept. Order is
-    /// unspecified (backed by a `HashMap`).
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn ExternalDataProvider>)> {
-        self.providers.iter().map(|(id, p)| (id.as_str(), p))
-    }
 }
 
 #[cfg(test)]

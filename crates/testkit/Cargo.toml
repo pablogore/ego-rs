@@ -24,7 +24,13 @@ kitlogger = { git = "https://github.com/pablogore/kitlogger.git", branch = "deve
 kitlogger-formatter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 console-exporter = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
 kitlogger-log-domain = { git = "https://github.com/pablogore/kitlogger.git", branch = "develop" }
+# PROD-005 PR3 TASK-027/028: StaticHealthContributor::with_delay's `check()`
+# sleeps via `tokio::time::sleep` — real library code, not test-only, so
+# `time` is a normal (non-dev) feature here.
+tokio = { version = "1.0", features = ["time"] }
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
-tokio = { version = "1.0", features = ["macros", "rt"] }
+# `test-util` unifies with the `time` feature above to enable
+# `#[tokio::test(start_paused = true)]` for deterministic delay assertions.
+tokio = { version = "1.0", features = ["macros", "rt", "test-util"] }

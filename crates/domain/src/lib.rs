@@ -74,6 +74,10 @@ pub mod auth;
 /// Configuration validation contract — Validate, ConfigError (CORE-016).
 pub mod config;
 
+/// Runtime health model — ProbeKind, HealthStatus, HealthCode,
+/// HealthContributor, and the deterministic fold (PROD-005).
+pub mod health;
+
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use auth::{
     AuthenticationError, ClaimSet, ClaimValue, Claims, Clock, Credential, StandardClaims,
@@ -88,6 +92,10 @@ pub use context::{
 };
 pub use effect::{Effect, ExternalEffectDescription, HandlerResult};
 pub use event::DomainEvent;
+pub use health::{
+    fold, ContributorReport, DependencyRequirement, HealthCheck, HealthCode, HealthContributor,
+    HealthReport, HealthStatus, ProbeKind,
+};
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
