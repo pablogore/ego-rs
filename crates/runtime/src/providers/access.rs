@@ -48,7 +48,6 @@ use tracing::{info, info_span, Instrument};
 use crate::effects::observability::hashed_key;
 use crate::effects::RetryPolicy;
 
-use super::provider::ProviderHealth;
 use super::registry::ExternalDataProviderRegistry;
 
 /// AD-234 default: the uniform per-attempt timeout applied to every provider
@@ -261,47 +260,6 @@ fn log_retry_scheduled(
     );
 }
 
-/// The provider subsystem's aggregated readiness (issue #234), one entry per
-/// registered provider. Deliberately **not** a statement about process
-/// liveness: [`Self::is_ready`] reporting `false` means a registered provider's
-/// backing dependency is degraded/unavailable, never that the process is dead.
-///
-/// Aggregate semantics (issue #234 decision — `registered = required`): every
-/// registered provider participates; there is no separate required/optional
-/// concept. [`Self::is_ready`] is `true` only when every registered provider
-/// reports [`ProviderHealth::Healthy`]. Wiring this into a future
-/// service-/process-level readiness surface is intentionally deferred — no such
-/// mechanism exists in the repository today, and inventing one is out of scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderSubsystemReadiness {
-    providers: Vec<(String, ProviderHealth)>,
-}
-
-impl ProviderSubsystemReadiness {
-    /// Per-provider health, sorted by `provider_id` for a stable snapshot.
-    pub fn per_provider(&self) -> &[(String, ProviderHealth)] {
-        &self.providers
-    }
-
-    /// Whether the whole provider subsystem is ready: every registered
-    /// provider is [`ProviderHealth::Healthy`] (`registered = required`). An
-    /// empty subsystem (no providers registered) is trivially ready.
-    pub fn is_ready(&self) -> bool {
-        self.providers
-            .iter()
-            .all(|(_, health)| *health == ProviderHealth::Healthy)
-    }
-
-    /// The `provider_id`s of every registered provider reporting
-    /// [`ProviderHealth::Unhealthy`].
-    pub fn unhealthy(&self) -> impl Iterator<Item = &str> {
-        self.providers
-            .iter()
-            .filter(|(_, health)| *health == ProviderHealth::Unhealthy)
-            .map(|(id, _)| id.as_str())
-    }
-}
-
 /// The sole runtime implementation of `DataProviderAccess` (AD-003's hybrid
 /// resolution model): a handler holds `Arc<dyn DataProviderAccess>` and
 /// never a concrete provider or the registry directly.
@@ -323,30 +281,6 @@ impl RuntimeDataProviderAccess {
         config: ProviderAccessConfig,
     ) -> Self {
         Self { registry, config }
-    }
-
-    /// Polls every registered provider's [`ExternalDataProvider::health`] and
-    /// aggregates them (issue #234). Providers are polled sequentially — a
-    /// health check must be cheap and non-blocking (see the trait method's
-    /// contract), so no fan-out is warranted. Result is sorted by
-    /// `provider_id` for a deterministic snapshot.
-    ///
-    /// This deliberately **trusts** the trait contract: `health()` gets no
-    /// per-provider timeout here, so a provider that violates the contract and
-    /// blocks indefinitely stalls the whole poll (and later providers are never
-    /// reached). That is an accepted limitation of this minimal surface — a
-    /// per-health timeout is intentionally deferred until this query feeds a
-    /// real service-level `/ready` mechanism (which does not exist in the repo
-    /// yet). Do not add one here without that consumer; it would bloat #234.
-    pub async fn readiness(&self) -> ProviderSubsystemReadiness {
-        let mut providers = Vec::new();
-        for (id, provider) in self.registry.iter() {
-            // Trusts the cheap/non-blocking `health()` contract — no timeout
-            // guard here (see the method-level note).
-            providers.push((id.to_string(), provider.health().await));
-        }
-        providers.sort_by(|(a, _), (b, _)| a.cmp(b));
-        ProviderSubsystemReadiness { providers }
     }
 }
 
@@ -810,79 +744,5 @@ mod tests {
             3,
             "each of the 3 attempts entered the provider before timing out"
         );
-    }
-
-    // -- #234: provider health / readiness ------------------------------
-
-    /// A provider that reports `Unhealthy` (its `fetch` is irrelevant here).
-    struct UnhealthyProvider;
-
-    #[async_trait]
-    impl ExternalDataProvider for UnhealthyProvider {
-        async fn fetch(&self, _request: DataRequest) -> Result<DataResponse, DataProviderError> {
-            Ok(DataResponse {
-                payload: vec![],
-                cache_hit: false,
-            })
-        }
-        async fn health(&self) -> ProviderHealth {
-            ProviderHealth::Unhealthy
-        }
-    }
-
-    fn healthy(payload: Vec<u8>) -> Arc<StaticProvider> {
-        Arc::new(StaticProvider {
-            response: DataResponse {
-                payload,
-                cache_hit: false,
-            },
-        })
-    }
-
-    #[tokio::test]
-    async fn readiness_is_ready_when_every_registered_provider_is_healthy() {
-        let mut registry = ExternalDataProviderRegistry::new();
-        registry.register("pricing", healthy(vec![1])).unwrap();
-        // A provider with no `health` override defaults to Healthy.
-        registry.register("jwks", healthy(vec![2])).unwrap();
-        let access = RuntimeDataProviderAccess::new(registry);
-
-        let readiness = access.readiness().await;
-
-        assert!(readiness.is_ready());
-        assert_eq!(readiness.per_provider().len(), 2);
-        assert_eq!(readiness.unhealthy().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn readiness_is_not_ready_when_a_registered_provider_is_unhealthy() {
-        let mut registry = ExternalDataProviderRegistry::new();
-        registry.register("pricing", healthy(vec![1])).unwrap();
-        registry
-            .register("jwks", Arc::new(UnhealthyProvider))
-            .unwrap();
-        let access = RuntimeDataProviderAccess::new(registry);
-
-        let readiness = access.readiness().await;
-
-        assert!(
-            !readiness.is_ready(),
-            "one unhealthy registered provider makes the subsystem not ready (registered = required)"
-        );
-        assert_eq!(
-            readiness.unhealthy().collect::<Vec<_>>(),
-            vec!["jwks"],
-            "the unhealthy provider is named, the healthy one is not"
-        );
-    }
-
-    #[tokio::test]
-    async fn readiness_of_an_empty_subsystem_is_trivially_ready() {
-        let access = RuntimeDataProviderAccess::new(ExternalDataProviderRegistry::new());
-
-        let readiness = access.readiness().await;
-
-        assert!(readiness.is_ready());
-        assert!(readiness.per_provider().is_empty());
     }
 }

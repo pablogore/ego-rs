@@ -141,14 +141,29 @@ pub struct RuntimeBuilder {
     /// "Explicit, Single-Owner Lifecycle") — the registry itself is moved
     /// into `RuntimeDataProviderAccess` and is no longer iterable once
     /// `build()` constructs the facade.
+    ///
+    /// Deduplicated by `Arc::ptr_eq` (single-owner teardown): registering the
+    /// same `Arc` under two different `provider_id`s stores it here only
+    /// once. This is DELIBERATELY NOT the source `build()` uses for health
+    /// contributors — see [`Self::provider_health_pairs`], which preserves
+    /// every alias.
     data_providers_for_teardown: Vec<Arc<dyn ExternalDataProvider>>,
+    /// Every `(provider_id, provider)` pair registered via
+    /// [`RuntimeBuilder::register_data_provider`] (PROD-005 PR3 TASK-023),
+    /// kept UNDEDUPLICATED — unlike [`Self::data_providers_for_teardown`],
+    /// which collapses an aliased `Arc` to one teardown call, health is a
+    /// per-registered-id contract: the same provider `Arc` registered under
+    /// two distinct `provider_id`s must still produce two independent
+    /// [`ego_runtime::providers::ProviderHealthContributor`]s, one per id.
+    provider_health_pairs: Vec<(String, Arc<dyn ExternalDataProvider>)>,
     /// Lifecycle-managed components registered via
     /// [`RuntimeBuilder::with_lifecycle_component`] (PROD-005 PR2
     /// TASK-018/019). `build()` folds every registered component's
-    /// `LifecycleManaged::health_contributors()` into ONE runtime-owned
-    /// [`HealthRegistry`] — a component that contributes none (the trait's
-    /// default) leaves aggregation unaffected. Data providers are NOT
-    /// registered here (PR3: `ProviderHealthContributor` doesn't exist yet).
+    /// `LifecycleManaged::health_contributors()`, together with a
+    /// [`ego_runtime::providers::ProviderHealthContributor`] per entry in
+    /// [`Self::provider_health_pairs`] (PROD-005 PR3 TASK-023), into ONE
+    /// runtime-owned [`HealthRegistry`] — a component that contributes none
+    /// (the trait's default) leaves aggregation unaffected.
     lifecycle_components: Vec<Arc<dyn LifecycleManaged>>,
 }
 
@@ -176,6 +191,7 @@ impl RuntimeBuilder {
             data_provider_registry: ExternalDataProviderRegistry::new(),
             provider_access_config: ProviderAccessConfig::default(),
             data_providers_for_teardown: Vec::new(),
+            provider_health_pairs: Vec::new(),
             lifecycle_components: Vec::new(),
         }
     }
@@ -435,15 +451,21 @@ impl RuntimeBuilder {
         provider_id: impl Into<String>,
         provider: Arc<dyn ExternalDataProvider>,
     ) -> Result<Self, DuplicateProviderId> {
+        let provider_id = provider_id.into();
         self.data_provider_registry
-            .register(provider_id, provider.clone())?;
+            .register(provider_id.clone(), provider.clone())?;
         let already_tracked = self
             .data_providers_for_teardown
             .iter()
             .any(|tracked| Arc::ptr_eq(tracked, &provider));
         if !already_tracked {
-            self.data_providers_for_teardown.push(provider);
+            self.data_providers_for_teardown.push(provider.clone());
         }
+        // PROD-005 PR3 TASK-023: recorded UNCONDITIONALLY, unlike the
+        // dedup-by-identity teardown list above — health is per registered
+        // `provider_id`, so an aliased `Arc` registered under a second id
+        // still gets its own entry here.
+        self.provider_health_pairs.push((provider_id, provider));
         Ok(self)
     }
 
@@ -554,11 +576,27 @@ impl RuntimeBuilder {
         // A component contributing none (the `LifecycleManaged` default)
         // leaves aggregation unaffected — this is the zero-cost path when no
         // component ever registers a contributor.
-        let health_contributors = self
+        let mut health_contributors: Vec<Arc<dyn ego_domain::health::HealthContributor>> = self
             .lifecycle_components
             .iter()
             .flat_map(|component| component.health_contributors())
             .collect();
+        // PROD-005 PR3 TASK-023 (single registration authority): every
+        // `register_data_provider` call also contributes a
+        // `ProviderHealthContributor`, keyed by the SAME `provider_id` it was
+        // registered under, into this SAME vec — never a second, separately
+        // owned registry/aggregator. Uses `provider_health_pairs`
+        // (unconditionally per-id), never `data_providers_for_teardown`
+        // (identity-deduplicated), so an aliased provider registered under
+        // two ids still yields two independent contributors.
+        health_contributors.extend(self.provider_health_pairs.into_iter().map(
+            |(provider_id, provider)| {
+                Arc::new(ego_runtime::providers::ProviderHealthContributor::new(
+                    provider_id,
+                    provider,
+                )) as Arc<dyn ego_domain::health::HealthContributor>
+            },
+        ));
         let health_aggregator = Arc::new(HealthAggregator::new(
             HealthRegistry::from_contributors(health_contributors),
             HealthAggregationConfig::default(),
@@ -1519,6 +1557,127 @@ mod tests {
         assert!(report.contributors.is_empty());
     }
 
+    // -- PROD-005 PR3 TASK-022: ProviderHealthContributor + real HealthAggregator
+    // concurrency/timeout behavior --------------------------------------------
+
+    use crate::health::{HealthAggregationConfig, HealthAggregator, HealthRegistry};
+    use ego_runtime::providers::{ProviderHealth, ProviderHealthContributor};
+
+    /// A provider whose `health()` sleeps for a configurable duration before
+    /// reporting healthy — used to prove `ProviderHealthContributor`s are
+    /// fanned out concurrently through the real `HealthAggregator`, not
+    /// evaluated sequentially.
+    struct SlowHealthProvider {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl ExternalDataProvider for SlowHealthProvider {
+        async fn fetch(&self, _request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            unreachable!("these tests only exercise health(), never fetch()")
+        }
+
+        async fn health(&self) -> ProviderHealth {
+            tokio::time::sleep(self.delay).await;
+            ProviderHealth::Healthy
+        }
+    }
+
+    /// A provider whose `health()` never resolves — used to prove the
+    /// per-contributor timeout fires for a `ProviderHealthContributor` exactly
+    /// as it would for any other `HealthContributor`.
+    struct HangingHealthProvider;
+
+    #[async_trait]
+    impl ExternalDataProvider for HangingHealthProvider {
+        async fn fetch(&self, _request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            unreachable!("these tests only exercise health(), never fetch()")
+        }
+
+        async fn health(&self) -> ProviderHealth {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_health_contributors_are_evaluated_concurrently_not_sequentially() {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(ProviderHealthContributor::new(
+                "slow-provider",
+                Arc::new(SlowHealthProvider {
+                    delay: Duration::from_millis(500),
+                }),
+            )),
+            Arc::new(ProviderHealthContributor::new(
+                "fast-provider-a",
+                Arc::new(SlowHealthProvider {
+                    delay: Duration::from_millis(1),
+                }),
+            )),
+            Arc::new(ProviderHealthContributor::new(
+                "fast-provider-b",
+                Arc::new(SlowHealthProvider {
+                    delay: Duration::from_millis(1),
+                }),
+            )),
+        ]);
+        let aggregator = HealthAggregator::new(registry, HealthAggregationConfig::default());
+
+        let start = tokio::time::Instant::now();
+        let report = aggregator.readiness().await;
+        let elapsed = start.elapsed();
+
+        // A slow provider must never serialize the others — the whole batch
+        // completes in ~the slowest single contributor's time, not the sum.
+        assert_eq!(elapsed, Duration::from_millis(500));
+        assert_eq!(report.contributors.len(), 3);
+        assert_eq!(report.status, HealthStatus::Healthy);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_health_contributor_exceeding_the_per_contributor_timeout_is_unhealthy_with_timeout_code(
+    ) {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(ProviderHealthContributor::new(
+                "wedged-provider",
+                Arc::new(HangingHealthProvider),
+            )),
+            Arc::new(ProviderHealthContributor::new(
+                "ok-provider",
+                Arc::new(SlowHealthProvider {
+                    delay: Duration::from_millis(1),
+                }),
+            )),
+        ]);
+        let config = HealthAggregationConfig {
+            per_contributor: Duration::from_millis(50),
+            global_budget: None,
+        };
+        let aggregator = HealthAggregator::new(registry, config);
+
+        let report = aggregator.readiness().await;
+
+        let wedged = report
+            .contributors
+            .iter()
+            .find(|c| c.name == "wedged-provider")
+            .expect("the timed-out provider must still produce a report");
+        assert_eq!(wedged.status, HealthStatus::Unhealthy);
+        assert_eq!(wedged.code, Some(ego_domain::health::HealthCode::Timeout));
+        assert_eq!(wedged.requirement, DependencyRequirement::Required);
+
+        // The other provider's real report survives the sibling's timeout.
+        let ok = report
+            .contributors
+            .iter()
+            .find(|c| c.name == "ok-provider")
+            .expect("other providers are unaffected by one timing out");
+        assert_eq!(ok.status, HealthStatus::Healthy);
+        assert_eq!(ok.code, None);
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+    }
+
     // -- CORE-120: unregistered type unchanged behavior ----------------------
 
     #[test]
@@ -2446,6 +2605,159 @@ mod tests {
         rt.shutdown_async().await.expect("shutdown_async succeeds");
 
         assert_eq!(provider.shutdown_call_count(), 1);
+    }
+
+    // -- PROD-005 PR3 TASK-023: single registration authority — every
+    // `register_data_provider` participates in the SAME runtime-owned
+    // `HealthAggregator` `LifecycleManaged::health_contributors()` folds
+    // into, via `ProviderHealthContributor` ---------------------------------
+
+    struct StaticHealthDataProvider {
+        health: ProviderHealth,
+    }
+
+    #[async_trait]
+    impl ExternalDataProvider for StaticHealthDataProvider {
+        async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            Ok(DataResponse {
+                payload: request.payload,
+                cache_hit: false,
+            })
+        }
+
+        async fn health(&self) -> ProviderHealth {
+            self.health
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_registered_via_the_builder_participates_in_the_same_health_aggregator() {
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "pricing",
+                Arc::new(StaticHealthDataProvider {
+                    health: ProviderHealth::Healthy,
+                }) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.contributors.len(), 1);
+        assert_eq!(report.contributors[0].name, "pricing");
+        assert_eq!(
+            report.contributors[0].requirement,
+            DependencyRequirement::Required
+        );
+        assert_eq!(report.contributors[0].code, None);
+    }
+
+    #[tokio::test]
+    async fn an_unhealthy_registered_provider_drives_global_readiness_and_startup_unhealthy() {
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "pricing",
+                Arc::new(StaticHealthDataProvider {
+                    health: ProviderHealth::Unhealthy,
+                }) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        for (probe, report) in [
+            (ProbeKind::Readiness, rt.readiness().await),
+            (ProbeKind::Startup, rt.startup().await),
+        ] {
+            assert_eq!(report.probe, probe);
+            assert_eq!(report.status, HealthStatus::Unhealthy);
+            assert_eq!(report.contributors.len(), 1);
+            assert_eq!(report.contributors[0].name, "pricing");
+            assert_eq!(
+                report.contributors[0].requirement,
+                DependencyRequirement::Required
+            );
+            assert_eq!(
+                report.contributors[0].code,
+                Some(ego_domain::health::HealthCode::DependencyFailure)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn liveness_still_consults_no_provider_even_when_one_is_registered_and_unhealthy() {
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "pricing",
+                Arc::new(StaticHealthDataProvider {
+                    health: ProviderHealth::Unhealthy,
+                }) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        let report = rt.liveness();
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.contributors.is_empty());
+    }
+
+    /// CRITICAL ALIAS RULE: `data_providers_for_teardown` dedupes by
+    /// `Arc::ptr_eq` (single-owner teardown), but health is a per-registered-id
+    /// contract — the SAME provider `Arc` registered under two distinct
+    /// `provider_id`s must still produce TWO `ProviderHealthContributor`s, one
+    /// per id, never collapsed down to teardown's deduplicated single entry.
+    #[tokio::test]
+    async fn a_provider_aliased_under_two_ids_yields_two_distinct_health_contributors() {
+        let provider = Arc::new(StaticHealthDataProvider {
+            health: ProviderHealth::Healthy,
+        }) as Arc<dyn ExternalDataProvider>;
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("pricing-v1", provider.clone())
+            .unwrap()
+            .register_data_provider("pricing-v2", provider)
+            .unwrap()
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(
+            report.contributors.len(),
+            2,
+            "both aliased provider_ids must each contribute their own health report"
+        );
+        let mut names: Vec<&str> = report
+            .contributors
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["pricing-v1", "pricing-v2"]);
+    }
+
+    #[tokio::test]
+    async fn register_data_provider_health_composes_with_lifecycle_component_health() {
+        let rt = RuntimeBuilder::new()
+            .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
+            .register_data_provider(
+                "pricing",
+                Arc::new(StaticHealthDataProvider {
+                    health: ProviderHealth::Healthy,
+                }) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(report.contributors.len(), 2);
+        assert_eq!(
+            report.status,
+            HealthStatus::Unhealthy,
+            "the unhealthy lifecycle contributor still drives the SAME aggregator unhealthy"
+        );
     }
 
     // -- PROD-003 Phase 4 (TASK-013/014): RuntimeBuilder::with_tracer /

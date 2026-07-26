@@ -18,11 +18,11 @@
 //! See `openspec/changes/core-019a-external-data-providers/design.md`.
 
 pub mod access;
+pub mod health;
 pub mod provider;
 pub mod registry;
 
-pub use access::{
-    ProviderAccessConfig, ProviderOutcome, ProviderSubsystemReadiness, RuntimeDataProviderAccess,
-};
+pub use access::{ProviderAccessConfig, ProviderOutcome, RuntimeDataProviderAccess};
+pub use health::ProviderHealthContributor;
 pub use provider::{ExternalDataProvider, ProviderHealth};
 pub use registry::{DuplicateProviderId, ExternalDataProviderRegistry};

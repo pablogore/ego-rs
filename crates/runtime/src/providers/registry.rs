@@ -63,11 +63,12 @@ impl ExternalDataProviderRegistry {
 
     /// Iterates every registered `(provider_id, provider)` pair (issue #234).
     ///
-    /// The enumeration the provider-subsystem readiness query
-    /// ([`super::access::RuntimeDataProviderAccess::readiness`]) polls: one
-    /// entry per registered id, so "registered = participates in readiness"
-    /// holds without a separate required/optional concept. Order is
-    /// unspecified (backed by a `HashMap`).
+    /// One entry per registered id — health participation is now expressed
+    /// per-id via `ego_runtime::providers::ProviderHealthContributor`, folded
+    /// into the runtime-owned `HealthAggregator`
+    /// (`ego_service_sdk::runtime::builder::RuntimeBuilder::register_data_provider`,
+    /// PROD-005 PR3), not through a separate provider-subsystem readiness
+    /// query. Order is unspecified (backed by a `HashMap`).
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn ExternalDataProvider>)> {
         self.providers.iter().map(|(id, p)| (id.as_str(), p))
     }
