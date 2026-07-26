@@ -14,6 +14,7 @@
 //! aggregator — liveness is a process-internal check that consults no
 //! contributor (see `Runtime::liveness` in `crate::runtime`).
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use ego_domain::health::{
     HealthStatus, ProbeKind,
 };
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 
 /// The set of registered health contributors (TASK-006).
 ///
@@ -157,12 +158,23 @@ async fn collect_reports(
         .map(|(id, contributor)| async move {
             let name = contributor.name().to_string();
             let requirement = contributor.requirement();
-            let report = match tokio::time::timeout(per_contributor, contributor.check()).await {
-                Ok(check) => ContributorReport {
+            let outcome = tokio::time::timeout(
+                per_contributor,
+                AssertUnwindSafe(contributor.check()).catch_unwind(),
+            )
+            .await;
+            let report = match outcome {
+                Ok(Ok(check)) => ContributorReport {
                     name,
                     status: check.status,
                     requirement,
                     code: check.code,
+                },
+                Ok(Err(_panic)) => ContributorReport {
+                    name,
+                    status: HealthStatus::Unhealthy,
+                    requirement,
+                    code: Some(HealthCode::InternalFailure),
                 },
                 Err(_elapsed) => ContributorReport {
                     name,
@@ -176,11 +188,12 @@ async fn collect_reports(
         .collect();
 
     let Some(global_budget) = config.global_budget else {
-        let mut reports = Vec::with_capacity(in_flight.len());
-        while let Some((_id, report)) = in_flight.next().await {
-            reports.push(report);
+        let mut reports: Vec<(usize, ContributorReport)> = Vec::with_capacity(in_flight.len());
+        while let Some((id, report)) = in_flight.next().await {
+            reports.push((id, report));
         }
-        return reports;
+        reports.sort_by_key(|(id, _)| *id);
+        return reports.into_iter().map(|(_id, report)| report).collect();
     };
 
     // Retain (name, requirement) identity for every registered contributor
@@ -195,7 +208,7 @@ async fn collect_reports(
         .map(|(id, c)| (id, (c.name().to_string(), c.requirement())))
         .collect();
 
-    let mut reports = Vec::with_capacity(pending.len());
+    let mut reports: Vec<(usize, ContributorReport)> = Vec::with_capacity(pending.len());
     let sleep = tokio::time::sleep(global_budget);
     tokio::pin!(sleep);
 
@@ -206,7 +219,7 @@ async fn collect_reports(
                 match next {
                     Some((id, report)) => {
                         pending.remove(&id);
-                        reports.push(report);
+                        reports.push((id, report));
                         if pending.is_empty() {
                             break;
                         }
@@ -215,20 +228,21 @@ async fn collect_reports(
                 }
             }
             _ = &mut sleep => {
-                for (_id, (name, requirement)) in pending.drain() {
-                    reports.push(ContributorReport {
+                for (id, (name, requirement)) in pending.drain() {
+                    reports.push((id, ContributorReport {
                         name,
                         status: HealthStatus::Unhealthy,
                         requirement,
                         code: Some(HealthCode::Timeout),
-                    });
+                    }));
                 }
                 break;
             }
         }
     }
 
-    reports
+    reports.sort_by_key(|(id, _)| *id);
+    reports.into_iter().map(|(_id, report)| report).collect()
 }
 
 #[cfg(test)]
@@ -726,5 +740,125 @@ mod tests {
         }
         // Required + Timeout -> global Unhealthy.
         assert_eq!(report.status, HealthStatus::Unhealthy);
+    }
+
+    // -- PROD-005: panic isolation + deterministic ordering ------------------
+
+    /// A contributor whose `check()` panics — used to prove a panic in one
+    /// contributor's future is caught and mapped to a per-contributor
+    /// `InternalFailure` instead of unwinding out of the whole aggregation.
+    struct PanickingContributor {
+        name: String,
+        requirement: DependencyRequirement,
+    }
+
+    #[async_trait]
+    impl HealthContributor for PanickingContributor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn requirement(&self) -> DependencyRequirement {
+            self.requirement
+        }
+
+        async fn check(&self) -> ego_domain::health::HealthCheck {
+            panic!("simulated contributor panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_contributor_is_isolated_as_internal_failure() {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(PanickingContributor {
+                name: "exploding".to_string(),
+                requirement: DependencyRequirement::Required,
+            }),
+            stub(
+                "ok",
+                DependencyRequirement::Required,
+                HealthStatus::Healthy,
+                None,
+            ),
+        ]);
+        let aggregator = HealthAggregator::new(registry, HealthAggregationConfig::default());
+
+        let report = aggregator.readiness().await;
+
+        let exploding = report
+            .contributors
+            .iter()
+            .find(|c| c.name == "exploding")
+            .expect("panicking contributor must still produce a report");
+        assert_eq!(exploding.status, HealthStatus::Unhealthy);
+        assert_eq!(exploding.code, Some(HealthCode::InternalFailure));
+
+        let ok = report
+            .contributors
+            .iter()
+            .find(|c| c.name == "ok")
+            .expect("other contributors are unaffected by one panicking");
+        assert_eq!(ok.status, HealthStatus::Healthy);
+        assert_eq!(ok.code, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contributors_are_emitted_in_registration_order_regardless_of_completion_order() {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(SlowContributor {
+                name: "a".to_string(),
+                delay: Duration::from_millis(300),
+            }),
+            Arc::new(SlowContributor {
+                name: "b".to_string(),
+                delay: Duration::from_millis(200),
+            }),
+            Arc::new(SlowContributor {
+                name: "c".to_string(),
+                delay: Duration::from_millis(100),
+            }),
+        ]);
+        let aggregator = HealthAggregator::new(registry, HealthAggregationConfig::default());
+
+        let report = aggregator.readiness().await;
+
+        let names: Vec<&str> = report
+            .contributors
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contributors_are_emitted_in_registration_order_under_global_budget() {
+        let registry = HealthRegistry::from_contributors(vec![
+            Arc::new(SlowContributor {
+                name: "a".to_string(),
+                delay: Duration::from_millis(30),
+            }),
+            Arc::new(SlowContributor {
+                name: "b".to_string(),
+                delay: Duration::from_millis(20),
+            }),
+            Arc::new(SlowContributor {
+                name: "c".to_string(),
+                delay: Duration::from_millis(10),
+            }),
+        ]);
+        let config = HealthAggregationConfig {
+            per_contributor: Duration::from_secs(5),
+            global_budget: Some(Duration::from_secs(5)),
+        };
+        let aggregator = HealthAggregator::new(registry, config);
+
+        let report = aggregator.readiness().await;
+
+        let names: Vec<&str> = report
+            .contributors
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
     }
 }
