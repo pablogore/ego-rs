@@ -21,9 +21,17 @@ phases:
     status: complete
     artifact: tasks.md
   apply:
-    status: pending
+    status: complete
+    note: >-
+      PR1 (domain, #239), PR2 (service-sdk, #240) and PR3 (runtime/testkit, #241)
+      implemented via feature-branch-chain, integrated on the tracker and merged
+      to develop by PR #243 (merge commit ab2571b). Issue #237 closed by Closes.
   verify:
-    status: pending
+    status: complete
+    note: >-
+      Workspace gates green on the integrated develop content (local — this repo
+      has no CI): cargo fmt --all --check, cargo test --workspace (0 failed),
+      cargo build --workspace, cargo clippy --workspace --all-targets -- -D warnings.
   archive:
     status: pending
 
@@ -37,5 +45,6 @@ notes: |
   are complete and reconciled after a senior-architect surgical review (probe-
   independent check(); readiness()/startup()-only aggregator with structurally
   unreachable liveness; identity-preserving global budget; single registration
-  authority; type-contract closed-set guarantee). apply is next (PR1 first).
+  authority; type-contract closed-set guarantee). PR1/PR2/PR3 are implemented and
+  merged to develop via PR #243 (merge commit ab2571b); #237 closed. Archive pending.
   ROADMAP.md is intentionally NOT edited in this phase.
