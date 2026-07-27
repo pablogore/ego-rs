@@ -47,14 +47,16 @@ pub trait Service: Send + Sync {
 /// effect on startup or teardown today.
 #[async_trait]
 pub trait LifecycleManaged: Send + Sync {
-    /// Called once by the runtime when the component is starting up.
-    /// The default implementation is a no-op.
+    /// Optional startup hook. The runtime does not currently invoke this hook
+    /// automatically; it is opt-in and reserved for future wiring. The default
+    /// implementation is a no-op.
     async fn initialize(&self) -> ServiceResult<()> {
         Ok(())
     }
 
-    /// Called once by the runtime when the component is shutting down.
-    /// The default implementation is a no-op.
+    /// Optional teardown hook. The runtime does not currently invoke this hook
+    /// automatically; it is opt-in and reserved for future wiring. The default
+    /// implementation is a no-op.
     async fn shutdown(&self) -> ServiceResult<()> {
         Ok(())
     }
