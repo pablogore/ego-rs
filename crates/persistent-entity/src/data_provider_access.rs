@@ -154,6 +154,14 @@ pub enum DataProviderError {
         /// The `provider_id` that had no registered owner.
         provider_id: String,
     },
+    /// The provider's `fetch` implementation panicked. Issue #242: the panic is
+    /// caught at the runtime access chokepoint (`ego_runtime::providers::access`)
+    /// and mapped to this closed variant so a provider panic never crosses the
+    /// public `DataProviderAccess::fetch` boundary. Carries NO payload: the panic
+    /// message is never captured, logged, or surfaced (no free text, no leak of
+    /// panic contents or sensitive data).
+    #[error("internal data provider failure")]
+    Internal,
 }
 
 impl std::fmt::Debug for DataProviderError {
@@ -170,6 +178,7 @@ impl std::fmt::Debug for DataProviderError {
                 .debug_struct("ProviderMissing")
                 .field("provider_id", provider_id)
                 .finish(),
+            Self::Internal => f.write_str("Internal"),
         }
     }
 }

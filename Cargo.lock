@@ -681,6 +681,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ego-domain",
+ "futures-util",
  "persistent-entity",
  "serde_json",
  "sha2 0.11.0",

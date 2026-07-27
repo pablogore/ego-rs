@@ -20,6 +20,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # "Observability Signals" — never the raw key).
 tracing = "0.1"
 sha2 = "0.11.0"
+# Issue #242: `FutureExt::catch_unwind` isolates a panicking provider `fetch`
+# at the access chokepoint. `futures-util` (part of the futures 0.3 stack
+# already used by ego-service-sdk) is the minimal dep that provides it.
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "test-util", "time"] }

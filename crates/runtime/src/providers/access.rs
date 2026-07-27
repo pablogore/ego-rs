@@ -37,9 +37,11 @@
 //!   never retried. The attempt count is bounded by the policy, so there is no
 //!   unbounded retry loop.
 
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use persistent_entity::data_provider_access::{
     DataProviderAccess, DataProviderError, DataRequest, DataResponse,
 };
@@ -111,6 +113,10 @@ pub enum ProviderOutcome {
     /// No provider is registered for the requested `provider_id`
     /// (fail-closed resolution).
     ProviderMissing,
+    /// The provider's `fetch` panicked and was caught at the chokepoint
+    /// (issue #242) — the caught-panic classification. Like `Fatal`, it is
+    /// non-retryable, and the panic payload is never captured.
+    Internal,
 }
 
 impl ProviderOutcome {
@@ -122,6 +128,7 @@ impl ProviderOutcome {
             Self::Timeout => "timeout",
             Self::Fatal => "fatal",
             Self::ProviderMissing => "provider_missing",
+            Self::Internal => "internal",
         }
     }
 
@@ -133,13 +140,15 @@ impl ProviderOutcome {
             Err(DataProviderError::Timeout) => Self::Timeout,
             Err(DataProviderError::Fatal(_)) => Self::Fatal,
             Err(DataProviderError::ProviderMissing { .. }) => Self::ProviderMissing,
+            Err(DataProviderError::Internal) => Self::Internal,
         }
     }
 
     /// Whether a fetch with this outcome may be retried (issue #234). Only
     /// `Transient` and `Timeout` are retryable; `Fatal`/`NotFound` are
-    /// definitive answers and `ProviderMissing` is a bootstrap error — none of
-    /// those are ever retried.
+    /// definitive answers, `ProviderMissing` is a bootstrap error, and
+    /// `Internal` is a caught provider panic (issue #242) — none of those are
+    /// ever retried.
     fn is_retryable(self) -> bool {
         matches!(self, Self::Transient | Self::Timeout)
     }
@@ -286,6 +295,15 @@ impl RuntimeDataProviderAccess {
 
 #[async_trait]
 impl DataProviderAccess for RuntimeDataProviderAccess {
+    /// # Panic isolation (issue #242)
+    ///
+    /// A panicking provider `fetch` is caught at this chokepoint (via
+    /// `catch_unwind`, inside the per-attempt timeout): the runtime continues
+    /// serving and the failure is reported as [`DataProviderError::Internal`]
+    /// / [`ProviderOutcome::Internal`], a non-retryable classification. The
+    /// panic payload is dropped — never downcast, logged, or surfaced through
+    /// the error — so a panic never crosses this public boundary and never
+    /// leaks its message.
     async fn fetch(
         &self,
         provider_id: &str,
@@ -325,11 +343,30 @@ impl DataProviderAccess for RuntimeDataProviderAccess {
                 let attempts_so_far = attempt + 1;
                 // Each attempt is independently timeout-bounded. Dropping the
                 // timed-out future cancels the in-flight provider call.
-                let result =
-                    match tokio::time::timeout(timeout, provider.fetch(request.clone())).await {
-                        Ok(provider_result) => provider_result,
-                        Err(_elapsed) => Err(DataProviderError::Timeout),
-                    };
+                //
+                // Issue #242: the provider call is additionally wrapped in
+                // `catch_unwind` *inside* the timeout, so a panicking `fetch`
+                // is caught here and mapped to `DataProviderError::Internal`
+                // instead of unwinding across the public boundary. The panic
+                // payload is dropped — never downcast, logged, or embedded in
+                // the error.
+                // The provider call is deferred to poll-time INSIDE the guard
+                // (an inner `async` block, not eager `provider.fetch(..)` as an
+                // argument), so a manual `ExternalDataProvider` impl that
+                // panics *synchronously* during future construction — before
+                // returning its pinned future — is caught here too, not just a
+                // panic that occurs while the future is polled.
+                let result = match tokio::time::timeout(
+                    timeout,
+                    AssertUnwindSafe(async { provider.fetch(request.clone()).await })
+                        .catch_unwind(),
+                )
+                .await
+                {
+                    Ok(Ok(provider_result)) => provider_result,
+                    Ok(Err(_panic)) => Err(DataProviderError::Internal),
+                    Err(_elapsed) => Err(DataProviderError::Timeout),
+                };
                 let outcome = ProviderOutcome::from_result(&result);
 
                 if outcome.is_retryable() && retry.allows_retry(attempt) {
@@ -743,6 +780,146 @@ mod tests {
             *calls.lock().unwrap(),
             3,
             "each of the 3 attempts entered the provider before timing out"
+        );
+    }
+
+    // -- #242: panic isolation at the fetch chokepoint ------------------
+    //
+    // A provider `fetch` that panics must be caught at the chokepoint,
+    // mapped to `DataProviderError::Internal`, and must never unwind the
+    // caller. The panic payload is dropped, never surfaced.
+
+    /// A provider whose `fetch` panics with a fixed message.
+    struct PanickingProvider {
+        message: &'static str,
+    }
+
+    #[async_trait]
+    impl ExternalDataProvider for PanickingProvider {
+        async fn fetch(&self, _request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            panic!("{}", self.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_isolates_a_panicking_provider_as_internal() {
+        let mut registry = ExternalDataProviderRegistry::new();
+        registry
+            .register("boom", Arc::new(PanickingProvider { message: "kaboom" }))
+            .unwrap();
+        // Retries are generously allowed, but a panic is non-retryable and
+        // must return after exactly one attempt.
+        let access =
+            RuntimeDataProviderAccess::with_config(registry, config(Duration::from_secs(5), 5));
+
+        let err = access.fetch("boom", request("k")).await.unwrap_err();
+
+        assert_eq!(err, DataProviderError::Internal);
+    }
+
+    #[tokio::test]
+    async fn runtime_keeps_serving_after_a_provider_panics() {
+        let mut registry = ExternalDataProviderRegistry::new();
+        registry
+            .register("boom", Arc::new(PanickingProvider { message: "kaboom" }))
+            .unwrap();
+        registry
+            .register(
+                "healthy",
+                Arc::new(StaticProvider {
+                    response: DataResponse {
+                        payload: vec![7],
+                        cache_hit: false,
+                    },
+                }),
+            )
+            .unwrap();
+        let access =
+            RuntimeDataProviderAccess::with_config(registry, config(Duration::from_secs(5), 0));
+
+        let panicked = access.fetch("boom", request("k")).await;
+        assert_eq!(panicked.unwrap_err(), DataProviderError::Internal);
+
+        // The runtime survived the panic: a subsequent fetch on a healthy
+        // provider through the same facade still succeeds.
+        let healthy = access.fetch("healthy", request("k")).await.unwrap();
+        assert_eq!(healthy.payload, vec![7]);
+    }
+
+    #[tokio::test]
+    async fn panic_payload_never_leaks_into_the_public_error() {
+        let mut registry = ExternalDataProviderRegistry::new();
+        registry
+            .register(
+                "boom",
+                Arc::new(PanickingProvider {
+                    message: "SECRET_PANIC_abc123",
+                }),
+            )
+            .unwrap();
+        let access =
+            RuntimeDataProviderAccess::with_config(registry, config(Duration::from_secs(5), 0));
+
+        let err = access.fetch("boom", request("k")).await.unwrap_err();
+
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains("SECRET_PANIC_abc123"),
+            "panic payload leaked into Display: {display}"
+        );
+        assert!(
+            !debug.contains("SECRET_PANIC_abc123"),
+            "panic payload leaked into Debug: {debug}"
+        );
+    }
+
+    /// A provider implemented BY HAND (not via `#[async_trait]`) whose `fetch`
+    /// panics *synchronously* — during future construction, before returning
+    /// the pinned future. Issue #242: the guard must cover construction too, so
+    /// the panic must still be caught at the chokepoint rather than escaping
+    /// out of the eager argument evaluation. The signature mirrors exactly what
+    /// `#[async_trait]` desugars `fetch` into.
+    struct SyncConstructionPanicProvider;
+
+    impl ExternalDataProvider for SyncConstructionPanicProvider {
+        fn fetch<'life0, 'async_trait>(
+            &'life0 self,
+            _request: DataRequest,
+        ) -> core::pin::Pin<
+            Box<
+                dyn core::future::Future<Output = Result<DataResponse, DataProviderError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            // Panics BEFORE returning the boxed future — outside the future's
+            // own poll. With eager `AssertUnwindSafe(provider.fetch(..))` this
+            // escapes the guard; with poll-time deferral it is caught.
+            panic!("SECRET_SYNC_PANIC_xyz789");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_isolates_a_synchronous_construction_panic_as_internal() {
+        let mut registry = ExternalDataProviderRegistry::new();
+        registry
+            .register("boom", Arc::new(SyncConstructionPanicProvider))
+            .unwrap();
+        let access =
+            RuntimeDataProviderAccess::with_config(registry, config(Duration::from_secs(5), 0));
+
+        let err = access.fetch("boom", request("k")).await.unwrap_err();
+
+        assert_eq!(err, DataProviderError::Internal);
+        let rendered = format!("{err} {err:?}");
+        assert!(
+            !rendered.contains("SECRET_SYNC_PANIC_xyz789"),
+            "sync-construction panic payload leaked: {rendered}"
         );
     }
 }
