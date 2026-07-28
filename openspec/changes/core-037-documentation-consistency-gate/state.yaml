@@ -34,8 +34,11 @@ notes: |
   `foundation-integrity` delta; FR-006 stale-change hygiene is preserved
   unchanged and reused, not modified). The gate is a FUTURE `xtask` subcommand
   `verify-doc-consistency` — this change SPECIFIES it and writes zero xtask/
-  production code. Offline-first core (repo files only) with an optional,
-  gracefully-degrading GitHub issue-state cross-check.
+  production code. Fully offline (repo files only): no GitHub issue-state
+  cross-check, because no artifact declares the change-to-issue link it would
+  need (ADR-1). Requires adding a YAML parser to xtask/Cargo.toml, which today
+  has no YAML parser. Phase/artifact rule is bidirectional; tasks.md, ROADMAP.md,
+  openspec/specs and GitHub are declared sources with no rule reading them.
 
   Explicitly EXCLUDED from this change: the concrete archiving of PROD-005, the
   operation-naming documentation fix, the External Data Providers documentation
