@@ -81,9 +81,15 @@ NOT depend on ambient state; the local-root default is `Sampled`.
 Outbound propagation and OTLP export MUST reflect the actual sampling decision
 carried on the `TraceContext`, not a hardcoded value. `to_traceparent()` MUST
 serialize `-01` when the decision is `Sampled` and `-00` when it is
-`NotSampled`. The OTLP adapter MUST derive the exported span's `TraceFlags` and
-`TraceState` from the domain decision/tracestate, and MUST NOT hardcode
-`TraceFlags::SAMPLED` or `TraceState::NONE`.
+`NotSampled` — propagation happens for both decisions, because a downstream
+service MUST learn that the trace was not sampled.
+
+Export is decided by the parent-based policy, NOT by flag rewriting: a
+`NotSampled` decision MUST result in the span being dropped and never exported,
+and a `Sampled` decision MUST be exported. For every span that IS exported, the
+OTLP adapter MUST derive `TraceFlags` and `TraceState` from the domain
+decision/tracestate and MUST NOT hardcode `TraceFlags::SAMPLED` or
+`TraceState::NONE`.
 
 #### Scenario: to_traceparent serializes the real decision
 
@@ -91,13 +97,12 @@ serialize `-01` when the decision is `Sampled` and `-00` when it is
 - WHEN `to_traceparent()` is called
 - THEN the produced header ends in `-00`, not a hardcoded `-01`
 
-#### Scenario: The OTLP adapter maps the decision instead of hardcoding sampled
+#### Scenario: A not-sampled decision is dropped rather than exported
 
 - GIVEN a `TraceContext` whose decision is `NotSampled`
-- WHEN the OTLP adapter builds the exported span
-- THEN the span's `TraceFlags` reflect not-sampled (the parent-based policy does
-  not export it as sampled), and the flags are NOT the hardcoded
-  `TraceFlags::SAMPLED`
+- WHEN the span ends and the parent-based policy is applied
+- THEN the span is dropped and no span is exported for it, so no exported span
+  can carry a hardcoded `TraceFlags::SAMPLED` for a not-sampled trace
 
 #### Scenario: A sampled decision is exported with faithful flags
 

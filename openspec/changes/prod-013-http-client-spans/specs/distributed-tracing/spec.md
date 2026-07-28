@@ -203,7 +203,7 @@ concrete client and the OTel mapping.
 
 ## MODIFIED Requirements
 
-### Requirement: Outbound HTTP Propagation Injects TraceContext And Creates A Client Span
+### Requirement: Outbound HTTP Propagation Injects TraceContext Without Creating A Span
 
 The HTTP transport (`crates/transport`) MUST propagate the current
 `TraceContext` on outbound calls as a W3C `traceparent` header, built from a
@@ -221,6 +221,14 @@ span remains owned by the request-boundary interceptor." PROD-013 supersedes the
 no-client-span clause: outbound HTTP now creates a client span. Explicit
 `traceparent` injection and the gRPC/messaging out-of-scope clause are
 unchanged.)
+
+(Heading note: the heading above is reproduced VERBATIM from the canonical
+capability spec, because an OpenSpec `MODIFIED` requirement is matched to its
+baseline by exact heading — changing it would add a second requirement at archive
+instead of amending the existing one. Its "Without Creating A Span" wording
+therefore describes the pre-PROD-013 contract, not the contract stated in the
+body. Renaming the canonical requirement is a separate, archive-time concern and
+is deliberately not attempted here.)
 
 #### Scenario: Outbound HTTP call injects the traceparent header and starts a client span
 - GIVEN a `ServiceContext` whose `trace_context()` is set
@@ -242,7 +250,7 @@ unchanged.)
 - THEN absence of `traceparent` propagation and of a client span over gRPC or
   messaging is NOT a defect
 
-### Requirement: Out of Scope for This Capability
+### Requirement: Out of Scope for v1
 
 NOT covered by this capability: OTLP-exported metrics, OTLP-exported logs,
 actor/effect-runner and messaging trace origination/propagation, gRPC and

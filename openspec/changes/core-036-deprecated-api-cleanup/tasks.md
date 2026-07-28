@@ -53,8 +53,10 @@ proves the migration is complete, and the suite MUST stay green at every step.
 The detector MUST be a **pure, callable function** — something like
 `fn count_deprecated_attrs(source: &str) -> usize` plus a `fn is_pre_stable(manifest: &str) -> bool`
 — so its own correctness is proven by passing fixtures **as arguments**, not by leaving a failing
-test in the suite. No task here may end with a red test: `cargo test --workspace` MUST be green at
-every step.
+test in the suite. TASK-012 is a genuine RED and ends with its three self-tests failing against
+not-yet-written code; TASK-013 turns them green. The invariant is that **no red test survives the
+TASK-012/013 pair** — no fixture is ever parked as a permanently failing test, and `cargo test
+--workspace` MUST be green once the pair completes.
 
 - [ ] TASK-012 RED: create `crates/service-sdk/tests/no_deprecated_shims_lint.rs` modeled on `crates/service-sdk/tests/tenant_scoped_lint.rs`, exposing the detector as a pure function over source text plus a pre-stable check over manifest text. Write its three self-tests first, against fixtures passed as arguments: (a) a clean fixture yields **0** detections, (b) a fixture containing one `#[deprecated]` yields exactly **1** detection, (c) a `version = "1.2.0"` manifest is NOT pre-stable while `version = "0.1.0"` is. AC: all three fail to compile or fail assertions before the detector is written — a genuine RED with no fixture left in a permanently-failing state.
 - [ ] TASK-013 GREEN: implement the detector and the pre-stable manifest check until TASK-012's three self-tests pass. AC: `cargo test -p ego-service-sdk no_deprecated_shims_lint` passes; the detector reports 1 detection on the dirty fixture and 0 on the clean one; version classification is correct for both manifests.
