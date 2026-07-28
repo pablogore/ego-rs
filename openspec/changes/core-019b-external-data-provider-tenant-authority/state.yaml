@@ -1,0 +1,61 @@
+change_id: CORE-019B
+title: External Data Provider Tenant Authority
+status: proposed
+artifact_store_mode: openspec
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: skipped
+    note: exploration captured inline; no explore.md artifact
+  spec:
+    status: complete
+    artifact: specs/
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
+notes: |
+  Independent change. Reuses the CORE-019 external-data-providers capability
+  lineage: CORE-019A shipped the fetch path and the caller-populated
+  DataRequest.tenant field (archived at
+  openspec/changes/archive/2026-07-16-core-019a-external-data-providers); this
+  change adds the missing runtime-side tenant-authority enforcement on that same
+  path. No dependency on any other active change.
+
+  Decisions resolved in design: ADR-1 (inject vs validate vs both) = BOTH, frozen
+  as a five-row reconciliation matrix — context=Some(A)+req=None => inject A;
+  =Some(A)+Some(A) => pass; =Some(A)+Some(B!=A) => fail closed TenantMismatch;
+  =None+None => tenant-agnostic pass (None); =None+Some(C) => fail closed
+  TenantContextMissing (distinct error — nothing to validate the assertion
+  against). Reconciliation runs INSIDE the observable fetch lifecycle: each
+  fail-closed decision emits exactly one terminal data_provider_fetch signal
+  (distinct non-retryable ProviderOutcome), zero retries, zero provider calls.
+  ADR-2 keeps DataRequest::new/for_tenant/with_tenant source-compatible and
+  reclassifies DataRequest.tenant from trusted authority to validated assertion
+  (adds two non-retryable error variants: TenantMismatch, TenantContextMissing).
+  ADR-3 frozen: an immutable PER-DISPATCH wrapper (TenantScopedDataProviderAccess)
+  captures the established tenant per invocation and shares the registry/config via
+  Arc; a mutable/captured tenant field on the singleton RuntimeDataProviderAccess
+  is rejected (concurrent dispatches would cross-contaminate). An end-to-end
+  real-dispatch test is required, not just unit tests on hand-built instances.
+
+  PRESERVES issue #234 (per-attempt timeout, bounded retry/backoff, fetch/retry
+  observability) unchanged — referenced only as PRESERVED context, not re-worked.
+  Out of scope: issue #73 (allow_cross_tenant granted escalation) — that is
+  authorized widening, distinct from the forgery path closed here.
+
+  Chained-PR delivery (Medium 400-line budget risk after per-dispatch wrapper,
+  real-dispatch wiring, observability outcomes, and end-to-end tests were added):
+  PR1 error surface + outcomes + reconcile + observable fetch_scoped; PR2 wrapper
+  + real dispatch wiring + end-to-end binding + cross-tenant negative. ROADMAP.md
+  is not edited in this planning phase.
