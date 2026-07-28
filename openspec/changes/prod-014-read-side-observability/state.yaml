@@ -1,0 +1,63 @@
+change_id: PROD-014
+title: Read-Side Production Observability
+status: proposed
+artifact_store_mode: openspec
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: skipped
+    note: exploration captured inline from the read-side/health source; no explore.md artifact
+  spec:
+    status: complete
+    artifact: specs/
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
+
+notes: |
+  Production observability for the read-side — lag, health, and operational
+  metrics — closing ROADMAP.md:623 §7.3 "Projection lag" (referenced as roadmap
+  context only; ROADMAP.md is NOT edited in this phase). No dedicated open issue.
+
+  Builds on the PROD-005 Runtime Health Model, already merged to develop via
+  PR #243: reuses HealthContributor, HealthStatus, DependencyRequirement, the
+  fold, the single runtime-owned aggregator, and its single registration
+  authority. Independent of other in-flight changes otherwise.
+
+  Two capabilities are MODIFIED (both additive):
+    - read-side (canonical spec is CORE-026 lifecycle only): target-checkpoint
+      (head-version) query on the store SPI, per-model lag definition (polling
+      Offset::Sequence vs head version; reactive bus-sequence vs consumed +
+      gaps), time-since-last-progress complement, bounded-cardinality metrics,
+      and observable health-state thresholds.
+    - runtime-health-model: the read-side becomes a HealthContributor in the
+      single model (readiness/startup only, never liveness). Chose this
+      capability over service-sdk for the health-integration delta because it
+      adds a new model PARTICIPANT with read-side status semantics (mirroring
+      PROD-005's external-data-providers delta), while the registration plumbing
+      already specified by PROD-005's service-sdk delta is reused unchanged.
+
+  One conscious design fork (Open Fork for DESIGN): the head-version SPI shape,
+  resolved at design ADR-1 to Option A (a head_version method on ReadSideStore),
+  pending apply-time confirmation that no ReadSideStore implementor needs the
+  separate-TargetCheckpointStore escape hatch. Four design ADRs: (1) target-
+  checkpoint query shape; (2) lag per model; (3) health-state thresholds;
+  (4) cardinality-bounding of labels.
+
+  Hexagonal: ego-domain stays OpenTelemetry-free; metrics flow through ports
+  whose adapters live in runtime. PR-chain intent: feature-branch-chain
+  (PR1 domain SPI/port → PR2 runtime health+metrics+reactive → PR3 builder
+  registration+testkit); only the tracker merged to develop.

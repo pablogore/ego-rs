@@ -1,0 +1,49 @@
+change_id: CORE-036
+title: Pre-v0.1 Deprecated API Cleanup
+status: proposed
+artifact_store_mode: openspec
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: complete
+    artifact: explore.md
+  spec:
+    status: complete
+    artifact: specs/
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
+
+notes: |
+  Enforces PRD.md:140 ("No shims — no deprecated aliases in pre-stable crates").
+  Removes the workspace's complete deprecated surface (exactly three #[deprecated]
+  symbols, all in 0.1.0 crates) plus the trait they strand:
+    - REMOVE  Item 1 TokioExecutionBackend  (persistent-entity)
+    - REMOVE  Item 2 SyncTestBackend         (persistent-entity)
+    - REMOVE  Item 3 ExecutionBackend trait  (persistent-entity)
+    - REMOVE  Item 4 ServiceContext::is_cross_tenant_allowed() (service-sdk) + migrate 4 test refs to is_cross_tenant_allowed_for(&TenantId)
+  Retentions (documented, no code change):
+    - KEEP    Item 5 #[doc(hidden)] pub macro-visibility hatches (intentional codegen surface)
+    - KEEP    Item 6 testkit log(Severity,&str) back-compat (external kitlogger API, not ego-owned)
+    - KEEP    Item 7 legacy flat trace_id mirror (authoritative-by-construction under TraceContext, PROD-003 ADR-4)
+  Spec shape (ADR-3): MODIFIED deltas on persistent-entity + service-sdk for the
+  capability-specific removals/retentions; NEW thin capability api-surface-hygiene
+  for the cross-cutting no-shims / zero-reference-verification policy.
+  Zero-reference proof: compiler (cargo build/test --workspace) + grep gates +
+  new no_deprecated_shims_lint (cargo test participant, modeled on tenant_scoped_lint.rs).
+  Depends on CORE-008A (is_cross_tenant_allowed_for replacement) and PROD-003
+  (trace_id mirror rationale) — both merged. No dedicated open issue. Single PR
+  (Low review-budget risk). ROADMAP/PRD not edited; PRD.md:140 is the driver, not a target.

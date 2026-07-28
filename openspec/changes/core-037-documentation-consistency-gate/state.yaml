@@ -1,0 +1,51 @@
+change_id: CORE-037
+title: Documentation Consistency Gate
+status: proposed
+artifact_store_mode: openspec
+
+# Phase progression
+phases:
+  proposal:
+    status: complete
+    artifact: proposal.md
+  explore:
+    status: skipped
+    note: exploration captured inline; no explore.md artifact
+  spec:
+    status: complete
+    artifact: specs/
+  design:
+    status: complete
+    artifact: design.md
+  tasks:
+    status: complete
+    artifact: tasks.md
+  apply:
+    status: pending
+  verify:
+    status: pending
+  archive:
+    status: pending
+
+notes: |
+  Independent change: defines a mechanically-verifiable documentation/state
+  consistency GATE, not any reconciliation. Introduces a new capability
+  `documentation-consistency` (design ADR-0 justifies a NEW capability over a
+  `foundation-integrity` delta; FR-006 stale-change hygiene is preserved
+  unchanged and reused, not modified). The gate is a FUTURE `xtask` subcommand
+  `verify-doc-consistency` — this change SPECIFIES it and writes zero xtask/
+  production code. Offline-first core (repo files only) with an optional,
+  gracefully-degrading GitHub issue-state cross-check.
+
+  Explicitly EXCLUDED from this change: the concrete archiving of PROD-005, the
+  operation-naming documentation fix, the External Data Providers documentation
+  fix, and any unbounded "sync all documentation" scope — those are
+  reconciliations, not the gate. PROD-005's own state.yaml (apply complete,
+  verify complete, archive pending) is used only as the motivating live example
+  of the stale-unarchived class the gate detects; this change does not archive
+  it.
+
+  Related context only (no dependency, not claimed as covering this change):
+  issue #237 (closed) motivates the PROD-005 stale-unarchived drift example;
+  issue #229 (open) tracks CI — this repo has no CI and the gate runs locally.
+  No dedicated open issue exists for this gate.

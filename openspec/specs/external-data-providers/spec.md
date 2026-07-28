@@ -105,24 +105,31 @@ field.
 - WHEN each is observed through emitted signals
 - THEN the cache hit and the cache miss are distinguishable from each other
 
-### Requirement: Timeout/Retry Observability (Deferred — Future Capability)
+### Requirement: Timeout/Retry Observability
 
-This slice has no retry/backoff policy for external-data-provider fetches
-(design.md AD-007) — a fetch is inline to command handling, so there is no
-delivery loop for a policy to drive. Timeout occurrence and retry-attempt
-count are therefore **not** part of this slice's MUST-emit signal set. This
-requirement records the target contract for once a retry policy exists, so
-it is not silently lost: **when** a retry/backoff policy is introduced for
-this capability, fetch signals MUST additionally reflect timeout occurrence
-and the number of retry attempts.
+A per-attempt timeout and a bounded retry/backoff policy MUST apply uniformly
+at the runtime provider-access chokepoint. Fetch signals MUST reflect timeout
+occurrence and the number of attempts: the terminal `data_provider_fetch`
+signal MUST carry an `attempts` count and a classified `outcome` that
+distinguishes `timeout` from other outcomes, and each scheduled retry MUST
+emit a `data_provider_fetch_retry` signal carrying the next-attempt number
+and backoff. None of these signals may carry the raw key, the payload, or a
+provider-authored error message.
 
-#### Scenario: Retried or timed-out fetch signals retries and timeout (not yet implemented)
+(Implemented: issue #234 shipped the per-attempt timeout, the bounded jittered
+retry policy, and the `attempts`/`outcome` signal fields. This requirement
+previously read "Deferred — Future Capability / not yet implemented"; it is
+corrected here to record the delivered contract. Earlier design note AD-007 —
+"no retry loop, fetch is inline" — is superseded by #234's uniform
+access-chokepoint policy.)
 
-- GIVEN a retry/backoff policy exists for external-data-provider fetches
+#### Scenario: Retried or timed-out fetch signals retries and timeout
+
+- GIVEN the runtime provider-access retry/backoff policy is active
 - AND a fetch times out and is retried before eventually completing
 - WHEN the fetch sequence finishes
-- THEN emitted signals reflect the timeout occurrence and the number of
-  retry attempts
+- THEN the terminal signal reflects the timeout occurrence and the total
+  attempt count, and a retry signal was emitted for each scheduled retry
 
 ### Requirement: Providers Replaceable By Deterministic Test Doubles
 

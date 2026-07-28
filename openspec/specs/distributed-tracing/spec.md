@@ -188,6 +188,37 @@ payload data MUST NOT be expressible as `SpanAttributes`. The
 - THEN it maps the given attributes directly to OTel key/values with no
   redaction step applied
 
+### Requirement: Request Span Is Named After The Operation
+
+The request span opened by the tracing interceptor MUST be named after the
+real operation being served, not a fixed literal. The name is carried on the
+request context (`ServiceContext.operation_name`), populated by the
+macro-generated service proxy from the method it dispatches, before the
+interceptor chain runs; the tracing interceptor MUST use that operation name
+as the span name. When a context carries no operation name (e.g. a
+hand-constructed context or a non-proxied call path), the interceptor MUST
+fall back to a single stable default name and MUST NOT panic or emit an empty
+name. The trait signature of the interceptor MUST NOT change to carry the
+name — it travels as additive context data.
+
+(Implemented: PROD-003 follow-up #212 — `ServiceContext.operation_name`,
+the `#[service]` proxy binding, and the `TracingInterceptor` name selection
+with a `"request"` fallback all shipped. This requirement records the
+already-delivered behavior that the v1 spec did not yet capture.)
+
+#### Scenario: Request span uses the operation name when present
+- GIVEN a request dispatched through the macro-generated proxy for operation
+  `create_user`
+- WHEN the tracing interceptor opens the request span
+- THEN the span name is `create_user`, sourced from
+  `ServiceContext.operation_name`
+
+#### Scenario: Missing operation name falls back to a stable default
+- GIVEN a hand-constructed `ServiceContext` with no operation name
+- WHEN the tracing interceptor opens the request span
+- THEN the span name is the stable default (`request`), with no panic and no
+  empty name
+
 ### Requirement: Tracer Port Is Transport-Agnostic, Non-Blocking
 
 The `Tracer` trait signature (methods, parameters, return types) MUST NOT
