@@ -39,11 +39,14 @@ notes: |
     - KEEP    Item 5 #[doc(hidden)] pub macro-visibility hatches (intentional codegen surface)
     - KEEP    Item 6 testkit log(Severity,&str) back-compat (external kitlogger API, not ego-owned)
     - KEEP    Item 7 legacy flat trace_id mirror (authoritative-by-construction under TraceContext, PROD-003 ADR-4)
-  Spec shape (ADR-3): MODIFIED deltas on persistent-entity + service-sdk for the
-  capability-specific removals/retentions; NEW thin capability api-surface-hygiene
-  for the cross-cutting no-shims / zero-reference-verification policy.
+  Spec shape (ADR-3): additive ADDED-only deltas on persistent-entity + service-sdk
+  for the capability-specific removals/retentions (no REMOVED Requirements blocks —
+  CORE-036 retires deprecated Rust API surface, not pre-existing normative
+  requirements); NEW thin capability api-surface-hygiene for the cross-cutting
+  no-shims / zero-reference-verification policy.
   Zero-reference proof: compiler (cargo build/test --workspace) + grep gates +
-  new no_deprecated_shims_lint (cargo test participant, modeled on tenant_scoped_lint.rs).
+  new no_deprecated_shims_lint (cargo test participant, modeled on tenant_scoped_lint.rs;
+  pure fixture-testable detector, applied only to 0.x crates per their own Cargo.toml).
   Depends on CORE-008A (is_cross_tenant_allowed_for replacement) and PROD-003
   (trace_id mirror rationale) — both merged. No dedicated open issue. Single PR
   (Low review-budget risk). ROADMAP/PRD not edited; PRD.md:140 is the driver, not a target.

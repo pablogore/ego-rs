@@ -14,6 +14,16 @@ modules `execution_backend` and `execution_backend_tokio`, MUST NOT exist in the
 removal, a workspace-wide search for these identifiers MUST return zero matches outside historical
 OpenSpec artifacts.
 
+(Why these symbols go: they were `#[deprecated]` stubs — `TokioExecutionBackend::execute` only ever
+returned `EntityError::Internal("… deprecated …")` — with zero external callers. The `block_on`
+execution path they existed to bridge was already removed; the actor awaits handlers directly.
+Retaining them violated `PRD.md:140` ("No shims — no deprecated aliases in pre-stable crates").)
+
+(Migration: no successor type is introduced — the concept is deleted, not renamed. Callers that
+previously constructed `TokioExecutionBackend`/`SyncTestBackend` drive an `EntityActor` directly,
+with in-memory stores in tests. No in-repo production or test caller existed, so the removal touches
+only the two deleted files and the two `pub mod` lines in `lib.rs`.)
+
 #### Scenario: Deprecated execution backends are absent
 
 - GIVEN the `persistent-entity` crate after CORE-036
@@ -31,18 +41,3 @@ OpenSpec artifacts.
 - GIVEN a persistent entity processing a command through its actor
 - WHEN the command is executed
 - THEN the handler is awaited directly inside the actor task, using no `ExecutionBackend` implementation and no `block_on`
-
-## REMOVED Requirements
-
-### Requirement: Execution Backend Abstraction
-
-(Reason: `TokioExecutionBackend`, `SyncTestBackend`, and the `ExecutionBackend` trait were
-`#[deprecated]` stubs — `TokioExecutionBackend::execute` only ever returned
-`EntityError::Internal("… deprecated …")` — with zero external callers. The `block_on` execution
-path was already removed; the actor awaits handlers directly. Retaining them violated `PRD.md:140`
-("No shims — no deprecated aliases in pre-stable crates").)
-
-(Migration: no successor type is introduced — the concept was deleted, not renamed. Callers that
-previously constructed `TokioExecutionBackend`/`SyncTestBackend` drive an `EntityActor` directly
-(with in-memory stores in tests). No in-repo production or test caller existed, so migration touches
-only the removed files themselves and the two `pub mod` lines in `lib.rs`.)

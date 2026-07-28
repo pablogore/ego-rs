@@ -12,6 +12,19 @@ access allowed to the destination actually being accessed" — MUST NOT exist. A
 workspace-wide search for `is_cross_tenant_allowed` (excluding the `_for` variant) MUST return zero
 matches across crate sources, tests, and `COOKBOOK.md`.
 
+(Why the predicate goes: `is_cross_tenant_allowed()` was `#[deprecated]`, and its own note documents
+a security foot-gun — it reports whether *any* permit is attached, so gating a real access decision
+on it would let a permit issued for one destination authorize a different one. The safe,
+destination-scoped `is_cross_tenant_allowed_for(&TenantId)` (CORE-008A AD-008) already exists, so
+keeping the presence-only predicate violated `PRD.md:140`.)
+
+(Migration: every in-repo reference is a test or doc line — two unit tests in `context/mod.rs`, one
+assertion in `tests/smoke.rs`, one in `tests/cross_tenant_access_contract.rs`, and one doc mention at
+`COOKBOOK.md:422`. Each test moves to `is_cross_tenant_allowed_for(&destination)`, where the
+destination is already in scope at every call site, and its `#[allow(deprecated)]` is deleted; the
+`COOKBOOK.md` deprecated parenthetical is deleted, leaving the `is_cross_tenant_allowed_for` entry.
+No production caller exists.)
+
 #### Scenario: The permit-presence predicate is absent
 
 - GIVEN `ServiceContext` after CORE-036
@@ -70,20 +83,3 @@ deprecated-API cleanup. A no-shims audit MUST NOT treat it as a removable alias.
 - GIVEN a `ServiceContext` built with `with_trace_context(tc)`
 - WHEN `trace_id()` is read
 - THEN it equals `trace_context().trace_id()` rendered as W3C hex (invariant preserved by construction)
-
-## REMOVED Requirements
-
-### Requirement: Permit-Presence Cross-Tenant Predicate
-
-(Reason: `ServiceContext::is_cross_tenant_allowed()` was `#[deprecated]`; its own note documents a
-security foot-gun — it reports whether *any* permit is attached, so gating a real access decision on
-it would let a permit issued for one destination authorize a different one. A safe, destination-scoped
-replacement, `is_cross_tenant_allowed_for(&TenantId)` (CORE-008A AD-008), already exists. Keeping the
-deprecated method violated `PRD.md:140`.)
-
-(Migration: every in-repo reference is a test or doc line — two unit tests in `context/mod.rs`, one
-assertion in `tests/smoke.rs`, one in `tests/cross_tenant_access_contract.rs`, and one doc mention at
-`COOKBOOK.md:422`. Each test migrates to `is_cross_tenant_allowed_for(&destination)` — the destination
-is already in scope at every call site — and its `#[allow(deprecated)]` is deleted; the `COOKBOOK.md`
-deprecated parenthetical is deleted, leaving the `is_cross_tenant_allowed_for` entry. No production
-caller exists.)

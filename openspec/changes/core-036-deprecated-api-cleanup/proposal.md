@@ -17,7 +17,7 @@ retentions so they are not re-flagged, and makes the no-shims policy **verifiabl
 - **REMOVE** `TokioExecutionBackend`, `SyncTestBackend` (`crates/persistent-entity/src/execution_backend_tokio.rs`) and the `ExecutionBackend` trait (`crates/persistent-entity/src/execution_backend.rs`) — delete both files and the two `pub mod` lines in `crates/persistent-entity/src/lib.rs:40-41`.
 - **REMOVE** `ServiceContext::is_cross_tenant_allowed()` (`crates/service-sdk/src/context/mod.rs:339-348`) and **migrate** its four in-repo test references to `is_cross_tenant_allowed_for(&TenantId)`; delete the deprecated-mention doc line at `COOKBOOK.md:422`.
 - Remove every now-orphaned `#[allow(deprecated)]` suppressor tied to the removed symbols (2 in `context/mod.rs`, 1 in `smoke.rs`, 1 in `cross_tenant_access_contract.rs`, 5 in `execution_backend_tokio.rs`).
-- Add a `no_deprecated_shims_lint` source-scan test enforcing `#[deprecated]` count == 0 in pre-stable crates (the `PRD.md:140` gate).
+- Add a `no_deprecated_shims_lint` source-scan test enforcing `#[deprecated]` count == 0 in pre-stable crates (the `PRD.md:140` gate) — a pure, fixture-testable detector applied only to crates whose own `Cargo.toml` declares a `0.x` version.
 - **DOCUMENT retentions** (no code change, justification recorded in specs): the `#[doc(hidden)] pub` macro hatches, the testkit `log(Severity,&str)` back-compat coverage, and the legacy flat `trace_id` mirror.
 
 ### Out of Scope (Non-Goals / Follow-ups)
@@ -67,7 +67,7 @@ justifications in the specs but no code change.
 | `crates/service-sdk/tests/smoke.rs` | Modify | Migrate `:210` to `_for`; drop `#[allow(deprecated)]` (`:203`) |
 | `crates/service-sdk/tests/cross_tenant_access_contract.rs` | Modify | Migrate `:7` to `_for`; drop `#[allow(deprecated)]` (`:4`); rename test |
 | `COOKBOOK.md` | Modify | Delete `is_cross_tenant_allowed()` deprecated mention (`:422`) |
-| `crates/service-sdk/tests/no_deprecated_shims_lint.rs` | Create | Source-scan gate: `#[deprecated]` count == 0 in pre-stable crates |
+| `crates/service-sdk/tests/no_deprecated_shims_lint.rs` | Create | Source-scan gate: `#[deprecated]` count == 0 in `0.x` crates only (per-crate `Cargo.toml` version gate; detector proven against inline fixtures) |
 
 ## Risks
 

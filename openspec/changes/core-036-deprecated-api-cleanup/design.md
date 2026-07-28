@@ -76,6 +76,18 @@ the genuinely cross-cutting policy (which no existing capability owns) becomes i
 independently-testable capability. This is the placement chosen; justification recorded here per the
 task's instruction to justify the spec-shape choice.
 
+**Delta shape — additive only, no `REMOVED Requirements` blocks.** Both capability deltas carry
+`ADDED Requirements` exclusively. An earlier draft added `REMOVED Requirements` blocks titled
+`Execution Backend Abstraction` and `Permit-Presence Cross-Tenant Predicate`, which was wrong on
+OpenSpec semantics: `REMOVED` retires a normative requirement that already exists in the baseline
+spec under that exact heading, and neither title exists in `openspec/specs/persistent-entity/spec.md`
+or `openspec/specs/service-sdk/spec.md` (persistent-entity does not even use the
+`Requirement: <title>` form — it uses `FR-NNN — <title>`). What CORE-036 actually retires is
+**deprecated Rust API surface**, not a normative requirement. So the removed symbols, the reason they
+go, and the caller migration are stated inside the new `ADDED` requirement that establishes the
+post-cleanup invariant, and elaborated in `proposal.md` and this design. Nothing is lost; the
+deltas simply stop claiming to retire requirements that were never written.
+
 ### ADR-4 (DECISION 4): Zero-reference verification mechanism
 
 **Choice:** three layered, observable checks — strongest first:
@@ -89,9 +101,23 @@ task's instruction to justify the spec-shape choice.
    - `rg '#\[allow\(deprecated\)\]' crates/`  (no lingering suppressors)
 3. **Source-scan lint test (`no_deprecated_shims_lint`):** a `cargo test --workspace` participant
    modeled on `crates/service-sdk/tests/tenant_scoped_lint.rs` — ascends from `CARGO_MANIFEST_DIR`
-   to the `[workspace]` root, scans `crates/*/src/**`, and asserts **zero** `#[deprecated]`
-   attributes in pre-stable crates. This turns `PRD.md:140` from prose into an enforced gate; a
-   future re-introduced shim fails the standard test run.
+   to the `[workspace]` root, then for **each** crate under `crates/` reads that crate's own
+   `Cargo.toml`, classifies it pre-stable (`version` major == 0) or stable, scans `src/**` **only**
+   for the pre-stable ones, and asserts **zero** `#[deprecated]` attributes across them. This turns
+   `PRD.md:140` from prose into an enforced gate; a future re-introduced shim fails the standard test
+   run.
+
+   The version gate is deliberate, not decorative. Every crate is `0.x` today, so an unconditional
+   `crates/*/src/**` scan would behave identically right now — but it would encode a **stronger**
+   policy than `PRD.md:140` states, and would start failing incorrectly the day a crate reaches
+   `1.0`, where `#[deprecated]` is the correct stability tool. Reading each manifest keeps the
+   mechanism exactly as wide as the specified policy.
+
+   The detector is factored as **pure functions over text** — source text in, count out; manifest
+   text in, pre-stable verdict out — so its correctness is proven by passing fixtures as arguments
+   (clean fixture ⇒ 0, one-`#[deprecated]` fixture ⇒ 1, `1.2.0` manifest ⇒ not pre-stable). The
+   filesystem walk is a thin caller over those functions. No fixture is ever left as a failing test
+   in the suite.
 
 **Rejected:** a standalone shell script in CI — rejected: not enforced by the project's actual gate
 (`cargo test --workspace`), can drift, and this repo already prefers `cargo test` lint participants
@@ -132,7 +158,7 @@ make the guarantee *observable and durable* so the policy cannot silently regres
 | `crates/service-sdk/tests/smoke.rs` | Modify | `:210` → `_for(&TenantId::new("tenant-b").unwrap())`; drop `#[allow(deprecated)]` (`:203`) |
 | `crates/service-sdk/tests/cross_tenant_access_contract.rs` | Modify | `:7` → `_for(&dest)`; drop `#[allow(deprecated)]` (`:4`); rename test to `..._for_defaults_to_false` |
 | `COOKBOOK.md` | Modify | Delete the `is_cross_tenant_allowed()` deprecated parenthetical (`:422`) |
-| `crates/service-sdk/tests/no_deprecated_shims_lint.rs` | Create | Source-scan: assert `#[deprecated]` count == 0 in pre-stable crates |
+| `crates/service-sdk/tests/no_deprecated_shims_lint.rs` | Create | Source-scan: pure fixture-testable detector + version-gated workspace assertion (`#[deprecated]` count == 0 in `0.x` crates only) |
 
 ## Interfaces / Contracts
 
@@ -156,7 +182,11 @@ impl ServiceContext {
 //   fn trace_id (private, authoritative-by-construction under TraceContext, PROD-003 ADR-4)
 
 // NEW verification (service-sdk tests) — no production symbol:
-//   no_deprecated_shims_lint: asserts count of #[deprecated] in pre-stable crate sources == 0
+//   no_deprecated_shims_lint:
+//     fn count_deprecated_attrs(source: &str) -> usize   // pure, fixture-testable
+//     fn is_pre_stable(manifest: &str) -> bool           // pure, reads version major == 0
+//     workspace gate: for each crate under crates/, if is_pre_stable(its Cargo.toml)
+//                     then sum count_deprecated_attrs over its src/**; assert total == 0
 ```
 
 ## Error Model
@@ -177,7 +207,7 @@ None. No logging, metrics, or tracing surface is added or removed. (The macro-vi
 | Compile | Zero dangling references to removed symbols | `cargo build --workspace` + `cargo test --workspace` must be green |
 | Unit | Migrated `context/mod.rs` tests assert `is_cross_tenant_allowed_for(&destination)` | Edit in place; `destination` already in scope |
 | Integration | `smoke.rs` + `cross_tenant_access_contract.rs` migrated to `_for` | Edit in place; drop `#[allow(deprecated)]` |
-| Lint (source-scan) | `#[deprecated]` count == 0 in pre-stable crates | New `no_deprecated_shims_lint.rs`, model on `tenant_scoped_lint.rs`; workspace-root anchored via `CARGO_MANIFEST_DIR` |
+| Lint (source-scan) | `#[deprecated]` count == 0 in `0.x` crates only, per-crate `Cargo.toml` version gate | New `no_deprecated_shims_lint.rs`, model on `tenant_scoped_lint.rs`; workspace-root anchored via `CARGO_MANIFEST_DIR`; detector is a pure function proven against inline fixtures |
 | Gate (grep) | All four zero-reference greps return 0 | Explicit `rg` commands embedded in tasks |
 | Gate (workspace) | fmt / clippy / test / build | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo build --workspace` |
 

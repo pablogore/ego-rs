@@ -67,17 +67,39 @@ The no-shims policy MUST be enforced by a participant of the project's standard 
 `CARGO_MANIFEST_DIR`, ascend to the `[workspace]` root, scan pre-stable crate sources, and fail if
 any `#[deprecated]` attribute is present.
 
-#### Scenario: The gate fails on a re-introduced shim
+The detection MUST be exposed as a callable function over source text, so that its own correctness is
+demonstrable by passing fixtures as arguments and asserting the returned count. The gate MUST NOT be
+validated by leaving an intentionally failing test in the suite: `cargo test --workspace` MUST be
+green on a compliant workspace.
 
-- GIVEN a fixture source containing a `#[deprecated]` attribute
-- WHEN `no_deprecated_shims_lint` evaluates it
-- THEN the test fails, flagging the shim
+The scan scope MUST match the stated policy exactly. The lint MUST read each crate's own `Cargo.toml`
+and apply the zero-`#[deprecated]` rule **only** to crates whose `version` has major `0`. A crate at
+`1.0` or above MUST be skipped, because `#[deprecated]` is the correct stability tool there; scanning
+it would enforce a stronger policy than `PRD.md:140` states.
+
+#### Scenario: The detector reports a re-introduced shim
+
+- GIVEN a fixture source string containing exactly one `#[deprecated]` attribute
+- WHEN the detector function is called with that fixture
+- THEN it returns a count of `1`, and the gate would fail were that source in a pre-stable crate
+
+#### Scenario: The detector reports nothing on clean source
+
+- GIVEN a fixture source string containing no `#[deprecated]` attribute
+- WHEN the detector function is called with that fixture
+- THEN it returns a count of `0`
 
 #### Scenario: The gate passes on a clean workspace
 
 - GIVEN the workspace after all deprecated symbols are removed
 - WHEN `cargo test --workspace` runs
 - THEN `no_deprecated_shims_lint` passes, because the pre-stable `#[deprecated]` count is zero
+
+#### Scenario: A stable crate is outside the policy's scope
+
+- GIVEN a crate whose `Cargo.toml` declares `version = "1.2.0"` and whose source carries a `#[deprecated]` attribute
+- WHEN `no_deprecated_shims_lint` runs
+- THEN that crate is classified as not pre-stable, its source is not scanned, and the gate still passes
 
 ### Requirement: Intentional Non-Deprecated Surface Is Not A Shim
 
