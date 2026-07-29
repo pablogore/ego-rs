@@ -1,20 +1,21 @@
-# Delta for external-data-providers
+# External Data Providers Specification
 
-**Capability choice**: `external-data-providers` is a new capability
-directory — no such entry exists under `openspec/specs/` today, and the
-proposal (§9, §10) names it as the first canonical spec for read-side
-external data access. This delta specifies the **observable contract** this
-capability must satisfy, deliberately at the level of behavior rather than
-mechanism. AD-001–AD-012 (proposal §11) are now resolved: `design.md` is the
-authoritative record of the resolution model (a runtime-owned SPI +
-registry, reached by handlers through a handler-facing facade port owned by
-`persistent-entity`), the fetch contract shape, registry key, error
-taxonomy, and lifecycle mechanism. This document does not restate,
-hardcode, or relitigate any of those concrete choices — it only fixes the
-externally observable behavior every requirement below MUST exhibit, which
-the chosen design already satisfies.
+## Purpose
 
-## ADDED Requirements
+Read-side external data access for `ego-rs`: handlers reach app-supplied data
+providers through a runtime-owned SPI and registry, entered via a
+handler-facing facade port owned by `persistent-entity`. This spec fixes the
+**observable contract** — resolution, fetch, tenant scoping, error taxonomy,
+signals, and lifecycle — deliberately at the level of behavior rather than
+mechanism.
+
+Mechanism is out of scope here by design: the resolution model, fetch contract
+shape, registry key, error taxonomy internals, and lifecycle wiring are
+recorded in the originating change's `design.md` (CORE-019A, archived). This
+document does not restate or relitigate those choices; it states the externally
+observable behavior every requirement below MUST exhibit.
+
+## Requirements
 
 ### Requirement: Fail-Closed Provider Resolution
 
