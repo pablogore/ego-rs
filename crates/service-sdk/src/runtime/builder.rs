@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use ego_runtime::providers::{
 };
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
+use futures::FutureExt;
 use kitlogger::KITLogger;
 use persistent_entity::data_provider_access::DataProviderAccess;
 use persistent_entity::effect_acceptor::EffectAcceptor;
@@ -630,12 +632,41 @@ impl RuntimeBuilder {
         // `shutdown_async` mechanism the effects subsystem already uses.
         // A no-op registration when no provider was ever registered — the
         // zero-cost path incurs no extra hook.
+        //
+        // Issue #242: each provider's `shutdown()` is isolated with
+        // `catch_unwind`, so a panic in one provider does not prevent the
+        // others from shutting down — the loop continues and any panic is
+        // surfaced afterwards as `RuntimeInfraError::Teardown`. The panic
+        // payload is dropped (`.is_err()` only), never logged or embedded; the
+        // `reason` is a fixed string. The exactly-once drain (`shutdown_async`
+        // takes the hook list via `mem::take`) and the `Arc::ptr_eq` alias
+        // dedup at registration are both preserved — this only wraps the call
+        // inside the loop.
         if !data_providers_for_teardown.is_empty() {
             runtime.register_async_teardown(async move {
+                let mut any_panicked = false;
                 for provider in data_providers_for_teardown {
-                    provider.shutdown().await;
+                    // The call is deferred to poll-time INSIDE the guard (an
+                    // inner `async` block, not eager `provider.shutdown()` as an
+                    // argument), so a manual `ExternalDataProvider` impl that
+                    // panics *synchronously* during future construction — before
+                    // returning its pinned future — is caught here too, and the
+                    // loop still continues to the remaining providers.
+                    if AssertUnwindSafe(async { provider.shutdown().await })
+                        .catch_unwind()
+                        .await
+                        .is_err()
+                    {
+                        any_panicked = true;
+                    }
                 }
-                Ok(())
+                if any_panicked {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "a data provider panicked during shutdown".to_string(),
+                    })
+                } else {
+                    Ok(())
+                }
             });
         }
 
@@ -2605,6 +2636,235 @@ mod tests {
         rt.shutdown_async().await.expect("shutdown_async succeeds");
 
         assert_eq!(provider.shutdown_call_count(), 1);
+    }
+
+    // -- #242: per-provider panic isolation in the teardown loop --------
+    //
+    // A provider `shutdown()` that panics must be isolated per-provider: the
+    // panic is caught, the remaining providers still shut down, and the
+    // failure is surfaced as `RuntimeInfraError::Teardown` without leaking the
+    // panic payload. The exactly-once + alias dedup guarantees are unchanged.
+
+    /// A provider whose `shutdown()` panics with a fixed message.
+    struct PanickingShutdownProvider {
+        message: &'static str,
+    }
+
+    impl PanickingShutdownProvider {
+        fn new(message: &'static str) -> Self {
+            Self { message }
+        }
+    }
+
+    #[async_trait]
+    impl ExternalDataProvider for PanickingShutdownProvider {
+        async fn fetch(&self, request: DataRequest) -> Result<DataResponse, DataProviderError> {
+            Ok(DataResponse {
+                payload: request.payload,
+                cache_hit: false,
+            })
+        }
+
+        async fn shutdown(&self) {
+            panic!("{}", self.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_isolates_a_panicking_provider_and_continues_others() {
+        let before = Arc::new(RecordingShutdownProvider::new());
+        let after = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("before", before.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .register_data_provider(
+                "boom",
+                Arc::new(PanickingShutdownProvider::new("kaboom")) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .register_data_provider("after", after.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .build();
+
+        let result = rt.shutdown_async().await;
+
+        assert!(
+            matches!(result, Err(RuntimeInfraError::Teardown { .. })),
+            "a panicking provider shutdown must surface as Teardown, got {result:?}"
+        );
+        assert_eq!(
+            before.shutdown_call_count(),
+            1,
+            "the provider registered before the panicking one still shut down"
+        );
+        assert_eq!(
+            after.shutdown_call_count(),
+            1,
+            "the provider registered after the panicking one still shut down"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_shutdown_hook_does_not_escape_as_unwind() {
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "boom",
+                Arc::new(PanickingShutdownProvider::new("kaboom")) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        // The panic must be caught and returned as a `Result`, never unwind
+        // the caller.
+        let result = rt.shutdown_async().await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn each_provider_shuts_down_at_most_once() {
+        let provider = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("pricing", provider.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(provider.shutdown_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn aliased_provider_is_not_shut_down_twice() {
+        // The same Arc registered under two provider_ids must still be torn
+        // down exactly once — the per-provider panic isolation must not break
+        // the `Arc::ptr_eq` dedup at registration.
+        let provider = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider("jwks", provider.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .register_data_provider(
+                "jwks-legacy",
+                provider.clone() as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        rt.shutdown_async().await.expect("shutdown_async succeeds");
+
+        assert_eq!(provider.shutdown_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_panic_reason_does_not_leak_payload() {
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "boom",
+                Arc::new(PanickingShutdownProvider::new("SECRET_SHUTDOWN_abc123"))
+                    as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .build();
+
+        let err = rt
+            .shutdown_async()
+            .await
+            .expect_err("a panicking shutdown must surface an error");
+
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains("SECRET_SHUTDOWN_abc123"),
+            "panic payload leaked into Display: {display}"
+        );
+        assert!(
+            !debug.contains("SECRET_SHUTDOWN_abc123"),
+            "panic payload leaked into Debug: {debug}"
+        );
+    }
+
+    /// A provider implemented BY HAND (not via `#[async_trait]`) whose
+    /// `shutdown` panics *synchronously* — during future construction, before
+    /// returning the pinned future. Issue #242: the per-provider guard must
+    /// cover construction too, so this panic must be caught (the loop
+    /// continues) rather than escaping out of the eager argument evaluation and
+    /// unwinding `shutdown_async`. Signatures mirror exactly what
+    /// `#[async_trait]` desugars the methods into.
+    struct SyncConstructionPanicShutdown;
+
+    #[allow(clippy::manual_async_fn)]
+    impl ExternalDataProvider for SyncConstructionPanicShutdown {
+        fn fetch<'life0, 'async_trait>(
+            &'life0 self,
+            request: DataRequest,
+        ) -> core::pin::Pin<
+            Box<
+                dyn core::future::Future<Output = Result<DataResponse, DataProviderError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                Ok(DataResponse {
+                    payload: request.payload,
+                    cache_hit: false,
+                })
+            })
+        }
+
+        fn shutdown<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            // Panics BEFORE returning the boxed future — outside the future's
+            // own poll. With eager `AssertUnwindSafe(provider.shutdown())` this
+            // escapes the guard and unwinds `shutdown_async`; with poll-time
+            // deferral it is caught and the loop continues.
+            panic!("SECRET_SYNC_SHUTDOWN_xyz789");
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_isolates_a_synchronous_construction_panic_and_continues() {
+        let after = Arc::new(RecordingShutdownProvider::new());
+
+        let rt = RuntimeBuilder::new()
+            .register_data_provider(
+                "boom",
+                Arc::new(SyncConstructionPanicShutdown) as Arc<dyn ExternalDataProvider>,
+            )
+            .unwrap()
+            .register_data_provider("after", after.clone() as Arc<dyn ExternalDataProvider>)
+            .unwrap()
+            .build();
+
+        let result = rt.shutdown_async().await;
+
+        assert!(
+            matches!(result, Err(RuntimeInfraError::Teardown { .. })),
+            "a synchronous-construction shutdown panic must surface as Teardown, got {result:?}"
+        );
+        assert_eq!(
+            after.shutdown_call_count(),
+            1,
+            "a sync-construction panic in one provider must not skip the next"
+        );
+        let err = result.unwrap_err();
+        let rendered = format!("{err} {err:?}");
+        assert!(
+            !rendered.contains("SECRET_SYNC_SHUTDOWN_xyz789"),
+            "sync-construction panic payload leaked: {rendered}"
+        );
     }
 
     // -- PROD-005 PR3 TASK-023: single registration authority — every
