@@ -40,7 +40,7 @@ fn register_command(user_id: &str) -> UserCommand {
 }
 
 #[tokio::test]
-async fn describe_deliver_retry_then_dedup_through_the_real_actor_spawn_path() {
+async fn describe_deliver_retry_through_the_real_actor_spawn_path_and_repeat_register_is_a_noop() {
     // describe: `UserEntity::external_effects` describes one
     // "user.welcome_email" effect per committed `UserRegistered` event.
     let executor = Arc::new(RecordingExecutor::with_outcomes(vec![
@@ -99,14 +99,30 @@ async fn describe_deliver_retry_then_dedup_through_the_real_actor_spawn_path() {
     assert_eq!(attempts[0].effect_type, "user.welcome_email");
     assert_eq!(attempts[0].destination, "mailer://welcome/user-e2e-1");
 
-    // dedup: re-registering the SAME user_id describes the identical
-    // idempotency key (derived only from user_id, domain/user.rs) — the
-    // second accept()'s effect must dedupe at the delivery runner, never
-    // reach the executor a third time.
+    // Re-registering the same user_id against the same already-rehydrated
+    // handle no-ops at the entity level — see
+    // `domain/user.rs::UserEntity::handle_command`. `CommandResult::NoEvents`
+    // means `external_effects` is never invoked a second time, so no new
+    // "welcome email" effect is even described: the executor call count below
+    // stays bounded by construction, not by delivery-runner dedup.
+    //
+    // Stated so nobody reads coverage into this test that is not here: this
+    // case used to reach the delivery runner twice and exercise its dedup path
+    // end to end, which is what the old `..._then_dedup_...` name described.
+    // The entity-level no-op removed that trigger, so the name went with it.
+    // Delivery-runner dedup is covered by unit tests in
+    // `crates/runtime/src/effects/runner.rs`
+    // (`happy_path_success_marks_succeeded_and_commits_dedup`,
+    // `dedup_conflict_marks_invalid_effect_terminal`,
+    // `dedup_reserve_transient_failure_retries_then_succeeds`,
+    // `dedup_reserve_permanent_error_is_immediately_terminal_without_retry`,
+    // `dedup_other_succeeded_on_a_fresh_submission_is_marked_succeeded_not_terminal_failed`)
+    // and by `cross_tenant_dedup_never_collides_even_with_identical_type_and_key`
+    // in `crates/runtime/src/effects/store.rs`.
     let second_result: Result<CommandResult<UserRegistered, UserState>, EntityError> = user_ref
         .send_command(register_command("user-e2e-1"), ctx())
         .await;
-    assert!(matches!(second_result, Ok(CommandResult::Events { .. })));
+    assert!(matches!(second_result, Ok(CommandResult::NoEvents { .. })));
 
     // Give the single-consumer runner a bounded window to drain the second
     // accept(); a dedup short-circuit never calls the executor, so the count
