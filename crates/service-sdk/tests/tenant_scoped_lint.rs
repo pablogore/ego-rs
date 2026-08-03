@@ -3,8 +3,9 @@
 //! AD-007's opt-in classification model has a fail-open risk: a forgotten
 //! `#[tenant_scoped]` marker silently leaves an operation unenforced. This
 //! test is the required automated mitigation — a `cargo test --workspace`
-//! participant (this project's Strict TDD test command, already the exact
-//! gate `.gitlab-ci.yml`'s `test` stage runs), not an unenforced shell script.
+//! participant, which is this project's Strict TDD test command and part of the
+//! declared gate set, rather than an unenforced shell script. It therefore runs
+//! wherever the suite runs, with no pipeline-specific wiring of its own.
 //!
 //! # AST-based, not line-based (code-review fix)
 //!

@@ -85,7 +85,7 @@ impl SchedulerEventEnvelope {
     pub fn new(payload: SchedulerEvent, source_actor: EntityTriple, sequence_id: u64) -> Self {
         let event_type = EventType::from(&payload);
         let mut hasher = Sha256::new();
-        hasher.update(format!("{:?}", &payload).as_bytes());
+        hasher.update(format!("{payload:?}").as_bytes());
         hasher.update(source_actor.tenant.as_bytes());
         hasher.update(source_actor.entity_type.as_bytes());
         hasher.update(source_actor.entity_id.as_bytes());
