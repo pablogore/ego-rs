@@ -100,10 +100,30 @@ impl PersistentEntity for UserEntity {
         UserState::Unregistered
     }
 
+    /// The `Registered` branch below is defence in depth against in-process
+    /// state drift: it stops a repeated `Register` against the same
+    /// already-rehydrated handle from emitting a duplicate `UserRegistered`.
+    ///
+    /// It is deliberately **not** a durable idempotency guarantee, and must not
+    /// be mistaken for one. The check does survive a process restart — the
+    /// actor rehydrates state from the event stream before handling any
+    /// command — but it can only prevent another event once the prior append
+    /// has actually committed. What it does not provide:
+    /// - replay of the original response to the caller,
+    /// - detection of the same idempotency key arriving with a different
+    ///   payload fingerprint,
+    /// - coordination across the several aggregates one operation may touch,
+    /// - protection against concurrent actors before either has committed its
+    ///   append, or
+    /// - continuation of an operation that was only partially executed.
+    ///
+    /// Every one of those needs durable, operation-scoped evidence recorded at
+    /// the command boundary — a reservation plus a persisted receipt — not a
+    /// state check inside a single aggregate's handler.
     async fn handle_command(
         &self,
         command: &Self::Command,
-        _state: &Self::State,
+        state: &Self::State,
         _context: &CommandContext,
     ) -> Result<Vec<Self::Event>, EntityError> {
         match command {
@@ -112,10 +132,15 @@ impl PersistentEntity for UserEntity {
                 email,
                 tenant_id,
             } => {
-                // Real validation, not a test-only hook — also gives
-                // register_user_partial_failure.rs (CORE-018 AD-5) a
-                // deterministic trigger for a User-write failure after a
-                // TenantOrganization-write success.
+                if matches!(state, UserState::Registered { .. }) {
+                    return Ok(vec![]);
+                }
+
+                // Real validation, not a test-only hook — it also gives
+                // register_user_partial_failure.rs a deterministic trigger for
+                // a User-write failure that lands after a successful
+                // TenantOrganization write, which is the non-atomic case that
+                // test exercises.
                 if email.trim().is_empty() {
                     return Err(EntityError::Internal("email must not be empty".to_string()));
                 }

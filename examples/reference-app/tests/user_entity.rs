@@ -75,3 +75,33 @@ async fn register_with_empty_email_is_rejected() {
 
     assert!(result.is_err(), "empty email must be rejected");
 }
+
+/// Given the aggregate is already `Registered`, a repeated `Register` must be a
+/// no-op rather than a second `UserRegistered`. This holds for a rehydrated
+/// aggregate too, but only once the prior append has committed — it is defence
+/// in depth, not a durable idempotency guarantee. See
+/// `UserEntity::handle_command` for what it does not cover.
+#[tokio::test]
+async fn register_when_already_registered_is_a_noop() {
+    let entity = UserEntity::new();
+    let state = UserState::Registered {
+        email: "user@example.com".to_string(),
+        tenant_id: "tenant-a".to_string(),
+    };
+    let cmd = UserCommand::Register {
+        user_id: "user-1".to_string(),
+        email: "user@example.com".to_string(),
+        tenant_id: "tenant-a".to_string(),
+    };
+
+    let events = entity
+        .handle_command(&cmd, &state, &ctx())
+        .await
+        .expect("already-registered no-op must not error");
+
+    assert_eq!(
+        events.len(),
+        0,
+        "re-registering an already-Registered aggregate must emit zero events, not a duplicate UserRegistered"
+    );
+}
