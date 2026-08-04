@@ -8,6 +8,7 @@ use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
 use ego_domain::context::TenantId;
+use ego_domain::operation::OperationKey;
 use ego_domain::TraceContext;
 
 use crate::runtime::{CanonicalTenant, CrossTenantGrant, CrossTenantPermit};
@@ -121,6 +122,17 @@ pub struct ServiceContext {
     /// [`ServiceContext::operation_name`]. `None` for contexts built manually
     /// or in tests (no proxy), which fall back to the generic span name.
     operation_name: Option<Arc<str>>,
+    /// The caller-supplied identity of the whole business operation this
+    /// invocation belongs to, set once at the transport boundary from the
+    /// extracted and validated `OperationKey` and never regenerated or
+    /// normalised downstream. Carried by explicit value only — there is no
+    /// ambient or thread-local fallback, matching every other identity field
+    /// on this context. Private (mirroring `tenant_id`/`trace_id`): set via
+    /// [`ServiceContext::with_operation_key`], read via
+    /// [`ServiceContext::operation_key`], so nothing can reach for a raw
+    /// field and mistake a stale or reconstructed value for the one actually
+    /// carried from ingress.
+    operation_key: Option<OperationKey>,
 }
 
 impl ServiceContext {
@@ -143,6 +155,7 @@ impl ServiceContext {
             resolved_tenant: None,
             trace_context: None,
             operation_name: None,
+            operation_key: None,
         }
     }
 
@@ -459,6 +472,32 @@ impl ServiceContext {
         self.operation_name.as_deref()
     }
 
+    /// Sets the caller-supplied operation key, extracted and validated at
+    /// the transport boundary.
+    ///
+    /// This is the sole way an `OperationKey` enters a `ServiceContext` — it
+    /// is carried forward by value from here, never looked up ambiently.
+    ///
+    /// # Arguments
+    /// * `operation_key` - The validated `OperationKey` to attach
+    ///
+    /// # Returns
+    /// A new `ServiceContext` with the operation key set
+    pub fn with_operation_key(mut self, operation_key: OperationKey) -> Self {
+        self.operation_key = Some(operation_key);
+        self
+    }
+
+    /// Returns the caller-supplied operation key set at ingress, if any.
+    ///
+    /// # Returns
+    /// The identical `OperationKey` attached via
+    /// [`ServiceContext::with_operation_key`], or `None` if this invocation
+    /// carries no operation key.
+    pub fn operation_key(&self) -> Option<&OperationKey> {
+        self.operation_key.as_ref()
+    }
+
     /// Requires that security be enabled in the runtime.
     ///
     /// This method should be called by service handlers that need to ensure
@@ -500,6 +539,7 @@ impl std::fmt::Debug for ServiceContext {
             .field("resolved_tenant", &self.resolved_tenant)
             .field("trace_context", &self.trace_context)
             .field("operation_name", &self.operation_name)
+            .field("operation_key", &self.operation_key)
             .finish()
     }
 }
@@ -599,6 +639,44 @@ mod tests {
         let ctx = ServiceContext::new();
         let tenant_b = TenantId::new("tenant-b").unwrap();
         assert!(!ctx.is_cross_tenant_allowed_for(&tenant_b));
+    }
+
+    // -- Carriage of the caller-supplied operation key --
+
+    #[test]
+    fn operation_key_is_none_by_default() {
+        let ctx = ServiceContext::new();
+        assert_eq!(ctx.operation_key(), None);
+    }
+
+    #[test]
+    fn operation_key_round_trips_the_identical_value_set_at_ingress() {
+        use ego_domain::operation::OperationKey;
+
+        let key = OperationKey::parse("op-carriage-1").unwrap();
+        let ctx = ServiceContext::new().with_operation_key(key.clone());
+
+        // Explicit-propagation only: the accessor must return exactly the
+        // value the builder was handed, with no ambient/thread-local lookup
+        // involved on either side.
+        assert_eq!(ctx.operation_key(), Some(&key));
+    }
+
+    #[test]
+    fn operation_key_does_not_affect_tenant_hint_or_trace_context() {
+        use ego_domain::operation::OperationKey;
+        use ego_domain::TraceContext;
+
+        let key = OperationKey::parse("op-carriage-2").unwrap();
+        let tc = TraceContext::root();
+        let ctx = ServiceContext::new()
+            .with_tenant_id("tenant-a")
+            .with_trace_context(tc)
+            .with_operation_key(key.clone());
+
+        assert_eq!(ctx.operation_key(), Some(&key));
+        assert_eq!(ctx.tenant_hint(), Some("tenant-a"));
+        assert_eq!(ctx.trace_context(), Some(&tc));
     }
 
     #[test]

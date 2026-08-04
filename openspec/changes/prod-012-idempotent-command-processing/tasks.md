@@ -4,13 +4,20 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **92 tasks total** — 25 complete and 67 pending. Complete: B0.1–B0.3 (merged as
+> **93 tasks total** — 28 complete and 65 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
-> B1.1–B1.7, B2.1–B2.9. The total moved from 93
-> to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
-> were added in their place; see the note under Phase A4. The count is stated here
-> so any prose that cites it can be checked against the file rather than drifting
-> from it.
+> B1.1–B1.10, B2.1–B2.9.
+>
+> The total has moved twice, in this order:
+>
+> 1. **93 originally**, as first planned.
+> 2. **92** once A4.3–A4.5 were removed for resting on a wrong premise — three tasks
+>    out, two follow-ups in. See the note under Phase A4.
+> 3. **93 again** when the context bridge B1 left unspecified was recorded as B6.4a.
+>    See the note under Phase B1.
+>
+> The count is stated here so any prose that cites it can be checked against the file
+> rather than drifting from it — which it has done more than once.
 
 ## Review Workload Forecast
 
@@ -130,11 +137,25 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 
 ### Phase B1: `OperationKey` + Carriage (may run parallel with Block A)
 
-> **Delivered in slices.** B1.1–B1.2 — the two identity types — land on their own,
-> because the reservation contract cannot define its request type without them.
-> B1.3–B1.10 (the no-conversion compile-fail assertion, the extraction contract and
-> its policy table, the HTTP carrier, and carriage through the service and command
-> contexts) remain open and follow separately.
+> **All ten tasks delivered, in slices.** B1.1–B1.2 — the two identity types —
+> landed first, because the reservation contract cannot define its request type
+> without them. B1.3–B1.5 (the no-conversion compile-fail assertion, the
+> extraction contract and its policy table) followed, then B1.6–B1.7 (the HTTP
+> carrier), then B1.8–B1.10 (both contexts able to hold the key, and its
+> traversal from the command envelope to the actor).
+>
+> **This phase does not achieve end-to-end carriage, and no task in it ever
+> specified that.** Ten tasks are individually satisfied, yet the value cannot
+> flow from the transport edge to the actor, because nothing reads
+> `ServiceContext::operation_key()` to construct the `CommandContext` a service
+> passes down. That bridge is a genuine gap in this task list rather than in the
+> code, and it is recorded as B6.4a below — the generated slot-3 code is where it
+> belongs, since that is the point which already reads the resolved key.
+>
+> What B1 does deliver: the key has a type, one shared definition of validity and
+> of the missing-key policy, one HTTP adapter conforming to that contract, and
+> both contexts able to hold and hand on the value. Every piece the bridge will
+> need, and not the bridge.
 
 - [x] B1.1 RED: `crates/domain/src/operation/key.rs` unit test — `OperationKey::parse` rejects empty/whitespace-only strings, accepts a bounded-length valid string.
 - [x] B1.2 GREEN: implement `OperationKey`, `OperationFingerprint` in `crates/domain/src/operation/key.rs` (sibling module to `idempotency.rs`, AD-7).
@@ -143,9 +164,9 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 - [x] B1.5 GREEN: implement `OperationKeyCarrier` trait, `resolve_operation_key`, `OperationKeyRejection`, and `IdempotencyEnforcementMode` (mirroring `crates/service-sdk/src/runtime/tenant.rs:143`) in `crates/service-sdk/src/runtime/idempotency.rs` and `crates/service-sdk/src/idempotency/extraction.rs`.
 - [x] B1.6 RED: `crates/transport/tests/idempotency_carrier.rs` — `assert_carrier_conformance` (shipped in `crates/testkit`) run against the HTTP `HeaderCarrier`.
 - [x] B1.7 GREEN: implement `HeaderCarrier(&HeaderMap)` in `crates/transport/src/idempotency.rs` (beside `security.rs`, `propagation.rs`); wire rejection to `crates/transport/src/error.rs`.
-- [ ] B1.8 RED: `crates/service-sdk/src/context/mod.rs` test — `ServiceContext::operation_key()` accessor returns the identical `OperationKey` set at ingress, no ambient lookup.
-- [ ] B1.9 GREEN: add `operation_key` field + accessor to `ServiceContext`.
-- [ ] B1.10 RED/GREEN: `crates/persistent-entity/src/command_context.rs` — `CommandContext` carries `operation_key` through to `EntityActor::execute_command`; test asserts identical value reaches the actor.
+- [x] B1.8 RED: `crates/service-sdk/src/context/mod.rs` test — `ServiceContext::operation_key()` accessor returns the identical `OperationKey` set at ingress, no ambient lookup.
+- [x] B1.9 GREEN: add `operation_key` field + accessor to `ServiceContext`.
+- [x] B1.10 RED/GREEN: `crates/persistent-entity/src/command_context.rs` — `CommandContext` carries `operation_key` through to `EntityActor::execute_command`; test asserts identical value reaches the actor.
 
 ### Phase B2: `OperationReservationStore` Port + In-Memory + Lease Mechanics (may run parallel with Block A)
 
@@ -202,6 +223,13 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 - [ ] B6.1 RED: `crates/service-sdk-macros/src/tests.rs` — `#[idempotent]` outside `#[service]` is a compile error; `#[idempotent]` without `#[operation]` is a compile error (mirrors the existing check at `lib.rs:528`).
 - [ ] B6.2 GREEN: add the inert `#[idempotent]` marker attribute in `crates/service-sdk-macros/src/lib.rs`, read by the `#[service]` generator alongside `#[authorize]` (`lib.rs:808`) and `#[tenant_scoped]` (`lib.rs:824`).
 - [ ] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
+- [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
+      `ServiceContext::operation_key()` and threads that exact value into the
+      `CommandContext` the service hands to the entity. Test asserts the key
+      resolved at the transport edge is what `handle_command` observes, with no
+      regeneration in between. **This closes the gap B1 left open**: B1 made both
+      contexts able to hold the key and proved traversal from the command envelope
+      onward, but nothing joined the two halves.
 - [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
@@ -268,7 +296,7 @@ B4 ──▶ B5
 |---|---|
 | Mandatory Key on Every External Mutable Command | B1.4, B1.5, B6.5 |
 | No Server-Side Key Generation | B1.4, B1.5 |
-| Operation-Scoped Identity, Reserved Before Dispatch | B1.9, B6.3, B6.4 |
+| Operation-Scoped Identity, Reserved Before Dispatch | B1.9, B6.3, B6.4a, B6.4 |
 | Lease With Owner, Expiry, and Verified Fencing | B2.1–B2.6, B3.4, B3.5 |
 | Per-Aggregate Receipts Confirmed Atomically With the Append | B5.1–B5.7 |
 | Two Guarantees, Named Separately | B7.1, B7.5, DOC.3 |

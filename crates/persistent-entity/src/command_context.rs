@@ -3,6 +3,7 @@
 //! This module provides context information that is available during command processing,
 //! including metadata about the command execution environment.
 
+use ego_domain::operation::OperationKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -29,6 +30,13 @@ pub struct CommandContext {
 
     /// Additional metadata for the command.
     pub metadata: HashMap<String, String>,
+
+    /// The caller-supplied operation key carried from the service boundary,
+    /// set once at ingress and passed through unchanged to
+    /// `EntityActor::execute_command` and the `handle_command` call it
+    /// makes — never regenerated, normalised, or reconstructed along the
+    /// way.
+    pub operation_key: Option<OperationKey>,
 }
 
 impl CommandContext {
@@ -47,6 +55,7 @@ impl CommandContext {
             expected_version: None,
             causation_id: None,
             metadata: HashMap::new(),
+            operation_key: None,
         }
     }
 }
