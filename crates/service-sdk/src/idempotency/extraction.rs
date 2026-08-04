@@ -14,9 +14,30 @@ use crate::runtime::IdempotencyEnforcementMode;
 /// rule. Validation and the missing-key policy live only in
 /// [`resolve_operation_key`], so two adapters cannot disagree about what a
 /// valid key is or what happens when one is absent.
+/// What a carrier found at its location.
+///
+/// Three answers rather than two. A carrier that could only say "here is a
+/// string" or "nothing" has to report an unreadable value as absent, and an
+/// absent key is admissible under the compatibility variant — so malformed
+/// input would silently disable the guarantee instead of being rejected for
+/// what it is. The third answer exists precisely so that cannot happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawOperationKey<'a> {
+    /// The carrier's location held nothing.
+    Absent,
+    /// The carrier's location held this raw, still-unvalidated value.
+    Present(&'a str),
+    /// The location held something, but it cannot be read as text — for
+    /// instance a header whose bytes are not valid UTF-8. Distinct from
+    /// [`RawOperationKey::Absent`] because the caller did supply a key; it is
+    /// simply unusable, and treating it as absent would let it through under
+    /// the compatibility variant.
+    Unreadable,
+}
+
 pub trait OperationKeyCarrier {
-    /// The raw, unvalidated key as this transport carried it, if present.
-    fn raw_operation_key(&self) -> Option<&str>;
+    /// What this transport found at its location.
+    fn raw_operation_key(&self) -> RawOperationKey<'_>;
 
     /// A stable diagnostic name for this carrier, e.g.
     /// `"http:Idempotency-Key"`. Never derived from user input — used only
@@ -50,6 +71,17 @@ pub enum OperationKeyRejection {
         /// Why the raw value failed validation.
         source: OperationKeyError,
     },
+    /// A key was present but could not be read as text at all.
+    ///
+    /// Never admitted under any mode, for the same reason as
+    /// [`OperationKeyRejection::Invalid`]: the caller supplied a key, so the
+    /// missing-key policy does not apply to it. Kept separate from `Invalid`
+    /// because no [`OperationKeyError`] describes it — that type judges a
+    /// string's validity, and this value never became one.
+    Unreadable {
+        /// The carrier that reported the unreadable value.
+        carrier: &'static str,
+    },
 }
 
 /// The single place validation and missing-key policy live.
@@ -61,15 +93,16 @@ pub enum OperationKeyRejection {
 /// from diverging per protocol.
 ///
 /// A key present but failing validation is **always** rejected as
-/// [`OperationKeyRejection::Invalid`], regardless of `mode`:
-/// [`IdempotencyEnforcementMode::Compatibility`] bounds only what happens
-/// when a key is *absent*, never what counts as valid.
+/// [`OperationKeyRejection::Invalid`], and a key present but unreadable is
+/// **always** rejected as [`OperationKeyRejection::Unreadable`], regardless of
+/// `mode`. [`IdempotencyEnforcementMode::Compatibility`] bounds only what
+/// happens when a key is *absent*, never what counts as usable.
 pub fn resolve_operation_key(
     carrier: &dyn OperationKeyCarrier,
     mode: IdempotencyEnforcementMode,
 ) -> Result<Option<OperationKey>, OperationKeyRejection> {
     match carrier.raw_operation_key() {
-        Some(raw) => {
+        RawOperationKey::Present(raw) => {
             OperationKey::parse(raw)
                 .map(Some)
                 .map_err(|source| OperationKeyRejection::Invalid {
@@ -77,7 +110,12 @@ pub fn resolve_operation_key(
                     source,
                 })
         }
-        None => match mode {
+        // A supplied-but-unusable value is never admitted. The mode governs
+        // only what happens when nothing was supplied at all.
+        RawOperationKey::Unreadable => Err(OperationKeyRejection::Unreadable {
+            carrier: carrier.carrier_name(),
+        }),
+        RawOperationKey::Absent => match mode {
             IdempotencyEnforcementMode::MandatoryKey => Err(OperationKeyRejection::Missing {
                 carrier: carrier.carrier_name(),
             }),
@@ -93,18 +131,20 @@ pub fn resolve_operation_key(
 mod tests {
     use ego_domain::operation::{OperationKey, OperationKeyError};
 
-    use crate::idempotency::{resolve_operation_key, OperationKeyCarrier, OperationKeyRejection};
+    use crate::idempotency::{
+        resolve_operation_key, OperationKeyCarrier, OperationKeyRejection, RawOperationKey,
+    };
     use crate::runtime::IdempotencyEnforcementMode;
 
     /// A minimal, test-only carrier — reads one string and nothing else, per
     /// the contract's explicit non-goal (no request, no headers, no
     /// protocol knowledge).
     struct TestCarrier {
-        raw: Option<&'static str>,
+        raw: RawOperationKey<'static>,
     }
 
     impl OperationKeyCarrier for TestCarrier {
-        fn raw_operation_key(&self) -> Option<&str> {
+        fn raw_operation_key(&self) -> RawOperationKey<'_> {
             self.raw
         }
 
@@ -116,7 +156,7 @@ mod tests {
     #[test]
     fn present_valid_key_resolves_under_the_default_mandatory_mode() {
         let carrier = TestCarrier {
-            raw: Some("op-123"),
+            raw: RawOperationKey::Present("op-123"),
         };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::MandatoryKey);
@@ -129,7 +169,7 @@ mod tests {
         // The mode governs the missing-key policy only — a present, valid
         // key resolves the same way regardless of mode.
         let carrier = TestCarrier {
-            raw: Some("op-123"),
+            raw: RawOperationKey::Present("op-123"),
         };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::Compatibility);
@@ -140,7 +180,9 @@ mod tests {
     #[test]
     fn missing_key_rejected_under_the_default_mandatory_mode() {
         // The default is fail-closed: no key means no dispatch.
-        let carrier = TestCarrier { raw: None };
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Absent,
+        };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::MandatoryKey);
 
@@ -156,7 +198,9 @@ mod tests {
     fn missing_key_admitted_only_under_the_explicit_compatibility_mode() {
         // Admission happens only because the compatibility variant was
         // explicitly configured, which is what keeps the loosening auditable.
-        let carrier = TestCarrier { raw: None };
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Absent,
+        };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::Compatibility);
 
@@ -165,7 +209,9 @@ mod tests {
 
     #[test]
     fn present_but_invalid_key_is_rejected_under_the_default_mandatory_mode() {
-        let carrier = TestCarrier { raw: Some("   ") };
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Present("   "),
+        };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::MandatoryKey);
 
@@ -184,7 +230,9 @@ mod tests {
         // admits a key that failed validation. A malformed key is not
         // "absent"; treating it as such would silently widen what counts as
         // a valid `OperationKey`.
-        let carrier = TestCarrier { raw: Some("   ") };
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Present("   "),
+        };
 
         let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::Compatibility);
 
@@ -193,6 +241,45 @@ mod tests {
             Err(OperationKeyRejection::Invalid {
                 carrier: "test:key",
                 source: OperationKeyError::Empty,
+            })
+        );
+    }
+
+    /// An unreadable value is rejected under the fail-closed default, as any
+    /// unusable key must be.
+    #[test]
+    fn unreadable_key_is_rejected_under_the_default_mandatory_mode() {
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Unreadable,
+        };
+
+        let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::MandatoryKey);
+
+        assert_eq!(
+            resolved,
+            Err(OperationKeyRejection::Unreadable {
+                carrier: "test:key"
+            })
+        );
+    }
+
+    /// And rejected under compatibility too — which is the whole point of
+    /// distinguishing it from an absent key. The compatibility variant loosens
+    /// what happens when a caller sent *no* key; a caller who sent an unusable
+    /// one did send a key, so admitting it would silently drop the guarantee
+    /// for exactly the malformed input most likely to indicate a broken client.
+    #[test]
+    fn unreadable_key_is_rejected_under_compatibility_mode_too() {
+        let carrier = TestCarrier {
+            raw: RawOperationKey::Unreadable,
+        };
+
+        let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::Compatibility);
+
+        assert_eq!(
+            resolved,
+            Err(OperationKeyRejection::Unreadable {
+                carrier: "test:key"
             })
         );
     }

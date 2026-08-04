@@ -9,65 +9,95 @@
 
 use ego_domain::operation::OperationKey;
 use ego_service_sdk::idempotency::{
-    resolve_operation_key, OperationKeyCarrier, OperationKeyRejection,
+    resolve_operation_key, OperationKeyCarrier, OperationKeyRejection, RawOperationKey,
 };
 use ego_service_sdk::runtime::IdempotencyEnforcementMode;
 
-/// Asserts that `with_key` and `without_key` — two instances of the same
-/// [`OperationKeyCarrier`] implementation, one carrying a valid raw key and
-/// one carrying none — resolve through [`resolve_operation_key`] exactly as
-/// every other conforming carrier must, against the one shared policy table.
+/// Asserts that three instances of the same [`OperationKeyCarrier`]
+/// implementation — one carrying a valid raw key, one carrying none, and one
+/// whose location holds something unreadable — resolve through
+/// [`resolve_operation_key`] exactly as every other conforming carrier must,
+/// against the one shared policy table.
 ///
-/// An adapter's own integration test wires up both a with-key and a
-/// without-key instance of its carrier and passes both here — that is the
-/// entire conformance obligation. Nothing about a specific protocol is
-/// exercised beyond what [`OperationKeyCarrier`] itself already narrows to
-/// (one raw string, one diagnostic name).
+/// An adapter's own integration test wires up all three instances of its
+/// carrier and passes them here — that is the entire conformance obligation. Nothing about a specific protocol is
+/// exercised beyond what [`OperationKeyCarrier`] itself already narrows to:
+/// one location reported as absent, present, or unreadable, plus one stable
+/// diagnostic name.
 ///
-/// # Why two carrier instances, not one
+/// # Why three carrier instances
 ///
-/// The original sketch for this helper took a single carrier reference. A
-/// single instance can only ever report one
-/// fixed `raw_operation_key()` value, so it cannot exercise both halves of
-/// `resolve_operation_key`'s policy table — key present and key absent —
-/// against the identical adapter implementation. Flagged here the same way
-/// `crate::runtime::tenant`'s `CanonicalTenant` flags its own deviation from
-/// a design sketch: the literal shape does not typecheck against what the
-/// function must actually prove, so it takes the smallest change consistent
-/// with the design's intent instead.
+/// The original sketch for this helper took a single carrier reference. One
+/// instance reports one fixed `raw_operation_key()` value, so it cannot
+/// exercise the policy table against the identical adapter — and the table has
+/// one row per state the contract admits. There are three such states, so
+/// three instances.
+///
+/// The third is not optional, and that is a deliberate trade. A carrier whose
+/// location physically cannot hold an unreadable value — one reading from a
+/// `String` field, say — cannot supply it, and therefore cannot use this
+/// harness unchanged. The alternative was an opt-out parameter, which would
+/// let any adapter skip the case silently; a harness that can be satisfied
+/// without exercising a rule is how a contract quietly stops being enforced.
+/// Requiring it makes the gap visible at the call site instead.
 ///
 /// # Panics
 ///
 /// Panics with a descriptive message on the first behaviour that does not
-/// match the shared contract: `with_key` not actually carrying a key,
-/// `without_key` carrying one anyway, a `carrier_name()` that is empty or
-/// unstable across calls, or any resolution outcome that diverges from the
-/// policy table every conforming carrier must satisfy.
-pub fn assert_carrier_conformance<C: OperationKeyCarrier>(with_key: &C, without_key: &C) {
-    let raw = with_key
-        .raw_operation_key()
-        .expect("conformance precondition failed: `with_key` must carry a raw operation key");
+/// match the shared contract: any instance not reporting the state it was
+/// passed as, a `carrier_name()` that is empty or that differs between
+/// instances, or any resolution outcome that diverges from the policy table
+/// every conforming carrier must satisfy.
+pub fn assert_carrier_conformance<C: OperationKeyCarrier>(
+    with_key: &C,
+    without_key: &C,
+    unreadable_key: &C,
+) {
+    let raw = match with_key.raw_operation_key() {
+        RawOperationKey::Present(raw) => raw,
+        other => panic!(
+            "conformance precondition failed: `with_key` must carry a present, readable \
+             raw operation key, got {other:?}"
+        ),
+    };
     let expected = OperationKey::parse(raw).unwrap_or_else(|err| {
         panic!("`with_key`'s raw value {raw:?} must itself be a valid OperationKey: {err}")
     });
 
-    assert!(
-        without_key.raw_operation_key().is_none(),
-        "conformance precondition failed: `without_key` must carry no operation key"
+    assert_eq!(
+        RawOperationKey::Absent,
+        without_key.raw_operation_key(),
+        "conformance precondition failed: `without_key` must report the key as absent — \
+         reporting it unreadable instead would be a different state with a different \
+         resolution rule"
+    );
+
+    assert_eq!(
+        RawOperationKey::Unreadable,
+        unreadable_key.raw_operation_key(),
+        "conformance precondition failed: `unreadable_key` must report the value as \
+         unreadable — reporting it absent instead is the exact collapse this state \
+         exists to prevent, since an absent key is admissible under compatibility"
     );
 
     assert!(
         !with_key.carrier_name().is_empty(),
         "carrier_name() must be a non-empty diagnostic name"
     );
-    // Both instances must report the same name. The generic bound already
+    // All three instances must report the same name. The generic bound already
     // forces them to be the same type; this catches a name derived from
     // per-instance state instead of from the adapter itself, which would make
     // the diagnostic location depend on which request happened to be rejected.
     assert_eq!(
         with_key.carrier_name(),
         without_key.carrier_name(),
-        "both instances of one carrier must report the identical name, so a \
+        "every instance of one carrier must report the identical name, so a \
+         rejection always names the same location"
+    );
+    assert_eq!(
+        with_key.carrier_name(),
+        unreadable_key.carrier_name(),
+        "every instance of one carrier must report the identical name, so a \
          rejection always names the same location"
     );
 
@@ -95,6 +125,26 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(with_key: &C, without_
         "a missing key must be rejected under the default mandatory mode"
     );
     assert_eq!(
+        resolve_operation_key(unreadable_key, IdempotencyEnforcementMode::MandatoryKey),
+        Err(OperationKeyRejection::Unreadable {
+            carrier: unreadable_key.carrier_name()
+        }),
+        "an unreadable key must be rejected under the default mandatory mode"
+    );
+    // The row that matters most: unlike an absent key, an unreadable one is
+    // rejected under compatibility too. The caller did supply a key, so the
+    // missing-key policy does not apply to it, and admitting it would drop the
+    // guarantee for exactly the malformed input most likely to signal a broken
+    // client.
+    assert_eq!(
+        resolve_operation_key(unreadable_key, IdempotencyEnforcementMode::Compatibility),
+        Err(OperationKeyRejection::Unreadable {
+            carrier: unreadable_key.carrier_name()
+        }),
+        "an unreadable key must be rejected under compatibility mode as well"
+    );
+
+    assert_eq!(
         resolve_operation_key(without_key, IdempotencyEnforcementMode::Compatibility),
         Ok(None),
         "a missing key must be admitted only under the explicit compatibility mode"
@@ -103,19 +153,19 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(with_key: &C, without_
 
 #[cfg(test)]
 mod tests {
-    use ego_service_sdk::idempotency::OperationKeyCarrier;
+    use ego_service_sdk::idempotency::{OperationKeyCarrier, RawOperationKey};
 
     use super::assert_carrier_conformance;
 
-    /// A minimal, test-local [`OperationKeyCarrier`] — reads one string and
-    /// nothing else, per the contract's explicit non-goal.
+    /// A minimal, test-local [`OperationKeyCarrier`] — reads one location and
+    /// nothing else, contributing no rule of its own.
     struct FakeCarrier {
-        raw: Option<&'static str>,
+        raw: RawOperationKey<'static>,
         name: &'static str,
     }
 
     impl OperationKeyCarrier for FakeCarrier {
-        fn raw_operation_key(&self) -> Option<&str> {
+        fn raw_operation_key(&self) -> RawOperationKey<'_> {
             self.raw
         }
 
@@ -127,33 +177,43 @@ mod tests {
     #[test]
     fn a_correctly_implemented_carrier_pair_satisfies_conformance() {
         let with_key = FakeCarrier {
-            raw: Some("op-1"),
+            raw: RawOperationKey::Present("op-1"),
             name: "fake:key",
         };
         let without_key = FakeCarrier {
-            raw: None,
+            raw: RawOperationKey::Absent,
+            name: "fake:key",
+        };
+
+        let unreadable_key = FakeCarrier {
+            raw: RawOperationKey::Unreadable,
             name: "fake:key",
         };
 
         // Must not panic — this is the "conforms" case.
-        assert_carrier_conformance(&with_key, &without_key);
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
     }
 
     #[test]
-    #[should_panic(expected = "`without_key` must carry no operation key")]
+    #[should_panic(expected = "`without_key` must report the key as absent")]
     fn a_without_key_carrier_that_still_reports_a_key_fails_conformance() {
         let with_key = FakeCarrier {
-            raw: Some("op-1"),
+            raw: RawOperationKey::Present("op-1"),
             name: "fake:key",
         };
         // Mislabeled: this "without_key" instance still reports a raw key,
         // violating the precondition `assert_carrier_conformance` requires.
         let mislabeled_without_key = FakeCarrier {
-            raw: Some("op-1"),
+            raw: RawOperationKey::Present("op-1"),
             name: "fake:key",
         };
 
-        assert_carrier_conformance(&with_key, &mislabeled_without_key);
+        let unreadable_key = FakeCarrier {
+            raw: RawOperationKey::Unreadable,
+            name: "fake:key",
+        };
+
+        assert_carrier_conformance(&with_key, &mislabeled_without_key, &unreadable_key);
     }
 
     /// Two instances of one carrier that disagree about their own name must fail
@@ -170,15 +230,20 @@ mod tests {
     #[should_panic(expected = "must report the identical name")]
     fn one_carrier_reporting_two_different_names_fails_conformance() {
         let with_key = FakeCarrier {
-            raw: Some("op-1"),
+            raw: RawOperationKey::Present("op-1"),
             name: "fake:key",
         };
         let without_key = FakeCarrier {
-            raw: None,
+            raw: RawOperationKey::Absent,
             name: "fake:some-other-location",
         };
 
-        assert_carrier_conformance(&with_key, &without_key);
+        let unreadable_key = FakeCarrier {
+            raw: RawOperationKey::Unreadable,
+            name: with_key.name,
+        };
+
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
     }
 
     /// An empty name fails too: a rejection has to be able to say where the key
@@ -187,14 +252,45 @@ mod tests {
     #[should_panic(expected = "non-empty diagnostic name")]
     fn an_empty_carrier_name_fails_conformance() {
         let with_key = FakeCarrier {
-            raw: Some("op-1"),
+            raw: RawOperationKey::Present("op-1"),
             name: "",
         };
         let without_key = FakeCarrier {
-            raw: None,
+            raw: RawOperationKey::Absent,
             name: "",
         };
 
-        assert_carrier_conformance(&with_key, &without_key);
+        let unreadable_key = FakeCarrier {
+            raw: RawOperationKey::Unreadable,
+            name: with_key.name,
+        };
+
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
+    }
+
+    /// The precondition that makes the third state worth having: an instance
+    /// passed as unreadable which actually reports the value as absent must fail
+    /// conformance. Collapsing those two is exactly the defect the third state
+    /// was introduced to prevent, since an absent key is admissible under the
+    /// compatibility variant and an unreadable one never is.
+    #[test]
+    #[should_panic(expected = "`unreadable_key` must report the value as unreadable")]
+    fn an_unreadable_instance_that_reports_absent_fails_conformance() {
+        let with_key = FakeCarrier {
+            raw: RawOperationKey::Present("op-1"),
+            name: "fake:key",
+        };
+        let without_key = FakeCarrier {
+            raw: RawOperationKey::Absent,
+            name: "fake:key",
+        };
+        // Mislabeled: passed as the unreadable instance, but it collapses the
+        // state back to absent.
+        let mislabeled_unreadable = FakeCarrier {
+            raw: RawOperationKey::Absent,
+            name: "fake:key",
+        };
+
+        assert_carrier_conformance(&with_key, &without_key, &mislabeled_unreadable);
     }
 }

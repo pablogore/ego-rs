@@ -10,4 +10,6 @@
 /// missing-key policy entry point.
 pub mod extraction;
 
-pub use extraction::{resolve_operation_key, OperationKeyCarrier, OperationKeyRejection};
+pub use extraction::{
+    resolve_operation_key, OperationKeyCarrier, OperationKeyRejection, RawOperationKey,
+};
