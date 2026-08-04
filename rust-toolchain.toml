@@ -1,0 +1,47 @@
+# Pins the toolchain so every developer, and the external pipeline, compile and
+# lint against the same compiler.
+#
+# This is not a preference. The compile-fail expectations under
+# crates/service-sdk/tests/compile_fail/*.stderr record exact rustc diagnostics,
+# including line and column positions. A different compiler changes that text and
+# the tests fail without any code having changed — which is precisely what
+# happened when the suite was run on 1.97 while this file did not yet exist:
+# authorize_missing_from.stderr expected a diagnostic at 25:1 and the compiler
+# emitted 11:1. Clippy shifts too; useless_borrows_in_formatting does not exist
+# as a lint here on 1.90 but fires from 1.97.
+#
+# Bumping this version is therefore a deliberate task, never a drive-by edit:
+#
+#   1. change `channel` below,
+#   2. re-run the full gate set,
+#   3. regenerate every affected .stderr under
+#      crates/service-sdk/tests/compile_fail/ and read the new diagnostics rather
+#      than blindly accepting them — a changed message can mean a changed
+#      diagnostic, or a changed behaviour,
+#   4. fix whatever new clippy lints the newer compiler introduces.
+#
+# The version chosen here is the one the gate set is verified green against.
+# Minimum-supported-version policy is a separate concern and is not expressed by
+# this file.
+#
+# `profile = "minimal"` is load-bearing, not tidiness. Without it rustup installs
+# this toolchain using the default profile, which additionally fetches rust-docs —
+# something no gate needs, and a component whose download failing partway leaves a
+# toolchain with no cargo at all. The symptom then looks nothing like the cause:
+# component conflicts and "cargo is not installed". Declaring the profile here
+# means a fresh checkout installs exactly what the gates were verified against.
+#
+# Only a toolchain already damaged by an earlier partial install needs repairing by
+# hand. A clean machine does not hit this. The failure is sticky because rustup
+# cannot rename over the leftover `.partial` files, so clearing them is the step
+# that actually matters — reinstalling alone reports "unchanged" and leaves the
+# toolchain broken:
+#
+#   rustup toolchain uninstall 1.90.0
+#   rm -rf ~/.rustup/downloads/*
+#   rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+
+[toolchain]
+channel = "1.90.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
