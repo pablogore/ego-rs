@@ -447,3 +447,57 @@ targeting `develop`. Per the consciously reordered chain for this run (B0 →
 A1 → A4), A2 and A3 remain deliberately untouched and blocked; B2 is
 unblocked by this slice (needs A4's `Clock` for deterministic lease/expiry
 tests) but is not started here.
+
+---
+
+## Phase B1 (partial): `OperationKey` and `OperationFingerprint` — COMPLETE
+
+Branch: `feat/prod-012-b1-operation-key`, off `develop` at `cbc0187`.
+
+- [x] B1.1 RED: unit tests in `crates/domain/src/operation/key.rs` — `parse`
+      rejects empty and whitespace-only input, rejects over-length input, and
+      accepts a bounded-length valid string; fingerprint equality is by value.
+- [x] B1.2 GREEN: `OperationKey`, `OperationKeyError` and
+      `OperationFingerprint` implemented in that module, a sibling of
+      `idempotency.rs` rather than part of its type family, so the compiler
+      keeps the two identities distinct.
+
+**Why these two tasks land alone.** The reservation contract cannot define its
+request type without them, so they were pulled out of B1 ahead of the rest.
+B1.3–B1.10 — the no-conversion compile-fail assertion, the extraction contract
+and its policy table, the HTTP carrier, and carriage through the service and
+command contexts — remain open and follow separately.
+
+### Provenance, stated rather than implied
+
+The code in this slice and the two that follow it was authored during an earlier
+apply run that was interrupted, and was found already present in the working tree
+by the run that committed it. It was verified against the design's Interfaces
+section and the specs rather than rewritten, and it is being split into reviewable
+slices without reworking its content. Recorded so the authorship of the diff is
+not misread.
+
+### UNIT — the gate for this slice
+
+Hermetic: in-memory only, no clock dependency, no external resource.
+
+- `cargo test -p ego-domain --lib operation`: **7/7 passed**, 0 failed.
+
+### Static gates — compile and lint only
+
+No test suite is executed by these, and none of them requires Docker.
+
+- `cargo fmt --all -- --check`
+- `cargo check --workspace --all-targets`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo run -p xtask -- verify-layers`
+- `cargo run -p xtask -- verify-isolation`
+- `cargo run -p xtask -- verify-hygiene`
+
+`cargo test --workspace` was deliberately **not** run: it pulls in the inherited
+Docker-backed integration suite, which is not part of this slice's validation.
+
+### Status
+
+2 tasks complete (B1.1, B1.2). Combined with B0, A1 and A4: 11 of 92 complete.
+Next in the chain: the reservation contract, then its in-memory implementation.

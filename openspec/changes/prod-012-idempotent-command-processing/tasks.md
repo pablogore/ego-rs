@@ -4,8 +4,9 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **92 tasks total** — 9 complete and 83 pending. Complete: B0.1–B0.3 (merged as
-> `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2. The total moved from 93
+> **92 tasks total** — 11 complete and 81 pending. Complete: B0.1–B0.3 (merged as
+> `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
+> B1.1–B1.2. The total moved from 93
 > to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
 > were added in their place; see the note under Phase A4. The count is stated here
 > so any prose that cites it can be checked against the file rather than drifting
@@ -129,8 +130,14 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 
 ### Phase B1: `OperationKey` + Carriage (may run parallel with Block A)
 
-- [ ] B1.1 RED: `crates/domain/src/operation/key.rs` unit test — `OperationKey::parse` rejects empty/whitespace-only strings, accepts a bounded-length valid string.
-- [ ] B1.2 GREEN: implement `OperationKey`, `OperationFingerprint` in `crates/domain/src/operation/key.rs` (sibling module to `idempotency.rs`, AD-7).
+> **Delivered in slices.** B1.1–B1.2 — the two identity types — land on their own,
+> because the reservation contract cannot define its request type without them.
+> B1.3–B1.10 (the no-conversion compile-fail assertion, the extraction contract and
+> its policy table, the HTTP carrier, and carriage through the service and command
+> contexts) remain open and follow separately.
+
+- [x] B1.1 RED: `crates/domain/src/operation/key.rs` unit test — `OperationKey::parse` rejects empty/whitespace-only strings, accepts a bounded-length valid string.
+- [x] B1.2 GREEN: implement `OperationKey`, `OperationFingerprint` in `crates/domain/src/operation/key.rs` (sibling module to `idempotency.rs`, AD-7).
 - [ ] B1.3 RED: compile-fail test asserting no `From<OperationKey> for IdempotencyKey>` (or reverse) exists anywhere in the workspace (D7, spec scenario "No implicit conversion compiles").
 - [ ] B1.4 RED: `crates/service-sdk/src/idempotency/extraction.rs` unit test — `resolve_operation_key` policy table: missing key rejected under default mode, admitted under explicit compatibility mode (idempotent-command-processing spec scenarios).
 - [ ] B1.5 GREEN: implement `OperationKeyCarrier` trait, `resolve_operation_key`, `OperationKeyRejection`, and `IdempotencyEnforcementMode` (mirroring `crates/service-sdk/src/runtime/tenant.rs:143`) in `crates/service-sdk/src/runtime/idempotency.rs` and `crates/service-sdk/src/idempotency/extraction.rs`.
