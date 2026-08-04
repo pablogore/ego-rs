@@ -34,6 +34,7 @@
 //! | `auth`          | `Claims`, `Credential`, `Clock`, `AuthenticationError` |
 //! | `config`        | `Validate`, `ConfigError` (CORE-016) |
 //! | `time`          | `Clock`, `SystemClock` — injectable UTC time source |
+//! | `operation`     | `OperationKey`, `OperationFingerprint` — identity of one client-supplied business operation |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -81,6 +82,13 @@ pub mod health;
 
 /// Time abstractions shared across the domain layer — Clock, SystemClock.
 pub mod time;
+
+/// Operation-scoped identity for end-to-end idempotent command processing —
+/// `OperationKey` and `OperationFingerprint`. These name a whole
+/// client-supplied business operation; extraction from a transport and
+/// carriage through the request context are separate concerns and live
+/// elsewhere.
+pub mod operation;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use auth::{
