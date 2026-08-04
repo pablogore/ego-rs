@@ -16,6 +16,7 @@ members = [
     "crates/security-jwt",
     "crates/security-apikey",
     "crates/testkit",
+    "crates/integration-tests",
     "examples/reference-app",
     "xtask",
 ]

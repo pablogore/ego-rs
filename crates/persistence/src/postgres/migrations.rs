@@ -17,7 +17,15 @@ const MIGRATION_003_CREATE_SNAPSHOTS: &str = include_str!("migrations/003_create
 pub async fn run(pool: &PgPool) -> Result<(), sqlx::Error> {
     for (name, sql) in migrations() {
         log::debug!("Running migration: {}", name);
-        sqlx::query(sql).execute(pool).await?;
+        // Each migration file may contain more than one statement (e.g. a
+        // `CREATE TABLE` followed by a `CREATE INDEX`). `sqlx::query` prepares
+        // its argument as a single statement through the extended protocol,
+        // which Postgres rejects outright when the string holds more than
+        // one command. `raw_sql` uses the simple query protocol instead,
+        // which allows exactly this — multiple semicolon-separated statements
+        // in one round trip, with no prepared-statement caching needed for a
+        // one-shot schema migration anyway.
+        sqlx::raw_sql(sql).execute(pool).await?;
     }
     Ok(())
 }

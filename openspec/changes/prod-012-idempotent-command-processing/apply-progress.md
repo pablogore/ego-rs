@@ -1,8 +1,8 @@
 # Apply Progress: PROD-012 — End-to-End Idempotent Command Processing
 
-> Scope of this run: **Phase B0 only** (PR 1 of the hybrid chain, D11). All
-> other phases (A1–A4, B1–B7, E1, DOC) are untouched and remain `[ ]` in
-> `tasks.md`.
+> Scope of the B0 run: **Phase B0 only** (PR 1 of the hybrid chain, D11).
+> Scope of the A1 run below: **Phase A1 only** (PR 2). All other phases
+> (A2–A4, B1–B7, E1, DOC) are untouched and remain `[ ]` in `tasks.md`.
 
 ## Phase B0: Defensive `UserEntity` Fix — COMPLETE
 
@@ -56,10 +56,12 @@ B0.2 — not a new PROD-012 piece.
 
 ## Remaining Tasks (out of scope for this run — untouched)
 
-- [ ] A1.1–A1.4, A2.1–A2.6, A3.1–A3.5, A4.1–A4.5 (Block A — Persistence Foundations)
+- [ ] A2.1–A2.6, A3.1–A3.5, A4.1–A4.5 (Block A remainder — Persistence Foundations)
 - [ ] B1.1–B1.10, B2.1–B2.9, B3.1–B3.7, B4.1–B4.8, B5.1–B5.8, B6.1–B6.12, B7.1–B7.11 (Block B remainder)
 - [ ] E1.1–E1.2 (Dual-Aggregate Recovery E2E)
 - [ ] DOC.1–DOC.3 (Documentation and Rollout)
+
+> A1.1–A1.4 completed below; see "Phase A1: Integration-Test Infrastructure".
 
 ## Status
 
@@ -162,3 +164,153 @@ this file) has never been committed. Bundling it into a code PR meant to stay ti
 would have added ~2,700 lines of documents. The repo's own convention is a separate
 planning-docs PR, per `21082dc docs(prod-005): SDD planning package for Runtime
 Health Model`. Still pending.
+
+**Update (A1 run, below): resolved.** The whole planning package, including
+this file, was committed separately in `56d2c97 docs(prod-012): SDD planning
+package for end-to-end idempotent command processing (#250)`, landing after
+B0's code PR merged. `tasks.md` and this file are tracked on `develop` as of
+the A1 run and are edited directly rather than staying untracked.
+
+---
+
+## Phase A1: Integration-Test Infrastructure — COMPLETE
+
+Branch: `feat/prod-012-a1-integration-test-infrastructure`, off `develop` at
+`d8d853b`, targeting `develop` per D11's hybrid chain strategy (PR 2 of the
+chain, after B0).
+
+- [x] A1.1 RED: wrote `crates/integration-tests/tests/event_store_characterization.rs`
+      against a package that did not exist yet. Confirmed FAILED before any
+      production/infrastructure change: `cargo test -p ego-integration-tests
+      --test event_store_characterization` → `error: package ID specification
+      'ego-integration-tests' did not match any packages`. That is the genuine
+      RED here — no test infrastructure crate existed at all, not merely a
+      missing implementation inside an existing one.
+- [x] A1.2 GREEN: created `crates/integration-tests/Cargo.toml` (`testcontainers
+      = "0.23"`, `testcontainers-modules = "0.11"` with the `postgres` feature,
+      `sqlx = "0.8"`, plus `ego-domain`/`ego-persistence` — all as
+      dev-dependencies, since this crate ships no library or binary of its
+      own) and added `crates/integration-tests` to `[workspace] members` in
+      the root `Cargo.toml`. Made A1.1 pass (see TDD Cycle Evidence below).
+- [x] A1.3 GREEN: added `"ego-integration-tests" = "tooling"` to `layers.toml`
+      (the actual layer map `xtask/src/layers.rs` reads and enforces). Layer
+      choice: `tooling`, the same layer as `ego-testkit` and
+      `ego-service-sdk-macros` — a sink crate nothing in the workspace depends
+      on, exempt from the direction matrix (`allowed_layers("tooling")`
+      returns `None`, meaning no restriction is enforced on what it may
+      depend on). `cargo run -p xtask -- verify-layers` now reports **17**
+      crates (was 16), 0 violations.
+- [x] A1.4 Added a "Requirements" section to `README.md` declaring PostgreSQL
+      14 as the minimum supported version. The integration-test harness pins
+      the exact container tag as a named constant,
+      `const POSTGRES_IMAGE_TAG: &str = "14-alpine"` — never a floating
+      `latest`, and never left as an unlabeled literal at the call site.
+
+### Unplanned but required fixes (discovered running A1.1 against real Postgres)
+
+Two pre-existing gaps surfaced the first time `ego_persistence::postgres`
+code was ever exercised against a real database. Neither is a new capability
+from the design (A2/A3/A4/B-anything) — both are bugs in code that already
+shipped, uncovered only because no integration-test crate existed until now
+to run it for real.
+
+1. **`migrations::run` could not apply its own first migration.**
+   `crates/persistence/src/postgres/migrations.rs` executed each migration
+   file with `sqlx::query(sql).execute(pool)`, which prepares the string as a
+   single statement via the extended query protocol. `001_create_events.sql`
+   contains two statements (`CREATE TABLE` then `CREATE INDEX`), and Postgres
+   rejected it outright: `cannot insert multiple commands into a prepared
+   statement` (SQLSTATE `42601`). Nothing in the workspace had ever called
+   `migrations::run` before this test did — confirmed by grep, zero other
+   call sites. Fixed by switching to `sqlx::raw_sql(sql).execute(pool)`,
+   which uses the simple query protocol and is designed for exactly this:
+   multiple semicolon-separated DDL statements in one round trip, with no
+   prepared-statement caching needed for a one-shot schema migration. This
+   is a one-line change to the execution mechanism inside `run()`, not a new
+   migration file — no file under
+   `crates/persistence/src/postgres/migrations/` was added or changed.
+2. **`PostgreSQLEventStore::append`/`load` panic on a current-thread Tokio
+   runtime.** Both bridge into async code internally via
+   `tokio::task::block_in_place`, which requires a multi-threaded runtime and
+   panics otherwise (`can call blocking only when running on the
+   multi-threaded runtime`). `#[tokio::test]` defaults to a current-thread
+   runtime. Not a production-code change: the two tests that call
+   `append`/`load` now use `#[tokio::test(flavor = "multi_thread")]`, and the
+   test file documents why inline. This is itself a characterization fact
+   worth keeping — it is part of what "synchronous-looking, actually-blocking"
+   means for this store's current API, which design.md AD-2 already names as
+   a latent hazard motivating the move to `async`.
+
+### A gap discovered, deliberately not fixed (out of A1's scope)
+
+While writing the happy-path test with `tenant_id: None` (the NULL-tenant
+"systemwide" mode), both the version-check `SELECT` inside `append` and the
+`SELECT` inside `load` silently behaved as if the aggregate had no prior
+history at all. Cause: the queries filter with `tenant_id = $2`, and SQL's
+three-valued logic makes `column = NULL` evaluate to unknown (never true) for
+every row, regardless of how many rows actually exist with a `NULL`
+`tenant_id`. This means the version-conflict check is a no-op today whenever
+a caller passes `tenant_id: None` — a second append at a stale
+`expected_version` silently succeeds instead of being rejected.
+
+This is real and currently unpinned. The null-safe form is
+`tenant_id IS NOT DISTINCT FROM $2`, which compares equal when both sides are
+NULL — note that `tenant_id IS $2` is not valid SQL, so the fix is a different
+operator rather than a variant of `IS`. Applying it is outside A1.1–A1.4 and
+touches exactly the query logic A3 is
+already scoped to harden around the NULL-tenant case (AD-1). Rather than
+either silently working around it inside a "characterization" test or
+quietly fixing production code outside this slice's four closed tasks, the
+two behavioral tests use a concrete tenant (`Some("tenant-1")`) and the test
+file documents the gap in a module-level comment, in plain language, so a
+future reader — likely working on A3 — finds it named rather than
+rediscovers it.
+
+## TDD Cycle Evidence (A1)
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| A1.1/A1.2 | `crates/integration-tests/tests/event_store_characterization.rs` | Integration (real Postgres via testcontainers) | N/A (new crate; no pre-existing tests to protect) | ✅ Written first, failed because the package did not exist: `error: package ID specification 'ego-integration-tests' did not match any packages` | ✅ 3/3 passing after creating `Cargo.toml`, registering the workspace member, adding the `layers.toml` entry, and fixing the two unplanned gaps above | ✅ 3 cases: happy-path append+load, stale-version conflict rejection, live-schema uniqueness-gap assertion — three genuinely different code paths, not restatements of one scenario | ➖ None needed — no duplication or complexity introduced worth extracting at this size |
+
+## Work Unit Evidence (A1)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `cargo test -p ego-integration-tests --test event_store_characterization` → 3 passed; 0 failed. Requires Docker; ran against colima (`DOCKER_HOST=unix:///Users/pablogore/.colima/default/docker.sock` on this machine — no Docker-host assumption is baked into the test: it asks the runtime via `get_host()` and the container's mapped port, normalising only the `localhost` name to its literal address so a host lacking that hosts entry still connects, while a genuinely remote host is honoured as reported). |
+| Runtime harness command/scenario and exact result | Real Postgres 14-alpine container via `testcontainers`/`testcontainers-modules`, started and torn down per test — this crate exists specifically because no other layer in the workspace may touch a real external resource (`skills/testing` Rule 3). Verified the container genuinely starts each run (not a cached/skipped fixture) and that removing Docker access reproduces a loud panic, not a silent pass: confirmed earlier in this session, invoking the same start path with no reachable Docker socket panicked with `failed to initialize a docker client: Socket not found: /var/run/docker.sock` rather than skipping. |
+| Rollback boundary | Delete `crates/integration-tests/`; drop its `"crates/integration-tests"` entry from the root `Cargo.toml` `[workspace] members`; drop its `"ego-integration-tests" = "tooling"` entry from `layers.toml`; revert the `README.md` "Requirements" section; revert the one-line `sqlx::query` → `sqlx::raw_sql` change in `crates/persistence/src/postgres/migrations.rs`. No schema change, no migration file added or removed, no data. |
+
+## Full Verification (A1)
+
+All eight declared gates, run against this branch:
+
+- `cargo fmt --all -- --check`: clean, exit 0.
+- `cargo check --workspace --all-targets`: clean, exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0, zero warnings.
+- `cargo test --workspace`: all blocks `test result: ok`, 0 failures anywhere
+  in the workspace, including `event_store_characterization` (3 passed).
+- `cargo test --workspace --doc`: all blocks `test result: ok`, 0 failures.
+- `cargo run -p xtask -- verify-layers`: `verify-layers: OK (17 crates, 0 violations)`.
+- `cargo run -p xtask -- verify-isolation`: `verify-isolation: OK (17 crates checked in isolation)`.
+- `cargo run -p xtask -- verify-hygiene`: `verify-hygiene: OK (no un-archived duplicates)`.
+
+## Status (A1)
+
+4/4 assigned A1 tasks complete (A1.1–A1.4). Combined with B0: 7/93 tasks
+complete workspace-wide. Branch: `feat/prod-012-a1-integration-test-infrastructure`,
+targeting `develop` per D11's hybrid chain strategy. Committed and opened as
+**PR #253**, the second unit of the chain after B0, following an orchestrator
+diff review that corrected the hard-coded container address and documented the
+Docker requirement. Next unit in the chain per the dependency graph: A2
+(`aggregate_type` real column), which stays blocked pending an operational
+pinned pipeline or an explicit decision to accept the manual risk of rewriting
+persisted identifiers.
+
+### Included in this PR, unlike at B0's time
+
+`tasks.md`'s checkbox flips for A1.1–A1.4 and this file's A1 section are
+committed on the same branch as the code. At B0's time the whole planning
+package was untracked, so bundling any of it risked a ~2,700-line diff; both
+files are now tracked on `develop` (via `56d2c97`, #250), so this update is
+four checkbox flips plus this section — small enough to travel with the code
+it describes. Nothing else from the wider planning package is touched.

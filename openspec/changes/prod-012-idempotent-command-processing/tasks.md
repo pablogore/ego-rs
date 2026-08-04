@@ -4,9 +4,9 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **93 tasks total** — 3 complete (B0.1–B0.3, merged as `378a639`) and 90
-> pending. The count is stated here so any prose that cites it can be checked
-> against the file rather than drifting from it.
+> **93 tasks total** — 7 complete (B0.1–B0.3, merged as `378a639`; A1.1–A1.4)
+> and 86 pending. The count is stated here so any prose that cites it can be
+> checked against the file rather than drifting from it.
 
 ## Review Workload Forecast
 
@@ -50,10 +50,10 @@ Chain strategy: hybrid
 
 ### Phase A1: Integration-Test Infrastructure
 
-- [ ] A1.1 RED: write `crates/integration-tests/tests/event_store_characterization.rs` asserting today's synchronous `EventStore::append` (`crates/persistence/src/postgres/event_store.rs:76-129`) behavior against a real Postgres testcontainer — pins current append/version/23505-unreachable behavior before any contract change.
-- [ ] A1.2 GREEN: create `crates/integration-tests/Cargo.toml` (testcontainers, testcontainers-modules, sqlx dev-deps per `assets/integration-crate-template.toml`), add it as a workspace member, make A1.1 pass.
-- [ ] A1.3 GREEN: add `crates/integration-tests` entry to `xtask/src/layers.rs` layer map (activates `skills/testing`'s `PENDING [INFRA-CRATE]` block; satisfies `foundation-integrity` FR-001).
-- [ ] A1.4 Document declared minimum PostgreSQL version (14) in `README.md` and the integration-test container image tag.
+- [x] A1.1 RED: write `crates/integration-tests/tests/event_store_characterization.rs` asserting today's synchronous `EventStore::append` (`crates/persistence/src/postgres/event_store.rs:76-129`) behavior against a real Postgres testcontainer — pins current append/version/23505-unreachable behavior before any contract change.
+- [x] A1.2 GREEN: create `crates/integration-tests/Cargo.toml` (testcontainers, testcontainers-modules, sqlx dev-deps per `assets/integration-crate-template.toml`), add it as a workspace member, make A1.1 pass.
+- [x] A1.3 GREEN: add `crates/integration-tests` entry to the `layers.toml` layer map at the repository root — that file is the registry, and `xtask/src/layers.rs` is the reader that validates against it (activates `skills/testing`'s `PENDING [INFRA-CRATE]` block; satisfies `foundation-integrity` FR-001).
+- [x] A1.4 Document declared minimum PostgreSQL version (14) in `README.md` and the integration-test container image tag.
 
 ### Phase A2: `aggregate_type` Real Column (AD-9 — reversible both directions)
 
