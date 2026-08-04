@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `OperationKey: From<IdempotencyKey>` is not satisfied
+ --> tests/compile_fail/idempotency_key_into_operation_key.rs:8:67
+  |
+8 |     let _operation_key: ego_domain::operation::OperationKey = key.into();
+  |                                                                   ^^^^ the trait `From<IdempotencyKey>` is not implemented for `OperationKey`
+  |
+  = note: required for `IdempotencyKey` to implement `Into<OperationKey>`
