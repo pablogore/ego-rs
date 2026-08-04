@@ -889,6 +889,145 @@ judged against the contract rather than against its author's reading of it.
 
 ### Review correction — the conformance harness did not verify what it promised
 
+---
+
+## Phase B1d: the HTTP carrier — COMPLETE
+
+Branch: `feat/prod-012-b1d-http-carrier`, off
+`feat/prod-012-idempotency-tracker` at `ef55fa5`, targeting the tracker branch
+per the hybrid chain strategy.
+
+Scope: exactly two tasks — B1.6 and B1.7. Neither `ServiceContext` nor
+`CommandContext` is touched; carriage into either is a later slice. No
+reservation store, no replay, no conflict handling.
+
+- [x] B1.6 RED: `crates/transport/tests/idempotency_carrier.rs` runs
+      `assert_carrier_conformance` against three `HeaderCarrier` instances
+      built from real `axum::http::HeaderMap`s, one with an `Idempotency-Key`
+      header and one without. Confirmed genuine RED before the carrier
+      existed: `cargo test -p ego-transport --test idempotency_carrier`
+      failed with `E0432: unresolved import` — `ego_transport::idempotency`
+      did not exist yet, not merely `HeaderCarrier` inside an existing
+      module.
+- [x] B1.7 GREEN: implemented `HeaderCarrier<'a>(pub &'a HeaderMap)` in
+      `crates/transport/src/idempotency.rs`, beside `security.rs` and
+      `propagation.rs`. It reads the `Idempotency-Key` header and nothing
+      else and reports the stable diagnostic name `"http:Idempotency-Key"`.
+      Wired rejection into `crates/transport/src/error.rs` via
+      `impl From<OperationKeyRejection> for TransportError`, mapping all three
+      reasons — `Missing`, `Invalid` and `Unreadable` — to
+      `TransportError::BadRequest`. The same
+      category `ServiceError::Validation` and `SecurityError::
+      InvalidAccessRequest` already use for caller-supplied input rejected
+      before a handler runs. `Conflict` stays reserved for the later
+      same-key-different-fingerprint replay mismatch, which this slice does
+      not implement. A second RED test,
+      `error::tests::operation_key_rejection_status_table`, was written
+      before the `From` impl existed and confirmed genuine RED:
+      `E0277: the trait bound ... From<OperationKeyRejection> ... is not
+      satisfied`.
+
+### Status code choice, stated rather than assumed
+
+`BadRequest` (400) was chosen by matching the existing table in
+`crates/transport/src/error.rs` rather than picking a code independently:
+`ServiceError::Validation` and `SecurityError::InvalidAccessRequest` both map
+to `BadRequest` for the same shape of failure — caller-supplied input that
+fails a validation rule before any handler runs. A missing or malformed
+`Idempotency-Key` is exactly that shape. `Conflict` (409) was considered and
+rejected for this slice: it is reserved by the existing table for a resource
+state conflict, and the design's later same-key-different-fingerprint
+permanent-conflict response is a distinct, not-yet-implemented case that
+should not be conflated with "the header was absent or malformed."
+
+### Out of scope, confirmed by reading the real files first
+
+Before writing any code, the spec file
+(`specs/http-transport/spec.md`) and the design's Data Flow section were
+read in full. Two things in that spec are explicitly not delivered by this
+slice, matching the boundary given: "Valid key is carried into
+ServiceContext" (carriage is a later slice; `ServiceContext` is untouched)
+and the entire "Replay and Conflict Responses Are Distinguishable"
+requirement (needs the reservation store wired end to end). Nothing in this
+slice's diff references either.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| B1.6 | `crates/transport/tests/idempotency_carrier.rs` | Integration (in-crate, hermetic — real `HeaderMap`, no network) | N/A (new file) | ✅ `E0432: unresolved import` — `ego_transport::idempotency` did not exist | ✅ 1/1 passed after implementing `HeaderCarrier` | ➖ The shared conformance harness covers all three rows of the policy table against this one adapter, including a real non-UTF-8 header value — no further triangulation needed at this layer | ➖ None needed |
+| B1.7 (carrier) | `crates/transport/src/idempotency.rs` | Unit (in-crate) | N/A (new module) | ✅ Module unit tests written alongside the type; the carrier itself did not exist before this task, so the whole module is new | ✅ 5/5 passed | ✅ 5 cases: present, absent, unreadable (real non-UTF-8 bytes), the lowercase header name HTTP/2 actually sends, and the fixed diagnostic name | ➖ None needed — minimal newtype |
+| B1.7 (rejection mapping) | `crates/transport/src/error.rs` | Unit (in-crate) | ✅ 20/20 pre-existing `ego-transport` lib tests unaffected | ✅ `E0277: the trait bound ... From<OperationKeyRejection> ... is not satisfied`, then `E0004: non-exhaustive patterns` when the third reason was added | ✅ 1/1 passed after mapping all three reasons to `BadRequest` | ✅ 3 cases: `Missing`, `Invalid` and `Unreadable`, each asserted independently — the exhaustive match proves the third is *mapped*, this proves it collapses to the *same* status | ➖ None needed |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `cargo test -p ego-transport` → 26 lib + 1 `idempotency_carrier` + 3 `security_extractor` + 1 `server` = 31 passed, 0 failed. Plus the crates the contract change reaches: `ego-service-sdk` 379, `ego-testkit` 86, `ego-domain` 228 — all 0 failed. |
+| Runtime harness command/scenario and exact result | N/A — this slice defines a pure header-reading adapter and a pure error-category mapping, both hermetic; no HTTP server, no route, no network socket is exercised. `crates/transport/tests/server.rs`'s existing real-listener test (`serve_handles_a_request_then_shuts_down_gracefully`) is unmodified and still passes, confirming this slice did not disturb the one runtime-adjacent test this crate has. |
+| Rollback boundary | Revert the whole commit. The three-state contract and the carrier are one unit: the carrier cannot report `Unreadable` without the contract's third state, and reverting only the transport half would reintroduce the unsound path in which a malformed key is admitted under the compatibility variant. Spans `service-sdk` (contract and policy), `testkit` (conformance harness) and `transport` (carrier and error mapping). No schema, no migration, no persisted state. |
+
+### Review budget — composition, well within the 400-line budget
+
+The slice began as transport-only at 124 lines. Closing the contract gap it exposed
+widened it across three crates — `service-sdk` for the third state and its resolution
+rule, `testkit` for the conformance harness that now exercises that rule, and
+`transport` for the carrier and its error mapping. The figures below are measured
+after that widening; the code diff remains inside the 400-line budget, so no
+`size:exception` is needed.
+
+| Crate | What changed |
+|---|---|
+| `service-sdk` | `RawOperationKey`'s three states, the `Unreadable` rejection reason, and the resolution rule that rejects it under every mode |
+| `testkit` | The conformance harness's third instance and the two policy rows it asserts |
+| `transport` | `HeaderCarrier`, its five unit cases, and the three-reason error mapping |
+
+The widening was accepted rather than deferred because the gap was discovered by
+building the first real adapter, which is exactly when a contract's missing case
+surfaces. Merging the adapter first would have shipped one that documents its own
+unsound path.
+
+### UNIT — the gate for this slice
+
+Hermetic: in-memory `HeaderMap` values only, no clock dependency, no
+external resource, no Docker.
+
+- `cargo test -p ego-transport`: **31 passed**, 0 failed
+  (26 lib tests — 20 pre-existing plus 6 new: 5 `idempotency` unit tests and
+  1 `operation_key_rejection_status_table` — plus the 1 new
+  `idempotency_carrier` integration test, plus the 3 pre-existing
+  `security_extractor` and 1 pre-existing `server` integration tests,
+  unaffected).
+- `cargo test -p ego-service-sdk`: **379 passed**, 0 failed — the crate the
+  three-state contract and its resolution rule live in.
+- `cargo test -p ego-testkit`: **86 passed**, 0 failed — the conformance
+  harness, now five cases including the third-state precondition.
+- `cargo test -p ego-domain`: **228 passed**, 0 failed — unchanged by this
+  slice, run because the contract change is visible from it.
+
+### Static gates — compile and lint only
+
+- `cargo fmt --all -- --check`: clean, exit 0.
+- `cargo check --workspace --all-targets`: clean, exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0,
+  zero warnings.
+- `cargo run -p xtask -- verify-layers`: `verify-layers: OK (17 crates, 0
+  violations)`.
+- `cargo run -p xtask -- verify-isolation`: `verify-isolation: OK (17 crates
+  checked in isolation)`.
+- `cargo run -p xtask -- verify-hygiene`: `verify-hygiene: OK (no un-archived
+  duplicates)`.
+
+`cargo test --workspace` was **not** run, per this run's explicit
+instructions — Docker/testcontainers/PostgreSQL/network are all out of
+bounds for this slice's validation.
+
+### Status
+
+2 tasks complete (B1.6, B1.7). Combined with everything prior: **25 of 92**.
+Next in the chain: B1.8–B1.10 — `ServiceContext`/`CommandContext` carriage —
+explicitly out of scope for this run.
+
 Three defects in `assert_carrier_conformance`, two found by review and one alongside
 them.
 
@@ -909,7 +1048,7 @@ nothing.
 
 The check is now `!with_key.carrier_name().is_empty()` plus
 `with_key.carrier_name() == without_key.carrier_name()`. The second is the real
-property: two instances of one adapter must agree, which catches a name derived from
+property: every instance of one adapter must agree, which catches a name derived from
 per-instance state rather than from the adapter itself — that would make the
 diagnostic location depend on which request happened to be rejected.
 
@@ -917,3 +1056,77 @@ Two negative tests were added: one adapter reporting two different names fails, 
 empty name fails. The first test's own comment records what it deliberately cannot
 express — passing two different implementations is now a compile error, not a runtime
 assertion, so there is nothing left to assert about it at runtime.
+
+### Orchestrator diff review — two gaps closed in the carrier
+
+**Case-insensitive lookup was correct but unpinned.** `HeaderMap::get` with a `&str`
+name already matches case-insensitively, so the carrier worked — but nothing asserted
+it. That matters in practice rather than in theory: HTTP/2 transmits every header name
+lowercased, so a real client sends `idempotency-key`, and a refactor to a literal
+string comparison would pass every other test in the file while rejecting every HTTP/2
+request as though it had sent no key at all. Now pinned by a test that inserts the
+lowercase form.
+
+**A non-UTF-8 header value reads as absent, not as present-but-unusable.** `to_str()`
+fails and `.ok()` discards the error, so garbage bytes become "no key". Under the
+fail-closed default that still rejects and the safe path is unaffected. Under the
+compatibility variant it means a malformed key is treated as no key at all and the
+request proceeds unguarded, instead of the client being told its key was bad.
+
+**And then it was fixed rather than documented.** The first version of this slice
+recorded the gap as out of scope, on the grounds that `raw_operation_key` returned
+`Option<&str>` and had no third answer to give. That reasoning identified the cause
+correctly and then stopped at the wrong place: a documented hole through which
+malformed input silently disables a guarantee is still a hole.
+
+The carrier contract now answers with three states rather than two —
+`RawOperationKey::{Absent, Present(&str), Unreadable}` — and
+`OperationKeyRejection` gained a matching `Unreadable` reason. Resolution treats a
+supplied-but-unusable value the way it treats an invalid one: rejected under **every**
+mode, because the compatibility variant loosens only what happens when a caller sent
+*no* key, and a caller who sent unreadable bytes did send one.
+
+`Unreadable` is deliberately not folded into `Invalid`: no `OperationKeyError`
+describes it, since that type judges a string's validity and this value never became a
+string.
+
+The widening was accepted rather than deferred because the gap was *discovered by*
+building the first real adapter, which is exactly when a contract's missing case
+surfaces. Deferring it would have merged an adapter that documents its own unsound
+path. Consequences: the contract and its policy in `service-sdk`, the conformance
+harness in `testkit`, and the carrier in `transport` all moved together, and the
+exhaustive match in the transport error mapping caught the missing arm at compile
+time rather than in review.
+
+### Review correction — the harness promised three states and exercised two
+
+`assert_carrier_conformance` was updated for the three-state contract's *types* but
+not its *rules*: it still passed only a with-key and a without-key instance, so
+`Unreadable` was never resolved and the rule that it is rejected under **both** modes
+— the entire point of adding the state — went unexercised. A harness that advertises
+conformance to a contract it does not fully drive is worse than no harness, because it
+converts an untested rule into an apparently tested one.
+
+It now takes a third instance and asserts both rows: `Unreadable` under the mandatory
+mode and under compatibility, each yielding `OperationKeyRejection::Unreadable`. It
+also asserts the third instance reports the state it was passed as, and that all three
+instances agree on the carrier name.
+
+The third parameter is mandatory rather than optional, and that is a deliberate trade
+recorded in the function's own doc. A carrier whose location physically cannot hold an
+unreadable value cannot supply one and therefore cannot use the harness unchanged. The
+alternative was an opt-out, which would let any adapter skip the case silently — and a
+harness that can be satisfied without exercising a rule is how a contract quietly stops
+being enforced. Requiring it makes the gap visible at the call site.
+
+A fifth harness test covers the precondition itself: an instance passed as unreadable
+that actually reports absent fails conformance, since collapsing those two is the exact
+defect the state was introduced to prevent.
+
+`crates/transport/tests/idempotency_carrier.rs` now builds that third instance from
+**real non-UTF-8 bytes** rather than a stand-in, so the hole that motivated the whole
+widening is proven end to end through the actual HTTP adapter.
+
+The status table gained its third case. The exhaustive match already guaranteed
+`Unreadable` was mapped at all; what was missing was the assertion that it collapses to
+the *same* status as the other two, which is the claim the table makes.

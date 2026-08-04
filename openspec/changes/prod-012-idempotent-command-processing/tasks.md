@@ -4,9 +4,9 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **92 tasks total** — 23 complete and 69 pending. Complete: B0.1–B0.3 (merged as
+> **92 tasks total** — 25 complete and 67 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
-> B1.1–B1.5, B2.1–B2.9. The total moved from 93
+> B1.1–B1.7, B2.1–B2.9. The total moved from 93
 > to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
 > were added in their place; see the note under Phase A4. The count is stated here
 > so any prose that cites it can be checked against the file rather than drifting
@@ -141,8 +141,8 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 - [x] B1.3 RED: compile-fail test asserting no `From<OperationKey> for IdempotencyKey>` (or reverse) exists anywhere in the workspace (D7, spec scenario "No implicit conversion compiles").
 - [x] B1.4 RED: `crates/service-sdk/src/idempotency/extraction.rs` unit test — `resolve_operation_key` policy table: missing key rejected under default mode, admitted under explicit compatibility mode (idempotent-command-processing spec scenarios).
 - [x] B1.5 GREEN: implement `OperationKeyCarrier` trait, `resolve_operation_key`, `OperationKeyRejection`, and `IdempotencyEnforcementMode` (mirroring `crates/service-sdk/src/runtime/tenant.rs:143`) in `crates/service-sdk/src/runtime/idempotency.rs` and `crates/service-sdk/src/idempotency/extraction.rs`.
-- [ ] B1.6 RED: `crates/transport/tests/idempotency_carrier.rs` — `assert_carrier_conformance` (shipped in `crates/testkit`) run against the HTTP `HeaderCarrier`.
-- [ ] B1.7 GREEN: implement `HeaderCarrier(&HeaderMap)` in `crates/transport/src/idempotency.rs` (beside `security.rs`, `propagation.rs`); wire rejection to `crates/transport/src/error.rs`.
+- [x] B1.6 RED: `crates/transport/tests/idempotency_carrier.rs` — `assert_carrier_conformance` (shipped in `crates/testkit`) run against the HTTP `HeaderCarrier`.
+- [x] B1.7 GREEN: implement `HeaderCarrier(&HeaderMap)` in `crates/transport/src/idempotency.rs` (beside `security.rs`, `propagation.rs`); wire rejection to `crates/transport/src/error.rs`.
 - [ ] B1.8 RED: `crates/service-sdk/src/context/mod.rs` test — `ServiceContext::operation_key()` accessor returns the identical `OperationKey` set at ingress, no ambient lookup.
 - [ ] B1.9 GREEN: add `operation_key` field + accessor to `ServiceContext`.
 - [ ] B1.10 RED/GREEN: `crates/persistent-entity/src/command_context.rs` — `CommandContext` carries `operation_key` through to `EntityActor::execute_command`; test asserts identical value reaches the actor.
