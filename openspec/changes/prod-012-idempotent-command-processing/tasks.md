@@ -4,9 +4,9 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **92 tasks total** — 12 complete and 80 pending. Complete: B0.1–B0.3 (merged as
+> **92 tasks total** — 20 complete and 72 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
-> B1.1–B1.2, B2.2. The total moved from 93
+> B1.1–B1.2, B2.1–B2.9. The total moved from 93
 > to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
 > were added in their place; see the note under Phase A4. The count is stated here
 > so any prose that cites it can be checked against the file rather than drifting
@@ -155,15 +155,15 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 > the behavioural tests that exercise `reserve` follow in a second slice, whose
 > volume is mostly behaviour coverage.
 
-- [ ] B2.1 RED: `crates/domain/src/operation/reservation.rs` unit tests against `TestClock` — `reserve` returns `Fresh` on first call, `OwnedInProgress` for the same owner mid-lease, `OtherInProgress` for a different owner mid-lease.
+- [x] B2.1 RED: `crates/domain/src/operation/reservation.rs` unit tests against `TestClock` — `reserve` returns `Fresh` on first call, `OwnedInProgress` for the same owner mid-lease, `OtherInProgress` for a different owner mid-lease.
 - [x] B2.2 GREEN: define `OperationReservationStore`, `ReserveRequest`, `OwnerFence`, `ReservationOutcome`, `ReservationError::StaleOwner`, `Lease`, `FencingToken` per the design.md Interfaces section.
-- [ ] B2.3 RED: lease-expiry-and-takeover test — advancing `TestClock` past `lease_until` makes a stale reservation eligible for takeover; takeover assigns a new `fencing_token` (F2 > F1) atomically.
-- [ ] B2.4 GREEN: implement takeover logic in `InMemoryOperationReservationStore` (`crates/testkit`).
-- [ ] B2.5 RED: `StaleOwner` conditional-update test — after takeover, the original owner's `complete`/`renew`/`abandon` call is rejected with `StaleOwner` and does not modify the reservation (verifies the triple `operation_id + owner_id + fencing_token`, not merely stored-token presence).
-- [ ] B2.6 GREEN: make every mutating call (`renew`, `complete`, `abandon`) perform the conditional triple-check.
-- [ ] B2.7 **Open-question task — lease renewal cadence and owner.** RED: test asserting a configured lease length with **no background renewal in this change** — a long-running operation either fits inside the configured lease or is taken over. GREEN: document this as the chosen default (design.md's stated assumption) in `IdempotencyEnforcementMode`'s doc-comment and `RetentionPolicy`/lease-length config; explicitly note renewal-on-demand (`OperationReservationStore::renew`) exists as a capability for a future caller-driven extension, but no runtime component invokes it automatically in this change.
-- [ ] B2.8 RED: fingerprint-conflict test at the reservation boundary — same key + different fingerprint → `Conflict`, never silent dedupe.
-- [ ] B2.9 GREEN: implement fingerprint comparison in `reserve`.
+- [x] B2.3 RED: lease-expiry-and-takeover test — advancing `TestClock` past `lease_until` makes a stale reservation eligible for takeover; takeover assigns a new `fencing_token` (F2 > F1) atomically.
+- [x] B2.4 GREEN: implement takeover logic in `InMemoryOperationReservationStore` (`crates/testkit`).
+- [x] B2.5 RED: `StaleOwner` conditional-update test — after takeover, the original owner's `complete`/`renew`/`abandon` call is rejected with `StaleOwner` and does not modify the reservation (verifies the triple `operation_id + owner_id + fencing_token`, not merely stored-token presence).
+- [x] B2.6 GREEN: make every mutating call (`renew`, `complete`, `abandon`) perform the conditional triple-check.
+- [x] B2.7 **Open-question task — lease renewal cadence and owner.** RED: test asserting a configured lease length with **no background renewal in this change** — a long-running operation either fits inside the configured lease or is taken over. GREEN: document this as the chosen default (design.md's stated assumption) in `IdempotencyEnforcementMode`'s doc-comment and `RetentionPolicy`/lease-length config; explicitly note renewal-on-demand (`OperationReservationStore::renew`) exists as a capability for a future caller-driven extension, but no runtime component invokes it automatically in this change.
+- [x] B2.8 RED: fingerprint-conflict test at the reservation boundary — same key + different fingerprint → `Conflict`, never silent dedupe.
+- [x] B2.9 GREEN: implement fingerprint comparison in `reserve`.
 
 ### Phase B3: Postgres Reservation Store + Readiness (needs A1, A4; cross-edge to B2)
 

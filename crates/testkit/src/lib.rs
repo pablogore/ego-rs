@@ -21,6 +21,7 @@ mod identity;
 mod jwt;
 mod logger;
 mod providers;
+mod reservation;
 mod security;
 
 pub use assertions::{assert_authorized, assert_denied};
@@ -36,4 +37,5 @@ pub use identity::{principal, PrincipalBuilder};
 pub use jwt::TestJwtBuilder;
 pub use logger::{CapturedRecord, CapturingLogger};
 pub use providers::{RecordingDataProvider, StaticDataProvider};
+pub use reservation::{InMemoryOperationReservationStore, TestClock};
 pub use security::{authenticated, authenticated_with_claims};
