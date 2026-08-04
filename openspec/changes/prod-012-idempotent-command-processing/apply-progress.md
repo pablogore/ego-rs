@@ -579,3 +579,112 @@ abandoning would discard a reservation another caller was entitled to seize.
 A traceability note: the topology decision this chain follows is **D11 in
 `decisions.md`**, not "AD-11" — `design.md` carries AD-1 through AD-10 and has no
 eleventh architecture decision.
+
+---
+
+## Phase B2, implementation slice: in-memory reservation store — COMPLETE
+
+Branch: `feat/prod-012-b2b-in-memory-store`, stacked on the contract slice.
+
+- [x] B2.1 RED: `reserve` returns a fresh claim on first call, the same owner
+      mid-lease sees its own claim in progress, a different owner mid-lease is
+      told the operation is already in progress elsewhere.
+- [x] B2.3 RED / B2.4 GREEN: advancing the clock past the lease bound makes a
+      stale reservation eligible for takeover, and takeover mints a strictly
+      greater fencing token in the same critical section as the read.
+- [x] B2.5 RED / B2.6 GREEN: a stale fence is rejected on `renew`, `complete`
+      and `abandon`, and the reservation is left untouched. The check compares
+      the full triple, not merely whether some token is stored.
+- [x] B2.7: renewal is caller-driven only. A long-running operation either
+      finishes inside its configured lease or is taken over; nothing renews in
+      the background. `renew` exists for a caller that needs it.
+- [x] B2.8 RED / B2.9 GREEN: the same key arriving with a different fingerprint
+      yields a conflict, never a silent dedupe.
+
+### Ordering that carries the guarantee
+
+The fingerprint guard is the first arm after the not-found case, ahead of every
+lease and ownership branch. That ordering is load-bearing: if a lease check ran
+first, a conflicting payload arriving after expiry would be reinterpreted as a
+legitimate takeover and admitted.
+
+### Review correction — a lapsed holder could still mutate the reservation
+
+Review found a real hole. `renew`, `complete` and `abandon` verified the fence
+triple but never compared the clock against the lease bound, so in the window
+between expiry and somebody else's takeover the lapsed holder could still act. It
+could renew and resurrect a dead lease, defeating a takeover that had already
+become legitimate; complete, publishing a result for an operation it no longer
+owned, which a later replay would serve as authoritative; or abandon, discarding a
+reservation another caller was entitled to seize. The port's own documentation said
+"still-valid lease" while the implementation accepted an invalid one.
+
+All three now require `now < lease_until` alongside the triple, and reject with
+`StaleOwner` without mutating.
+
+**Second correction, on the same code:** the first fix read the clock *before*
+acquiring the lock, and the comment justifying it was wrong — it argued for "one
+instant for the whole decision", when the property that matters is an instant read
+*inside* the critical section. Reading before the lock leaves a time-of-check to
+time-of-use race: a caller can read the clock while the lease is live, block on the
+mutex, have the lease lapse during that wait, then enter carrying a stale instant
+and mutate a reservation another caller is already entitled to seize. Validation and
+mutation must be linearised together. All three now lock first and read the clock
+inside, which is also what `reserve` already did — it takes the lock and only then
+compares the clock against the lease bound.
+
+A hermetic concurrency test covers it: the test itself holds the store's lock,
+starts the mutation, advances the clock to exactly the lease bound while still
+holding it, and only then releases. Because the advance strictly precedes the
+release, any clock read taken inside the critical section necessarily observes the
+expired lease. Its limitation is written into the test rather than left implied — as
+a regression detector for the ordering it is not airtight, since a spawned task that
+has not yet reached its clock read would also observe the expired instant and reject.
+Closing that gap needs a sleep or a synchronisation seam inside the store, and this
+suite forbids the first and does not warrant the second.
+
+Three tests pin it at **exactly** `lease_until` — the same instant `reserve`
+already treats as expired and seizable. Testing the boundary rather than a
+comfortable margin is what keeps the two decisions on one definition of expiry
+instead of leaving a one-instant window where a lease is simultaneously seizable
+and renewable. Each asserts the reservation is unmodified, by observing that
+another owner still takes it over afterwards, rather than only that the call
+errored — "rejected but mutated" would corrupt state just as badly.
+
+The takeover path also adopts the checked fencing advance from the contract slice
+and surfaces `FencingExhausted` instead of wrapping.
+
+### Determinism
+
+`TestClock` holds a mutex-guarded instant and advances only when a test calls
+`advance`. No test reads the wall clock, sleeps, or depends on machine speed.
+
+### Review budget — size exception, deliberately concentrated here
+
+One file, of which the clear majority is behavioural tests. This exceeds the
+400-line budget and the exception is accepted here rather than spread across the
+chain: the identity types and the port contract were split out precisely so it
+applies only to the slice whose bulk is coverage of executable behaviour.
+Splitting further would separate tests from the code they exercise.
+
+### UNIT — the gate for this slice
+
+Hermetic: in-memory state, deterministic clock, no external resource.
+
+- `cargo test -p ego-testkit`: **81/81 passed**, 0 failed.
+- `cargo test -p ego-domain --lib operation`: **16/16 passed**, 0 failed.
+
+### Static gates — compile and lint only
+
+`cargo fmt --all -- --check`, `cargo check --workspace --all-targets`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and the three
+`xtask verify-*` commands: all pass.
+
+`cargo test --workspace` was **not** run. Docker availability is not part of this
+slice's validation.
+
+### Status
+
+8 tasks complete (B2.1, B2.3–B2.9). Combined with everything prior: **20 of 92**.
+The reservation contract now has an executable model; the durable Postgres
+implementation waits on the schema work.
