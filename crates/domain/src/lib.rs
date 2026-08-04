@@ -33,6 +33,7 @@
 //! | `persistence`   | `EventStore`, `Repository`, `Snapshot`, `PersistenceError` traits |
 //! | `auth`          | `Claims`, `Credential`, `Clock`, `AuthenticationError` |
 //! | `config`        | `Validate`, `ConfigError` (CORE-016) |
+//! | `time`          | `Clock`, `SystemClock` — injectable UTC time source |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -77,6 +78,9 @@ pub mod config;
 /// Runtime health model — ProbeKind, HealthStatus, HealthCode,
 /// HealthContributor, and the deterministic fold (PROD-005).
 pub mod health;
+
+/// Time abstractions shared across the domain layer — Clock, SystemClock.
+pub mod time;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
 pub use auth::{

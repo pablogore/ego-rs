@@ -355,8 +355,11 @@ territory, not this change. Saying so plainly is the point.
 - `foundation-integrity`: `crates/integration-tests/` needs a layer-map entry
   (FR-001 requires every workspace crate be mapped). The requirement does not
   change; the data does.
-- `external-effects`: `EffectDedupStore` gains an injected `Clock`. Confirm in
-  `sdd-spec` whether the shipped spec constrains the time source.
+- `external-effects`: **no change.** An earlier draft expected
+  `EffectDedupStore` to gain an injected `Clock`; inspecting the code showed its
+  methods neither take nor read time, so there is nothing to constrain. The
+  effects subsystem's real wall-clock reads live in `EffectRunner` and are
+  tracked as a separate follow-up, outside this change.
 - `testkit`: a reservation-store double is likely needed. Confirm during spec.
 
 ---
