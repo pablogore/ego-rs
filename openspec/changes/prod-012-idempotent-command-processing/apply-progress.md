@@ -688,3 +688,232 @@ slice's validation.
 8 tasks complete (B2.1, B2.3–B2.9). Combined with everything prior: **20 of 92**.
 The reservation contract now has an executable model; the durable Postgres
 implementation waits on the schema work.
+
+---
+
+## Phase B1c: the extraction contract and its policy — COMPLETE
+
+Branch: `feat/prod-012-b1c-extraction-contract`, off
+`feat/prod-012-idempotency-tracker` at `d3b3845`, targeting the tracker branch
+per D11's hybrid chain strategy (this branch does not merge to `develop`
+directly — only the consolidated tracker does).
+
+Scope: exactly four pieces, per the apply instructions — B1.3, B1.4, B1.5, and
+`assert_carrier_conformance` in `crates/testkit`. B1.6–B1.10 (the HTTP carrier,
+`ServiceContext`/`CommandContext` carriage) remain open and follow separately;
+nothing under `crates/transport` was touched.
+
+- [x] B1.3 RED/GREEN: `crates/service-sdk/tests/operation_key_conversion.rs`
+      drives `trybuild` against two new `tests/compile_fail/` fixtures — one
+      per direction (`OperationKey` → `IdempotencyKey` and the reverse).
+      Confirmed genuine RED before the driver existed:
+      `cargo test -p ego-service-sdk --test operation_key_conversion` failed
+      because no such test target existed. The `.stderr` snapshots were
+      generated deliberately with `TRYBUILD=overwrite` and read rather than
+      accepted blindly — both are `E0277: the trait bound
+      ... From<...> is not satisfied`, i.e. the compiler itself confirms
+      neither `From<OperationKey> for IdempotencyKey` nor its reverse exists
+      anywhere reachable from this workspace today (D7, spec scenario "No
+      implicit conversion compiles").
+- [x] B1.4 RED / B1.5 GREEN: `crates/service-sdk/src/idempotency/extraction.rs`
+      defines `OperationKeyCarrier` (reads one string and nothing else — no
+      request, no headers, no protocol knowledge) and `resolve_operation_key`,
+      the single validation and missing-key policy entry point (AD-4).
+      `crates/service-sdk/src/runtime/idempotency.rs` defines
+      `IdempotencyEnforcementMode` (`MandatoryKey` default, `Compatibility`
+      bounded escape hatch), mirroring `TenantEnforcementMode`
+      (`runtime/tenant.rs:143`)'s posture: a fixed-invariant enum, not
+      `dyn`-dispatched, with its doc-comment stating why. Confirmed genuine RED
+      for each file before its production code existed: the test module for
+      `runtime/idempotency.rs` compiled to "0 tests" (module not yet wired into
+      `runtime/mod.rs`), and `idempotency/extraction.rs`'s test module produced
+      `E0432: unresolved imports` for all three not-yet-defined symbols.
+      `OperationKeyRejection::Invalid` is rejected under *every* mode,
+      including `Compatibility` — that variant loosens only the missing-key
+      policy, never what counts as a valid key; a malformed key is not
+      "absent."
+- [x] Conformance harness: `assert_carrier_conformance` in
+      `crates/testkit/src/idempotency.rs`. **Deviation from design.md's literal
+      AD-4 sketch, flagged per apply instructions** (the same posture
+      `runtime/tenant.rs`'s `CanonicalTenant` doc-comment already takes for its
+      own deviation): the sketch shows a single-argument
+      `assert_carrier_conformance(&carrier)`, but one fixed carrier instance
+      can only ever report one `raw_operation_key()` value, so it cannot
+      exercise both halves of `resolve_operation_key`'s policy table (key
+      present vs. key absent) against the identical adapter implementation.
+      Implemented instead as
+      `assert_carrier_conformance<C: OperationKeyCarrier>(with_key: &C, without_key: &C)`
+      — two instances of the same adapter type, one carrying a key and one not.
+      The generic bound is what enforces "same type": an earlier version took
+      `&dyn` twice and therefore accepted two unrelated implementations, which
+      review caught and which the note further down records.
+      Confirmed genuine RED before the function existed:
+      `cargo test -p ego-testkit --lib idempotency::` failed with
+      `E0432: unresolved import` for `assert_carrier_conformance` in both the
+      test module and `lib.rs`'s re-export. Proven against a test-local
+      `FakeCarrier` (not the future HTTP `HeaderCarrier`, which is out of
+      scope here): one test proves a correctly-implemented pair passes
+      silently, one `#[should_panic]` test proves a mislabeled pair (a
+      "without_key" instance that still reports a key) is caught rather than
+      silently accepted.
+
+### Why these four pieces land as one work unit
+
+All four exist to satisfy one guarantee — D7's "no implicit conversion" plus
+AD-4's "one shared extraction contract" — and the conformance harness is
+meaningless without the policy function it exercises. Splitting the
+compile-fail assertion from the extraction contract, or the contract from its
+conformance harness, would fragment one coherent review into pieces that
+cannot be evaluated independently of each other.
+
+### Review budget — stated plainly, not absorbed
+
+This slice's diff, after the review corrections, is **534 inserted lines of code
+across 12 files** plus **224 inserted and 5 deleted lines across the two planning
+artefacts**, for a whole-PR total of **+758 / −5 across 14 files**. Of the code, 14
+lines are generated `.stderr` trybuild snapshots — goldens, excluded from the
+authored-risk count per the review-workload convention but still part of snapshot
+identity. **Authored risk count: 520 lines — this exceeds the 400-line review
+budget.** The figure grew from 475 when the conformance harness was corrected; the
+correction added the generic bound, the missing name assertion and two negative
+tests. No `size:exception` was pre-negotiated for this
+specific B1c slice in `tasks.md`'s Review Workload Forecast (that table
+groups all of B1 into one PR-6-sized unit rather than pre-splitting B1.3–B1.5
+from B1.6–B1.10). Recorded honestly rather than silently absorbed, following
+the precedent set by the B2 implementation slice's own stated size exception
+above: the four pieces are tightly coupled to one guarantee (see above), and
+tests are kept with the behavior they verify per `skills/work-unit-commits`,
+which is most of what drives the line count — `extraction.rs` and
+`idempotency.rs` (testkit) are each roughly half test code.
+
+### UNIT — the gate for this slice
+
+Hermetic: in-memory only, no clock dependency, no external resource, no
+Docker.
+
+- `cargo test -p ego-service-sdk`: **377 passed** across all targets, 0 failed (including both compile-fail cases; was 250 pre-existing +
+  8 new: 2 in `runtime::idempotency`, 6 in `idempotency::extraction`), plus the
+  `operation_key_conversion` trybuild driver (1 passed, exercising both
+  compile-fail fixtures) and pre-existing integration/doc-test binaries,
+  unaffected.
+- `cargo test -p ego-testkit`: **85 passed**, 0 failed (81 pre-existing + 4 new
+  in `idempotency::tests`).
+
+### Static gates — compile and lint only
+
+- `cargo fmt --all -- --check`: clean, exit 0 (after one `cargo fmt --all` pass
+  to apply the project's import-ordering and line-wrap conventions to the new
+  files).
+- `cargo check --workspace --all-targets`: clean, exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0, zero
+  warnings.
+- `cargo run -p xtask -- verify-layers`: `verify-layers: OK (17 crates, 0
+  violations)`.
+- `cargo run -p xtask -- verify-isolation`: `verify-isolation: OK (17 crates
+  checked in isolation)`.
+- `cargo run -p xtask -- verify-hygiene`: `verify-hygiene: OK (no un-archived
+  duplicates)`.
+
+`cargo test --workspace` was **not** run, per this run's explicit instructions
+— only the two listed UNIT gates and the six static gates were permitted.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| B1.3 | `crates/service-sdk/tests/operation_key_conversion.rs` + 2 `compile_fail/` fixtures | Integration (trybuild) | N/A (new files) | ✅ Confirmed: no such test target existed before the driver was written | ✅ 1/1 passed after generating both `.stderr` snapshots and reading them | ✅ 2 cases — both conversion directions, each independently confirmed absent by the compiler | ➖ None needed — minimal fixtures |
+| B1.4/B1.5 (extraction) | `crates/service-sdk/src/idempotency/extraction.rs` | Unit | N/A (new module) | ✅ `E0432` unresolved imports for `OperationKeyCarrier`/`OperationKeyRejection`/`resolve_operation_key` | ✅ 6/6 passed after implementing the trait, enum, and function | ✅ 6 cases: present+valid under both modes, missing under both modes, invalid under both modes — the full policy table | ➖ None needed |
+| B1.5 (mode) | `crates/service-sdk/src/runtime/idempotency.rs` | Unit | N/A (new module) | ✅ Module not yet wired into `runtime/mod.rs` — filtered test run matched 0 of 250 existing tests, and neither new test | ✅ 2/2 passed after wiring the module and implementing `IdempotencyEnforcementMode` + its `Default` impl | ➖ Structural: exactly two variants, `Default` has one possible correct answer per D1 | ➖ None needed |
+| Conformance harness | `crates/testkit/src/idempotency.rs` | Unit | N/A (new module) | ✅ `E0432` unresolved import for `assert_carrier_conformance` in both the test module and `lib.rs` | ✅ 4/4 passed after implementing the function and applying the review corrections | ✅ 4 cases: a conforming pair passes silently; a mislabeled pair, one adapter reporting two different names, and an empty name each panic with their own expected message | ➖ None needed |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `cargo test -p ego-service-sdk` → 377 passed across all targets, 0 failed. `cargo test -p ego-testkit` → 85 passed, 0 failed. |
+| Runtime harness command/scenario and exact result | N/A — this slice defines a pure validation function and a policy enum, both hermetic; no request, no transport, no runtime boundary exists yet for this contract (that arrives with the HTTP carrier in B1.6–B1.7, explicitly out of scope here). |
+| Rollback boundary | Delete `crates/service-sdk/src/idempotency/`, `crates/service-sdk/src/runtime/idempotency.rs`, `crates/service-sdk/tests/operation_key_conversion.rs`, `crates/service-sdk/tests/compile_fail/{operation_key_into_idempotency_key,idempotency_key_into_operation_key}.{rs,stderr}`, and `crates/testkit/src/idempotency.rs`; revert the four `mod`/`pub use` one-line additions in `crates/service-sdk/src/lib.rs`, `crates/service-sdk/src/runtime/mod.rs`, and `crates/testkit/src/lib.rs`. No schema, no migration, no persisted state — every new symbol is unreferenced by any other crate as of this slice. |
+
+### Status
+
+3 tasks complete (B1.3, B1.4, B1.5) plus the `testkit` conformance harness
+(not independently numbered in `tasks.md` — it is part of B1.5's deliverable
+per the design's AD-4 consequence and the `testkit` spec). Combined with
+everything prior: **23 of 92**. Next in the chain: B1.6–B1.7 (the HTTP
+carrier under `crates/transport`), then B1.8–B1.10 (`ServiceContext`/
+`CommandContext` carriage) — both explicitly out of scope for this run.
+
+### Orchestrator diff review — identifier convention violated in the new code
+
+Nineteen decision and task identifiers had been written into the doc-comments and
+test fixtures this slice introduced — `D1`, `D7`, `D9`, `AD-4`, `AD-10`, `B1.3`, and
+`design.md` references — across all five new files. That breaks the project
+convention that a comment must explain behaviour and reasons rather than cite the
+planning artefact that produced it: the identifier is archived within months and the
+comment then explains nothing.
+
+Every one was rewritten to carry the substance instead of the citation. For example,
+"no server-side generation (D1)" became a statement of *why*: a server-minted key is
+a function of the request as received, so a retry produces a different one and
+deduplicates nothing. The pre-existing identifiers in the older `compile_fail/`
+fixtures were left alone — cleaning those is separate, opportunistic work, not this
+slice's business.
+
+The `trybuild` goldens are line-sensitive, so the rewrite was verified by re-running
+the suite rather than by inspection: both compile-fail expectations still match.
+
+### Review budget — composition of the overrun
+
+534 inserted lines of code across twelve files, of which 14 are generated `.stderr`
+goldens. Composition:
+
+| Part | Production | Tests |
+|---|---|---|
+| `idempotency/extraction.rs` | 91 | 108 |
+| `runtime/idempotency.rs` | 46 | 20 |
+| `testkit/idempotency.rs` | 103 | 97 |
+| compile-fail driver, fixtures and goldens | — | 50 |
+| module wiring | 19 | — |
+
+Which rolls up to the four figures reported on the pull request — 137 lines of
+production decision logic, 103 of reusable testkit infrastructure, 275 of tests,
+fixtures and goldens, and 19 of wiring. Those sum to 534 exactly.
+
+That exceeds the 400-line budget. Stated rather than absorbed, with the composition
+that makes it judgeable: the **actual decision logic under review is 137 lines** —
+the extraction policy and the enforcement mode. The testkit harness's 103 lines are
+production only in the sense that they compile into a library crate; their purpose is
+testing. Splitting further would separate the conformance harness from the contract
+it defines, and that harness exists precisely so the next slice's adapter can be
+judged against the contract rather than against its author's reading of it.
+
+### Review correction — the conformance harness did not verify what it promised
+
+Three defects in `assert_carrier_conformance`, two found by review and one alongside
+them.
+
+**It took `&dyn OperationKeyCarrier` twice**, so nothing stopped a caller passing two
+*different* implementations — which is precisely what a harness named "conformance of
+one adapter" must not permit. It is now generic over a single `C:
+OperationKeyCarrier`, so the compiler enforces that both instances are the same
+adapter. That is the stronger place for the constraint than any runtime assertion.
+
+**`without_key.carrier_name()` was never asserted at all.** A `without_key` instance
+could report a different name, or an empty one, and still pass. The harness documents
+that it guarantees a stable diagnostic location, and it did not.
+
+**And the "stable across calls" assertion compared `with_key.carrier_name()` to
+itself.** For a method returning `&'static str` that is tautologically true — it could
+not fail for any reason, interesting or otherwise. It claimed a property and proved
+nothing.
+
+The check is now `!with_key.carrier_name().is_empty()` plus
+`with_key.carrier_name() == without_key.carrier_name()`. The second is the real
+property: two instances of one adapter must agree, which catches a name derived from
+per-instance state rather than from the adapter itself — that would make the
+diagnostic location depend on which request happened to be rejected.
+
+Two negative tests were added: one adapter reporting two different names fails, and an
+empty name fails. The first test's own comment records what it deliberately cannot
+express — passing two different implementations is now a compile error, not a runtime
+assertion, so there is nothing left to assert about it at runtime.
