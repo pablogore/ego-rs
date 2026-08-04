@@ -38,16 +38,19 @@ that cannot honor the mandatory-key guarantee.
 
 `RuntimeBuilder` MUST support registering a `Clock` (generalized out of the
 existing auth `Clock`), defaulting to a system-clock implementation. The
-registered `Clock` MUST be the sole time source injected into both the
-`OperationReservationStore` and `EffectDedupStore` — neither MUST call
-`Utc::now()` directly.
+registered `Clock` MUST be the sole time source injected into the
+`OperationReservationStore`, which MUST NOT call `Utc::now()` directly.
 
-#### Scenario: A custom Clock is observed identically by both stores
+This requirement deliberately says nothing about the effects subsystem. An
+earlier draft also bound `EffectDedupStore`, on the mistaken premise that it
+read the wall clock; its methods neither take nor read time, so there is
+nothing there to inject.
+
+#### Scenario: A custom Clock is the reservation store's only time source
 - GIVEN a `RuntimeBuilder` registered with a deterministic test `Clock`
-- WHEN the reservation store and `EffectDedupStore` each read the current
-  time
-- THEN both observe the identical injected `Clock`, with no direct
-  `Utc::now()` call in either
+- WHEN the reservation store reads the current time
+- THEN it observes the injected `Clock` value, with no direct `Utc::now()`
+  call in its path
 
 ### Requirement: RuntimeBuilder Registers Enforcement Mode and Retention Policy
 

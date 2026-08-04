@@ -316,8 +316,8 @@ a compile-fail test.
 `crates/domain/src/auth/clock.rs` becomes `pub use crate::time::clock::{Clock,
 SystemClock};`.
 
-**Criteria**: existing JWT call sites must keep compiling; the move must be a
-zero-behaviour-change slice; `EffectDedupStore`'s callers must not break.
+**Criteria**: existing JWT call sites must keep compiling, and the move must be a
+zero-behaviour-change slice.
 
 **Runner-up**: a hard move with call-site updates across `auth`. Rejected —
 it inflates a 150–250 line slice with unrelated churn and mixes a rename into a
@@ -326,14 +326,37 @@ warnings at every existing use site in a workspace that treats warnings as
 errors. The re-export is documented as the compatibility path; removing it is a
 follow-up, not this change.
 
-**`EffectDedupStore` conversion** (`crates/runtime/src/effects/store.rs:58`):
-add a `clock: Arc<dyn Clock>` field, keep the existing constructor delegating to
-`Arc::new(SystemClock)`, and add `with_clock(clock)` as the injecting
-constructor. Every existing caller compiles unchanged; `RuntimeBuilder` — the
-only production construction site — switches to `with_clock(runtime_clock)`. The
-service-sdk requirement "both observe the identical injected `Clock`" is
-asserted by a test against the builder-constructed pair. No `Utc::now()` remains
-in either store's own code.
+**Correction — do not inject a clock into `EffectDedupStore`.** An earlier version
+of this decision instructed exactly that, on the premise that
+`crates/runtime/src/effects/store.rs:58` was a direct wall-clock read inside the
+store. It is not, and the instruction was withdrawn after the code was inspected:
+
+- That `Utc::now()` is inside `Timestamp::now()`, a free constructor on
+  `Timestamp`, not inside any `EffectDedupStore` method.
+- The trait's three methods — `reserve`, `commit_success`, `release` — neither take
+  nor read time.
+- `EffectStateStore`'s time-aware methods already receive time as a parameter:
+  `claim_due(now, limit)`, `recover_in_flight(now)`, `mark_retryable(.., next_at)`.
+  Time is injected per call already.
+- Every `Timestamp::now()` in that file sits below the `#[cfg(test)]` boundary at
+  line 677, so none of them is a production read.
+
+Injecting there produces a field no code reads plus a test asserting that a getter
+returns what the constructor was handed — unfalsifiable by construction. It was
+implemented, reviewed, and reverted. Do not reintroduce it, and do not require the
+dedup store and the reservation store to observe one shared injected clock: the
+dedup store observes no clock at all.
+
+**Where the real wall-clock reads are.** `EffectRunner` reads the wall clock in
+production at `crates/runtime/src/effects/runner.rs:546` and `:1017`. Making those
+injectable is genuine work, is not required by the reservation store, and is
+tracked as its own follow-up unit rather than folded into this move — that file
+runs to roughly three thousand lines and the concern is effect retry, not
+idempotency.
+
+**What the reservation store does.** It receives the common `Clock` this decision
+makes available, and that is the whole dependency: nothing needs to be shared with
+the effects subsystem.
 
 ### AD-9 — Migration ordering and reversibility
 
@@ -536,7 +559,7 @@ recovery assertion in proposal §17.
 |---|---|---|
 | Unit | `OperationKey` validation; no-`From` compile-fail; `resolve_operation_key` policy table; `ReservationOutcome` transitions against `TestClock`; slot-3 ordering via macro expansion | `#[cfg(test)]` in-crate |
 | Unit | In-memory reservation store: lease expiry, takeover, `StaleOwner`, fingerprint conflict — all deterministic under `TestClock` | `crates/testkit` + in-crate |
-| Integration | Macro codegen; `assert_carrier_conformance` for the HTTP carrier; `EffectDedupStore` and reservation store observe the same injected `Clock` | `crates/<crate>/tests/` |
+| Integration | Macro codegen; `assert_carrier_conformance` for the HTTP carrier | `crates/<crate>/tests/` |
 | Integration (real PG) | Both partial-index pairs reject duplicates including `tenant_id IS NULL`; append + receipt atomicity; zero-event receipt; concurrent takeover; two concurrent purge workers; cross-tenant non-replay; characterization of today's `append` before A2 | `crates/integration-tests/` — testcontainers only |
 | E2E | Retried `POST /register` yields one `UserRegistered` and one welcome email; kill-after-org-command recovery | `examples/reference-app/tests/` |
 

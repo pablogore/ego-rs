@@ -374,7 +374,11 @@ Block A and `feature-branch-chain` for Block B):
 1. **Foundations go to `develop` as a short incremental chain**: B0, then A1, A2,
    A3, A4. Each unit integrates into `develop` on its own. These are autonomous
    and independently valuable — today `events` has no uniqueness, the `23505`
-   path is unreachable, and `EffectDedupStore` has no testable clock.
+   path is unreachable, and the `Clock` is trapped under `auth` where nothing
+   outside authentication can reach it. (An earlier draft of this sentence said
+   `EffectDedupStore` has no testable clock. It has no clock at all: its methods
+   neither take nor read time, so there was never anything to make testable
+   there.)
 2. **Once that block is integrated, the idempotency tracker branch is created
    from the updated `develop`.**
 3. **The remaining Block B units stack inside the tracker**: each PR targets the

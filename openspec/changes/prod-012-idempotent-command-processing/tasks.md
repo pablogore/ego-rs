@@ -4,9 +4,12 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **93 tasks total** — 7 complete (B0.1–B0.3, merged as `378a639`; A1.1–A1.4)
-> and 86 pending. The count is stated here so any prose that cites it can be
-> checked against the file rather than drifting from it.
+> **92 tasks total** — 9 complete and 83 pending. Complete: B0.1–B0.3 (merged as
+> `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2. The total moved from 93
+> to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
+> were added in their place; see the note under Phase A4. The count is stated here
+> so any prose that cites it can be checked against the file rather than drifting
+> from it.
 
 ## Review Workload Forecast
 
@@ -32,7 +35,7 @@ Chain strategy: hybrid
 | A1 | `crates/integration-tests/` crate + testcontainers + `append` characterization | PR 2 | `cargo test -p integration-tests` (testcontainers) | Real Postgres via testcontainers | Delete new crate; drop workspace member entry |
 | A2 | `aggregate_type` real column + `EntityTriple` split + backfill runbook | PR 3 | `cargo test -p integration-tests migration_007` | Testcontainers, backfill tool dry-run | Exact reverse migration (AD-9): rejoin `aggregate_type \|\| '-' \|\| aggregate_id` |
 | A3 | Events uniqueness (AD-1 partial pair) + PG14 floor | PR 4 | `cargo test -p integration-tests uniqueness` | Testcontainers | `DROP INDEX` both partial indexes |
-| A4 | Common `Clock` generalization | PR 5 | `cargo test -p domain -p runtime clock` | N/A — pure unit test, no external service | Revert re-export commit; `auth::clock` path restored |
+| A4 | Common `Clock` generalization | PR 3 of the chain (reordered ahead of A2/A3) | `cargo test -p ego-domain --lib time::clock` — hermetic unit tests only | N/A — no external service, no wall-clock dependency | Delete `crates/domain/src/time/`, drop the `pub mod time;` line, restore `auth/clock.rs` |
 | B1 | `OperationKey` + `OperationKeyCarrier` + HTTP carrier + context carriage | PR 6 | `cargo test -p domain -p service-sdk -p transport idempotency_key` | N/A — unit/integration, no DB | Revert; no persisted state |
 | B2 | `OperationReservationStore` port + in-memory + lease/fencing + renewal policy | PR 7 | `cargo test -p domain -p testkit reservation` | N/A — deterministic `TestClock` | Revert; no persisted state |
 | B3 | Postgres reservation store + readiness health contributor | PR 8 | `cargo test -p integration-tests reservation_store` | Testcontainers | `DROP TABLE operation_reservations`; unregister health contributor |
@@ -74,11 +77,45 @@ Chain strategy: hybrid
 
 ### Phase A4: Common `Clock` (independent — may run parallel with A1–A3)
 
-- [ ] A4.1 RED: `crates/domain/src/time/clock.rs` unit test — `Clock`/`SystemClock` behave identically to the current `crates/domain/src/auth/clock.rs:20` implementation (zero-behavior-change slice).
-- [ ] A4.2 GREEN: move `Clock`/`SystemClock` to `crates/domain/src/time/clock.rs`; `auth/clock.rs` becomes `pub use crate::time::clock::{Clock, SystemClock};` (compatibility re-export, no `#[deprecated]` per AD-8).
-- [ ] A4.3 RED: `crates/runtime/src/effects/store.rs` test asserting `EffectDedupStore` reads time only via an injected `Arc<dyn Clock>`, never `Utc::now()` (verified constraint: `store.rs:58` calls `Utc::now()` directly today).
-- [ ] A4.4 GREEN: add `clock: Arc<dyn Clock>` field to `EffectDedupStore`; keep existing constructor delegating to `Arc::new(SystemClock)`; add `with_clock(clock)`.
-- [ ] A4.5 GREEN: `RuntimeBuilder` switches its only production construction site to `with_clock(runtime_clock)`.
+- [x] A4.1 RED: `crates/domain/src/time/clock.rs` unit test — `Clock`/`SystemClock` behave identically to the current `crates/domain/src/auth/clock.rs:20` implementation (zero-behavior-change slice).
+- [x] A4.2 GREEN: move `Clock`/`SystemClock` to `crates/domain/src/time/clock.rs`; `auth/clock.rs` becomes `pub use crate::time::clock::{Clock, SystemClock};` (compatibility re-export, no `#[deprecated]` per AD-8).
+
+**A4.3–A4.5 removed — the premise was wrong.** They asked for a `Clock` to be
+injected into `EffectDedupStore`, on the stated basis that `store.rs:58` calls
+`Utc::now()` directly. Inspecting the real call sites showed otherwise:
+
+- That `Utc::now()` lives inside `Timestamp::now()`, a free constructor on
+  `Timestamp`, not inside any `EffectDedupStore` method.
+- The trait's three methods — `reserve`, `commit_success`, `release` — neither
+  take nor read time.
+- `EffectStateStore`'s time-aware methods already receive it as a parameter:
+  `claim_due(now, limit)`, `recover_in_flight(now)`, `mark_retryable(.., next_at)`.
+  Time is already injected per call.
+- Every `Timestamp::now()` inside `store.rs` sits below the `#[cfg(test)]`
+  boundary at line 677.
+
+Injecting a clock there would have produced a field nothing reads and a test
+asserting that a getter returns what the constructor was handed — unfalsifiable
+by construction. A4 is therefore complete at A4.1–A4.2, which is the deliverable
+B2 actually consumes: one common `Clock` to inject into the reservation store.
+
+## Follow-up — injectable clock for the effect retry subsystem
+
+Not required by B2 and not part of Block A. Recorded so it is not lost.
+
+- [ ] F1.1 RED: unit tests for `EffectRunner`'s due-claiming and retry-scheduling
+      paths driven by a fake clock, asserting scheduling decisions without
+      real elapsed time. Pure unit tests — no Docker, no containers, no real
+      external resource.
+- [ ] F1.2 GREEN: give `EffectRunner` an injected clock and route its two
+      production wall-clock reads through it —
+      `crates/runtime/src/effects/runner.rs:546` (`claim_due(Timestamp::now(), ..)`)
+      and `:1017` (`mark_retryable_with_retry(.., Timestamp::now())`). These are
+      the real untestable wall-clock reads in the effects subsystem; the store
+      never had any.
+
+Sized as its own unit because it touches the retry subsystem inside a file of
+roughly three thousand lines, which does not belong inside an unrelated slice.
 
 ---
 
@@ -271,11 +308,6 @@ B4 ──▶ B5
 | Retried RegisterUser Produces Exactly One UserRegistered Event | B0.1, B0.2, B6.9, B6.10 |
 | Dual-Aggregate Recovery After Mid-Operation Process Death | E1.1, E1.2 |
 
-### `external-effects` delta
-
-| Requirement | Task(s) |
-|---|---|
-| EffectDedupStore Uses the Injected Clock | A4.3, A4.4 |
 
 ### `testkit` delta
 

@@ -56,7 +56,7 @@ B0.2 — not a new PROD-012 piece.
 
 ## Remaining Tasks (out of scope for this run — untouched)
 
-- [ ] A2.1–A2.6, A3.1–A3.5, A4.1–A4.5 (Block A remainder — Persistence Foundations)
+- [ ] A2.1–A2.6, A3.1–A3.5, A4 (Block A remainder — Persistence Foundations)
 - [ ] B1.1–B1.10, B2.1–B2.9, B3.1–B3.7, B4.1–B4.8, B5.1–B5.8, B6.1–B6.12, B7.1–B7.11 (Block B remainder)
 - [ ] E1.1–E1.2 (Dual-Aggregate Recovery E2E)
 - [ ] DOC.1–DOC.3 (Documentation and Rollout)
@@ -296,7 +296,7 @@ All eight declared gates, run against this branch:
 
 ## Status (A1)
 
-4/4 assigned A1 tasks complete (A1.1–A1.4). Combined with B0: 7/93 tasks
+4/4 assigned A1 tasks complete (A1.1–A1.4). Combined with B0: 7 tasks
 complete workspace-wide. Branch: `feat/prod-012-a1-integration-test-infrastructure`,
 targeting `develop` per D11's hybrid chain strategy. Committed and opened as
 **PR #253**, the second unit of the chain after B0, following an orchestrator
@@ -314,3 +314,136 @@ package was untracked, so bundling any of it risked a ~2,700-line diff; both
 files are now tracked on `develop` (via `56d2c97`, #250), so this update is
 four checkbox flips plus this section — small enough to travel with the code
 it describes. Nothing else from the wider planning package is touched.
+
+---
+
+## Phase A4: Common `Clock` — COMPLETE
+
+Branch: `feat/prod-012-a4-common-clock`, off `develop` at `10b221d`, targeting
+`develop`. This unit runs out of its originally planned order: the dependency
+graph makes A4 independent of Postgres, so it moves ahead of A2/A3 (both still
+blocked); the chain for this run is B0 → A1 → A4. Final scope is A4.1–A4.2 only:
+the run began with A4.1–A4.5, and A4.3–A4.5 were reverted during diff review once
+their premise proved wrong — see the note below. Nothing from A2, A3 or B2 is
+touched.
+
+- [x] A4.1 RED: wrote the test module for `crates/domain/src/time/clock.rs`
+      before the `Clock` trait and `SystemClock` struct existed at this path.
+      Four tests were written initially, carried over from `auth/clock.rs`'s
+      suite. The check that compared `SystemClock`'s reading against
+      `Utc::now()` was then **deliberately removed** during review: it asserted
+      that the operating system's clock behaves like a clock, non-deterministically,
+      rather than asserting anything about this module. It is replaced by a
+      structural assertion that `SystemClock` satisfies the trait, and every
+      remaining time-dependent case runs against a fixed clock. No unit test in
+      this slice reads the wall clock.
+      Confirmed FAILED before implementation — `cargo test -p ego-domain --lib
+      time::clock` produced six `E0405`/`E0432`/`E0599` compile errors (`cannot
+      find trait Clock in this scope`, etc.), not a runtime assertion failure —
+      the module genuinely didn't exist yet.
+- [x] A4.2 GREEN: added the `Clock` trait and `SystemClock` struct to
+      `crates/domain/src/time/clock.rs` (byte-identical implementation to
+      the one that lived in `auth/clock.rs`), created `crates/domain/src/
+      time/mod.rs` declaring the module, registered `pub mod time;` in
+      `crates/domain/src/lib.rs`, and rewrote `crates/domain/src/auth/
+      clock.rs` down to a single compatibility re-export: `pub use
+      crate::time::clock::{Clock, SystemClock};`. No `#[deprecated]`
+      attribute — this workspace treats warnings as errors, so a deprecation
+      notice would fail the build at every existing JWT/`auth` call site
+      rather than merely warn; the re-export is the documented permanent
+      compatibility path per the design decision, not a temporary shim.
+      `cargo test -p ego-domain --lib time::clock` → 4 passed.
+### A4.3–A4.5 removed after inspecting the real call sites
+
+These three tasks were implemented, then reverted during orchestrator diff
+review, because the premise they rested on was wrong. Recorded rather than
+quietly dropped, since the same premise appears in `design.md` AD-8.
+
+The tasks asked for a `Clock` to be injected into `EffectDedupStore`, citing
+`crates/runtime/src/effects/store.rs:58` as a direct `Utc::now()` call in that
+store. Reading the code:
+
+- That `Utc::now()` is inside `Timestamp::now()`, a free constructor on
+  `Timestamp`, not inside any `EffectDedupStore` method.
+- `EffectDedupStore`'s three methods — `reserve`, `commit_success`, `release` —
+  neither take nor read time.
+- `EffectStateStore`'s time-aware methods already receive time as a parameter:
+  `claim_due(now, limit)`, `recover_in_flight(now)` and
+  `mark_retryable(.., next_at)`. Time is injected per call already.
+- Every `Timestamp::now()` inside `store.rs` sits below the `#[cfg(test)]`
+  boundary at line 677, so none of them is a production read.
+
+What had been built was therefore a `clock` field read by nothing except a
+`now()` accessor added alongside it, plus a test asserting that accessor returns
+whatever the constructor was handed. That test cannot fail for an interesting
+reason, and a field with no reader is not a seam — it is dead weight that a later
+slice would have had to reconcile.
+
+`crates/runtime/src/effects/store.rs` and
+`crates/service-sdk/src/runtime/builder.rs` were restored to their state on
+`develop`. Neither appears in this slice's diff.
+
+The genuine gap this exposed is elsewhere and is recorded as a follow-up in
+`tasks.md`: `EffectRunner` reads the wall clock in production at
+`crates/runtime/src/effects/runner.rs:546` and `:1017`. That is the retry
+subsystem, it is not needed for B2, and it belongs in its own unit rather than
+inside an unrelated slice.
+
+A4 is complete at A4.1–A4.2, which is precisely what B2 consumes: one common
+`Clock` available to inject into the reservation store when that store exists.
+
+## TDD Cycle Evidence (A4)
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| A4.1/A4.2 | `crates/domain/src/time/clock.rs` | Unit (in-crate), hermetic — no external resource, no wall-clock read | N/A (new module; coverage derives from the pre-existing `auth/clock.rs` suite, with one case deliberately replaced) | ✅ Written first; failed to compile (`E0405`/`E0432`/`E0599`, `Clock`/`SystemClock` not found) — a genuine "doesn't exist yet" RED, not an assertion failure | ✅ 4/4 passing after moving the trait/struct into place | ✅ 4 cases: `SystemClock` satisfies the trait contract structurally (generic bound and trait object), `FixedClock` returns its exact value twice over proving determinism, object safety behind `Box` asserted with `FixedClock`, and the trait works behind `Arc`. The original wall-clock plausibility check was removed rather than carried over. | ➖ None needed — a pure move, no new complexity |
+
+## Work Unit Evidence (A4)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `cargo test -p ego-domain --lib time::clock` → 4 passed, 0 failed. `cargo test -p ego-runtime --lib effects::store` → 29 passed, 0 failed. `cargo test -p ego-service-sdk --lib` → 250 passed, 0 failed. |
+| Runtime harness command/scenario and exact result | N/A — per the tasks artifact's own row for this unit: "N/A — pure unit test, no external service." No Postgres, no testcontainers, no real actor spawn is exercised by this slice; the full `cargo test --workspace` run below is the closest thing to a runtime harness and is green including the Docker-backed `ego-integration-tests` crate, which this slice did not touch. |
+| Rollback boundary | Delete `crates/domain/src/time/`, drop the `pub mod time;` line from `crates/domain/src/lib.rs`, and restore `crates/domain/src/auth/clock.rs` to its pre-move content. Zero behaviour change in either direction, since the move preserved the trait and its implementation byte for byte and the original import path still resolves. No other crate is touched, and nothing touches schema, migrations or persisted state. |
+
+## Full Verification (A4)
+
+### UNIT — the gate for A4
+
+This slice touches only `crates/domain`, so this is what A4 stands or falls on.
+Hermetic: no Docker, no external resource, no wall-clock dependency.
+
+- `cargo test -p ego-domain --lib time::clock`: **4/4 passed**, 0 failed
+  (`system_clock_satisfies_the_clock_contract`, `fixed_clock_returns_exact_time`,
+  `clock_is_object_safe`, `clock_works_behind_arc`).
+
+### INTEGRATION — inherited regression, run additionally
+
+Green, and **not a requirement of A4**. Recorded because it was executed.
+
+- `cargo test --workspace` (with `DOCKER_HOST` pointed at the colima socket):
+  103 `test result: ok` blocks, 0 failures anywhere, including the Docker-backed
+  `event_store_characterization` suite inherited from A1 (3 passed). This gate
+  became Docker-dependent when A1 landed; it is repository-wide regression
+  coverage, not a check A4 introduces or depends on.
+
+### Repository validation — general gates, also green
+
+- `cargo fmt --all -- --check`: clean, exit 0.
+- `cargo check --workspace --all-targets`: clean, exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0, zero warnings.
+- `cargo test --workspace --doc`: all blocks `test result: ok`, 0 failures.
+- `cargo run -p xtask -- verify-layers`: `verify-layers: OK (17 crates, 0 violations)`.
+- `cargo run -p xtask -- verify-isolation`: `verify-isolation: OK (17 crates checked in isolation)`.
+- `cargo run -p xtask -- verify-hygiene`: `verify-hygiene: OK (no un-archived duplicates)`.
+
+## Status (A4)
+
+A4 complete at A4.1–A4.2. A4.3–A4.5 were built, then reverted on review and
+removed from the task list, replaced by two follow-up tasks for the effect retry
+subsystem. Combined with B0 and A1: 9 of 92 tasks complete workspace-wide.
+Branch: `feat/prod-012-a4-common-clock`,
+targeting `develop`. Per the consciously reordered chain for this run (B0 →
+A1 → A4), A2 and A3 remain deliberately untouched and blocked; B2 is
+unblocked by this slice (needs A4's `Clock` for deterministic lease/expiry
+tests) but is not started here.
