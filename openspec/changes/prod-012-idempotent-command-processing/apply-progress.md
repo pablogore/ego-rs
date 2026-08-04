@@ -1130,3 +1130,244 @@ widening is proven end to end through the actual HTTP adapter.
 The status table gained its third case. The exhaustive match already guaranteed
 `Unreadable` was mapped at all; what was missing was the assertion that it collapses to
 the *same* status as the other two, which is the claim the table makes.
+
+---
+
+## Phase B1e: carriage of the operation key from ingress to the actor — COMPLETE
+
+Branch: `feat/prod-012-b1e-key-carriage`, off
+`feat/prod-012-idempotency-tracker` at `fe7e89c`, targeting the tracker branch
+per the hybrid chain strategy. B1.6/B1.7 (the HTTP carrier) landed in B1d. This
+slice does two separate things, and calling them one continuous path is exactly
+the overclaim corrected further down: it **prepares** `ServiceContext` to hold the
+key, and it **separately proves** that a key already present on a `CommandContext`
+travels through `EntityActor` into `handle_command` unchanged.
+
+Nothing joins those two halves here. The bridge — reading
+`ServiceContext::operation_key()` to construct the `CommandContext` a service hands
+down — is recorded as B6.4a, because the generated slot-3 code is already the point
+that reads the resolved key.
+
+Scope: exactly three tasks — B1.8, B1.9, B1.10. No reservation store, no
+receipts, no `EventStore`, no schema, no migrations, and no policy change —
+the enforcement mode and resolution rules from B1c are untouched; this slice
+only carries an already-resolved value.
+
+- [x] B1.8 RED: `crates/service-sdk/src/context/mod.rs` — three tests written
+      against methods that did not exist yet: `operation_key()` defaults to
+      `None`, round-trips the identical `OperationKey` handed to
+      `with_operation_key`, and coexists with `tenant_hint`/`trace_context`
+      without disturbing either. Confirmed genuine RED before implementation:
+      `cargo test -p ego-service-sdk --lib context::` failed with
+      `E0599: no method named 'with_operation_key' found` at both call
+      sites — the accessor and builder simply did not exist, not a runtime
+      assertion failure.
+- [x] B1.9 GREEN: added a private `operation_key: Option<OperationKey>` field
+      to `ServiceContext`, plus `with_operation_key` (consuming builder) and
+      `operation_key()` (accessor), and wired both into `ServiceContext::new`
+      and the hand-rolled `Debug` impl. Deliberately matches the posture
+      already established for `tenant_id`/`tenant_hint()` and the private
+      `trace_id` — a private field reachable only through the builder/accessor
+      pair, so nothing can reach for a raw field and mistake a stale or
+      reconstructed value for the one actually carried from ingress. Read
+      both existing fields' doc-comments and code before writing this one and
+      followed the same shape rather than inventing a third pattern.
+      `cargo test -p ego-service-sdk --lib context::` → 26 passed (23
+      pre-existing + 3 new).
+- [x] B1.10 RED/GREEN: added a `pub operation_key: Option<OperationKey>`
+      field to `crates/persistent-entity/src/command_context.rs::CommandContext`,
+      matching that struct's own existing convention of plain public fields
+      (`tenant_id`, `expected_version`, `causation_id`, `metadata` are all
+      `pub`) rather than importing `ServiceContext`'s private+builder posture
+      onto a type whose own established shape is different — the design's
+      own data-flow sketch shows this field set by direct struct literal
+      (`CommandContext{ operation_key: K }`), which only a public field
+      permits. Two tests added to `crates/persistent-entity/src/actor.rs`,
+      both driving `EntityActor::execute_command` directly (the same
+      already-established pattern `build_effect_actor` and its neighbouring
+      tests use) rather than only constructing a `CommandContext` and reading
+      the field back: a `RecordingContextHandler` captures
+      `context.operation_key.clone()` inside its own `handle_command` into an
+      `Arc<Mutex<Option<OperationKey>>>`, and each test asserts what the
+      handler actually saw, not merely what was passed in. One test sets a
+      specific key at construction and asserts the handler observed that
+      *exact* value; a second sets no key and asserts the handler observed
+      `None` rather than a stale value left over from a prior call. Confirmed
+      genuine RED before the field existed: `cargo test -p persistent-entity
+      --lib actor::tests::command_context_operation_key` failed with
+      `E0609: no field 'operation_key' on type 'CommandContext'` at both the
+      read inside `handle_command` and the write in the test — the field
+      itself did not exist yet, not a value mismatch.
+
+### The trap named in the apply instructions, and how this slice avoids it
+
+`CommandContext` already carries three fields — `expected_version`,
+`causation_id`, `metadata` — that are constructed as `None`/empty at every
+real call site (`CommandContext::new(entity_type)`, used verbatim in
+`examples/reference-app/src/application.rs` and every reference-app test) and
+never read anywhere in `crates/persistent-entity`. `execute_command` passes
+its own `self.version` for optimistic concurrency, not
+`context.expected_version`. A test that only proves `operation_key` exists on
+the struct, or that a `CommandContext` can be constructed carrying one, would
+have been the fourth such field — passing trivially regardless of whether the
+value ever reaches anything downstream.
+
+Both B1.10 tests instead route the value through the real `execute_command`
+call into a handler's `handle_command`, and assert on what the handler
+observed rather than on what was constructed. Neither test can pass by
+accident: removing the pass-through at `execute_command`'s
+`self.entity_handler.handle_command(&command, &current_state, &context)`
+call site, or reintroducing a hand-rolled context that drops the field, would
+fail the "same value" assertion (or leave the `Mutex` holding the sentinel
+value the second test deliberately seeds it with) — not merely fail to
+compile.
+
+### Why B1.9's field is private but B1.10's is public
+
+Not an inconsistency — the two structs already disagreed before this slice
+touched either of them. `ServiceContext` established private+builder+accessor
+for every identity-carrying field it has (`tenant_id`/`tenant_hint()`,
+`trace_id`) specifically to prevent a caller reaching for a raw field and
+mistaking an ingress hint for a resolved value; the apply instructions named
+this posture explicitly for B1.9. `CommandContext` has no such precedent —
+every one of its six fields, including the three dead ones, is `pub`, and the
+design's own data-flow sketch constructs it as a literal
+(`CommandContext{ operation_key: K }`), which a private field would forbid
+from outside the crate. Importing `ServiceContext`'s posture onto
+`CommandContext` would have been inventing a new convention for one field in
+a struct that has never used it, not following an existing one.
+
+### Compile-error RED, not runtime-assertion RED
+
+Both RED steps in this slice are the compiler refusing to build — `E0599` for
+the missing `ServiceContext` methods, `E0609` for the missing `CommandContext`
+field — rather than a test that compiles and then fails an assertion. This
+matches the established pattern for "this doesn't exist yet" scenarios used
+throughout B0/A1/A4/B1c in this same file, and was confirmed directly: each
+RED was captured by temporarily reverting only the production-code half of
+the change (the field/method it depends on) and re-running the exact test
+that exercises it, reading the compiler's error text rather than assuming the
+test would fail for the intended reason.
+
+### Struct-literal call sites updated, not left broken
+
+Adding a field to a struct whose existing convention is direct struct
+literals (no `..Default::default()` anywhere in this crate) breaks every
+existing literal construction site until each one is updated. Four such sites
+existed before this slice, none of them new: `crates/persistent-entity/src/
+testing.rs::create_test_context()`, `crates/persistent-entity/src/
+command_envelope.rs`'s two test-module literals, and `crates/persistent-entity/
+src/persistent_entity.rs`'s `ctx()` test helper. Each gained a single
+`operation_key: None,` line to keep compiling. These four lines are
+mechanical compiler-forced upkeep, not new test assertions — the traversal
+guarantee itself is carried entirely by the two new tests in `actor.rs`.
+
+### Review budget — well within the 400-line budget
+
+249 inserted lines across six files, zero deletions — no `size:exception`
+needed.
+
+| File | Production | Tests | Wiring (mechanical struct-literal upkeep) |
+|---|---|---|---|
+| `crates/service-sdk/src/context/mod.rs` | 40 | 38 | — |
+| `crates/persistent-entity/src/command_context.rs` | 9 | — | — |
+| `crates/persistent-entity/src/actor.rs` | — | 158 | — |
+| `crates/persistent-entity/src/command_envelope.rs` | — | — | 2 |
+| `crates/persistent-entity/src/persistent_entity.rs` | — | — | 1 |
+| `crates/persistent-entity/src/testing.rs` | — | — | 1 |
+| **Total** | **49** | **196** | **4** |
+
+49 + 196 + 4 = 249, matching `git diff --numstat` exactly. `command_envelope.rs`'s
+and `persistent_entity.rs`'s changed lines sit inside pre-existing `#[cfg(test)]`
+modules; `testing.rs::create_test_context()` is test-support infrastructure
+(the module is `pub mod testing` but named and used exclusively as a fixture
+builder), not a change to any code the actor's real dispatch path executes in
+production.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| B1.8/B1.9 | `crates/service-sdk/src/context/mod.rs` | Unit (in-crate), hermetic | ✅ 23/23 pre-existing `context` tests unaffected | ✅ `E0599: no method named 'with_operation_key' found` for both the accessor and the builder | ✅ 3/3 passed after adding the field, builder, accessor, `new()` wiring, and `Debug` field | ✅ 3 cases: default absence, exact round-trip, and non-interference with `tenant_hint`/`trace_context` | ➖ None needed — mirrors an existing, already-reviewed pattern verbatim |
+| B1.10 | `crates/persistent-entity/src/actor.rs` | Unit (in-crate), real actor-spawn call path (`EntityActor::execute_command`, not a hand-rolled shortcut) | ✅ 41/41 pre-existing `actor` tests unaffected | ✅ `E0609: no field 'operation_key' on type 'CommandContext'` at both the read inside `handle_command` and the write in the test | ✅ 2/2 passed after adding the field to `CommandContext` and updating the four pre-existing struct-literal call sites | ✅ 2 cases: a specific key set at the boundary reaches the handler unchanged; an absent key reaches the handler as `None`, not a stale prior value — proves both the positive and negative path of "identical value, no reconstruction" | ➖ None needed — minimal field addition, no new abstraction |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `cargo test -p ego-service-sdk --lib context::` → 26 passed, 0 failed. `cargo test -p persistent-entity --lib actor::tests::command_context_operation_key` → 2 passed, 0 failed. |
+| Runtime harness command/scenario and exact result | `cargo test -p persistent-entity --lib` → 43 passed, 0 failed, including both new tests driving `EntityActor::execute_command` directly — the same real actor-dispatch call `EntityRef`'s production spawn path uses, not a hand-rolled bypass. No Docker, no external resource: the actor is constructed in-process with an in-memory `PersistenceFacade` and `NoopPublisher`, exactly matching the existing `build_effect_actor` pattern this file already uses for its other actor-level tests. |
+| Rollback boundary | Revert the one commit. Drop the `operation_key` field, builder and accessor from `ServiceContext` (`crates/service-sdk/src/context/mod.rs`); drop the `operation_key` field from `CommandContext` (`crates/persistent-entity/src/command_context.rs`) and its four struct-literal call sites; delete the two new tests and the `RecordingContextHandler` helper from `crates/persistent-entity/src/actor.rs`. No schema, no migration, no persisted state — every new symbol is unreferenced by any other crate as of this slice — nothing reads `ServiceContext::operation_key()` yet, which is precisely why this slice does not close the phase end to end and why the bridge is recorded as B6.4a. |
+
+### Full Verification
+
+#### UNIT — the gate for this slice
+
+Hermetic: in-memory only, no clock dependency, no external resource, no Docker.
+
+- `cargo test -p ego-service-sdk`: **382 passed** across all targets, 0 failed
+  (263 lib — 260 pre-existing + 3 new — plus 119 across integration-test
+  binaries and one doc-test, all pre-existing and unaffected).
+- `cargo test -p persistent-entity`: **84 passed** across all targets, 0
+  failed (43 lib — 41 pre-existing + 2 new — plus 41 across integration-test
+  binaries and one doc-test, all pre-existing and unaffected).
+
+#### Static gates — compile and lint only
+
+- `cargo fmt --all -- --check`: clean, exit 0.
+- `cargo check --workspace --all-targets`: clean, exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean, exit 0, zero
+  warnings.
+- `cargo run -p xtask -- verify-layers`: `verify-layers: OK (17 crates, 0
+  violations)` — unchanged crate count; confirms `persistent-entity` did not
+  gain a dependency on `service-sdk` (both sides only ever reference
+  `ego-domain`'s `OperationKey`).
+- `cargo run -p xtask -- verify-isolation`: `verify-isolation: OK (17 crates
+  checked in isolation)`.
+- `cargo run -p xtask -- verify-hygiene`: `verify-hygiene: OK (no un-archived
+  duplicates)`.
+
+`cargo test --workspace` was **not** run, per this run's explicit
+instructions — Docker/testcontainers/PostgreSQL/network are all out of
+bounds for this slice's validation.
+
+### Status
+
+3 tasks complete (B1.8, B1.9, B1.10). Combined with everything prior:
+**28 of 93**.
+
+**Phase B1's ten tasks are all delivered, and B1 is still not end to end.** Those
+are not in tension: no task in the phase ever specified the bridge between the two
+contexts. What exists after this slice is the `OperationKey` type, one shared
+definition of validity and of the missing-key policy, one HTTP adapter conforming
+to that contract, and both context types able to hold and hand on the value.
+Nothing reads `ServiceContext::operation_key()` to construct the `CommandContext`
+a service passes down, so the value cannot yet travel from the transport edge to
+the actor.
+
+An earlier version of this record claimed otherwise, and the claim was wrong in a
+way worth naming: the rollback note in this same section already admitted "nothing
+wires `ServiceContext::operation_key()` into `CommandContext` yet" while the status
+line above it said the phase closed end to end. The evidence contradicted itself
+within one section.
+
+The gap is recorded as **B6.4a** in `tasks.md`, which raised the task total from 92
+to 93. It belongs in the generated slot-3 code because that is already the point
+which reads the resolved key — not in a bridge invented here to make a sentence
+true.
+
+Next in the chain: B2 is already complete; the next open work is B4 (async
+`EventStore` unit of work, needs A1 and A4 — both landed) and the F1 follow-ups.
+B3 onward waits on schema.
+
+### Correction applied before commit — identifier-free comments
+
+The first draft of this slice's two new test-section comments (in
+`context/mod.rs` and `actor.rs`) named the ticket directly
+("carriage of the caller-supplied operation key" prefixed with the
+project code). Caught by scanning the diff against the project's own
+convention before committing — the same convention the B1c record above
+already documents nineteen violations of — and rewritten to describe only
+the behaviour, with no ticket, phase, or decision identifier anywhere in
+either comment. Verified by re-scanning the final diff for the forbidden
+patterns after the edit, with zero matches.

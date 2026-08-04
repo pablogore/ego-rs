@@ -149,6 +149,7 @@ mod tests {
             expected_version: None,
             causation_id: None,
             metadata: std::collections::HashMap::new(),
+            operation_key: None,
         }
     }
 

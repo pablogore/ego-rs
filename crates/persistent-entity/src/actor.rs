@@ -1012,4 +1012,162 @@ mod tests {
             "the commit that happened before the gate must be reflected regardless of the delayed reply"
         );
     }
+
+    // --- CommandContext carries the operation key through to the actor ---
+
+    /// Records the exact `operation_key` `handle_command` was called with,
+    /// so a test can compare it against the value set at the boundary rather
+    /// than merely proving the field exists on `CommandContext`.
+    #[derive(Debug)]
+    struct RecordingContextHandler {
+        seen_operation_key: Arc<std::sync::Mutex<Option<ego_domain::operation::OperationKey>>>,
+    }
+
+    #[async_trait]
+    impl PersistentEntity for RecordingContextHandler {
+        type Command = TestCommand;
+        type Event = TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> TestState {
+            TestState::new(0)
+        }
+
+        async fn handle_command(
+            &self,
+            _command: &TestCommand,
+            _state: &TestState,
+            context: &CommandContext,
+        ) -> Result<Vec<TestEvent>, crate::error::EntityError> {
+            *self.seen_operation_key.lock().unwrap() = context.operation_key.clone();
+            Ok(vec![])
+        }
+
+        async fn apply_event(
+            &self,
+            state: &TestState,
+            _event: &TestEvent,
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+
+        async fn apply_events(
+            &self,
+            state: &TestState,
+            _events: &[TestEvent],
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn command_context_operation_key_reaches_the_actor_unchanged() {
+        use ego_domain::operation::OperationKey;
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("tenant-x".to_string(), "probe", "actor-opkey-1");
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        let mut actor = EntityActor {
+            entity_id,
+            mailbox,
+            state: Some(TestState::new(0)),
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry,
+            tx,
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor: None,
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(RecordingContextHandler {
+                seen_operation_key: seen.clone(),
+            }),
+            event_sender,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        };
+
+        let key = OperationKey::parse("op-carriage-1").unwrap();
+        let mut context = ctx();
+        context.operation_key = Some(key.clone());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::GetState,
+                context,
+            },
+            reply: reply_tx,
+        };
+
+        actor.execute_command(envelope).await;
+        reply_rx
+            .await
+            .expect("reply sender must not be dropped")
+            .expect("a zero-event command must reply Ok");
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(key),
+            "handle_command must observe the identical OperationKey set at the boundary, \
+             not a regenerated, normalised, or reconstructed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_context_with_no_operation_key_reaches_the_actor_as_none() {
+        let seen = Arc::new(std::sync::Mutex::new(Some(
+            ego_domain::operation::OperationKey::parse("sentinel").unwrap(),
+        )));
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("tenant-x".to_string(), "probe", "actor-opkey-2");
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        let mut actor = EntityActor {
+            entity_id,
+            mailbox,
+            state: Some(TestState::new(0)),
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry,
+            tx,
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor: None,
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(RecordingContextHandler {
+                seen_operation_key: seen.clone(),
+            }),
+            event_sender,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::GetState,
+                context: ctx(),
+            },
+            reply: reply_tx,
+        };
+
+        actor.execute_command(envelope).await;
+        reply_rx
+            .await
+            .expect("reply sender must not be dropped")
+            .expect("a zero-event command must reply Ok");
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            None,
+            "an absent operation key must reach the actor as None, not a stale prior value"
+        );
+    }
 }
