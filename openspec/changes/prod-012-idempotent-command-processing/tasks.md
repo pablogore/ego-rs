@@ -4,9 +4,9 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **92 tasks total** — 11 complete and 81 pending. Complete: B0.1–B0.3 (merged as
+> **92 tasks total** — 12 complete and 80 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
-> B1.1–B1.2. The total moved from 93
+> B1.1–B1.2, B2.2. The total moved from 93
 > to 92 because A4.3–A4.5 were removed on a wrong premise and two follow-up tasks
 > were added in their place; see the note under Phase A4. The count is stated here
 > so any prose that cites it can be checked against the file rather than drifting
@@ -149,8 +149,14 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 
 ### Phase B2: `OperationReservationStore` Port + In-Memory + Lease Mechanics (may run parallel with Block A)
 
+> **Delivered in two slices.** The contract — the port, its supporting types and
+> their type-level tests — lands first and compiles and tests on its own, since
+> none of those tests needs an implementation. The in-memory implementation and
+> the behavioural tests that exercise `reserve` follow in a second slice, whose
+> volume is mostly behaviour coverage.
+
 - [ ] B2.1 RED: `crates/domain/src/operation/reservation.rs` unit tests against `TestClock` — `reserve` returns `Fresh` on first call, `OwnedInProgress` for the same owner mid-lease, `OtherInProgress` for a different owner mid-lease.
-- [ ] B2.2 GREEN: define `OperationReservationStore`, `ReserveRequest`, `OwnerFence`, `ReservationOutcome`, `ReservationError::StaleOwner`, `Lease`, `FencingToken` per the design.md Interfaces section.
+- [x] B2.2 GREEN: define `OperationReservationStore`, `ReserveRequest`, `OwnerFence`, `ReservationOutcome`, `ReservationError::StaleOwner`, `Lease`, `FencingToken` per the design.md Interfaces section.
 - [ ] B2.3 RED: lease-expiry-and-takeover test — advancing `TestClock` past `lease_until` makes a stale reservation eligible for takeover; takeover assigns a new `fencing_token` (F2 > F1) atomically.
 - [ ] B2.4 GREEN: implement takeover logic in `InMemoryOperationReservationStore` (`crates/testkit`).
 - [ ] B2.5 RED: `StaleOwner` conditional-update test — after takeover, the original owner's `complete`/`renew`/`abandon` call is rejected with `StaleOwner` and does not modify the reservation (verifies the triple `operation_id + owner_id + fencing_token`, not merely stored-token presence).

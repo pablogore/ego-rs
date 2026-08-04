@@ -501,3 +501,81 @@ Docker-backed integration suite, which is not part of this slice's validation.
 
 2 tasks complete (B1.1, B1.2). Combined with B0, A1 and A4: 11 of 92 complete.
 Next in the chain: the reservation contract, then its in-memory implementation.
+
+---
+
+## Phase B2, contract slice: the reservation port — COMPLETE
+
+Branch: `feat/prod-012-b2a-reservation-contract`, stacked on the
+`OperationKey` slice, which it genuinely depends on: `reservation.rs` imports
+`OperationKey` and `OperationFingerprint` for its request type.
+
+- [x] B2.2 GREEN: `OperationReservationStore` and its supporting types —
+      `OperationId`, `OwnerId`, `FencingToken`, `Lease`, `OwnerFence`,
+      `ReserveRequest`, `ReservationOutcome`, `StoredResponse` and
+      `ReservationError` — defined in `crates/domain/src/operation/reservation.rs`
+      per the design's Interfaces section. Port only: no implementation lives in
+      the domain crate, which its hexagonal boundary forbids.
+
+### Why the contract lands separately
+
+The seven tests in this module are type-level — that a taken-over fencing token
+is strictly greater than the original, that `OperationId` is scoped by tenant and
+key, that `OwnerFence` carries the full verification triple, that the outcome
+variants are constructible and comparable, that `StoredResponse` compares by
+content, that `StaleOwner` is distinguishable from a backend error, and that
+`ReserveRequest` carries both a fingerprint and a lease bound. None of them
+exercises `reserve`, so none needs an implementation. That is what makes this a
+coherent slice rather than an arbitrary cut, and it keeps the contract reviewable
+on its own.
+
+### UNIT — the gate for this slice
+
+Hermetic: no clock, no external resource, no implementation under test.
+
+- `cargo test -p ego-domain --lib operation`: **14/14 passed**, 0 failed
+  (7 from the identity types, 7 from the port's supporting types).
+
+### Static gates — compile and lint only
+
+- `cargo fmt --all -- --check`
+- `cargo check --workspace --all-targets`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo run -p xtask -- verify-layers`
+- `cargo run -p xtask -- verify-isolation`
+- `cargo run -p xtask -- verify-hygiene`
+
+`cargo test --workspace` was deliberately **not** run: it pulls in the inherited
+Docker-backed integration suite, which is not part of this slice's validation.
+
+### Status
+
+1 task complete (B2.2). Combined with everything prior: 12 of 92 complete.
+Next: the in-memory implementation and the behavioural tests.
+
+### Review correction — fencing overflow and the expired-owner hole
+
+Two real defects, both found by review of the split, both fixed.
+
+**`FencingToken::next` was an unchecked `+ 1`.** At `u64::MAX` that panics in a
+debug build and wraps in a release build. Wrapping is the dangerous outcome: a
+wrapped token can compare equal to a fence a prior owner still holds, un-fencing
+the very owner a takeover exists to exclude. The whole point of the type is
+exclusion, so neither a panic nor a silent wrap is acceptable. `next` now returns
+`Option<Self>` from a checked add, and the store surfaces exhaustion as an explicit
+`ReservationError::FencingExhausted` rather than minting a token that no longer
+fences. Two hermetic tests cover it: the boundary reports exhaustion instead of
+wrapping, and a thousand consecutive advances stay strictly monotonic.
+
+**The contract now states that an expired lease is not an owned lease.** `renew`'s
+doc already said "still-valid lease", but nothing in the contract said what happens
+when the triple matches and the lease has lapsed — and the implementation let it
+through. Each mutating method now documents that an expired lease is rejected as a
+stale owner, with the reason it matters: a lapsed holder renewing would resurrect a
+dead lease and defeat a legitimate takeover; completing would publish a result for
+an operation it no longer owns, which a later replay would serve as authoritative;
+abandoning would discard a reservation another caller was entitled to seize.
+
+A traceability note: the topology decision this chain follows is **D11 in
+`decisions.md`**, not "AD-11" — `design.md` carries AD-1 through AD-10 and has no
+eleventh architecture decision.
