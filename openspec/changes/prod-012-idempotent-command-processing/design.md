@@ -1,0 +1,591 @@
+# Design: PROD-012 — End-to-End Idempotent Command Processing
+
+> **Inputs**: `decisions.md` (D1–D9, binding), `proposal.md` (approved),
+> `specs/` (8 spec files). D1–D7 and D9 are settled — this document decides
+> **how**, never **what**. It resolves the three items in proposal §12 plus the
+> seven implementation questions the orchestrator raised, as AD-1 … AD-10.
+
+## Technical Approach
+
+A mandatory client-supplied `OperationKey` is extracted per transport through
+one shared contract, carried on the transport-neutral `ServiceContext`, and
+reserved under a fenced lease at a new code-generation slot inside the existing
+`#[service]` wrapper — after the `#[authorize]` and `#[tenant_scoped]` guards,
+before the first `EntityRuntime` call. Each aggregate the operation reaches
+records a permanent receipt confirmed through a caller-driven unit of work
+returned by the `EventStore` port, so append and receipt commit in one
+transaction — including the zero-event case. Recovery is re-execution: receipts
+make the second pass a no-op wherever the first pass already landed.
+
+The campaign runs as two dependency-ordered blocks (D8) inside **one** change,
+**one** spec set, **one** identifier.
+
+---
+
+## Block Structure (D8)
+
+```
+Block A — persistence foundations           Block B — end-to-end idempotency
+─────────────────────────────────           ────────────────────────────────
+A1 integration-tests crate                  B1 OperationKey + carriage
+     │                                      B2 reservation port + in-memory
+     ▼                                           │
+A2 aggregate_type real column               B3 Postgres reservation store
+     │                                      B4 EventStore unit of work
+     ▼                                           │
+A3 events effective uniqueness              B5 operation_receipts
+                                                 │
+A4 common Clock  (independent)              B6 #[idempotent] wiring — closes the bug
+                                                 │
+                                            B7 retention, purge, observability
+```
+
+| Edge | From | To | Reason |
+|---|---|---|---|
+| within A | A1 | A2 | Schema change needs a real-Postgres test home first |
+| within A | A2 | A3 | The unique index names `aggregate_type` |
+| cross | A1 | B3, B4 | First slices that genuinely need testcontainers |
+| cross | A2 | B5 | Receipts key on `aggregate_type` |
+| cross | A3 | B5 | Receipt uniqueness reuses the AD-1 pattern, proven on `events` first |
+| cross | A4 | B2, B3 | Deterministic lease/expiry/takeover tests need the injected `Clock` |
+| within B | B1, B2, B3, B5 | B6 | Wiring needs key, store, and receipts |
+| within B | B4 | B5 | Receipts are confirmed through the UoW |
+| within B | B3, B6 | B7 | Nothing depends on retention; it lands last |
+
+**Merge gate**: no Block B slice merges before A1, A2, A3 have merged, except
+**B1 and B2**, which touch no schema and no real Postgres and may proceed in
+parallel with Block A.
+
+---
+
+## Architecture Decisions
+
+### AD-1 — Effective uniqueness under the NULL-tenant systemwide mode
+
+**Decision**: two **partial unique indexes** per identity table, plus a declared
+minimum of **PostgreSQL 14**.
+
+```sql
+CREATE UNIQUE INDEX ux_events_identity_tenant ON events
+  (tenant_id, aggregate_type, aggregate_id, version) WHERE tenant_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_events_identity_systemwide ON events
+  (aggregate_type, aggregate_id, version)            WHERE tenant_id IS NULL;
+```
+
+**Criteria**: (a) enforce under `resolve_tenant(None) → Ok(None)`, which
+CORE-008A D1 blesses; (b) never introduce a magic value into a domain that
+deliberately models absence as `None`; (c) minimise the version floor imposed on
+adopters — ego-rs is a framework, not an application, and its adopters bring
+their own Postgres; (d) close the stated downside by test, not by discipline.
+
+**Runner-up**: `NULLS NOT DISTINCT`. It is one index and states the intent
+directly, but it hard-couples the correctness guarantee to PG15+. Partial
+indexes have existed since PG 7.2, so the floor becomes a support-lifecycle
+decision rather than a feature dependency. Rejected outright: a sentinel tenant
+value — every read path must translate it and a missed translation is a silent
+cross-tenant bug, which is exactly the disclosure vector the
+`Cross-Tenant Replay Is Prohibited` requirement forbids.
+
+**Consequence**: two indexes per identity table (`events`,
+`operation_receipts`, `operation_reservations`) — six total. A schema
+assertion in `crates/integration-tests/` enumerates the expected index set and
+fails when a table has one half of a pair. The declared floor is **PG 14**,
+recorded in `README.md` and in the integration-test container image; the floor
+is driven by PG 13 having reached EOL in Nov 2025, **not** by this feature.
+
+### AD-2 — The new `EventStore` contract
+
+**Decision**: the port becomes **async** and returns an opaque, caller-driven
+**unit-of-work handle**.
+
+```rust
+#[async_trait]
+pub trait EventStore<E: DomainEvent>: Send + Sync {
+    async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError>;
+    async fn load(&self, id: &StreamId) -> Result<Vec<StoredEvent<E>>, PersistenceError>;
+    async fn list_aggregate_ids(&self, tenant: Option<&str>) -> Result<Vec<StreamId>, PersistenceError>;
+    fn stream_version_offset(&self, id: &StreamId) -> u64 { 0 }
+}
+
+#[async_trait]
+pub trait EventStoreUnitOfWork<E: DomainEvent>: Send {
+    async fn append(&mut self, id: &StreamId, expected_version: i64,
+                    events: Vec<StoredEvent<E>>) -> Result<i64, PersistenceError>;
+    async fn confirm_receipt(&mut self, receipt: &OperationReceipt) -> Result<(), PersistenceError>;
+    async fn commit(self: Box<Self>) -> Result<(), PersistenceError>;
+    // Dropping without commit rolls back.
+}
+```
+
+**Criteria**: (a) the receipt must join the append transaction; (b) no `sqlx`
+type may appear in `crates/domain`; (c) the store must stay usable behind
+`Arc<dyn EventStore<E>>`; (d) CORE-030's outbox must be able to join the same
+transaction later without a second contract break.
+
+**Runner-up**: the closure form `append_with(|uow| …)`. It keeps the same
+boundary, but on a trait with an async body the higher-ranked lifetime of a
+`FnOnce(&mut Uow) -> BoxFuture<'_, _>` is the hard part the proposal already
+flagged, and it buys nothing the handle does not. Rejected: `append_in_tx(&mut
+sqlx::Transaction, …)` — a hexagonal violation the workspace does not otherwise
+tolerate. Rejected: widening `append` with a receipt parameter — it hardcodes
+exactly one co-transactional concern and CORE-030 would need the same surgery
+again.
+
+**Async: yes.** Three reasons. The transaction now spans multiple
+caller-issued calls, so `event_store.rs:76–129`'s internal `block_on` can no
+longer hide the lifecycle. `block_on` on a Tokio worker thread inside
+`EntityActor` is already a latent starvation hazard, and holding an open
+transaction across it would widen the window. `async_trait` is already a
+workspace dependency and `Interceptor` already uses it
+(`crates/service-sdk/src/interceptor/chain.rs:23`).
+
+**Consequence**: both implementors change; `append(&mut self, …)` becomes
+`&self`, removing the exclusive-borrow requirement. `EventStore` is no longer
+callable from a synchronous context — acceptable, because its only real caller
+is the async actor. The unreachable `23505` handling in `append` becomes
+reachable once A3 lands, and is mapped to `PersistenceError::Conflict`.
+
+### AD-3 — Physical home of the receipt index
+
+**Decision**: a **dedicated `operation_receipts` table**, written only through
+`EventStoreUnitOfWork::confirm_receipt`.
+
+**Criteria**: must cover zero-event successes; must carry the fingerprint (D5);
+must be permanently retained under a lifecycle distinct from `events`.
+
+**Runner-up**: columns on `events` plus a partial unique index. One write and
+atomic by construction, but it can only exist where an event exists — and the
+`Zero-event success still writes a receipt` scenario is normative, so this is
+disqualified, not merely inconvenient. Rejected: metadata on `events` plus a
+derived index table — two structures to keep consistent, rebuild cost grows with
+the stream, and the derived table still needs its own uniqueness anyway.
+
+**Consequence**: two writes per append instead of one, in the same transaction.
+`operation_key` **also** lands in `StoredEvent` metadata (the `event-store`
+spec's metadata requirement) — the two are not redundant: the table is the
+authoritative lookup index, the metadata is the correlation breadcrumb CORE-030
+will consume. Uniqueness on `(tenant_id, aggregate_type, aggregate_id,
+operation_key)` uses the AD-1 partial-index pair.
+
+### AD-4 — The shared extraction contract (D9)
+
+**Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.
+
+```rust
+pub trait OperationKeyCarrier {
+    /// The raw, unvalidated key as this transport carried it, if present.
+    fn raw_operation_key(&self) -> Option<&str>;
+    /// Stable diagnostic name, e.g. "http:Idempotency-Key". Never user input.
+    fn carrier_name(&self) -> &'static str;
+}
+
+/// The single place validation and missing-key policy live.
+pub fn resolve_operation_key(
+    carrier: &dyn OperationKeyCarrier,
+    mode: IdempotencyEnforcementMode,
+) -> Result<Option<OperationKey>, OperationKeyRejection>;
+```
+
+**Criteria**: one definition of a valid key; one definition of the missing-key
+policy; adapters contribute a location, never a rule; no adapter may make the
+core see a protocol.
+
+**Crate choice**: `crates/service-sdk`, **not** `crates/domain` and **not**
+`crates/transport`. The missing-key policy depends on
+`IdempotencyEnforcementMode`, which is deployment configuration — and
+`TenantEnforcementMode` already lives at `crates/service-sdk/src/runtime/
+tenant.rs:143`. `crates/transport` declares itself axum-only, so a contract
+there could not be implemented by a gRPC adapter without dragging in axum. The
+`OperationKey` **type** stays in `crates/domain` per D7; only the **policy**
+lives in the SDK.
+
+**HTTP adapter**: `crates/transport/src/idempotency.rs`, beside `security.rs`
+and `propagation.rs`. A newtype over `&HeaderMap` implements the trait by
+reading `Idempotency-Key`; the rejection maps to a status through the existing
+`crates/transport/src/error.rs`. gRPC would implement it over
+`tonic::metadata::MetadataMap`, Kafka over record headers, GraphQL over an
+extension map — each adding only an impl in its own crate, touching neither
+`service-sdk` nor `domain`.
+
+**Runner-up**: an extraction trait in `crates/domain`. Rejected because it
+would drag `IdempotencyEnforcementMode` — a runtime-configuration type — into
+the domain crate and split it from its `TenantEnforcementMode` sibling.
+
+**Consequence**: divergence is structurally impossible — `OperationKey::parse`
+is the only constructor and `resolve_operation_key` is the only policy entry
+point. A table-driven conformance test, `assert_carrier_conformance(&carrier)`,
+ships in `crates/testkit` so each adapter proves the same behaviour. Explicit
+non-goal honoured: `OperationKeyCarrier` reads one string and has no request,
+response, or lifecycle — it is not a `Transport` trait.
+
+### AD-5 — The reservation mechanism at the D2 position
+
+**Decision**: a new **inert marker attribute `#[idempotent]`** in
+`crates/service-sdk-macros`, with the reservation code emitted by the existing
+`#[service]` generator at a new **slot 3** — after the `#[authorize]` (slot 1)
+and `#[tenant_scoped]` (slot 2) guards, before `on_request`.
+
+**Decisive criterion** — the existing interceptor chain cannot do this.
+`Interceptor::on_request` is `async fn(&self, &ServiceContext) -> Result<(),
+ServiceError>` (`chain.rs:33`): it takes the context **immutably** and returns
+**unit**. It can veto a call, but it cannot return the stored response on a
+replay and cannot attach a lease handle to the context. Replay-with-the-original-
+response is normative (`http-transport` spec). Widening `Interceptor` to a typed
+short-circuit would make the trait generic over every operation's return type
+and change every existing implementor — a far larger blast radius than a marker.
+
+**Runner-up**: an explicit `ctx.reserve_operation(…)` call inside each handler.
+Rejected on the D1 criterion: it is per-handler discipline, and per-handler
+discipline is precisely the failure mode `UserEntity` already demonstrates
+(proposal §1). A forgotten call is silently unguarded — fail-open.
+
+**Why a marker and not a self-contained macro**: `#[authorize]` and
+`#[tenant_scoped]` are already inert markers
+(`crates/service-sdk-macros/src/lib.rs:808,824`) that the `#[service]` generator
+reads and orders. Making `#[idempotent]` a marker means the D2 position is a
+property of the **code generator**, not of the order a developer happens to
+write attributes. Like its siblings it is a compile error outside `#[service]`
+and a compile error without `#[operation]` (mirroring the existing check at
+`lib.rs:528`), so a misapplied marker can never be silently inert — the same
+fail-loud reasoning CORE-008A recorded for `#[tenant_scoped]`.
+
+**Consequence**: slot 3 reserves, and on `Succeeded` returns the stored response
+without invoking the handler. `enforce_tenant(&mut ctx_param)` runs at slot 2,
+so the `CanonicalTenant` is already on the context when slot 3 namespaces the
+key — D2 satisfied by construction. **Residual gap**: the macro cannot tell a
+mutating operation from a read-only one, so marker completeness stays a
+developer responsibility. Mitigated by a reference-app test that enumerates
+every mutating operation and asserts it carries the marker (see Risks).
+
+### AD-6 — Capability, not registry
+
+**Decision**: a single capability port `OperationReservationStore` with a
+**single fail-closed registration** on `RuntimeBuilder`. No keyed registry.
+
+**Evaluating the proposal's argument** rather than inheriting it: the proposal
+argues that CORE-019 needed a registry because `effect_type` varies per effect
+and reservation has no equivalent axis. That is correct, but the stronger
+reason is different. A keyed registry is warranted when *resolution* must pick
+an owner at call time from request data. The only candidate index here is
+`CanonicalTenant` — and per-tenant reservation stores would be actively
+harmful: the fail-closed guarantee would then depend on registry completeness,
+so a tenant with no registered store would be **silently unguarded**. That is
+exactly the fail-open shape D1 rejects. The "one entry today" argument would
+weaken over time; the fail-closed-reachability argument does not.
+
+**Counterfactual check**: if PROD-009 later shards reservations, that is
+sharding *inside one implementation*, not a registry — the conclusion survives.
+
+**Runner-up**: a keyed registry mirroring `ExecutorRegistry`
+(`crates/runtime/src/effects/registry.rs:28`). Rejected on the reachability
+argument above.
+
+**Consequence**: `RuntimeBuilder::with_operation_reservation_store(…)`;
+`build()` fails when the enforcing mode resolves and no store is registered
+(consistent with CORE-019 §10 and `resolve_tenant`'s posture). The **receipt
+store is not an independently registered port** — it is `confirm_receipt` on
+the AD-2 UoW, because a separately registered store could not join the append
+transaction. This coupling is stated, not hidden; CORE-019 hit the same wall and
+shipped `InMemoryEffectStore` as a composite.
+
+### AD-7 — Crate and module placement
+
+| Type | Home | Why |
+|---|---|---|
+| `OperationKey`, `OperationFingerprint` | `crates/domain/src/operation/key.rs` | D7: common domain crate, sibling of `idempotency.rs`, not under HTTP or runtime. A sibling `operation/` module names the concept without merging into `IdempotencyKey`'s type family |
+| `OperationReceipt` | `crates/domain/src/operation/receipt.rs` | Persistence record confirmed by the UoW; must be visible to `domain::persistence` |
+| `OperationReservationStore`, `OperationReservation`, `ReservationOutcome`, `Lease`, `FencingToken`, `ReservationError::StaleOwner` | `crates/domain/src/operation/reservation.rs` | A port reachable from `service-sdk` (caller) and `persistence` (implementor); `crates/domain` is their only common dependency |
+| `EventStore`, `EventStoreUnitOfWork`, `StreamId` | `crates/domain/src/persistence/` | Beside the trait being replaced |
+| `Clock`, `SystemClock` | `crates/domain/src/time/clock.rs` | AD-8 |
+| `IdempotencyEnforcementMode`, `RetentionPolicy` | `crates/service-sdk/src/runtime/idempotency.rs` | Deployment policy, mirroring `runtime/tenant.rs:143` |
+| `OperationKeyCarrier`, `resolve_operation_key`, `OperationKeyRejection` | `crates/service-sdk/src/idempotency/extraction.rs` | AD-4 |
+| `ServiceContext::operation_key()` | `crates/service-sdk/src/context/mod.rs` | Transport-neutral seam (D9) |
+| `#[idempotent]` marker + slot-3 codegen | `crates/service-sdk-macros/src/lib.rs` | AD-5 |
+| HTTP carrier impl | `crates/transport/src/idempotency.rs` | Beside `security.rs` / `propagation.rs` |
+| Postgres reservation store, receipt writes, migrations | `crates/persistence/src/postgres/` | Durable backend |
+| `InMemoryOperationReservationStore`, `TestClock`, `assert_carrier_conformance` | `crates/testkit` | `testkit` spec requires the double against the identical port |
+| Real-Postgres tests | `crates/integration-tests/` | `skills/testing` Rule 3 — testcontainers only |
+
+`IdempotencyKey` and `crates/runtime/src/effects/` are untouched except for the
+AD-8 clock injection. No `From<OperationKey>` exists anywhere (D7), asserted by
+a compile-fail test.
+
+### AD-8 — Clock generalization
+
+**Decision**: move the trait to `crates/domain/src/time/clock.rs`;
+`crates/domain/src/auth/clock.rs` becomes `pub use crate::time::clock::{Clock,
+SystemClock};`.
+
+**Criteria**: existing JWT call sites must keep compiling; the move must be a
+zero-behaviour-change slice; `EffectDedupStore`'s callers must not break.
+
+**Runner-up**: a hard move with call-site updates across `auth`. Rejected —
+it inflates a 150–250 line slice with unrelated churn and mixes a rename into a
+capability change. A `#[deprecated]` re-export was also rejected: it would emit
+warnings at every existing use site in a workspace that treats warnings as
+errors. The re-export is documented as the compatibility path; removing it is a
+follow-up, not this change.
+
+**`EffectDedupStore` conversion** (`crates/runtime/src/effects/store.rs:58`):
+add a `clock: Arc<dyn Clock>` field, keep the existing constructor delegating to
+`Arc::new(SystemClock)`, and add `with_clock(clock)` as the injecting
+constructor. Every existing caller compiles unchanged; `RuntimeBuilder` — the
+only production construction site — switches to `with_clock(runtime_clock)`. The
+service-sdk requirement "both observe the identical injected `Clock`" is
+asserted by a test against the builder-constructed pair. No `Utc::now()` remains
+in either store's own code.
+
+### AD-9 — Migration ordering and reversibility
+
+The repository already ships migrations `001`–`006`
+(`crates/persistence/src/postgres/migrations/`), so this change starts at `007`.
+
+| # | Migration | Reverse |
+|---|---|---|
+| 007 | `add_aggregate_type_to_events` — add nullable column, operator backfill, rewrite `aggregate_id` to the bare id, `SET NOT NULL` | **Exact** (see below) |
+| 008 | `events_stream_identity_unique` — the AD-1 partial pair | `DROP INDEX` |
+| 009 | `create_operation_receipts` + AD-1 pair | `DROP TABLE` (receipts lost) |
+| 010 | `create_operation_reservations` + AD-1 pair | `DROP TABLE` |
+
+Ordering is forced: 008 and 009 both name `aggregate_type`, so 007 must land
+first. 010 is keyed `(tenant_id, operation_key)` and is independent of 007 —
+the file number pins one order for linearity, not for correctness.
+
+**Stated plainly.** The forward step is **not derivable from data alone**.
+`EntityTriple::aggregate_id()` returns `format!("{}-{}", entity_type,
+entity_id)` (`scheduler.rs:30`), and hyphen-joining is not injective:
+`("user-account", "7")` and `("user", "account-7")` both yield
+`"user-account-7"`. There is no total inverse. Therefore 007 ships as two
+steps: a SQL step that adds the nullable column, and a **runbook step** — an
+offline backfill tool that takes the deployment's registered entity-type list,
+verifies by longest-prefix match that no stored `aggregate_id` is ambiguous
+under that list, and **aborts naming the ambiguous rows** rather than guessing.
+`SET NOT NULL` and migration 008 run only after the backfill succeeds.
+
+**The reverse step, by contrast, is exact and total**: once the columns exist,
+`UPDATE events SET aggregate_id = aggregate_type || '-' || aggregate_id` rejoins
+precisely what was split, then the column drops. So a revert is safe and
+lossless; what cannot be re-derived is the *forward* decision, which requires
+re-running the operator step. Cost, stated: the slice gates the chain — nothing
+after A2 lands until A2 is verified in a real environment.
+
+### AD-10 — Observability
+
+**Decision**: three spans, everything else a span event plus a counter, on the
+existing CORE-012A / PROD-003 OTLP surface.
+
+| Span | Parent | Why a span |
+|---|---|---|
+| `idempotency.reserve` | request-boundary span (`TracingInterceptor`) | A durable write with its own latency and failure mode |
+| `idempotency.takeover` | request-boundary span | A distinct causal unit with a different owner |
+| `idempotency.purge_batch` | root | Background worker; there is no request span |
+
+| Signal | Kind | Attributes |
+|---|---|---|
+| `idempotency.key.rejected` | counter | `reason` = `missing` \| `invalid`, `carrier` |
+| `idempotency.reservation.outcome` | counter | `outcome` = `fresh` \| `taken_over` \| `owned_in_progress` \| `other_in_progress` \| `succeeded` \| `conflict` |
+| `idempotency.lease.event` | counter | `event` = `acquired` \| `renewed` \| `expired` \| `taken_over` |
+| `idempotency.lease.stale_owner` | counter | `operation` = `renew` \| `complete` \| `abandon` |
+| `idempotency.receipt.outcome` | counter | `outcome` = `confirmed` \| `already_applied` \| `conflict`, `aggregate_type` |
+| `idempotency.purge.rows` | counter | — |
+| `idempotency.purge.batch_duration` | histogram | — |
+| `idempotency.purge.oldest_completed_age` | gauge | — |
+
+**Redaction**: `operation_key` is client-supplied and may carry business
+identifiers. It is **never emitted raw**. Spans carry
+`idempotency.operation_key_hash` — the first 16 hex chars of SHA-256 — following
+CORE-019 §12. Because that value is unbounded, it is a **span attribute only,
+never a metric attribute**; `aggregate_type` is bounded by the registered entity
+set and is safe as a metric attribute. Stored responses are never logged, never
+emitted as attributes, and never included in error messages.
+
+---
+
+## Data Flow — Happy Path
+
+```
+HTTP request (Idempotency-Key: K)
+  │
+  ├─ crates/transport/src/idempotency.rs
+  │     HeaderCarrier(&HeaderMap) : OperationKeyCarrier
+  │     resolve_operation_key(carrier, mode) → OperationKey(K)
+  │        missing / invalid ⇒ rejection response; handler never invoked
+  │
+  ├─ ServiceContext { …, operation_key: Some(K) }        ← transport-neutral seam
+  │
+  ├─ #[service]-generated wrapper
+  │     slot 1  #[authorize]       — deny ⇒ return; no reservation is created
+  │     slot 2  #[tenant_scoped]   — enforce_tenant(&mut ctx) ⇒ CanonicalTenant T
+  │     slot 3  #[idempotent]      — store.reserve(T, K, fingerprint, owner O,
+  │                                     lease_until = clock.now() + lease)
+  │                Fresh / TakenOver ⇒ continue
+  │                Succeeded         ⇒ return stored response; handler never runs
+  │                Conflict          ⇒ permanent conflict
+  │                *InProgress       ⇒ contention response
+  │     on_request → handler body
+  │
+  ├─ EntityRuntime → EntityActor::execute_command(CommandContext{ operation_key: K })
+  │     receipt lookup (T, aggregate_type, aggregate_id, K)
+  │        hit + same fingerprint  ⇒ no-op, return recorded outcome
+  │        hit + other fingerprint ⇒ permanent conflict, handle_command not invoked
+  │        miss                    ⇒ handle_command
+  │     uow = event_store.begin()
+  │        uow.append(StreamId{T, type, id}, expected_version, events)   ← may be empty
+  │        uow.confirm_receipt(OperationReceipt{ …, K, fingerprint, outcome })
+  │        uow.commit()          ◄── ONE transaction, zero-event case included
+  │
+  └─ slot 3 epilogue: store.complete(op_id, O, fencing_token, response)
+                       conditional update; stale ⇒ StaleOwner, response discarded
+```
+
+## Data Flow — Lease-Expiry Recovery
+
+```
+t0  owner O1, fencing F1: reserve(T, K) ⇒ Fresh, lease_until = t0 + L
+t1  TenantOrganization/org-1: append + receipt(K) committed in one tx
+t2  process dies. Reservation stays InProgress — never TTL-purged (D5).
+t3  retry with the same K arrives at owner O2
+      reserve() observes InProgress with lease_until < clock.now()
+      ⇒ atomic takeover: owner_id := O2, fencing_token := F2 (F2 > F1),
+                          lease_until := clock.now() + L
+      ⇒ ReservationOutcome::TakenOver
+t4  O2 re-executes the same operation:
+      TenantOrganization/org-1 → receipt(K, F) present, fingerprint matches ⇒ no-op
+      User/user-7              → no receipt ⇒ handle_command ⇒ append + receipt, one tx
+t5  O2 complete(op, O2, F2, response) ⇒ Ok
+t5' O1 revives and calls complete(op, O1, F1, …) ⇒ StaleOwner; reservation unmodified
+```
+
+Exactly one `UserRegistered`. No atomicity is claimed between t4's two writes —
+proposal §9 is normative.
+
+The same flow as a sequence, showing which participant holds the lease at each
+step and where the revived original owner is rejected:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant O1 as Owner O1
+    participant R as Reservation store
+    participant Org as TenantOrganization/org-1
+    participant U as User/user-7
+    participant O2 as Owner O2
+
+    C->>O1: command, key K
+    O1->>R: reserve(T, K)
+    R-->>O1: Fresh — owner O1, fencing F1, lease_until t0+L
+    O1->>Org: handle_command
+    Org->>Org: append + receipt(K) in one transaction
+    Note over O1: process dies before complete()
+    Note over R: reservation stays InProgress,<br/>never TTL-purged
+
+    C->>O2: retry, same key K
+    O2->>R: reserve(T, K)
+    R-->>O2: TakenOver — lease_until expired,<br/>owner O2, fencing F2 where F2 > F1
+    O2->>Org: handle_command
+    Org-->>O2: receipt(K) present, fingerprint matches — no-op
+    O2->>U: handle_command
+    U->>U: append + receipt(K) in one transaction
+    O2->>R: complete(op, O2, F2, response)
+    R-->>O2: Ok
+
+    O1->>R: complete(op, O1, F1, response)
+    R-->>O1: StaleOwner — reservation unmodified
+```
+
+Note that steps 12 and 13 are where the guarantee is actually earned: the
+re-execution is safe only because `Org` already holds a receipt for `K`. Without
+it the retry would emit a second event, which is precisely what the receipt table
+exists to prevent.
+
+---
+
+## Interfaces
+
+```rust
+// crates/domain/src/operation/reservation.rs
+#[async_trait]
+pub trait OperationReservationStore: Send + Sync {
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError>;
+    async fn renew(&self, fence: &OwnerFence, until: DateTime<Utc>) -> Result<(), ReservationError>;
+    async fn complete(&self, fence: &OwnerFence, response: StoredResponse) -> Result<(), ReservationError>;
+    async fn abandon(&self, fence: &OwnerFence) -> Result<(), ReservationError>;
+    async fn purge_completed_before(&self, cutoff: DateTime<Utc>, batch: usize) -> Result<u64, ReservationError>;
+}
+
+/// Every mutating call carries the full triple — D6 requires verification,
+/// not merely storage, of the fencing token.
+pub struct OwnerFence { pub operation_id: OperationId, pub owner_id: OwnerId, pub fencing_token: FencingToken }
+
+pub enum ReservationOutcome { Fresh(Lease), TakenOver(Lease), OwnedInProgress(Lease),
+                              OtherInProgress, Succeeded(StoredResponse), Conflict }
+
+pub enum ReservationError { StaleOwner, Backend(String) }
+```
+
+`ReservationOutcome` deliberately extends `DedupOutcome`'s five-way shape with
+`TakenOver`: takeover must be independently observable for AD-10 and for the
+recovery assertion in proposal §17.
+
+---
+
+## Testing Strategy
+
+| Layer | What | Where |
+|---|---|---|
+| Unit | `OperationKey` validation; no-`From` compile-fail; `resolve_operation_key` policy table; `ReservationOutcome` transitions against `TestClock`; slot-3 ordering via macro expansion | `#[cfg(test)]` in-crate |
+| Unit | In-memory reservation store: lease expiry, takeover, `StaleOwner`, fingerprint conflict — all deterministic under `TestClock` | `crates/testkit` + in-crate |
+| Integration | Macro codegen; `assert_carrier_conformance` for the HTTP carrier; `EffectDedupStore` and reservation store observe the same injected `Clock` | `crates/<crate>/tests/` |
+| Integration (real PG) | Both partial-index pairs reject duplicates including `tenant_id IS NULL`; append + receipt atomicity; zero-event receipt; concurrent takeover; two concurrent purge workers; cross-tenant non-replay; characterization of today's `append` before A2 | `crates/integration-tests/` — testcontainers only |
+| E2E | Retried `POST /register` yields one `UserRegistered` and one welcome email; kill-after-org-command recovery | `examples/reference-app/tests/` |
+
+Strict TDD: every RED test above is written before its production change.
+`crates/integration-tests/` activates the `PENDING [INFRA-CRATE]` block in
+`skills/testing` and needs a `foundation-integrity` layer-map entry.
+
+## Security
+
+| Rule | Applied |
+|---|---|
+| No SQL injection | Every reservation/receipt query binds `tenant_id`, `operation_key`, `fencing_token` as `$N`. No interpolation anywhere, including migrations |
+| Tenant isolation | The uniqueness namespace is `CanonicalTenant` from `TenantResolver::resolve`, never the raw hint (D2, CORE-008A) |
+| Cross-tenant replay | Tenant is part of the identity by construction; AD-1's partial pair keeps the systemwide scope a distinct namespace rather than a wildcard. A cross-tenant replay test is a success criterion |
+| Untrusted boundary input | `OperationKey` is a validated, length-bounded newtype; hashed in telemetry (AD-10); never concatenated into SQL |
+
+## Threat Matrix
+
+**N/A** — this design introduces no shell command, subprocess, git repository
+selection, commit/push state handling, PR automation, or executable-file
+classification. The only new boundary is an in-process HTTP header reaching a
+parameterised SQL lookup, covered by the Security table above rather than by the
+routing/shell matrix.
+
+## Migration / Rollout
+
+Per AD-9. Kill switch: setting `IdempotencyEnforcementMode` to its bounded
+compatibility variant disables enforcement at runtime with no code revert
+(proposal §15). Blocks A3/A4 and B1–B7 revert as code; A2 reverts by exact
+rejoin; B5's `operation_receipts` rows become harmless orphans on revert.
+
+## Open Questions
+
+- [ ] **Renewal cadence and owner.** Slot 3 owns the lease; whether a
+      long-running operation renews from a spawned task or the lease is simply
+      sized above the operation timeout is unresolved. Default assumption:
+      lease length is configuration, no background renewal in this change.
+- [ ] **Readiness gating.** The service-sdk spec pins *startup* fail-closed but
+      is silent on readiness. Proposed: startup only — a runtime that started
+      has a store by construction.
+- [ ] **Purge worker ownership.** Runtime-owned under CORE-017 ordering
+      (assumed here) versus operator-scheduled. Affects B7 only.
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| `#[idempotent]` marker omitted on a mutating operation (fail-open, AD-5) | Reference-app test enumerating mutating operations and asserting the marker; the transport-level extractor is mandatory on mutable routes independently |
+| A2's operator backfill aborts on genuinely ambiguous production data | The pre-flight names the ambiguous rows and refuses; resolution is a manual data decision, not an automated guess |
+| AD-2's async conversion ripples further than B4 | A1's characterization tests pin current `append` behaviour before the contract changes |
+| PG 14 floor is newly declared and may surprise an adopter | AD-1 needs nothing beyond PG 7.2; the floor is lifecycle-driven and documented in `README.md` |
+| Six partial indexes drift out of pairs | Schema assertion in `crates/integration-tests/` enumerates the expected set |
