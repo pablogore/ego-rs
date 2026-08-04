@@ -34,7 +34,7 @@
 //! | `auth`          | `Claims`, `Credential`, `Clock`, `AuthenticationError` |
 //! | `config`        | `Validate`, `ConfigError` (CORE-016) |
 //! | `time`          | `Clock`, `SystemClock` — injectable UTC time source |
-//! | `operation`     | `OperationKey`, `OperationFingerprint` — identity of one client-supplied business operation |
+//! | `operation`     | `OperationKey`, `OperationFingerprint`, `OperationReservationStore` — identity of one client-supplied business operation and the port that claims it under a fenced lease |
 
 /// Actor trait, identity, lifecycle, and supervision.
 pub mod actor;
@@ -84,10 +84,12 @@ pub mod health;
 pub mod time;
 
 /// Operation-scoped identity for end-to-end idempotent command processing —
-/// `OperationKey` and `OperationFingerprint`. These name a whole
-/// client-supplied business operation; extraction from a transport and
-/// carriage through the request context are separate concerns and live
-/// elsewhere.
+/// `OperationKey`, `OperationFingerprint`, and the reservation port through
+/// which one operation is claimed under a fenced lease before it is
+/// dispatched. Extraction from a transport and carriage through the request
+/// context are separate concerns and live elsewhere; so does every concrete
+/// implementation of the port, which this crate's hexagonal boundary keeps
+/// outside the domain.
 pub mod operation;
 
 pub use actor::{Actor, ActorId, ActorLifecycleState, SupervisionStrategy};
