@@ -11,6 +11,31 @@ A hexagonal, actor-oriented, deterministic backend framework for Rust.
 - **Framework-first** — build the framework before modeling runtime governance
 - **Minimal primitives** — one concept, one trait, one responsibility
 
+## Requirements
+
+- Rust — see `rust-toolchain.toml` for the pinned version.
+- **PostgreSQL 14 or later** for the `ego-persistence` backend. This is the
+  declared minimum this workspace supports; it tracks PostgreSQL's own
+  support lifecycle rather than any feature this framework uses today.
+  `crates/integration-tests` pins its testcontainer to that exact major
+  version so the suite characterizes the declared floor, not whatever image
+  happens to be newest.
+- **A reachable Docker daemon**, because `crates/integration-tests` starts real
+  containers. `cargo test --workspace` therefore needs it too — those tests fail
+  loudly rather than skipping, so a missing daemon looks like a test failure by
+  design.
+
+  Note that the Docker CLI and these tests find the daemon differently: the CLI
+  reads its own context, while the test harness uses `DOCKER_HOST` and otherwise
+  falls back to `/var/run/docker.sock`. On a setup where that path is absent or a
+  dangling symlink — common with Colima, Podman, or Rancher Desktop — `docker`
+  commands work while the tests cannot connect. Point the harness at the real
+  socket:
+
+  ```sh
+  export DOCKER_HOST="unix://$(docker context inspect --format '{{.Endpoints.docker.Host}}' | sed 's|unix://||')"
+  ```
+
 ## Crates
 
 | Crate | Layer | Description |
