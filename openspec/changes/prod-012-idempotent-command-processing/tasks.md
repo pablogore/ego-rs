@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **101 tasks total** — 28 complete and 73 pending. Complete: B0.1–B0.3 (merged as
+> **102 tasks total** — 28 complete and 74 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -22,7 +22,8 @@
 >    only handled matching more than one.
 > 5. **101** when a second transport was made part of the change (B1.11–B1.15), so
 >    protocol-neutrality is demonstrated by two conforming adapters rather than
->    asserted by one. See the note under Phase B1b.
+>    asserted by one, and **102** with the feature-state check that a repository
+>    without CI needs in order for gated code not to rot. See the note under Phase B1b.
 >
 > The count is stated here so any prose that cites it can be checked against the file
 > rather than drifting from it — which it has done more than once.
@@ -218,13 +219,26 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       `persistent-entity`, or the reservation and receipt surfaces. A grep-style
       structural test, so the neutrality is enforced rather than trusted.
 
-**Placement, the one open decision.** `GrpcMetadataCarrier` needs `tonic`, which
-`crates/transport` does not currently depend on. Two candidates: add it to
-`crates/transport` behind a `grpc` feature, so HTTP-only builds do not compile tonic
-and both adapters live where transport adapters already live — the crate already
-hosts `GrpcServerConfig`; or a separate `crates/transport-grpc`, which keeps the
-dependency fully isolated at the cost of a new workspace member and layer-map entry
-for a small amount of code. Decide before B1.12, not during it.
+**Placement — decided.** `GrpcMetadataCarrier` lives in `crates/transport`, with
+`tonic` as an **optional** dependency behind a `grpc` feature, so the carrier compiles
+only when that feature is on. A separate `crates/transport-grpc` was rejected: a new
+workspace member and layer-map entry for a small amount of code, and it would
+fragment the adapters. Keeping both in one crate keeps them side by side — that crate
+already hosts `GrpcServerConfig` — while an HTTP-only build still never compiles tonic.
+
+**Consequence that needs a task, because this repository has no CI to catch it.** Code
+behind a feature nothing builds rots silently: it stops compiling and nobody learns
+until someone enables the feature months later. The default build does not cover it,
+and `cargo check --workspace --all-targets` does not enable non-default features.
+
+- [ ] B1.16 GREEN: exercise both feature states as part of this slice's own gate —
+      the default build and `--features grpc` — and record both commands in the
+      slice's evidence. A feature that is only ever verified by the person who wrote
+      it is not verified.
+
+Two further transports are explicitly **not** in this change: Kafka record headers,
+and any real gRPC server binding. Both would consume the same carrier contract
+unchanged, which is the point of stopping here.
 
 ### Phase B2: `OperationReservationStore` Port + In-Memory + Lease Mechanics (may run parallel with Block A)
 
