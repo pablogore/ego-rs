@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **93 tasks total** — 28 complete and 65 pending. Complete: B0.1–B0.3 (merged as
+> **101 tasks total** — 28 complete and 73 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -15,6 +15,14 @@
 >    out, two follow-ups in. See the note under Phase A4.
 > 3. **93 again** when the context bridge B1 left unspecified was recorded as B6.4a.
 >    See the note under Phase B1.
+> 4. **96** when A2 gained an explicit preflight, post-verification and evidence
+>    task (A2.7–A2.9). Three of the conditions attached to accepting the manual
+>    migration risk had no task covering them, and one — an `aggregate_id`
+>    matching no registered entity type at all — was a real hole in A2.3, which
+>    only handled matching more than one.
+> 5. **101** when a second transport was made part of the change (B1.11–B1.15), so
+>    protocol-neutrality is demonstrated by two conforming adapters rather than
+>    asserted by one. See the note under Phase B1b.
 >
 > The count is stated here so any prose that cites it can be checked against the file
 > rather than drifting from it — which it has done more than once.
@@ -73,7 +81,14 @@ Chain strategy: hybrid
 - [ ] A2.3 GREEN: add migration `crates/persistence/src/postgres/migrations/007_add_aggregate_type_to_events.sql` — nullable `aggregate_type` column; write the operator backfill tool that verifies longest-prefix-match non-ambiguity and aborts on any ambiguous row (**forward direction, not derivable from data alone**).
 - [ ] A2.4 GREEN: after backfill succeeds, `SET NOT NULL` on `aggregate_type`; split `EntityTriple::aggregate_id()` into structural fields; update `actor.rs:230` write path.
 - [ ] A2.5 GREEN: implement the **exact, lossless reverse migration** — `UPDATE events SET aggregate_id = aggregate_type || '-' || aggregate_id` rejoining precisely what was split, then drop the column. State explicitly in the migration file's down-comment: forward is abort-on-ambiguity (not derivable), reverse is exact and total.
-- [ ] A2.6 Gate: nothing in A3/B5 lands until A2 passes under `crates/integration-tests` against real Postgres (per design.md AD-9 cost statement).
+- [ ] A2.7 RED/GREEN: **preflight, before a single row is written.** Three checks, each aborting the whole run and naming the offending rows:
+      (a) an `aggregate_id` matching **no** registered entity type — distinct from ambiguity, which is matching more than one, and not covered by A2.1/A2.3;
+      (b) an `aggregate_id` that is empty or whitespace-only, since the column is `NOT NULL` but not non-empty;
+      (c) a post-split identity `(tenant_id, aggregate_type, aggregate_id, version)` that would collide with another row's — detected here rather than discovered when A3 tries to build its unique index.
+      No write happens unless all three pass, alongside A2.1's ambiguity check.
+- [ ] A2.8 RED/GREEN: **post-verification, after the backfill.** Row count unchanged; the post-split identity is unique across the table; and per identity the `version` sequence is gap-free and starts at 1. Referential integrity is deliberately **not** checked: no migration in this repository declares a foreign key, so there is nothing to verify and a check would only imply otherwise. Stream integrity is the meaningful analogue and is what A2.8 asserts.
+- [ ] A2.9 GREEN: the backfill tool emits a machine-readable report — rows scanned, rows rewritten, and every abort with its reason and offending row identifiers — and the exact command sequence is recorded as a runbook so the external pipeline can execute it unchanged when it exists. Evidence is a deliverable of this slice, not a by-product of running it locally.
+- [ ] A2.6 Gate: nothing in A3/B5 lands until A2.1–A2.5 and A2.7–A2.9 all pass under `crates/integration-tests` against real Postgres (per design.md AD-9 cost statement). A failing precondition leaves data untouched by construction, so a red gate here is a stop, never a partial migration.
 
 ### Phase A3: Effective Event Uniqueness (AD-1)
 
@@ -168,6 +183,49 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 - [x] B1.9 GREEN: add `operation_key` field + accessor to `ServiceContext`.
 - [x] B1.10 RED/GREEN: `crates/persistent-entity/src/command_context.rs` — `CommandContext` carries `operation_key` through to `EntityActor::execute_command`; test asserts identical value reaches the actor.
 
+### Phase B1b: A second transport, so protocol-neutrality is demonstrated rather than asserted
+
+> **Why this exists.** HTTP was implemented first because it is the only external
+> transport that actually exists in this repository, not because idempotency is an
+> HTTP concern. With one adapter, "protocol-agnostic" is a claim; with two it is a
+> property somebody checked. gRPC is the minimum second adapter. Kafka is
+> deliberately out of scope for this change.
+>
+> **Bounded deliberately.** This does not build a gRPC server. The repository has no
+> gRPC transport — `tonic` appears only as an OTLP exporter dependency in
+> `crates/infrastructure`, and `crates/transport` does not depend on it at all. What
+> ships here is the reusable carrier surface over `tonic`'s metadata type plus its
+> tests. Binding it to a real server belongs to whichever change introduces that
+> transport.
+
+- [ ] B1.11 RED: conformance test for a gRPC metadata carrier, driven by the **same**
+      three-state harness HTTP already passes — no protocol-specific harness, no
+      relaxed variant. Includes a real non-ASCII/non-UTF-8 metadata value so the
+      unreadable state is exercised on this transport too.
+- [ ] B1.12 GREEN: implement `GrpcMetadataCarrier` reading `idempotency-key` from
+      `tonic::metadata::MetadataMap`, reporting `Absent`, `Present` or `Unreadable`.
+      **Placement decision required before starting** — see the note below.
+- [ ] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
+      valid key, an invalid key and an unreadable value, HTTP and gRPC resolve to the
+      **identical** outcome under both enforcement modes. Any divergence is a defect
+      in whichever adapter differs, never a protocol-specific rule.
+- [ ] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
+      the crate provides "no gRPC transport" while already exporting
+      `GrpcServerConfig`. The charter is stale relative to its own contents and will
+      be more so after B1.12.
+- [ ] B1.15 RED/GREEN: assert no protocol type crosses the boundary — no `axum`,
+      `HeaderMap`, `tonic` or `MetadataMap` symbol appears in `ego-domain`,
+      `persistent-entity`, or the reservation and receipt surfaces. A grep-style
+      structural test, so the neutrality is enforced rather than trusted.
+
+**Placement, the one open decision.** `GrpcMetadataCarrier` needs `tonic`, which
+`crates/transport` does not currently depend on. Two candidates: add it to
+`crates/transport` behind a `grpc` feature, so HTTP-only builds do not compile tonic
+and both adapters live where transport adapters already live — the crate already
+hosts `GrpcServerConfig`; or a separate `crates/transport-grpc`, which keeps the
+dependency fully isolated at the cost of a new workspace member and layer-map entry
+for a small amount of code. Decide before B1.12, not during it.
+
 ### Phase B2: `OperationReservationStore` Port + In-Memory + Lease Mechanics (may run parallel with Block A)
 
 > **Delivered in two slices.** The contract — the port, its supporting types and
@@ -230,6 +288,11 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       regeneration in between. **This closes the gap B1 left open**: B1 made both
       contexts able to hold the key and proved traversal from the command envelope
       onward, but nothing joined the two halves.
+      **The bridge must not live in a transport adapter.** It belongs to the dispatch
+      path every transport shares, so each adapter decides only how to *extract* the
+      key while everything from `ServiceContext` inward is one identical path.
+      Implementing it inside the axum layer would make the actor's idempotency
+      accidentally HTTP-shaped, and the second adapter would then need its own copy.
 - [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
@@ -297,6 +360,7 @@ B4 ──▶ B5
 | Mandatory Key on Every External Mutable Command | B1.4, B1.5, B6.5 |
 | No Server-Side Key Generation | B1.4, B1.5 |
 | Operation-Scoped Identity, Reserved Before Dispatch | B1.9, B6.3, B6.4a, B6.4 |
+| The Guarantee Is Protocol-Neutral, Demonstrated By Two Adapters | B1.4, B1.5, B1.6, B1.7, B1.11, B1.12, B1.13, B1.15 |
 | Lease With Owner, Expiry, and Verified Fencing | B2.1–B2.6, B3.4, B3.5 |
 | Per-Aggregate Receipts Confirmed Atomically With the Append | B5.1–B5.7 |
 | Two Guarantees, Named Separately | B7.1, B7.5, DOC.3 |

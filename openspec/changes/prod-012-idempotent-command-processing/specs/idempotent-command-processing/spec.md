@@ -302,3 +302,35 @@ vector, not merely a correctness defect.
   the "Cross-Tenant Replay Is Prohibited" requirement above.
 - gRPC and Kafka enforcement — the contract is transport-agnostic; those
   adapters do not exist in the workspace today.
+
+### Requirement: The Guarantee Is Protocol-Neutral, Demonstrated By Two Adapters
+
+Idempotency MUST NOT depend on any protocol type. `OperationKey`,
+`OperationFingerprint`, key validation and the missing-key policy MUST live in the
+domain and SDK layers and MUST NOT reference a transport type. A transport adapter
+MUST contribute only the location a raw value is read from, never a rule about it.
+
+At least **two** transports MUST implement `OperationKeyCarrier` and MUST pass the
+identical three-state conformance harness — one adapter can satisfy a contract by
+accident, two cannot. HTTP and gRPC are the required minimum for this capability.
+Every adapter MUST report the same three states, `Absent`, `Present` and
+`Unreadable`, and MUST NOT redefine validation or enforcement for its protocol.
+
+#### Scenario: Two adapters resolve identically for every input class
+- GIVEN an HTTP carrier and a gRPC metadata carrier
+- WHEN each is presented with an absent key, a valid key, an invalid key and a value
+  that cannot be read as text
+- THEN both resolve to the identical outcome for every class, under both the
+  fail-closed and the compatibility enforcement modes
+
+#### Scenario: No protocol type reaches the core
+- GIVEN the domain layer, the entity runtime, and the reservation and receipt surfaces
+- WHEN their public and internal surfaces are inspected
+- THEN no HTTP or gRPC type appears in any of them, and idempotency behaviour is
+  reachable without naming a protocol
+
+#### Scenario: The extraction-to-dispatch path is shared, not duplicated
+- GIVEN two transports that each extract a key their own way
+- WHEN a resolved key travels onward from `ServiceContext`
+- THEN both follow one identical path to the entity, so adding a transport adds an
+  extraction step and nothing else
