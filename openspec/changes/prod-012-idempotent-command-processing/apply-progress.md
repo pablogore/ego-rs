@@ -1603,3 +1603,266 @@ more. Now 38 and 65, matching both the checkbox count and the PR body.
 Re-verified after the correction: integration **9 passed** (the eight above plus the new
 one), plus the 3 characterization tests. Unit 219 / 11 / 45. `fmt`, `check`, `clippy -D
 warnings` and the three `xtask verify-*` clean.
+---
+
+## Phase A3, first slice: null-safe tenant comparison — COMPLETE
+
+Branch: `feat/prod-012-a3-event-uniqueness`, off the tracker at `3f0f5aa`.
+
+A3 turned out to have a prerequisite that was not in the task list, so it ships as its own
+slice ahead of the unique indexes.
+
+### The defect
+
+`resolve_tenant(None)` resolves the systemwide mode to SQL NULL, and all three of the
+store's queries compared `tenant_id` to that bound parameter with plain `=`. In SQL's
+three-valued logic `tenant_id = NULL` is unknown, never true — for every row, including the
+rows whose tenant genuinely is NULL. A systemwide stream was therefore invisible to its own
+reads:
+
+- the version check inside `append` always read an empty history,
+- `load` always reported the aggregate absent,
+- `list_aggregate_ids` never listed it.
+
+The consequence is worse than invisibility. Because the version check always returned 0,
+every systemwide append at `expected_version = 0` succeeded and wrote version 1 **again**.
+History duplicated silently, with no error anywhere. The RED run demonstrated exactly that:
+the duplicate append returned `Ok(1)` instead of a conflict.
+
+Pre-existing, not introduced by A2-ii: `git show e87018a` has the same `tenant_id = $2`.
+A2-ii preserved it while adding the type column.
+
+### Why it went unnoticed, which matters more than the fix
+
+The in-memory implementation of the same port keys streams by
+`(String, String, Option<String>)` in a `HashMap`, and in Rust `None == None`. So the
+in-memory store has always handled the systemwide partition correctly while the Postgres one
+did not. **Two implementations of one port disagreed, and the hermetic suite agreed with the
+correct one.** Any test written against the in-memory store would have reported systemwide
+mode as working.
+
+That is an argument for a shared conformance suite over the `EventStore` port, the way A2
+built one for the carrier contract. Registered as debt below rather than done here.
+
+### The fix
+
+All three queries now use `tenant_id IS NOT DISTINCT FROM $n`, which compares two NULLs as
+equal while keeping NULL distinct from any concrete tenant. That second half is not
+incidental — a comparison that matched NULL against everything would have made the first two
+tests pass for entirely the wrong reason, and a systemwide read returning another tenant's
+events is an isolation breach strictly worse than the invisibility being fixed. There is a
+test for it.
+
+This is the same defect class corrected in A2-ii's post-verification queries. It is now in
+every `tenant_id` comparison the store makes.
+
+### Why this must precede A3.2
+
+`CREATE UNIQUE INDEX` fails on a table that already holds duplicates. The duplicates in the
+NULL partition are produced by exactly this defect, so adding the indexes first would turn a
+silent data problem into an opaque boot failure. Fixing the comparison stops new duplicates;
+A3.2 still needs a story for ones already there, which is the second slice's job.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: **5 new + 9 + 3 = 17 passed**, 0 failed. RED first: all five
+  new tests failed before the fix, for the predicted reasons.
+- UNIT: ego-domain **219**, ego-persistence **11**, ego-infrastructure **24**,
+  persistent-entity **45**. All pass.
+- STATIC: `fmt`, `check --workspace --all-targets`, `clippy -D warnings`, and the three
+  `xtask verify-*` all clean. `cargo test --workspace` not run.
+
+The characterization suite's module note, which had recorded this gap and deferred it to
+"the uniqueness work", is updated to say it is closed and where it is now pinned. Its own
+tests are untouched — they use a concrete tenant, which was never the broken path.
+
+### Debt found, deliberately not fixed here
+
+1. **Migrations 004, 005 and 006 are orphans.** The SQL files exist but no runner executes
+   them — `migrations()` registers only 001, 002, 003 and 007 — and no code queries
+   `read_side_offsets`, `processed_events` or `projection_state`. Dead schema, the same
+   pattern as the dead `.gitlab-ci.yml` found earlier. Out of A3's scope.
+2. **No conformance suite over the `EventStore` port**, which is why the divergence above
+   survived.
+3. **`list_aggregate_ids` still filters `aggregate_type IS NOT NULL`** with a comment saying
+   the column may still be NULL. After A2-ii's guard and `SET NOT NULL` it cannot be. The
+   filter is harmless; the comment is now false. One-line follow-up, not mixed into this
+   diff.
+
+### Debt from this slice, closed rather than carried
+
+All three items registered above are fixed in the same slice.
+
+**1. The `EventStore` port has a conformance harness.**
+`crates/testkit/src/event_store.rs` states the identity half of the contract once — version
+advance, stale-version rejection, ordered readback, absent-stream reporting, the systemwide
+and tenant partitions staying separate under a shared type and id, and the per-partition
+listing. Both adapters are judged against it: the in-memory store hermetically in
+`crates/infrastructure/tests/`, the PostgreSQL store against a real database in
+`crates/integration-tests/`.
+
+The harness was verified to have teeth rather than assumed to. With the null-safe comparison
+temporarily reverted, the PostgreSQL run fails on exactly the divergence:
+
+```
+a systemwide stream must see the history it just wrote: appending at expected version 1
+must succeed, not be rejected as though the stream were empty:
+Conflict { aggregate_id: "conformance-shared-identity", expected: 1, actual: 0 }
+```
+
+while the in-memory store passes the identical assertions. That is the divergence
+reproduced, not described. The fix was then restored and the diff confirmed to hold only the
+intended change.
+
+Deliberately not asserted: durability, concurrency, snapshotting. A harness that demands
+more than the contract turns every adapter into a copy of whichever one it was written
+against.
+
+`ego-testkit` is a **dev-dependency** of `ego-infrastructure`, never a build-time one —
+testkit is tooling, and no production crate may depend on tooling. `verify-layers` excludes
+dev edges for that reason and still reports 17 crates, 0 violations.
+
+**2. The migration registry is checked against the filesystem.**
+Migrations 004, 005 and 006 are removed, and `migrations.rs` gains a bidirectional test:
+every `.sql` file is registered, and every registration has a file. Plus one asserting the
+registry ascends by numeric prefix, since registration order *is* execution order.
+
+Removing rather than registering, and why: the three files had no consumer — no Postgres
+read-side adapter exists, only the domain SPI traits — so registering them would create
+three unused tables in every deployment for a feature that does not exist. The pattern this
+repository now follows is the one 007 used: the migration ships with the code that needs it.
+Git keeps them at `e5b4074` for whoever writes that adapter. The reverse call is one review
+comment away; the test is the part that matters either way, because it converts "someone
+forgot" into a failing test.
+
+**3. `list_aggregate_ids` no longer filters on a condition that cannot occur.**
+The `AND aggregate_type IS NOT NULL` filter and its comment claiming rows may still predate
+the backfill are both gone. `open` refuses to return a store while any row lacks its type,
+and the backfill makes the column mandatory in the database, so by the time the method is
+callable the column is non-null for every row. A guard against an impossible state implies
+the state is possible.
+
+### Verification after the debt fixes
+
+- UNIT: ego-domain **219**, ego-persistence **13** (up 2 — the registry tests),
+  ego-infrastructure **24**, persistent-entity **45**, ego-testkit **86**. All pass.
+- HERMETIC conformance: in-memory store **1 passed**.
+- INTEGRATION, real PostgreSQL: **9 + 3 + 1 + 5 = 18 passed**, 0 failed.
+- STATIC: `fmt`, `clippy -D warnings`, and the three `xtask verify-*` all clean.
+
+Clippy again caught something the passing test run did not — an unused import in the new
+conformance test. Fixed before commit, not deferred.
+
+---
+
+## Phase A3, second slice: database-enforced stream identity — COMPLETE
+
+Same branch as A3-i, third commit. A3 is now fully complete.
+
+### The strategy, chosen by measurement rather than assumption
+
+A single conventional `UNIQUE (tenant_id, aggregate_type, aggregate_id, version)` would have
+been wrong, and wrong in the exact place this change already found damage: PostgreSQL treats
+every NULL as distinct from every other NULL, so such an index permits unlimited duplicate
+identities in the tenant-less partition.
+
+`NULLS NOT DISTINCT` expresses the intent in one index, but it arrived in PostgreSQL 15 and
+this workspace declares 14 as its floor (README.md). That was verified against the pinned
+`14-alpine` image rather than taken from documentation:
+
+```
+ERROR:  syntax error at or near "NULLS"
+LINE 1: ...CREATE UNIQUE INDEX ux ON probe (a, b) NULLS NOT DISTINCT;
+                                                  ^
+pg_index.indnullsnotdistinct present on 14: 0 columns
+```
+
+So the equivalent strategy is stated explicitly: two partial unique indexes over
+complementary predicates. Every row satisfies exactly one of `tenant_id IS NOT NULL` and
+`tenant_id IS NULL`, so together they cover the table with no gap and no overlap — the same
+semantics the store's queries express with `IS NOT DISTINCT FROM`.
+
+The systemwide half omits `tenant_id` from its column list, because its predicate already
+fixes that column to NULL for every row it contains; including it would index a constant. The
+asymmetry is deliberate and pinned rather than left to be rediscovered.
+
+### The `23505` translation, and the lie it used to tell
+
+The mapping to `PersistenceError::Conflict` already existed and was unreachable. Making it
+reachable exposed that it reported `actual: current` — and the in-process check immediately
+above has *already proven* `current == expected_version`. So the first real conflict this
+schema could produce would have claimed the expected and actual versions were the same
+number: self-contradictory, and useless to whoever has to act on it.
+
+The aborted transaction cannot be queried, so the stream is re-read on another connection.
+That value is a reading taken after the failure rather than at the instant of it, which is
+the only thing "actual" can mean once a competing writer exists. Documented as such at the
+call site.
+
+### Reaching the branch deterministically
+
+Inside one transaction the violation is unreachable by construction: the version check reads
+`MAX(version)`, so no existing row sits where the insert is about to write. It needs a
+competing commit between the read and the insert.
+
+The test creates that window without depending on timing. Another connection inserts the
+row and **does not commit** — invisible to the version check, but the unique index already
+holds its slot. `append` then reads 0, agrees, issues its `INSERT`, and **blocks**. The test
+polls `pg_locks` until it observes an ungranted lock, then commits the competing
+transaction, at which point the blocked insert fails with `23505`.
+
+The blocking observation is also what identifies *which* guard fired: had the in-process
+check caught this, `append` would have returned immediately and nothing would have waited.
+
+### Both new guarantees verified to have teeth
+
+Neither was assumed to work. Each was broken on purpose and observed to fail:
+
+1. **Restoring the old `actual: current`** — the deterministic test fails with `left: 0,
+   right: 1`. That `0` is positive proof the `23505` branch executed, since the version check
+   had read the stream as empty and passed.
+2. **Unregistering migration 008** — four of the five uniqueness tests fail, and the
+   migration-registry guard added in A3-i objects by name:
+   `these migration files exist but no code runs them: ["008_events_stream_identity_unique"]`.
+   The fifth, "two tenants may hold the same identity", correctly keeps passing: it does not
+   depend on the index.
+
+Both reversions were then restored and the diff confirmed to hold only intended changes.
+
+### The characterization test did what it was written to do
+
+`events_table_provides_no_uniqueness_guarantee_for_the_stream_identity_today` failed on this
+slice with `left: 3, right: 1` — exactly as its own failure message instructed: *"update this
+test to assert the new guarantee instead of the gap"*. Rewritten, not deleted, so the file
+still records the transition. It now asserts only that a unique guarantee exists; the precise
+shape lives in `schema_index_assertion.rs`, because two places to update is one place to
+forget.
+
+### A defect found in already-merged code
+
+The event store's open-time refusal message had lost its line continuations and shipped with
+runs of eighteen spaces inside an operator-facing string. It is in the merged tracker — it
+went in with A2-ii and was not caught in review either. Restored, and verified by
+reconstructing the runtime value rather than eyeballing the source. A scan of every string
+literal in `crates/` for interior space runs found no others. I do not have a confirmed cause
+and am not inventing one.
+
+### Held out of scope, as instructed
+
+No receipts, no reservations, no fencing, no async surface, no unit of work. The store stays
+synchronous and gains no handle.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: **9 + 3 + 1 + 3 + 5 + 5 = 26 passed**, 0 failed.
+- HERMETIC conformance: in-memory store **1 passed**.
+- UNIT: ego-domain **219**, ego-persistence **13**, ego-infrastructure **24**,
+  persistent-entity **45**, ego-testkit **86**.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene` — all clean. `cargo test --workspace` not run.
+
+Clippy caught a `type_complexity` violation the passing suite did not — the third slice in a
+row where a green test run coexisted with a failing static gate. Fixed with a named type
+alias before commit.
+
+**A3 complete. 106 tasks, 46 complete, 60 pending.**

@@ -7,32 +7,36 @@
 //! visible as an intentional, reviewed diff to this file rather than a silent
 //! regression.
 //!
-//! One thing this file explicitly does NOT assert: a unique-constraint
-//! violation being mapped to a conflict error. The `events` table today has
-//! only a non-unique index over the stream identity, so the database itself
-//! provides no uniqueness guarantee for it — two concurrent appends with the
-//! same expected version can both pass the in-process check and both insert.
-//! The corresponding error-mapping code path exists in `append`, but nothing
-//! in the current schema can trigger it. The test below asserts that gap
-//! directly by inspecting the live schema, so it fails loudly (and correctly)
-//! the day a real uniqueness guarantee is added — at which point it needs to
-//! be rewritten to assert the opposite, not deleted.
+//! One gap this file used to document — since closed: the `events` table had
+//! only a non-unique index over the stream identity, so the database provided no
+//! uniqueness guarantee for it, and two concurrent appends with the same expected
+//! version could both pass the in-process check and both insert. The
+//! error-mapping code path for a unique violation existed in `append` and nothing
+//! in the schema could trigger it.
 //!
-//! Another gap this file discovered rather than assumed: the append/load
-//! tests below use a concrete tenant, not the NULL-tenant ("systemwide")
-//! mode that the rest of this store's API otherwise treats as a first-class
-//! case. Against a real database, comparing a column to a bound `NULL`
-//! parameter with plain `=` never matches — SQL's three-valued logic makes
-//! `tenant_id = NULL` evaluate to unknown, not true, for every row — so the
-//! version-check `SELECT` inside `append` and the `SELECT` inside `load`
-//! both silently behave as if the aggregate has no prior history whenever
-//! the caller passes `tenant_id: None`. That is a real, currently-unpinned
-//! behavior gap in the systemwide mode. The null-safe form is
-//! `tenant_id IS NOT DISTINCT FROM $2`, which compares equal when both sides
-//! are NULL, but changing the query belongs with the uniqueness work rather
-//! than here. So this file does not pin the gap either way; it only avoids
-//! exercising it, to keep these characterization tests honestly describing
-//! what they actually tested.
+//! The gap test carried an instruction in its own failure message: rewrite it to
+//! assert the opposite the day a real guarantee arrives, rather than delete it.
+//! That happened, and the rewrite is at the bottom of this file. The behaviour
+//! that violation now produces is pinned in `stream_identity_uniqueness.rs`, and
+//! the index shape in `schema_index_assertion.rs`.
+//!
+//! Another gap this file discovered rather than assumed — since closed: the
+//! append/load tests below use a concrete tenant, not the NULL-tenant
+//! ("systemwide") mode that the rest of this store's API otherwise treats as a
+//! first-class case. Against a real database, comparing a column to a bound
+//! `NULL` parameter with plain `=` never matches — SQL's three-valued logic
+//! makes `tenant_id = NULL` evaluate to unknown, not true, for every row — so
+//! the version-check `SELECT` inside `append` and the `SELECT` inside `load`
+//! both silently behaved as if the aggregate had no prior history whenever the
+//! caller passed `tenant_id: None`.
+//!
+//! That gap is now fixed: all three queries use `tenant_id IS NOT DISTINCT
+//! FROM`, which compares two NULLs as equal while keeping NULL distinct from
+//! any concrete tenant. The behaviour is pinned in `systemwide_streams.rs`
+//! rather than here, because this file characterizes what the store did before
+//! the change and those tests assert what it does after. These tests still use
+//! a concrete tenant, which is now a statement about their scope rather than an
+//! avoidance of a defect.
 
 use chrono::{DateTime, Utc};
 use ego_domain::event::DomainEvent;
@@ -267,57 +271,51 @@ async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check(
     );
 }
 
+/// The gap this file used to document is closed: the database now enforces
+/// uniqueness of the stream identity.
+///
+/// This test was originally written to assert the *absence* of that guarantee,
+/// with an instruction in its own failure message to rewrite it — not delete it —
+/// the day the guarantee arrived. That day is this slice, and this is the rewrite.
+/// Keeping it means the file still records the transition: what the store used to
+/// rely on, and what now backs it.
+///
+/// It deliberately asserts only that a unique guarantee over the identity exists.
+/// The precise shape — columns, order, NULL treatment, index names — is pinned in
+/// `schema_index_assertion.rs`, and duplicating it here would create two places
+/// to update and one to forget.
 #[tokio::test]
-async fn events_table_provides_no_uniqueness_guarantee_for_the_stream_identity_today() {
+async fn the_events_table_now_enforces_uniqueness_of_the_stream_identity() {
     let (_store, pool, _container) = start_store().await;
 
-    // Every index on `events`, from the live schema — not from reading the
-    // migration source, so this reflects what Postgres actually enforces.
+    // From the live schema, not from reading the migration source, so this
+    // reflects what Postgres actually enforces.
     let indexes: Vec<(String, String)> =
         sqlx::query_as("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'events'")
             .fetch_all(&pool)
             .await
             .expect("pg_indexes must be queryable against the migrated schema");
 
-    assert!(
-        !indexes.is_empty(),
-        "the events table must have at least its primary key index"
-    );
-
-    let identity_indexes: Vec<&(String, String)> = indexes
+    let unique_identity_indexes: Vec<&(String, String)> = indexes
         .iter()
-        .filter(|(_, def)| def.contains("aggregate_id"))
+        .filter(|(_, def)| def.contains("aggregate_id") && def.to_uppercase().contains("UNIQUE"))
         .collect();
 
-    assert_eq!(
-        identity_indexes.len(),
-        1,
-        "expected exactly the one non-unique idx_events_aggregate index today; \
-         if this changed, the uniqueness gap this test documents may have closed"
+    assert!(
+        !unique_identity_indexes.is_empty(),
+        "the stream identity must be protected by at least one unique index; without one, two \
+         concurrent appends can both pass the in-process version check and both insert, which is \
+         the state this test used to document. Found: {indexes:?}"
     );
 
-    for (name, def) in &identity_indexes {
-        assert!(
-            !def.to_uppercase().contains("UNIQUE"),
-            "index {name} unexpectedly enforces uniqueness on the stream identity \
-             ({def}); the database now provides a uniqueness guarantee it did not \
-             provide when this test was written — update this test to assert the \
-             new guarantee instead of the gap"
-        );
-    }
-
-    // Belt-and-suspenders: no unique *constraint* (as opposed to a plain
-    // index) exists either. A unique constraint always creates a backing
-    // index, so this and the check above cover both roads to the same fact.
-    let unique_constraints: Vec<(String,)> = sqlx::query_as(
-        "SELECT conname FROM pg_constraint WHERE conrelid = 'events'::regclass AND contype = 'u'",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("pg_constraint must be queryable against the migrated schema");
-
+    // The in-process version check is no longer the only thing standing between a
+    // retry and a duplicate row, which is what the append tests above rely on.
+    let non_unique_identity_only = indexes
+        .iter()
+        .filter(|(_, def)| def.contains("aggregate_id"))
+        .all(|(_, def)| !def.to_uppercase().contains("UNIQUE"));
     assert!(
-        unique_constraints.is_empty(),
-        "no unique constraint should exist on the events table today; found: {unique_constraints:?}"
+        !non_unique_identity_only,
+        "every index over the identity is non-unique, so the database enforces nothing"
     );
 }
