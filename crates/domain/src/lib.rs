@@ -57,7 +57,8 @@ pub mod event;
 /// Observability port — SemanticEvent, Level, Observability trait.
 pub mod observability;
 
-/// Persistence SPI — EventStore, Repository, Snapshot, PersistenceError.
+/// Persistence SPI — EventStore, EventStoreUnitOfWork, Repository, Snapshot,
+/// PersistenceError.
 pub mod persistence;
 
 /// CQRS query marker trait with typed Output.

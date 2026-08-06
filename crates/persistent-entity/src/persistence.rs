@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 
-use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
+use ego_domain::persistence::{
+    EventStore, EventStoreUnitOfWork, PersistenceError, Snapshot, StoredEvent,
+};
 use ego_domain::DomainEvent;
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,43 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
+    }
+
+    /// A unit of work that discards everything, which is this store's whole
+    /// contract: it accepts writes and persists nothing. Returning an error
+    /// instead would make the no-op facade unusable by any caller that opens a
+    /// unit of work, and the no-op facade exists precisely so such a caller can
+    /// run without a configured store.
+    async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
+        Ok(Box::new(DiscardingUnitOfWork {
+            _phantom: PhantomData,
+        }))
+    }
+}
+
+/// The [`NoopEventStore`]'s unit of work. Accepts appends, reports the versions
+/// they would have produced, and persists nothing on commit.
+struct DiscardingUnitOfWork<E> {
+    _phantom: PhantomData<E>,
+}
+
+#[async_trait]
+impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
+    for DiscardingUnitOfWork<E>
+{
+    async fn append(
+        &mut self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        expected_version: i64,
+        events: Vec<StoredEvent<E>>,
+    ) -> Result<i64, PersistenceError> {
+        Ok(expected_version + events.len() as i64)
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
+        Ok(())
     }
 }
 
@@ -308,7 +347,16 @@ type StreamKey = (String, String);
 /// supply an implementation that incorporates `tenant_id` into the stream
 /// key.
 pub struct InMemoryEventStore<E> {
-    streams: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+    /// Behind a shared lock rather than owned outright, so a unit of work handed
+    /// out by [`EventStore::begin`] can publish into the same store after the
+    /// borrow that created it has ended.
+    ///
+    /// `parking_lot::Mutex`, like the facade's snapshot lock: it does not poison,
+    /// so a caller that panics mid-append cannot make the store permanently
+    /// unusable for everyone sharing it. Its guard is never held across an
+    /// `.await` — only for the duration of a map operation — so it never needs to
+    /// be `Send`.
+    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
     /// Per-stream version offset — simulates events already covered by a snapshot.
     version_offsets: HashMap<StreamKey, i64>,
 }
@@ -317,7 +365,7 @@ impl<E> InMemoryEventStore<E> {
     /// Creates an empty in-memory event store.
     pub fn new() -> Self {
         InMemoryEventStore {
-            streams: HashMap::new(),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             version_offsets: HashMap::new(),
         }
     }
@@ -353,7 +401,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     ) -> Result<i64, PersistenceError> {
         let key = (aggregate_type.to_string(), aggregate_id.to_string());
         let offset = self.version_offsets.get(&key).copied().unwrap_or(0);
-        let stream = self.streams.entry(key).or_default();
+        let mut streams = self.streams.lock();
+        let stream = streams.entry(key).or_default();
 
         let current_version = stream.len() as i64 + offset;
         if current_version != expected_version {
@@ -378,14 +427,26 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         let key = (aggregate_type.to_string(), aggregate_id.to_string());
-        Ok(self.streams.get(&key).cloned().unwrap_or_default())
+        Ok(self.streams.lock().get(&key).cloned().unwrap_or_default())
     }
 
     async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        Ok(self.streams.keys().cloned().collect())
+        Ok(self.streams.lock().keys().cloned().collect())
+    }
+
+    async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
+        Ok(Box::new(StagingUnitOfWork {
+            streams: Arc::clone(&self.streams),
+            // Cloned rather than shared, and exact: offsets are declared through
+            // `with_version_offset`, a builder that consumes `self`, so they are
+            // fixed before the store can be used and cannot change while a unit
+            // of work is open.
+            version_offsets: self.version_offsets.clone(),
+            staged: HashMap::new(),
+        }))
     }
 
     fn stream_version_offset(
@@ -434,5 +495,71 @@ impl Snapshot for InMemorySnapshotStore {
         _tenant_id: Option<&str>,
     ) -> Result<Option<(i64, serde_json::Value)>, PersistenceError> {
         Ok(self.snapshots.get(stream_id).cloned())
+    }
+}
+
+/// [`InMemoryEventStore`]'s unit of work.
+///
+/// Appends accumulate in `staged` and reach the shared streams only on commit, so
+/// dropping this without committing discards them — the same observable outcome
+/// as abandoning a database transaction, reached by staging rather than by
+/// rolling back.
+///
+/// The version check counts committed events *and* what this unit of work has
+/// already staged, which is what lets two appends to one stream advance instead
+/// of colliding. Getting that wrong is how the in-memory store would come to
+/// disagree with the durable one about a case the shared conformance harness
+/// covers.
+///
+/// Version offsets are part of that arithmetic, not an exception to it. They exist
+/// so a test can pretend a snapshot already covers earlier events, and
+/// [`EventStore::append`] adds them to the stream length when deciding whether an
+/// expected version matches. A unit of work that left them out would reject an
+/// append the direct path accepts, on the same stream, with the same argument —
+/// so the version here is `offset + committed + staged`.
+struct StagingUnitOfWork<E> {
+    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    version_offsets: HashMap<StreamKey, i64>,
+    staged: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+}
+
+#[async_trait]
+impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
+    for StagingUnitOfWork<E>
+{
+    async fn append(
+        &mut self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        expected_version: i64,
+        events: Vec<StoredEvent<E>>,
+    ) -> Result<i64, PersistenceError> {
+        let key = (aggregate_type.to_string(), aggregate_id.to_string());
+
+        let offset = self.version_offsets.get(&key).copied().unwrap_or(0);
+        let committed = self.streams.lock().get(&key).map_or(0, Vec::len) as i64;
+        let staged = self.staged.get(&key).map_or(0, Vec::len) as i64;
+        let current = offset + committed + staged;
+
+        if current != expected_version {
+            return Err(PersistenceError::Conflict {
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
+                expected: expected_version,
+                actual: current,
+            });
+        }
+
+        let count = events.len() as i64;
+        self.staged.entry(key).or_default().extend(events);
+        Ok(current + count)
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
+        let mut streams = self.streams.lock();
+        for (key, events) in self.staged {
+            streams.entry(key).or_default().extend(events);
+        }
+        Ok(())
     }
 }

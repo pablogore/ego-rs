@@ -35,8 +35,10 @@ use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 ///
 /// Checked: version advance, rejection of a stale expected version, ordered
 /// readback, that a tenant partition and the systemwide partition are separate
-/// streams even when they share a type and an id, and that the aggregate listing
-/// reports each partition's own streams and only those.
+/// streams even when they share a type and an id, that the aggregate listing
+/// reports each partition's own streams and only those, and the unit-of-work
+/// semantics — staged appends invisible until commit, durable after it, and
+/// discarded when the unit of work is dropped.
 ///
 /// Not checked: durability, concurrency, snapshotting, or anything an
 /// implementation may reasonably decide for itself. A conformance harness that
@@ -239,6 +241,103 @@ where
         "the systemwide listing must hold exactly the streams written without a tenant"
     );
 
+    // --- A unit of work either lands whole or not at all ---------------------
+    // Asserted here rather than only against the durable store, because a staging
+    // implementation and a transactional one can only be trusted to agree if the
+    // same assertions are put to both. This is the "in-memory store does not
+    // silently diverge" obligation, and the divergence it guards against is not
+    // hypothetical: these two implementations already disagreed once about the
+    // tenant-less partition while both satisfying the trait's signature.
+    {
+        let mut uow = store
+            .begin()
+            .await
+            .expect("a conforming store must be able to open a unit of work");
+        let staged_version = uow
+            .append(
+                "conformance",
+                "abandoned",
+                tenant,
+                0,
+                vec![StoredEvent::without_correlation(make_event("Staged"))],
+            )
+            .await
+            .expect("appending inside a unit of work must succeed");
+        assert_eq!(
+            staged_version, 1,
+            "a unit of work must report the version it advanced to, provisional though it is"
+        );
+
+        // Still invisible: the append has not been committed.
+        match store.load("conformance", "abandoned", tenant).await {
+            Err(PersistenceError::NotFound { .. }) => {}
+            Ok(events) => panic!(
+                "an uncommitted append must not be visible to a reader, saw {} event(s)",
+                events.len()
+            ),
+            Err(other) => panic!("expected the stream to read as absent, got {other:?}"),
+        }
+        // Dropped without committing.
+    }
+
+    match store.load("conformance", "abandoned", tenant).await {
+        Err(PersistenceError::NotFound { .. }) => {}
+        Ok(events) => panic!(
+            "dropping a unit of work without committing must discard its appends, but {} \
+             event(s) survived",
+            events.len()
+        ),
+        Err(other) => panic!("expected the abandoned stream to read as absent, got {other:?}"),
+    }
+
+    // Committing is the other half. Without it, "discards on drop" would also be
+    // satisfied by a unit of work that never records anything at all.
+    let mut uow = store
+        .begin()
+        .await
+        .expect("a conforming store must be able to open a unit of work");
+    uow.append(
+        "conformance",
+        "committed-uow",
+        tenant,
+        0,
+        vec![
+            StoredEvent::without_correlation(make_event("One")),
+            StoredEvent::without_correlation(make_event("Two")),
+        ],
+    )
+    .await
+    .expect("appending inside a unit of work must succeed");
+    // A second append to the same stream inside one unit of work must see the
+    // first: a version check that consulted only committed state would reject
+    // this, which is the mistake a staging implementation is most likely to make.
+    let second = uow
+        .append(
+            "conformance",
+            "committed-uow",
+            tenant,
+            2,
+            vec![StoredEvent::without_correlation(make_event("Three"))],
+        )
+        .await
+        .expect("a second append in the same unit of work must see the first one's version");
+    assert_eq!(second, 3);
+    uow.commit()
+        .await
+        .expect("committing a unit of work must succeed");
+
+    let committed = store
+        .load("conformance", "committed-uow", tenant)
+        .await
+        .expect("the committed stream must load");
+    assert_eq!(
+        committed.len(),
+        3,
+        "every append made in the unit of work must be durable after the commit"
+    );
+    assert_eq!(committed[0].event.event_type(), "One");
+    assert_eq!(committed[2].event.event_type(), "Three");
+
     let mut tenant_listing = store
         .list_aggregate_ids(tenant)
         .await
@@ -248,6 +347,7 @@ where
         tenant_listing,
         vec![
             ("conformance".to_string(), "advances".to_string()),
+            ("conformance".to_string(), "committed-uow".to_string()),
             ("conformance".to_string(), "shared-identity".to_string()),
             ("conformance".to_string(), "stale".to_string()),
         ],

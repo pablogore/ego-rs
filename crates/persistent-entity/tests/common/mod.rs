@@ -119,4 +119,18 @@ impl EventStore<TestEvent> for CountingEventStore {
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.inner.list_aggregate_ids(tenant_id).await
     }
+
+    /// These doubles exist to inject failures into the direct append path, and
+    /// none of the tests using them opens a unit of work. An explicit refusal is
+    /// the honest answer: it cannot silently behave like a transaction, and if a
+    /// future test ever does reach here the message says what is missing rather
+    /// than the test failing somewhere further away.
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn ego_domain::persistence::EventStoreUnitOfWork<TestEvent>>, PersistenceError>
+    {
+        Err(PersistenceError::Internal(
+            "this test double does not implement unit-of-work semantics".to_string(),
+        ))
+    }
 }
