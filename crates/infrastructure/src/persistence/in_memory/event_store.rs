@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ego_domain::event::DomainEvent;
+use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 type StreamKey = (String, String, Option<String>);
@@ -178,12 +179,4 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn resolve_tenant(tenant_id: Option<&str>) -> Result<Option<String>, PersistenceError> {
-    match tenant_id {
-        Some("") => Err(PersistenceError::MissingTenant),
-        Some(t) => Ok(Some(t.to_string())),
-        None => Ok(None),
-    }
 }

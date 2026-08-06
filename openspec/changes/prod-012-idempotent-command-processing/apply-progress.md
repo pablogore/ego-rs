@@ -2256,3 +2256,88 @@ consecutive slice where that happened. `cargo test` does not apply `-D warnings`
 is not evidence about the static gates, and by now that is a rule rather than an observation.
 
 **113 tasks, 56 complete, 57 pending. B4.5c still open.**
+
+---
+
+## B4.5c: the default store, inside the harness — COMPLETE
+
+Branch: `feat/prod-012-b45c-tenant-partitioned-default-store`, off the tracker at `8f36531`.
+
+`persistent-entity`'s in-memory store — the one `EntityRuntimeBuilder` installs when none is
+supplied — was outside the shared conformance harness, and everything the harness would have
+caught, it was getting wrong.
+
+### Two divergences, both closed
+
+**Tenant partitioning.** `StreamKey` was `(aggregate_type, aggregate_id)` with `_tenant_id` unused
+in every method, so two streams sharing a type and an id in different tenants collided into one. It
+now carries `Option<String>`. Keeping the `Option` in the key rather than flattening it is what
+makes the tenant-less scope its own partition: in a keyed collection `None == None`, so two
+systemwide streams find each other, while `None` never equals `Some(_)`. That is the same semantics
+the durable store expresses with `IS NOT DISTINCT FROM`.
+
+**Absent versus empty.** `load` returned `Ok(vec![])` for a stream it had never seen. It now
+reports `NotFound`, like the durable store. B4.5d is what made that safe — recovery absorbs
+absence explicitly now, so the store can answer honestly instead of being the one place that lies
+to keep activation working.
+
+Version offsets keep their own narrower key, `(aggregate_type, aggregate_id)`, because
+`with_version_offset` takes no tenant argument. An offset therefore applies in every tenant
+partition of a stream identity. That is the granularity the API offers, and it is now stated at the
+type rather than left to be discovered.
+
+### A test was passing because of the defect
+
+`test_recovery_replays_seeded_events` seeded the store with **no tenant** and then recovered
+through an actor, which recovers under `Some("default")` — the tenant the builder assigns in
+single-tenant mode. It only ever worked because the store ignored the argument.
+
+That is the useful part of the failure: the divergence was not theoretical or reachable only by an
+unusual caller. The repository's own actor-recovery test was relying on it. Fixed by seeding all
+three identity components, with the coupling named in the test rather than left implicit.
+
+### `resolve_tenant` consolidated, behaviour-preserving
+
+Four adapters carried a private copy — the PostgreSQL module and three in-memory ones — and B4.5c
+needed a fifth call site, so copying again would have knowingly worsened a duplication that already
+existed four times. The four were compared before consolidating: **two textual variants, differing
+only in `match` arm order, semantically identical.** The rule is a domain statement about what a
+tenant identifier means, not a detail of how any one store keeps rows, so it lives in
+`crates/domain/src/persistence/tenant.rs` with the tests that pinned it.
+
+One boundary the consolidated version documents that no copy did: only the exactly-empty string is
+rejected. `Some(" ")` is a tenant named `" "`. Trimming would silently rename tenants, and deciding
+that whitespace is a mistake is a policy this layer has no basis for.
+
+`ego-testkit` enters `persistent-entity` as a **dev-dependency**, which creates a dev-only cycle
+(testkit depends on persistent-entity). Cargo permits that, and the three `xtask verify-*` gates
+still pass — `verify-layers` excludes dev edges, which is the same reason the infrastructure crate
+could take the harness in B4-i.
+
+### Both divergences verified to have teeth
+
+- Flattening every tenant to `None` fails the harness:
+  `a tenant stream sharing a type and an id with a systemwide stream must be independent of it:
+  Conflict { aggregate_id: "conformance-shared-identity", expected: 0, actual: 2 }`
+- Returning an empty stream instead of `NotFound` fails it on the absent-stream assertion.
+
+**The first teeth check was worthless the first time I ran it, and reported success.** The patch
+targeted a multi-line tuple that `cargo fmt` had already collapsed onto one line, so it matched
+nothing, changed nothing, and the harness passed — which reads exactly like "the harness does not
+catch this". Redone with an assertion that the patch applied to all three key sites. Any teeth check
+from here asserts its own patch landed; a check that silently patches nothing is worse than no
+check, because it produces a confident wrong conclusion.
+
+### Verification
+
+- HERMETIC: `default_store_conformance` **1 passed** — the default store is now inside the harness.
+- `real_actor_path_tests` **6 passed** after correcting the seeding tenant.
+- WORKSPACE: `cargo test --workspace` — **117 suites, 1 554 passed, 0 failed**.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene`.
+
+Clippy caught an orphaned doc comment left behind when the consolidated function was removed —
+sixth consecutive slice.
+
+**114 tasks, 58 complete, 56 pending. All three `EventStore` implementations are now judged against
+one contract.**
