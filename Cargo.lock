@@ -798,6 +798,8 @@ dependencies = [
  "ego-domain",
  "ego-persistence",
  "ego-testkit",
+ "parking_lot",
+ "persistent-entity",
  "serde_json",
  "sqlx",
  "testcontainers",

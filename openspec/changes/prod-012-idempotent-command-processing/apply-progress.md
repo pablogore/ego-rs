@@ -2169,3 +2169,90 @@ It could not stay closed as one item while the default in-memory store ignores t
   `verify-isolation`, `verify-hygiene` — all clean.
 
 **112 tasks, 55 complete, 57 pending.**
+
+---
+
+## Unplanned slice: recovery of a fresh aggregate — a live defect
+
+Branch: `fix/prod-012-fresh-aggregate-recovery`, off the tracker at `827f507`.
+
+B4.5c's premise — the two in-memory stores and the durable one disagree, and the default store is
+outside the harness — turned out to be hiding something worse than a tenant-key mismatch.
+
+### The defect
+
+`PersistenceFacade::load_for_recovery` propagated whatever error `EventStore::load` returned. The
+durable store reports an aggregate with no events as `PersistenceError::NotFound`. So recovery of
+a never-persisted aggregate failed, which means **no entity could be activated for the first time
+against PostgreSQL**.
+
+Reproduced against a real database before any fix was written:
+
+```
+an aggregate with no events yet is the ordinary first state of every entity, not a
+recovery failure: "aggregate 'counter-never-written' not found"
+```
+
+It predates PROD-012 and is live on `develop`.
+
+### Why nothing caught it
+
+Every recovery test wires the in-memory store, and that one returns `Ok(vec![])` for a stream it
+has never seen instead of reporting absence. The forgiving implementation was the one under test.
+
+That is the **third** time in this change that two implementations of one port disagreed and the
+suite happened to exercise the one that was right — after the systemwide tenant comparison and
+the unit-of-work version offsets. The pattern is not that these particular stores are careless;
+it is that a port with two implementations and no shared conformance obligation will drift, and
+the drift surfaces wherever the durable path is the one nobody tested.
+
+### The fix, and the boundary it must not cross
+
+`NotFound` is absorbed as "no history". Every other error still fails recovery.
+
+That second half carries as much weight as the first. An unreadable stream — dropped connection,
+malformed row, rejected payload — is not an empty one. Recovering it as a fresh entity would
+start appending from version zero over history the entity never saw, forking a stream that
+already exists. The absence case is a normal state; the unreadable case is a failure, and
+collapsing them would trade a startup error for silent history divergence.
+
+### A gap in my own tests, found by breaking the fix on purpose
+
+The first teeth check replaced the `NotFound` arm with `Err(_) => Vec::new()` — absorbing
+*everything* — and the integration suite **stayed green**. So the tests proved the absence case
+and said nothing about the boundary the comment claimed to hold.
+
+`crates/persistent-entity/tests/recovery_absorbs_only_absence.rs` closes it, hermetically, with a
+store whose `load` fails for a reason that is not absence. With that test present, absorbing
+every error fails:
+
+```
+a store that could not be read must fail recovery, not report an empty history; got 0 event(s)
+```
+
+And reverting the fix entirely fails the integration test. Both directions pinned.
+
+### Held back deliberately
+
+The `resolve_tenant` consolidation prepared while investigating this is **not** in this slice.
+Four adapters carry a private copy of the tenant-scope rule — the PostgreSQL module and three
+in-memory ones — and B4.5c needs a fifth call site. The four were compared and are semantically
+identical (two textual variants differing only in `match` arm order), so consolidating into the
+domain is behaviour-preserving. It belongs with B4.5c, not bundled into a defect fix. The patch
+is kept for that slice.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: `recovery_of_a_fresh_aggregate` **3 passed** — the store's own
+  answer characterized first, then recovery against the durable store, then against the in-memory
+  one, reaching the identical outcome.
+- HERMETIC: `recovery_absorbs_only_absence` **1 passed**.
+- WORKSPACE: `cargo test --workspace` — **116 suites, 1 552 passed, 0 failed**.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene`.
+
+Clippy caught an unused import that the entire green workspace suite did not — the fifth
+consecutive slice where that happened. `cargo test` does not apply `-D warnings`, so a green suite
+is not evidence about the static gates, and by now that is a rule rather than an observation.
+
+**113 tasks, 56 complete, 57 pending. B4.5c still open.**
