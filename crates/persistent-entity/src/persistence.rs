@@ -238,10 +238,23 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             // TODO: EventStore::load returns the full stream; events before snap_version are loaded
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
-            let events = store
-                .load(aggregate_type, aggregate_id, tenant_id)
-                .await
-                .map_err(|e| e.to_string())?;
+            // An aggregate with no events yet is the ordinary first state of
+            // every entity, not a failure. The two store implementations report
+            // it differently — the durable one as an absent stream, the in-memory
+            // one as an empty one — and that difference is theirs to make. What
+            // recovery does with it is not: propagating the absence as an error
+            // meant no entity could be activated for the first time against the
+            // durable store, while every recovery test used the store that
+            // happened to answer the other way.
+            //
+            // Only `NotFound` is absorbed. A connection failure or a
+            // deserialization error still fails recovery, because those mean the
+            // history could not be read — not that there is none.
+            let events = match store.load(aggregate_type, aggregate_id, tenant_id).await {
+                Ok(events) => events,
+                Err(PersistenceError::NotFound { .. }) => Vec::new(),
+                Err(other) => return Err(other.to_string()),
+            };
             let base = store.stream_version_offset(aggregate_type, aggregate_id, tenant_id);
             (events, base)
         };
