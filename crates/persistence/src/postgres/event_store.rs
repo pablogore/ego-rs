@@ -8,7 +8,7 @@ use sqlx::FromRow;
 use sqlx::PgPool;
 
 use ego_domain::event::DomainEvent;
-use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
+use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 use crate::postgres::resolve_tenant;
 
@@ -286,5 +286,144 @@ where
         .map_err(|e| PersistenceError::Internal(format!("failed to query aggregate ids: {}", e)))?;
 
         Ok(rows)
+    }
+
+    async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
+        let tx =
+            self.pool.begin().await.map_err(|e| {
+                PersistenceError::Internal(format!("failed to begin transaction: {e}"))
+            })?;
+        Ok(Box::new(PostgresEventStoreUnitOfWork {
+            tx,
+            pool: self.pool.clone(),
+            _marker: PhantomData,
+        }))
+    }
+}
+
+/// A unit of work backed by one real PostgreSQL transaction.
+///
+/// Rollback-on-drop is not implemented here and is not a gap: `sqlx`'s
+/// `Transaction` already rolls back when dropped without being committed, and
+/// re-implementing that would mean tracking commit state a second time in order
+/// to disagree with it. The behaviour is asserted against a real database rather
+/// than taken on trust — see `crates/integration-tests/tests/event_store_uow.rs`.
+pub struct PostgresEventStoreUnitOfWork<E> {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    /// A separate handle, used only to re-read a stream's version after the
+    /// database refuses a duplicate identity. That refusal aborts `tx`, which can
+    /// no longer answer questions, and reporting a conflict without the real
+    /// version is what the direct append path was corrected for.
+    pool: PgPool,
+    _marker: PhantomData<E>,
+}
+
+#[async_trait]
+impl<E> EventStoreUnitOfWork<E> for PostgresEventStoreUnitOfWork<E>
+where
+    E: DomainEvent + Clone + Send + Sync + 'static,
+{
+    async fn append(
+        &mut self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        expected_version: i64,
+        events: Vec<StoredEvent<E>>,
+    ) -> Result<i64, PersistenceError> {
+        let tenant = resolve_tenant(tenant_id)?;
+
+        // Reads its own uncommitted writes, which is what makes two appends to
+        // one stream inside a single unit of work advance rather than collide.
+        let current: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(MAX(version), 0) FROM events
+               WHERE aggregate_type = $1 AND aggregate_id = $2
+                 AND tenant_id IS NOT DISTINCT FROM $3"#,
+        )
+        .bind(aggregate_type)
+        .bind(aggregate_id)
+        .bind(&tenant)
+        .fetch_one(&mut *self.tx)
+        .await
+        .map_err(|e| PersistenceError::Internal(format!("failed to query current version: {e}")))?;
+
+        if current != expected_version {
+            return Err(PersistenceError::Conflict {
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
+                expected: expected_version,
+                actual: current,
+            });
+        }
+
+        let new_version = current + events.len() as i64;
+
+        for (i, stored) in events.iter().enumerate() {
+            let event_version = current + (i as i64) + 1;
+            let event = &stored.event;
+            let inserted = sqlx::query(
+                r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            )
+            .bind(aggregate_type)
+            .bind(aggregate_id)
+            .bind(&tenant)
+            .bind(event_version)
+            .bind(event.event_type())
+            .bind(event.payload().clone())
+            .bind(*event.occurred_at())
+            .execute(&mut *self.tx)
+            .await;
+
+            if let Err(e) = inserted {
+                let is_identity_collision = matches!(
+                    &e,
+                    sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505")
+                );
+                if !is_identity_collision {
+                    return Err(PersistenceError::Internal(format!(
+                        "failed to insert event: {e}"
+                    )));
+                }
+
+                // Same reasoning as the direct append path: `current` was just
+                // proven equal to `expected_version`, so reporting it would
+                // produce a conflict claiming the two are the same number. This
+                // transaction is aborted and cannot be queried, so the stream is
+                // re-read on another connection — a reading taken after the
+                // failure, which is the only thing "actual" can mean once a
+                // competing writer exists.
+                let actual: i64 = sqlx::query_scalar(
+                    r#"SELECT COALESCE(MAX(version), 0) FROM events
+                       WHERE aggregate_type = $1 AND aggregate_id = $2
+                         AND tenant_id IS NOT DISTINCT FROM $3"#,
+                )
+                .bind(aggregate_type)
+                .bind(aggregate_id)
+                .bind(&tenant)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|read_back| {
+                    PersistenceError::Internal(format!(
+                        "the stream identity was already taken ({e}), and re-reading the stream \
+                         to report its current version also failed: {read_back}"
+                    ))
+                })?;
+
+                return Err(PersistenceError::Conflict {
+                    aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
+                    expected: expected_version,
+                    actual,
+                });
+            }
+        }
+
+        Ok(new_version)
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
+        self.tx
+            .commit()
+            .await
+            .map_err(|e| PersistenceError::Internal(format!("failed to commit transaction: {e}")))
     }
 }

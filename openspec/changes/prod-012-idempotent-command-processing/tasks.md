@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **107 tasks total** — 48 complete and 59 pending. Complete: B0.1–B0.3 (merged as
+> **110 tasks total** — 54 complete and 56 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -312,12 +312,14 @@ unchanged, which is the point of stopping here.
 
 ### Phase B4: Async `EventStore` + Unit-of-Work Contract (needs A1 characterization tests)
 
-- [ ] B4.1 RED: `crates/domain/src/persistence/event_store.rs` — trait-level test (via a mock/double) asserting the new async `EventStore::begin() -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError>` shape compiles and is callable behind `Arc<dyn EventStore<E>>`.
+- [x] B4.1 RED: `crates/domain/src/persistence/event_store.rs` — trait-level test (via a mock/double) asserting the new async `EventStore::begin() -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError>` shape compiles and is callable behind `Arc<dyn EventStore<E>>`.
 - [x] B4.2a GREEN **(first slice)**: `EventStore` becomes asynchronous (AD-2) — `append`, `load` and `list_aggregate_ids` are `async`; `stream_version_offset` stays synchronous because it reports a static property of the store's configuration with no fallible path and no I/O. Uses `#[async_trait]`, not native `async fn` in trait: the trait is consumed as `dyn EventStore<E> + Send` behind a shared lock, and a native `async fn` makes a trait non-dyn-compatible. `PostgreSQLEventStore` loses its `block_in_place` + `block_on` bridge entirely. Behaviour unchanged: the full pre-existing suite passes untouched in substance.
-- [ ] B4.2b GREEN **(second slice)**: add the `EventStoreUnitOfWork` trait with `append`, `confirm_receipt`, `commit`.
-- [ ] B4.3 RED: `crates/integration-tests/tests/event_store_uow.rs` — dropping a UoW without calling `commit()` rolls back (real Postgres transaction).
-- [ ] B4.4 GREEN: implement `PostgresEventStoreUnitOfWork` in `crates/persistence/src/postgres/event_store.rs`, replacing the `block_on`-wrapped synchronous `append` (verified constraint 2) — `append(&mut self, ...)` becomes `&self`.
-- [ ] B4.5 GREEN: implement the in-memory `EventStoreUnitOfWork` equivalent; ensure tenant-scoped uniqueness matches the durable store exactly (event-store spec: "In-Memory Store Does Not Silently Diverge").
+- [x] B4.2b GREEN **(second slice)**: add the `EventStoreUnitOfWork` trait with `append` and `commit`. **`confirm_receipt` deliberately deferred to B5**: nothing backs it today — no `operation_receipts` table, no receipt type, no caller — so shipping it now would mean a trait method whose every implementation answers "not yet". That is the same premise-without-backing already trimmed from A4 in this change. It lands in B5 alongside migration `009` and the semantics it needs. Recorded as B5.3a.
+- [x] B4.2c GREEN: `commit` takes `self: Box<Self>`, so a committed unit of work cannot be reused — the compiler refuses rather than an implementation discovering a spent transaction at runtime. There is deliberately **no `rollback`**: dropping is the rollback, which makes the safe outcome the one that happens on an early return, a cancellation, or a panic — exactly the paths where an explicit call gets missed.
+- [x] B4.3 RED: `crates/integration-tests/tests/event_store_uow.rs` — dropping a UoW without calling `commit()` rolls back (real Postgres transaction).
+- [x] B4.4 GREEN: implement `PostgresEventStoreUnitOfWork` in `crates/persistence/src/postgres/event_store.rs`. `begin` takes `&self`, not `&mut self`: handing out a transaction does not mutate the store, so requiring exclusive access would force every caller behind a lock it does not need.
+- [ ] B4.4b GREEN **(not bundled)**: narrow `EventStore::append` from `&mut self` to `&self`, which is what would let `PersistenceFacade` drop its event-store lock entirely. Deliberately separate: it changes the facade's public shape a second time, and B4-ii's claim is transactional semantics, not lock removal.
+- [x] B4.5 GREEN: implement the in-memory `EventStoreUnitOfWork` equivalent; ensure tenant-scoped uniqueness matches the durable store exactly (event-store spec: "In-Memory Store Does Not Silently Diverge").
 - [ ] B4.6 RED: `crates/domain/src/persistence/stored_event.rs` test — `StoredEvent` metadata round-trips an `operation_key` through storage and back (event-store spec scenario; verified constraint 3 — no metadata channel exists today).
 - [ ] B4.7 GREEN: add the metadata column/serialized field and bind it in the Postgres INSERT.
 - [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
@@ -326,6 +328,7 @@ unchanged, which is the point of stopping here.
 
 - [ ] B5.1 RED: `crates/integration-tests/tests/receipts.rs` — zero-event success still writes a receipt inside the same (empty) transaction (event-store + idempotent-command-processing spec scenarios).
 - [ ] B5.2 GREEN: migration `009_create_operation_receipts.sql` + AD-1 partial-index pair on `(tenant_id, aggregate_type, aggregate_id, operation_key)`, storing the fingerprint.
+- [ ] B5.3a GREEN **(deferred here from B4.2b)**: add `confirm_receipt` to the `EventStoreUnitOfWork` trait. It was left out of B4-ii because nothing backed it — no table, no receipt type, no caller — and a trait method every implementation answers "not yet" is a premise without backing.
 - [ ] B5.3 GREEN: implement `confirm_receipt` on `EventStoreUnitOfWork` for both implementors, joining the same transaction as `append`.
 - [ ] B5.4 RED: `crates/persistent-entity` test — actor consults the receipt before dispatch; matching fingerprint no-ops without invoking `handle_command`; mismatched fingerprint returns a permanent conflict without invoking `handle_command` (persistent-entity spec scenarios).
 - [ ] B5.5 GREEN: add receipt-consultation gating in `crates/persistent-entity/src/actor.rs` before the `handle_command` call at line ~213.

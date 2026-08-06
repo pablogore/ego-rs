@@ -9,7 +9,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | `error` | `PersistenceError` — NotFound, Conflict, Internal, MissingTenant |
-//! | `event_store` | `EventStore<E>` — append and load domain events |
+//! | `event_store` | `EventStore<E>` — append and load domain events; `EventStoreUnitOfWork<E>` — a span in which appends share one fate |
 //! | `repository` | `Repository<A>` — save, load, and delete aggregates |
 //! | `snapshot` | `Snapshot` — save and load aggregate state snapshots |
 //! | `stored_event` | `StoredEvent<E>` — event wrapper with optional correlation_id |
@@ -30,7 +30,7 @@ pub mod snapshot;
 pub mod stored_event;
 
 pub use error::PersistenceError;
-pub use event_store::EventStore;
+pub use event_store::{EventStore, EventStoreUnitOfWork};
 pub use repository::Repository;
 pub use snapshot::Snapshot;
 pub use stored_event::StoredEvent;

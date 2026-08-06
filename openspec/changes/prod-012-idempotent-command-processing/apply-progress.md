@@ -1994,3 +1994,112 @@ A scan for the same class of stale claim elsewhere in the tree found none.
 
 The sibling double, `PanicOnLoadEventStore`, was already correct — its comment was rewritten
 when the channel was converted. Only this one was missed.
+
+---
+
+## Phase B4, second slice: the unit of work — COMPLETE
+
+Branch: `feat/prod-012-b4ii-unit-of-work`, off the tracker at `e1e8a8f`.
+
+### Why the trait exists at all
+
+`EventStore::append` owns its own transaction and commits before returning. That makes it
+complete on its own and useless as a building block: nothing can be made to land atomically
+*with* an append, because by the time it hands back the decision is already made. A caller
+that needs two writes to share a fate has to hold the transaction open, and only the store can
+hand that out.
+
+### Two shape decisions, and what they buy
+
+**`commit` takes `self: Box<Self>`.** A committed unit of work cannot be used again, and the
+compiler is what refuses — rather than an implementation discovering a spent transaction at
+runtime and having to invent an error for it.
+
+**There is no `rollback`.** Dropping is the rollback, so the safe outcome is the one that
+happens on an early return, a cancellation, or a panic — exactly the paths where an explicit
+call is what gets missed. An explicit `rollback` would add a second way to say what dropping
+already means, and the failure mode it invites is forgetting it.
+
+`begin` takes `&self`, not `&mut self`: handing out a transaction does not mutate the store, so
+requiring exclusive access would force every caller behind a lock it does not need.
+
+### `begin` has no default implementation, deliberately
+
+A default would have to either pretend — returning something that commits each append as it
+arrives — or fail. Both let an implementation claim transactional semantics it does not
+provide. So all nine implementors answer explicitly:
+
+- **Postgres**: one real transaction. Rollback-on-drop is `sqlx`'s, not reimplemented; tracking
+  commit state a second time in order to disagree with it would be the only thing to gain.
+- **Both in-memory stores**: stage appends and publish on commit, so dropping discards them —
+  the same observable outcome as abandoning a transaction, reached by staging rather than by
+  rolling back.
+- **The no-op store**: a unit of work that discards. That is the store's whole contract, and
+  erroring instead would make the no-op facade unusable by any caller that opens one — which is
+  the exact situation the no-op facade exists for.
+- **The five test doubles**: an explicit refusal. They inject failures into the direct append
+  path and no test using them opens a unit of work; if one ever does, the message says what is
+  missing instead of the test failing somewhere further away.
+
+### The in-memory version check was the trap
+
+A staging implementation's version check has to count committed events **and** what the unit of
+work has already staged. Consulting only committed state makes a second append to the same
+stream inside one unit of work fail — and the conformance harness now covers exactly that,
+because it is the mistake this shape invites.
+
+### Both guarantees verified to have teeth
+
+Broken on purpose, observed to fail, restored:
+
+1. **Postgres UoW committing eagerly** (pool instead of transaction) — 3 of the 4 unit-of-work
+   tests fail: drop-leaves-nothing, isolation, and shared-fate. The fourth, "commit makes
+   durable", correctly keeps passing: it does not discriminate between the two behaviours, and
+   a test that passes either way is not evidence.
+2. **In-memory version check ignoring its own staged appends** — conformance fails with
+   `Conflict { aggregate_id: "conformance-committed-uow", expected: 2, actual: 0 }`, which is
+   the predicted mistake, reproduced.
+
+### The conformance harness now covers the unit of work
+
+Staged appends invisible until commit, durable after it, discarded on drop, and a second append
+in one unit of work seeing the first. Put to **both** implementations, because a staging
+implementation and a transactional one can only be trusted to agree if the same assertions are
+put to both — and these two already disagreed once about the tenant-less partition while both
+satisfying the trait's signature.
+
+### `confirm_receipt` deferred to B5, with reason
+
+B4.2b's text names `append`, `confirm_receipt` and `commit`. Only two shipped. Nothing backs the
+third today — no `operation_receipts` table, no receipt type, no caller — verified rather than
+assumed. A trait method whose every implementation answers "not yet" is the same
+premise-without-backing already trimmed from A4 in this change. Recorded as B5.3a, where the
+migration and semantics it needs arrive.
+
+### Found, reported, not fixed here
+
+**`persistent_entity::persistence::InMemoryEventStore` does not partition by tenant at all.**
+Its `StreamKey` is `(String, String)` — type and id, no tenant — and every method takes
+`_tenant_id` unused. Two streams sharing a type and id in different tenants collide into one.
+
+It matters more than a test-support store normally would, because it is the **default** the
+runtime builder installs when no store is supplied. The durable store and the other in-memory
+store both partition by tenant; this one silently does not, which is precisely the divergence
+class the conformance harness exists to catch — and running the harness against it would fail
+immediately, for a reason unrelated to this slice.
+
+Not fixed here: changing the key of the default store alters behaviour for every test that
+relies on it, and needs its own verification. B4-ii's claim is transactional semantics.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: `event_store_uow` **4 passed**; full integration suite
+  unchanged and green.
+- HERMETIC conformance, extended: **1 passed**. Postgres conformance, extended: **1 passed**.
+- WORKSPACE: `cargo test --workspace` — **113 suites, 1 544 passed, 0 failed**, exit 0. Run for
+  the same reason as in B4-i: a required trait method reaches every implementor, including ones
+  nobody would think to name.
+- STATIC: `fmt`, `clippy -D warnings` (clean first time), `verify-layers` (17 crates, 0
+  violations), `verify-isolation`, `verify-hygiene`.
+
+**110 tasks, 54 complete, 56 pending.**
