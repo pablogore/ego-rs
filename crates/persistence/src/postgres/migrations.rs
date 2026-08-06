@@ -11,6 +11,10 @@ const MIGRATION_002_CREATE_AGGREGATES: &str = include_str!("migrations/002_creat
 /// Migration SQL for creating the snapshots table.
 const MIGRATION_003_CREATE_SNAPSHOTS: &str = include_str!("migrations/003_create_snapshots.sql");
 
+/// Migration SQL for adding the (nullable) `aggregate_type` column to `events`.
+const MIGRATION_007_ADD_AGGREGATE_TYPE: &str =
+    include_str!("migrations/007_add_aggregate_type_to_events.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -36,5 +40,9 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("001_create_events", MIGRATION_001_CREATE_EVENTS),
         ("002_create_aggregates", MIGRATION_002_CREATE_AGGREGATES),
         ("003_create_snapshots", MIGRATION_003_CREATE_SNAPSHOTS),
+        (
+            "007_add_aggregate_type_to_events",
+            MIGRATION_007_ADD_AGGREGATE_TYPE,
+        ),
     ]
 }

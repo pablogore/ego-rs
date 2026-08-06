@@ -16,6 +16,7 @@ use crate::postgres::resolve_tenant;
 #[derive(FromRow)]
 #[expect(dead_code)]
 struct EventRow {
+    aggregate_type: Option<String>,
     aggregate_id: String,
     tenant_id: Option<String>,
     version: i64,
@@ -42,13 +43,50 @@ impl<E, F> fmt::Debug for PostgreSQLEventStore<E, F> {
 }
 
 impl<E, F> PostgreSQLEventStore<E, F> {
-    /// Create a new PostgreSQL event store with the given connection pool and deserializer.
-    pub fn new(pool: PgPool, deserialize: F) -> Self {
-        Self {
+    /// Opens a store against `pool`, refusing to open at all while any row is
+    /// still missing its aggregate type.
+    ///
+    /// This is the only constructor, deliberately. Every read and the version
+    /// check filter on the type column, so against a row that predates the
+    /// split — type null, identifier still joined — neither filter matches: the
+    /// comparison against null is never true and the joined text is not the bare
+    /// identifier. A stream in that state reads as absent, the version check
+    /// returns zero, and an append writes a **second, forked stream** while the
+    /// original rows sit orphaned. There is no clean recovery from that once
+    /// traffic has passed through.
+    ///
+    /// So the check runs here rather than living in a runbook step somebody has
+    /// to remember. Wiring the store up in the wrong order — new binary before
+    /// the backfill — produces a visible, recoverable startup failure instead of
+    /// silent history divergence. It runs on **every** open, with no cached
+    /// flag: a cached answer would go stale exactly when an old writer inserts
+    /// one more untyped row mid-transition, which is the case worth catching.
+    ///
+    /// The cost is one existence query per open. That buys refusing to operate
+    /// in a state where correctness is not achievable.
+    pub async fn open(pool: PgPool, deserialize: F) -> Result<Self, PersistenceError> {
+        let unmigrated: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE aggregate_type IS NULL)")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| {
+                    PersistenceError::Internal(format!(
+                "could not determine whether the aggregate-type backfill has completed: {e}"
+            ))
+                })?;
+
+        if unmigrated {
+            return Err(PersistenceError::Internal(
+                "refusing to open the event store: at least one row has no aggregate type,                  which means the backfill has not completed. Reading or writing now would                  treat existing streams as absent and fork their history. Run the backfill                  to completion first, then start this process."
+                    .to_string(),
+            ));
+        }
+
+        Ok(Self {
             pool,
             deserialize,
             _marker: PhantomData,
-        }
+        })
     }
 
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
@@ -63,6 +101,7 @@ where
 {
     fn append(
         &mut self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
@@ -70,6 +109,7 @@ where
     ) -> Result<i64, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
         let pool = self.pool.clone();
+        let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
 
         self.block_on(async move {
@@ -78,8 +118,10 @@ where
             })?;
 
             let current: i64 = sqlx::query_scalar(
-                r#"SELECT COALESCE(MAX(version), 0) FROM events WHERE aggregate_id = $1 AND tenant_id = $2"#,
+                r#"SELECT COALESCE(MAX(version), 0) FROM events
+                   WHERE aggregate_type = $1 AND aggregate_id = $2 AND tenant_id = $3"#,
             )
+            .bind(&aggregate_type)
             .bind(&aggregate_id)
             .bind(&tenant)
             .fetch_one(&mut *tx)
@@ -88,7 +130,7 @@ where
 
             if current != expected_version {
                 return Err(PersistenceError::Conflict {
-                    aggregate_id: aggregate_id.clone(),
+                    aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
                     expected: expected_version,
                     actual: current,
                 });
@@ -100,9 +142,10 @@ where
                 let event_version = current + (i as i64) + 1;
                 let event = &stored.event;
                 sqlx::query(
-                    r#"INSERT INTO events (aggregate_id, tenant_id, version, event_type, payload, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                 )
+                .bind(&aggregate_type)
                 .bind(&aggregate_id)
                 .bind(&tenant)
                 .bind(event_version)
@@ -115,7 +158,7 @@ where
                     if let sqlx::Error::Database(db_err) = &e {
                         if db_err.code().as_deref() == Some("23505") {
                             return PersistenceError::Conflict {
-                                aggregate_id: aggregate_id.clone(),
+                                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
                                 expected: expected_version,
                                 actual: current,
                             };
@@ -135,6 +178,7 @@ where
 
     fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
@@ -143,10 +187,11 @@ where
         let rows: Vec<EventRow> = self
             .block_on(async {
                 sqlx::query_as(
-                    r#"SELECT aggregate_id, tenant_id, version, event_type, payload, created_at
-                   FROM events WHERE aggregate_id = $1 AND tenant_id = $2
+                    r#"SELECT aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at
+                   FROM events WHERE aggregate_type = $1 AND aggregate_id = $2 AND tenant_id = $3
                    ORDER BY version ASC"#,
                 )
+                .bind(aggregate_type)
                 .bind(aggregate_id)
                 .bind(&tenant)
                 .fetch_all(&self.pool)
@@ -156,7 +201,7 @@ where
 
         if rows.is_empty() {
             return Err(PersistenceError::NotFound {
-                aggregate_id: aggregate_id.to_string(),
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
             });
         }
 
@@ -171,15 +216,22 @@ where
         events
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
 
-        let rows: Vec<(String,)> = self
+        // `aggregate_type` may still be NULL for rows that predate the
+        // backfill; those are excluded here rather than surfaced as a pair
+        // with a fabricated type, since this store has no way to know what
+        // the caller would consider correct for them.
+        let rows: Vec<(String, String)> = self
             .block_on(async {
                 sqlx::query_as(
-                    r#"SELECT DISTINCT aggregate_id FROM events
-                   WHERE tenant_id = $1
-                   ORDER BY aggregate_id"#,
+                    r#"SELECT DISTINCT aggregate_type, aggregate_id FROM events
+                   WHERE tenant_id = $1 AND aggregate_type IS NOT NULL
+                   ORDER BY aggregate_type, aggregate_id"#,
                 )
                 .bind(tenant)
                 .fetch_all(&self.pool)
@@ -189,6 +241,6 @@ where
                 PersistenceError::Internal(format!("failed to query aggregate ids: {}", e))
             })?;
 
-        Ok(rows.into_iter().map(|(id,)| id).collect())
+        Ok(rows)
     }
 }

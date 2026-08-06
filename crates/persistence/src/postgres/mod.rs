@@ -1,5 +1,6 @@
 //! PostgreSQL persistence implementations.
 
+pub mod aggregate_type_backfill;
 pub mod event_store;
 pub mod migrations;
 pub mod repository;

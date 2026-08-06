@@ -48,6 +48,7 @@ impl<E: DomainEvent> NoopEventStore<E> {
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEventStore<E> {
     fn append(
         &mut self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -58,6 +59,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
 
     fn load(
         &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
@@ -67,7 +69,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
     fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
     }
 }
@@ -152,17 +154,24 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
 
     /// Loads snapshot and events for recovery.
     ///
+    /// `aggregate_type` and `aggregate_id` are the structural identity
+    /// components the event store now requires; the snapshot store still
+    /// keys on the single joined string, since only the event stream's
+    /// identity is split in this change.
+    ///
     /// Returns `(Option<SnapshotData>, Vec<StoredEventRow<E>>)` where
     /// `StoredEventRow` is the local wrapper holding version metadata.
     pub async fn load_for_recovery(
         &self,
-        entity_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<(Option<SnapshotData>, Vec<StoredEventRow<E>>), String> {
+        let snapshot_key = format!("{aggregate_type}-{aggregate_id}");
         let snap = {
             let store = self.snapshot_store.lock();
             store
-                .load_snapshot(entity_id, tenant_id)
+                .load_snapshot(&snapshot_key, tenant_id)
                 .map_err(|e| e.to_string())?
         };
 
@@ -179,9 +188,9 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
             let events = store
-                .load(entity_id, tenant_id)
+                .load(aggregate_type, aggregate_id, tenant_id)
                 .map_err(|e| e.to_string())?;
-            let base = store.stream_version_offset(entity_id, tenant_id);
+            let base = store.stream_version_offset(aggregate_type, aggregate_id, tenant_id);
             (events, base)
         };
 
@@ -205,7 +214,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
     /// Returns the new aggregate version.
     pub async fn persist_events(
         &self,
-        entity_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
         tenant_id: Option<&str>,
         version: u64,
         events: &[E],
@@ -219,7 +229,13 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         let new_version = {
             let mut store = self.event_store.lock();
             store
-                .append(entity_id, tenant_id, version as i64, stored)
+                .append(
+                    aggregate_type,
+                    aggregate_id,
+                    tenant_id,
+                    version as i64,
+                    stored,
+                )
                 .map_err(|e| e.to_string())?
         };
 
@@ -258,6 +274,12 @@ pub struct StoredEventRow<E> {
 // InMemory stores (re-export for builder/tests convenience)
 // ---------------------------------------------------------------------------
 
+/// The in-memory store's stream key: `(aggregate_type, aggregate_id)`, the
+/// same split identity the `EventStore` trait now requires — never a joined
+/// string, so two streams can never be confused by this store even if their
+/// components would join to the same text.
+type StreamKey = (String, String);
+
 /// In-memory event store backed by a `HashMap`.
 ///
 /// Suitable for tests and development. Enforces optimistic concurrency via
@@ -266,15 +288,15 @@ pub struct StoredEventRow<E> {
 /// # Tenant isolation
 ///
 /// This implementation does **not** scope streams by `tenant_id`.  All
-/// tenants share the same `aggregate_id`-keyed namespace.  This is
-/// intentional for testing purposes where single-tenant behaviour is the
-/// default.  Production deployments that require tenant isolation must
+/// tenants share the same `(aggregate_type, aggregate_id)`-keyed namespace.
+/// This is intentional for testing purposes where single-tenant behaviour is
+/// the default.  Production deployments that require tenant isolation must
 /// supply an implementation that incorporates `tenant_id` into the stream
-/// key (e.g. `"{tenant}/{aggregate_id}"`).
+/// key.
 pub struct InMemoryEventStore<E> {
-    streams: HashMap<String, Vec<StoredEvent<E>>>,
+    streams: HashMap<StreamKey, Vec<StoredEvent<E>>>,
     /// Per-stream version offset — simulates events already covered by a snapshot.
-    version_offsets: HashMap<String, i64>,
+    version_offsets: HashMap<StreamKey, i64>,
 }
 
 impl<E> InMemoryEventStore<E> {
@@ -286,12 +308,21 @@ impl<E> InMemoryEventStore<E> {
         }
     }
 
-    /// Declares that `offset` events were already persisted for `stream_id` before
-    /// this store was created (e.g. covered by a pre-seeded snapshot). The store
-    /// treats those events as implicitly present for version-check purposes without
-    /// requiring dummy event payloads to be added.
-    pub fn with_version_offset(mut self, stream_id: &str, offset: i64) -> Self {
-        self.version_offsets.insert(stream_id.to_string(), offset);
+    /// Declares that `offset` events were already persisted for
+    /// `(aggregate_type, aggregate_id)` before this store was created (e.g.
+    /// covered by a pre-seeded snapshot). The store treats those events as
+    /// implicitly present for version-check purposes without requiring dummy
+    /// event payloads to be added.
+    pub fn with_version_offset(
+        mut self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        offset: i64,
+    ) -> Self {
+        self.version_offsets.insert(
+            (aggregate_type.to_string(), aggregate_id.to_string()),
+            offset,
+        );
         self
     }
 }
@@ -299,18 +330,20 @@ impl<E> InMemoryEventStore<E> {
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryEventStore<E> {
     fn append(
         &mut self,
-        stream_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
         _tenant_id: Option<&str>,
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
-        let offset = self.version_offsets.get(stream_id).copied().unwrap_or(0);
-        let stream = self.streams.entry(stream_id.to_string()).or_default();
+        let key = (aggregate_type.to_string(), aggregate_id.to_string());
+        let offset = self.version_offsets.get(&key).copied().unwrap_or(0);
+        let stream = self.streams.entry(key).or_default();
 
         let current_version = stream.len() as i64 + offset;
         if current_version != expected_version {
             return Err(PersistenceError::Conflict {
-                aggregate_id: stream_id.to_string(),
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
                 expected: expected_version,
                 actual: current_version,
             });
@@ -325,25 +358,29 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
 
     fn load(
         &self,
-        stream_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
-        Ok(self.streams.get(stream_id).cloned().unwrap_or_default())
+        let key = (aggregate_type.to_string(), aggregate_id.to_string());
+        Ok(self.streams.get(&key).cloned().unwrap_or_default())
     }
 
     fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(self.streams.keys().cloned().collect())
     }
 
-    fn stream_version_offset(&self, aggregate_id: &str, _tenant_id: Option<&str>) -> u64 {
-        self.version_offsets
-            .get(aggregate_id)
-            .copied()
-            .unwrap_or(0)
-            .max(0) as u64
+    fn stream_version_offset(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        _tenant_id: Option<&str>,
+    ) -> u64 {
+        let key = (aggregate_type.to_string(), aggregate_id.to_string());
+        self.version_offsets.get(&key).copied().unwrap_or(0).max(0) as u64
     }
 }
 

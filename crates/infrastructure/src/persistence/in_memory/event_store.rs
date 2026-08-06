@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use ego_domain::event::DomainEvent;
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
-type StreamKey = (String, Option<String>);
+type StreamKey = (String, String, Option<String>);
 
 /// In-memory event store.
 ///
-/// Stores events per aggregate per tenant. Enforces optimistic concurrency.
+/// Stores events per `(aggregate_type, aggregate_id)` per tenant. Enforces
+/// optimistic concurrency.
 pub struct InMemoryEventStore<E> {
     streams: HashMap<StreamKey, Vec<StoredEvent<E>>>,
 }
@@ -29,20 +30,25 @@ impl<E> Default for InMemoryEventStore<E> {
 impl<E: DomainEvent + Clone> EventStore<E> for InMemoryEventStore<E> {
     fn append(
         &mut self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
-        let key = (aggregate_id.to_string(), tenant.clone());
+        let key = (
+            aggregate_type.to_string(),
+            aggregate_id.to_string(),
+            tenant.clone(),
+        );
 
         let stream = self.streams.entry(key).or_default();
         let current = stream.len() as i64;
 
         if current != expected_version {
             return Err(PersistenceError::Conflict {
-                aggregate_id: aggregate_id.to_string(),
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
                 expected: expected_version,
                 actual: current,
             });
@@ -55,27 +61,31 @@ impl<E: DomainEvent + Clone> EventStore<E> for InMemoryEventStore<E> {
 
     fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
-        let key = (aggregate_id.to_string(), tenant);
+        let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
 
         match self.streams.get(&key) {
             Some(events) => Ok(events.clone()),
             None => Err(PersistenceError::NotFound {
-                aggregate_id: aggregate_id.to_string(),
+                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
             }),
         }
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
-        let mut ids: Vec<String> = self
+        let mut ids: Vec<(String, String)> = self
             .streams
             .keys()
-            .filter(|(_, t)| *t == tenant)
-            .map(|(id, _)| id.clone())
+            .filter(|(_, _, t)| *t == tenant)
+            .map(|(atype, aid, _)| (atype.clone(), aid.clone()))
             .collect();
         ids.sort();
         Ok(ids)

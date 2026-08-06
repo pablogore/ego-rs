@@ -81,6 +81,7 @@ struct PanicOnLoadEventStore {
 impl EventStore<TestEvent> for PanicOnLoadEventStore {
     fn append(
         &mut self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -91,6 +92,7 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
 
     fn load(
         &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
@@ -104,7 +106,7 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
     fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
     }
 }
@@ -896,6 +898,7 @@ struct GatedPanicOnceEventStore {
 impl EventStore<TestEvent> for GatedPanicOnceEventStore {
     fn append(
         &mut self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -906,6 +909,7 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
 
     fn load(
         &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
@@ -925,7 +929,7 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
     fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
     }
 }
