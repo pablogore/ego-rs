@@ -924,9 +924,16 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         let call_number = self.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call_number == 1 {
-            // Synchronous, explicit wait for the test's release signal — not
-            // a sleep. Blocks this one Tokio worker thread; the other 7
-            // (`worker_threads = 8`) keep servicing the 100 caller tasks.
+            // An explicit wait for the test's release signal — not a sleep, so
+            // the gate opens when the test says so rather than after a guessed
+            // interval.
+            //
+            // Awaited, not blocked on. This runs inside the store's own async
+            // method, so yielding here returns the worker to the runtime and the
+            // 100 caller tasks keep being serviced. A blocking receive would
+            // instead park a worker for as long as the test holds the gate —
+            // which is what this did while the store bridged async to sync, and
+            // what `block_in_place` was compensating for.
             let _ = self.release_panic.lock().await.recv().await;
             panic!(
                 "guaranteed_completion_tests: intentional panic on the FIRST recovery attempt only"

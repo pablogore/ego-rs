@@ -1957,3 +1957,40 @@ Clippy again caught what the suite did not: three now-unused `parking_lot::Mutex
 Fourth slice in a row.
 
 **107 tasks, 48 complete, 59 pending.**
+
+### Review round one on B4-i — two corrections
+
+Both findings were correct.
+
+**1. B4.8 was marked complete while the command its own text requires had not been run.**
+The task reads "run full `cargo test --workspace` to catch ripple", and the PR body said in
+plain words that the command was not run. A contradiction inside one record, of the same class
+already corrected twice in this change.
+
+The available resolutions were to weaken the task or to satisfy it. Weakening it would have
+removed exactly the check that matters here: a trait signature change reaches crates nobody
+thinks to name, and choosing which crates to run is the author deciding which ripple counts.
+
+So it was run: **112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0.** That is now the
+evidence attached to the task, and B4-i is the first slice in this change where the
+workspace-wide suite is the stated gate rather than a per-crate selection.
+
+**2. `GatedPanicOnceEventStore::load` still described a mechanism it no longer uses.**
+The comment read "Synchronous, explicit wait … Blocks this one Tokio worker thread; the other
+7 (`worker_threads = 8`) keep servicing the 100 caller tasks", above a line that is now
+`recv().await`.
+
+The arithmetic was right — that test really does use `worker_threads = 8` — and the mechanism
+was wrong, which is the worse half. Awaiting *yields* the worker back to the runtime; the 100
+callers keep progressing because of that, not because seven spare workers absorb the loss of
+one. A reader would have taken the wrong model of why the test works from a comment that
+still added up.
+
+Corrected to describe what the code does, and to name what changed: a blocking receive would
+park a worker for as long as the gate is held, which is what this did while the store bridged
+async to sync, and what `block_in_place` was compensating for.
+
+A scan for the same class of stale claim elsewhere in the tree found none.
+
+The sibling double, `PanicOnLoadEventStore`, was already correct — its comment was rewritten
+when the channel was converted. Only this one was missed.

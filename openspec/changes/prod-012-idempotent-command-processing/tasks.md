@@ -320,7 +320,7 @@ unchanged, which is the point of stopping here.
 - [ ] B4.5 GREEN: implement the in-memory `EventStoreUnitOfWork` equivalent; ensure tenant-scoped uniqueness matches the durable store exactly (event-store spec: "In-Memory Store Does Not Silently Diverge").
 - [ ] B4.6 RED: `crates/domain/src/persistence/stored_event.rs` test — `StoredEvent` metadata round-trips an `operation_key` through storage and back (event-store spec scenario; verified constraint 3 — no metadata channel exists today).
 - [ ] B4.7 GREEN: add the metadata column/serialized field and bind it in the Postgres INSERT.
-- [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple.
+- [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
 
 ### Phase B5: Per-Aggregate `operation_receipts` (needs A2, A3, B4)
 
