@@ -2341,3 +2341,39 @@ sixth consecutive slice.
 
 **114 tasks, 58 complete, 56 pending. All three `EventStore` implementations are now judged against
 one contract.**
+
+### Review round one on B4.5c — a comment describing the divergence this slice removed
+
+Correct, and it was in the one place most likely to mislead: `load_for_recovery`'s own comment
+still said the durable store reports absence while the in-memory one returns an empty stream.
+This slice is what eliminated that difference. A comment explaining a fix by describing a state
+the fix abolished sends the next reader looking for a divergence that is no longer there.
+
+Rewritten to say what is true: recovery absorbs `NotFound` as "no history" whatever store
+reported it, unconditionally.
+
+One thing the rewrite does **not** claim, because it would be the same mistake in a new
+direction: uniformity. The no-op store still returns an empty stream, and that is not a
+divergence — it persists nothing, so an empty stream is the truth about it rather than a claim
+that a stream is missing. Both shapes mean the same thing to recovery, which is why it handles
+both instead of requiring one. The boundary is restated too: only `NotFound` is absorbed, because
+an unreadable stream recovered as a fresh entity would append from version zero over history it
+never saw.
+
+Scanning for the same staleness elsewhere found two more, in a file written during the previous
+slice:
+
+- `recovery_of_a_fresh_aggregate.rs`'s module doc said the two stores "answered differently" in
+  the present tense.
+- Its in-memory test's doc asserted that "the two stores disagree about how to report an absent
+  stream, and this asserts that the disagreement is invisible to recovery" — an assertion about a
+  disagreement that no longer exists.
+
+Both moved to the past tense with what replaced them stated, so the file still records why it was
+written without claiming a present state that is gone. The reviewer flagged one instance; the
+class had three.
+
+Re-verified: `fmt` and `clippy -D warnings` clean; `recovery_of_a_fresh_aggregate` **3 passed**,
+`recovery_absorbs_only_absence` **1 passed**, `default_store_conformance` **1 passed**,
+`persistent-entity` lib **45 passed**. Comment-only changes, so counts are unchanged: **114 tasks,
+58 complete, 56 pending.**

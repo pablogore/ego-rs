@@ -240,17 +240,23 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
             // An aggregate with no events yet is the ordinary first state of
-            // every entity, not a failure. The two store implementations report
-            // it differently — the durable one as an absent stream, the in-memory
-            // one as an empty one — and that difference is theirs to make. What
-            // recovery does with it is not: propagating the absence as an error
-            // meant no entity could be activated for the first time against the
-            // durable store, while every recovery test used the store that
-            // happened to answer the other way.
+            // every entity, not a failure. Recovery absorbs `NotFound` as "no
+            // history" whatever store reported it, and does so unconditionally:
+            // propagating it meant no entity could be activated for the first
+            // time against any store that reports absence.
+            //
+            // Every real implementation of the port does report it that way. The
+            // no-op store instead returns an empty stream, and that is not a
+            // divergence — it persists nothing, so an empty stream is the truth
+            // about it rather than a claim that a stream is missing. Both shapes
+            // mean the same thing here, which is why this handles both rather
+            // than requiring one.
             //
             // Only `NotFound` is absorbed. A connection failure or a
             // deserialization error still fails recovery, because those mean the
-            // history could not be read — not that there is none.
+            // history could not be *read* — not that there is none. Recovering an
+            // unreadable stream as a fresh entity would append from version zero
+            // over history it never saw.
             let events = match store.load(aggregate_type, aggregate_id, tenant_id).await {
                 Ok(events) => events,
                 Err(PersistenceError::NotFound { .. }) => Vec::new(),
