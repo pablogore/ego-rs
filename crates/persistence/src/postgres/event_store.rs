@@ -233,15 +233,17 @@ where
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
 
-        // `aggregate_type` may still be NULL for rows that predate the
-        // backfill; those are excluded here rather than surfaced as a pair
-        // with a fabricated type, since this store has no way to know what
-        // the caller would consider correct for them.
+        // No filter excluding a NULL `aggregate_type`: there is nothing left to
+        // exclude. `open` refuses to return a store while any row lacks its
+        // type, and the backfill makes the column mandatory in the database, so
+        // by the time this method can be called the column is non-null for every
+        // row. A filter guarding against that would imply the store still admits
+        // rows it cannot admit.
         let rows: Vec<(String, String)> = self
             .block_on(async {
                 sqlx::query_as(
                     r#"SELECT DISTINCT aggregate_type, aggregate_id FROM events
-                   WHERE tenant_id IS NOT DISTINCT FROM $1 AND aggregate_type IS NOT NULL
+                   WHERE tenant_id IS NOT DISTINCT FROM $1
                    ORDER BY aggregate_type, aggregate_id"#,
                 )
                 .bind(tenant)

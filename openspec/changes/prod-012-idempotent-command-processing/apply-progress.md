@@ -1688,3 +1688,67 @@ tests are untouched — they use a concrete tenant, which was never the broken p
    the column may still be NULL. After A2-ii's guard and `SET NOT NULL` it cannot be. The
    filter is harmless; the comment is now false. One-line follow-up, not mixed into this
    diff.
+
+### Debt from this slice, closed rather than carried
+
+All three items registered above are fixed in the same slice.
+
+**1. The `EventStore` port has a conformance harness.**
+`crates/testkit/src/event_store.rs` states the identity half of the contract once — version
+advance, stale-version rejection, ordered readback, absent-stream reporting, the systemwide
+and tenant partitions staying separate under a shared type and id, and the per-partition
+listing. Both adapters are judged against it: the in-memory store hermetically in
+`crates/infrastructure/tests/`, the PostgreSQL store against a real database in
+`crates/integration-tests/`.
+
+The harness was verified to have teeth rather than assumed to. With the null-safe comparison
+temporarily reverted, the PostgreSQL run fails on exactly the divergence:
+
+```
+a systemwide stream must see the history it just wrote: appending at expected version 1
+must succeed, not be rejected as though the stream were empty:
+Conflict { aggregate_id: "conformance-shared-identity", expected: 1, actual: 0 }
+```
+
+while the in-memory store passes the identical assertions. That is the divergence
+reproduced, not described. The fix was then restored and the diff confirmed to hold only the
+intended change.
+
+Deliberately not asserted: durability, concurrency, snapshotting. A harness that demands
+more than the contract turns every adapter into a copy of whichever one it was written
+against.
+
+`ego-testkit` is a **dev-dependency** of `ego-infrastructure`, never a build-time one —
+testkit is tooling, and no production crate may depend on tooling. `verify-layers` excludes
+dev edges for that reason and still reports 17 crates, 0 violations.
+
+**2. The migration registry is checked against the filesystem.**
+Migrations 004, 005 and 006 are removed, and `migrations.rs` gains a bidirectional test:
+every `.sql` file is registered, and every registration has a file. Plus one asserting the
+registry ascends by numeric prefix, since registration order *is* execution order.
+
+Removing rather than registering, and why: the three files had no consumer — no Postgres
+read-side adapter exists, only the domain SPI traits — so registering them would create
+three unused tables in every deployment for a feature that does not exist. The pattern this
+repository now follows is the one 007 used: the migration ships with the code that needs it.
+Git keeps them at `e5b4074` for whoever writes that adapter. The reverse call is one review
+comment away; the test is the part that matters either way, because it converts "someone
+forgot" into a failing test.
+
+**3. `list_aggregate_ids` no longer filters on a condition that cannot occur.**
+The `AND aggregate_type IS NOT NULL` filter and its comment claiming rows may still predate
+the backfill are both gone. `open` refuses to return a store while any row lacks its type,
+and the backfill makes the column mandatory in the database, so by the time the method is
+callable the column is non-null for every row. A guard against an impossible state implies
+the state is possible.
+
+### Verification after the debt fixes
+
+- UNIT: ego-domain **219**, ego-persistence **13** (up 2 — the registry tests),
+  ego-infrastructure **24**, persistent-entity **45**, ego-testkit **86**. All pass.
+- HERMETIC conformance: in-memory store **1 passed**.
+- INTEGRATION, real PostgreSQL: **9 + 3 + 1 + 5 = 18 passed**, 0 failed.
+- STATIC: `fmt`, `clippy -D warnings`, and the three `xtask verify-*` all clean.
+
+Clippy again caught something the passing test run did not — an unused import in the new
+conformance test. Fixed before commit, not deferred.

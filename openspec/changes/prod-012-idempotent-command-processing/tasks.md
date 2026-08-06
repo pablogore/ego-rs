@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **104 tasks total** — 39 complete and 65 pending. Complete: B0.1–B0.3 (merged as
+> **106 tasks total** — 41 complete and 65 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -133,6 +133,8 @@ Chain strategy: hybrid
 ### Phase A3: Effective Event Uniqueness (AD-1)
 
 - [x] A3.0 RED/GREEN **(first slice — prerequisite for A3.2)**: the store's three `tenant_id` comparisons are null-safe. `resolve_tenant(None)` binds SQL NULL, and `tenant_id = NULL` is unknown rather than true for every row, so a systemwide stream was invisible to its own version check, its own `load`, and `list_aggregate_ids`. Every systemwide append therefore read an empty history and wrote version 1 again — duplicating history silently. Fixed with `IS NOT DISTINCT FROM`, which compares two NULLs as equal while keeping NULL distinct from any concrete tenant. **This must land before A3.2**: the unique indexes cannot be built over a table that already holds the duplicates this defect produces. Proven against real PostgreSQL, including that the fix does not over-match — a systemwide stream and a tenant stream sharing type and id stay separate.
+- [x] A3.0a GREEN **(debt closed with the slice)**: a shared `EventStore` conformance harness in `crates/testkit`, run against **both** implementations of the port — the in-memory one hermetically, the PostgreSQL one against a real database. The two disagreed about the systemwide partition while both satisfying the trait's signature, and nothing compared them. Proven to have teeth: with the null-safe comparison temporarily reverted, the harness fails on the PostgreSQL store with `Conflict { expected: 1, actual: 0 }` while the in-memory store still passes.
+- [x] A3.0b GREEN **(debt closed with the slice)**: the migration registry is verified against the filesystem, bidirectionally. Three migration files numbered into the applied sequence had never been executed by any code path; `include_str!` only binds the files that are named, so an unnamed file is inert while looking exactly like one that ships. The orphans are removed and the check makes the omission impossible to repeat.
 - [ ] A3.1 RED: `crates/integration-tests/tests/uniqueness.rs` — duplicate `(tenant_id, aggregate_type, aggregate_id, version)` rejected for a real tenant AND for `tenant_id IS NULL` systemwide mode (event-store spec scenarios).
 - [ ] A3.2 GREEN: migration `008_events_stream_identity_unique.sql` — two partial unique indexes (`ux_events_identity_tenant` WHERE `tenant_id IS NOT NULL`, `ux_events_identity_systemwide` WHERE `tenant_id IS NULL`).
 - [ ] A3.3 GREEN: map the now-reachable `23505` in `append` to `PersistenceError::Conflict` (verified constraint 4 — previously unreachable code).
