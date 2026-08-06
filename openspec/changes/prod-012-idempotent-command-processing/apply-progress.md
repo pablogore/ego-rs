@@ -1603,3 +1603,88 @@ more. Now 38 and 65, matching both the checkbox count and the PR body.
 Re-verified after the correction: integration **9 passed** (the eight above plus the new
 one), plus the 3 characterization tests. Unit 219 / 11 / 45. `fmt`, `check`, `clippy -D
 warnings` and the three `xtask verify-*` clean.
+---
+
+## Phase A3, first slice: null-safe tenant comparison — COMPLETE
+
+Branch: `feat/prod-012-a3-event-uniqueness`, off the tracker at `3f0f5aa`.
+
+A3 turned out to have a prerequisite that was not in the task list, so it ships as its own
+slice ahead of the unique indexes.
+
+### The defect
+
+`resolve_tenant(None)` resolves the systemwide mode to SQL NULL, and all three of the
+store's queries compared `tenant_id` to that bound parameter with plain `=`. In SQL's
+three-valued logic `tenant_id = NULL` is unknown, never true — for every row, including the
+rows whose tenant genuinely is NULL. A systemwide stream was therefore invisible to its own
+reads:
+
+- the version check inside `append` always read an empty history,
+- `load` always reported the aggregate absent,
+- `list_aggregate_ids` never listed it.
+
+The consequence is worse than invisibility. Because the version check always returned 0,
+every systemwide append at `expected_version = 0` succeeded and wrote version 1 **again**.
+History duplicated silently, with no error anywhere. The RED run demonstrated exactly that:
+the duplicate append returned `Ok(1)` instead of a conflict.
+
+Pre-existing, not introduced by A2-ii: `git show e87018a` has the same `tenant_id = $2`.
+A2-ii preserved it while adding the type column.
+
+### Why it went unnoticed, which matters more than the fix
+
+The in-memory implementation of the same port keys streams by
+`(String, String, Option<String>)` in a `HashMap`, and in Rust `None == None`. So the
+in-memory store has always handled the systemwide partition correctly while the Postgres one
+did not. **Two implementations of one port disagreed, and the hermetic suite agreed with the
+correct one.** Any test written against the in-memory store would have reported systemwide
+mode as working.
+
+That is an argument for a shared conformance suite over the `EventStore` port, the way A2
+built one for the carrier contract. Registered as debt below rather than done here.
+
+### The fix
+
+All three queries now use `tenant_id IS NOT DISTINCT FROM $n`, which compares two NULLs as
+equal while keeping NULL distinct from any concrete tenant. That second half is not
+incidental — a comparison that matched NULL against everything would have made the first two
+tests pass for entirely the wrong reason, and a systemwide read returning another tenant's
+events is an isolation breach strictly worse than the invisibility being fixed. There is a
+test for it.
+
+This is the same defect class corrected in A2-ii's post-verification queries. It is now in
+every `tenant_id` comparison the store makes.
+
+### Why this must precede A3.2
+
+`CREATE UNIQUE INDEX` fails on a table that already holds duplicates. The duplicates in the
+NULL partition are produced by exactly this defect, so adding the indexes first would turn a
+silent data problem into an opaque boot failure. Fixing the comparison stops new duplicates;
+A3.2 still needs a story for ones already there, which is the second slice's job.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: **5 new + 9 + 3 = 17 passed**, 0 failed. RED first: all five
+  new tests failed before the fix, for the predicted reasons.
+- UNIT: ego-domain **219**, ego-persistence **11**, ego-infrastructure **24**,
+  persistent-entity **45**. All pass.
+- STATIC: `fmt`, `check --workspace --all-targets`, `clippy -D warnings`, and the three
+  `xtask verify-*` all clean. `cargo test --workspace` not run.
+
+The characterization suite's module note, which had recorded this gap and deferred it to
+"the uniqueness work", is updated to say it is closed and where it is now pinned. Its own
+tests are untouched — they use a concrete tenant, which was never the broken path.
+
+### Debt found, deliberately not fixed here
+
+1. **Migrations 004, 005 and 006 are orphans.** The SQL files exist but no runner executes
+   them — `migrations()` registers only 001, 002, 003 and 007 — and no code queries
+   `read_side_offsets`, `processed_events` or `projection_state`. Dead schema, the same
+   pattern as the dead `.gitlab-ci.yml` found earlier. Out of A3's scope.
+2. **No conformance suite over the `EventStore` port**, which is why the divergence above
+   survived.
+3. **`list_aggregate_ids` still filters `aggregate_type IS NOT NULL`** with a comment saying
+   the column may still be NULL. After A2-ii's guard and `SET NOT NULL` it cannot be. The
+   filter is harmless; the comment is now false. One-line follow-up, not mixed into this
+   diff.

@@ -118,8 +118,18 @@ where
             })?;
 
             let current: i64 = sqlx::query_scalar(
+                // `tenant_id IS NOT DISTINCT FROM $3`, never `= $3`: the
+                // systemwide mode binds SQL NULL here, and `tenant_id = NULL`
+                // is unknown rather than true for every row — including the
+                // rows whose tenant genuinely is NULL. With plain equality a
+                // systemwide stream is invisible to its own version check, so
+                // every append reads an empty history and writes version 1
+                // again. IS NOT DISTINCT FROM treats two NULLs as equal while
+                // still keeping NULL distinct from any concrete tenant, which
+                // is what separates the systemwide partition from a tenant's.
                 r#"SELECT COALESCE(MAX(version), 0) FROM events
-                   WHERE aggregate_type = $1 AND aggregate_id = $2 AND tenant_id = $3"#,
+                   WHERE aggregate_type = $1 AND aggregate_id = $2
+                     AND tenant_id IS NOT DISTINCT FROM $3"#,
             )
             .bind(&aggregate_type)
             .bind(&aggregate_id)
@@ -188,7 +198,8 @@ where
             .block_on(async {
                 sqlx::query_as(
                     r#"SELECT aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at
-                   FROM events WHERE aggregate_type = $1 AND aggregate_id = $2 AND tenant_id = $3
+                   FROM events WHERE aggregate_type = $1 AND aggregate_id = $2
+                     AND tenant_id IS NOT DISTINCT FROM $3
                    ORDER BY version ASC"#,
                 )
                 .bind(aggregate_type)
@@ -230,7 +241,7 @@ where
             .block_on(async {
                 sqlx::query_as(
                     r#"SELECT DISTINCT aggregate_type, aggregate_id FROM events
-                   WHERE tenant_id = $1 AND aggregate_type IS NOT NULL
+                   WHERE tenant_id IS NOT DISTINCT FROM $1 AND aggregate_type IS NOT NULL
                    ORDER BY aggregate_type, aggregate_id"#,
                 )
                 .bind(tenant)

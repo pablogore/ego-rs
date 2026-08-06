@@ -18,21 +18,23 @@
 //! the day a real uniqueness guarantee is added — at which point it needs to
 //! be rewritten to assert the opposite, not deleted.
 //!
-//! Another gap this file discovered rather than assumed: the append/load
-//! tests below use a concrete tenant, not the NULL-tenant ("systemwide")
-//! mode that the rest of this store's API otherwise treats as a first-class
-//! case. Against a real database, comparing a column to a bound `NULL`
-//! parameter with plain `=` never matches — SQL's three-valued logic makes
-//! `tenant_id = NULL` evaluate to unknown, not true, for every row — so the
-//! version-check `SELECT` inside `append` and the `SELECT` inside `load`
-//! both silently behave as if the aggregate has no prior history whenever
-//! the caller passes `tenant_id: None`. That is a real, currently-unpinned
-//! behavior gap in the systemwide mode. The null-safe form is
-//! `tenant_id IS NOT DISTINCT FROM $2`, which compares equal when both sides
-//! are NULL, but changing the query belongs with the uniqueness work rather
-//! than here. So this file does not pin the gap either way; it only avoids
-//! exercising it, to keep these characterization tests honestly describing
-//! what they actually tested.
+//! Another gap this file discovered rather than assumed — since closed: the
+//! append/load tests below use a concrete tenant, not the NULL-tenant
+//! ("systemwide") mode that the rest of this store's API otherwise treats as a
+//! first-class case. Against a real database, comparing a column to a bound
+//! `NULL` parameter with plain `=` never matches — SQL's three-valued logic
+//! makes `tenant_id = NULL` evaluate to unknown, not true, for every row — so
+//! the version-check `SELECT` inside `append` and the `SELECT` inside `load`
+//! both silently behaved as if the aggregate had no prior history whenever the
+//! caller passed `tenant_id: None`.
+//!
+//! That gap is now fixed: all three queries use `tenant_id IS NOT DISTINCT
+//! FROM`, which compares two NULLs as equal while keeping NULL distinct from
+//! any concrete tenant. The behaviour is pinned in `systemwide_streams.rs`
+//! rather than here, because this file characterizes what the store did before
+//! the change and those tests assert what it does after. These tests still use
+//! a concrete tenant, which is now a statement about their scope rather than an
+//! avoidance of a defect.
 
 use chrono::{DateTime, Utc};
 use ego_domain::event::DomainEvent;
