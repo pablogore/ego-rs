@@ -1371,3 +1371,75 @@ already documents nineteen violations of — and rewritten to describe only
 the behaviour, with no ticket, phase, or decision identifier anywhere in
 either comment. Verified by re-scanning the final diff for the forbidden
 patterns after the edit, with zero matches.
+
+---
+
+## Phase A2, first slice: the type accessor — COMPLETE
+
+Branch: `feat/prod-012-a2i-aggregate-type-column`, off the tracker.
+
+- [x] A2.2 RED: `EntityTriple` exposes the entity type through an `aggregate_type()`
+      accessor, with tests recording that the joined form cannot be reversed in
+      general — two different type/id pairs produce the identical joined string when a
+      type name contains the separator.
+
+**37 lines of Rust, purely additive.** No schema change, no SQL, no `EventStore`
+change, and `aggregate_id()` keeps its exact current meaning — the new test only
+*calls* it, to demonstrate the collision.
+
+### The blocker that reshaped this slice
+
+A first version of this slice also carried the `EventStore` signature change, the
+nullable column and the write-path switch, on the reasoning that new writes would then
+record the type immediately and the debt would stop growing. **Review rejected it, and
+was right.**
+
+`load` and `append`'s version check would have queried
+`aggregate_type = $1 AND aggregate_id = $2` while historical rows still held `NULL` and
+a joined `"user-7"`. Neither condition matches. One of them fails for the same
+three-valued-logic reason this change already documents twice elsewhere: a comparison
+against `NULL` is never true.
+
+The consequence is not degraded reads. Every historical stream reads as absent,
+`append` computes version 0 from `COALESCE(MAX(version), 0)`, the actor concludes the
+aggregate is new, and it writes a **second, forked stream** under the split identity
+while the original rows sit orphaned and unreachable. Once traffic has passed through
+that window there is no clean revert — two partial histories exist for one aggregate.
+
+The PR body had claimed the opposite: "nothing has been rewritten, so there is no data
+to restore — which is precisely the property that makes this half safe to land ahead of
+the other." The migration rewrites nothing; the *running code* writes divergent
+history. That distinction is the whole of it.
+
+### The signal that was missed
+
+In the unsafe version, the inherited characterization tests had to be **edited** to
+keep compiling, and that was recorded as mechanical fallout. It was not. A
+characterization test exists to pin current behaviour; needing to adapt one is the test
+reporting that the behaviour changed. That was the alarm and it was read as noise.
+
+In this slice those tests pass **untouched**, and the file is not in the diff. That is
+now the stated evidence that the slice is additive — a property to check rather than
+assert.
+
+### What moved to the second slice
+
+The column, the preflight and its four aborts, the backfill, the coordinated
+switch-over of read and write identity, the post-verification, `SET NOT NULL`, the
+reverse operation, the report, the runbook, and the real-PostgreSQL suite. One
+transition, one moment of change, no window between two states.
+
+### UNIT — hermetic
+
+- `cargo test -p persistent-entity --lib`: **45 passed**, 0 failed.
+- `cargo test -p ego-persistence --lib`: **6 passed**, 0 failed.
+
+### INTEGRATION — inherited, and unmodified
+
+- `cargo test -p ego-integration-tests`: **3 passed**, 0 failed, against real Postgres.
+  The test file is **not** in this slice's diff. That is the point.
+
+### Static gates
+
+`fmt`, `check --workspace --all-targets`, `clippy -D warnings` and the three
+`xtask verify-*`: all pass. `cargo test --workspace` was not run.
