@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **102 tasks total** — 28 complete and 74 pending. Complete: B0.1–B0.3 (merged as
+> **102 tasks total** — 29 complete and 73 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -24,6 +24,11 @@
 >    protocol-neutrality is demonstrated by two conforming adapters rather than
 >    asserted by one, and **102** with the feature-state check that a repository
 >    without CI needs in order for gated code not to rot. See the note under Phase B1b.
+>
+> An earlier revision briefly recorded 103 and 104 while A2.3 and A2.4 were split into
+> halves. Review then showed the switch-over cannot be split without forking history, so
+> the halves collapsed back and the total returned to 102. Recorded because the number
+> moved and then moved back, which is worth being able to reconstruct.
 >
 > The count is stated here so any prose that cites it can be checked against the file
 > rather than drifting from it — which it has done more than once.
@@ -77,10 +82,43 @@ Chain strategy: hybrid
 
 ### Phase A2: `aggregate_type` Real Column (AD-9 — reversible both directions)
 
+> **Two review slices, one coordinated transition.**
+>
+> The first slice is **purely additive Rust**: an `aggregate_type()` accessor on the
+> entity identity, plus tests that record why the joined form cannot be reversed. No
+> schema change, no SQL, no `EventStore` change, and `aggregate_id()` keeps its current
+> meaning. It is deployable on its own with no traffic coordination because it changes
+> no persisted behaviour at all.
+>
+> Everything that touches the schema or the data is the **second** slice, landing as one
+> transition: the column, the preflight and its four aborts, the backfill, the switch-over
+> of read and write identity, the post-verification, `SET NOT NULL`, the reverse
+> operation, the report, the runbook, and the real-PostgreSQL suite.
+>
+> **Why the boundary sits exactly there.** An earlier attempt put the `EventStore`
+> signature change in the first slice, reasoning that new writes would then record the
+> type immediately. That is unsafe. `load` and `append`'s version check would query
+> `aggregate_type = $1 AND aggregate_id = $2` while historical rows still hold `NULL` and
+> a joined `"user-7"`. Neither condition matches — one of them for the same
+> three-valued-logic reason recorded elsewhere in this change — so every historical stream
+> reads as absent, `append` computes version 0, and the actor writes a **second, forked
+> stream** under the split identity while the original rows are orphaned. That is not a
+> window of temporary unavailability; it is history divergence with no clean revert once
+> traffic has passed through.
+>
+> **The tell, and it was missed once.** In the unsafe version the inherited
+> characterization tests had to be edited to keep compiling. A characterization test that
+> needs adapting is reporting that the behaviour it characterises has changed — that was
+> the alarm, and it was read as mechanical fallout. In the corrected first slice those
+> tests pass untouched, and that is the evidence the slice is additive.
+>
+> The second slice must not assume the first cleaned anything. All four aborts run before
+> any `UPDATE`.
+
 - [ ] A2.1 RED: `crates/integration-tests/tests/aggregate_type_backfill.rs` — given ambiguous stored `aggregate_id` strings under a registered entity-type list (e.g. `user-account`/`7` vs `user`/`account-7`), the offline backfill tool MUST abort and name the ambiguous rows rather than guess (AD-9, verified constraint 5).
-- [ ] A2.2 RED: `EntityTriple::aggregate_id()` (`crates/persistent-entity/src/scheduler.rs:30`) test asserting it exposes `aggregate_type`/`aggregate_id` as distinct fields, not a hyphen-joined string.
+- [x] A2.2 RED: `EntityTriple::aggregate_id()` (`crates/persistent-entity/src/scheduler.rs:30`) test asserting it exposes `aggregate_type`/`aggregate_id` as distinct fields, not a hyphen-joined string.
 - [ ] A2.3 GREEN: add migration `crates/persistence/src/postgres/migrations/007_add_aggregate_type_to_events.sql` — nullable `aggregate_type` column; write the operator backfill tool that verifies longest-prefix-match non-ambiguity and aborts on any ambiguous row (**forward direction, not derivable from data alone**).
-- [ ] A2.4 GREEN: after backfill succeeds, `SET NOT NULL` on `aggregate_type`; split `EntityTriple::aggregate_id()` into structural fields; update `actor.rs:230` write path.
+- [ ] A2.4 GREEN **(one coordinated step, after the rows are transformed)**: extend `EventStore`'s surface synchronously to carry the type alongside the id, switch the `actor.rs` write path to the structural identity, and `SET NOT NULL` on `aggregate_type`. These cannot be separated: activating the identity before the data is transformed forks history, and making the column mandatory before the switch-over would reject writes from the old path. Deliberately **not** async and **no** unit-of-work handle — this changes what the identifier is, not how the transaction is shaped.
 - [ ] A2.5 GREEN: implement the **exact, lossless reverse migration** — `UPDATE events SET aggregate_id = aggregate_type || '-' || aggregate_id` rejoining precisely what was split, then drop the column. State explicitly in the migration file's down-comment: forward is abort-on-ambiguity (not derivable), reverse is exact and total.
 - [ ] A2.7 RED/GREEN: **preflight, before a single row is written.** Three checks, each aborting the whole run and naming the offending rows:
       (a) an `aggregate_id` matching **no** registered entity type — distinct from ambiguity, which is matching more than one, and not covered by A2.1/A2.3;

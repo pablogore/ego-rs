@@ -30,6 +30,14 @@ impl EntityTriple {
     pub fn aggregate_id(&self) -> String {
         format!("{}-{}", self.entity_type, self.entity_id)
     }
+
+    /// The type component of the persisted event-stream identity, kept
+    /// structurally distinct from `entity_id` rather than concatenated into
+    /// it — see the tests below for why the join is not reversible in
+    /// general.
+    pub fn aggregate_type(&self) -> &str {
+        &self.entity_type
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,5 +165,34 @@ impl Scheduler {
         let suggestion = self.policy.suggest_activation(pending);
         inner.state.last_suggestion = suggestion.clone();
         suggestion
+    }
+}
+
+#[cfg(test)]
+mod entity_triple_identity_tests {
+    use super::*;
+
+    /// The persisted event-stream identity is the entity type and the bare
+    /// entity id as two distinct fields, not a single joined string. Two
+    /// different pairs can join to the exact same string when a type itself
+    /// contains the join separator, so nothing that needs the two components
+    /// back can recover them by parsing the join.
+    #[test]
+    fn type_and_bare_id_are_exposed_as_distinct_fields_not_a_joined_string() {
+        let triple = EntityTriple::new("tenant-1".to_string(), "user-account", "7");
+
+        assert_eq!(triple.aggregate_type(), "user-account");
+        assert_eq!(triple.entity_id, "7");
+    }
+
+    #[test]
+    fn joining_the_two_components_is_not_reversible_in_general() {
+        let a = EntityTriple::new("tenant-1".to_string(), "user-account", "7");
+        let b = EntityTriple::new("tenant-1".to_string(), "user", "account-7");
+
+        // Same joined string, genuinely different type/id pairs.
+        assert_eq!(a.aggregate_id(), b.aggregate_id());
+        assert_ne!(a.aggregate_type(), b.aggregate_type());
+        assert_ne!(a.entity_id, b.entity_id);
     }
 }
