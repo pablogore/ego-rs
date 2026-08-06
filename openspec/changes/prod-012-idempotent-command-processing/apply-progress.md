@@ -2103,3 +2103,69 @@ relies on it, and needs its own verification. B4-ii's claim is transactional sem
   violations), `verify-isolation`, `verify-hygiene`.
 
 **110 tasks, 54 complete, 56 pending.**
+
+### Review round one on B4-ii — a functional blocker I introduced
+
+**`StagingUnitOfWork::append` ignored `version_offsets` while the direct append path includes
+them.** Verified at `persistence.rs`: `EventStore::append` computes `stream.len() + offset`; the
+unit of work computed `committed + staged`. With offset 5 on an empty stream the direct path
+accepts `expected_version: 5` and the unit of work rejects it reporting `actual: 0`.
+
+The worse half is not the arithmetic. **My comment asserted the opposite of what the code it
+compared against does** — it claimed a unit of work adding offsets "would answer a different
+question than the direct append path does", when the direct path is precisely where the offset is
+added. A wrong comment that reads as a justification is harder to catch than a wrong line,
+because it tells the next reader to stop looking.
+
+Corrected to `offset + committed + staged`. The offsets are cloned into the unit of work at
+`begin`, which is exact rather than approximate: `with_version_offset` is a builder that consumes
+`self`, so offsets are fixed before the store can be used and cannot change while a unit of work
+is open.
+
+#### The test the divergence needed
+
+`crates/persistent-entity/tests/in_memory_version_offset_parity.rs`, four cases:
+
+1. The **direct** path treats the offset as part of the version — characterizing the behaviour
+   the other path has to match, rather than assuming it.
+2. The **unit-of-work** path agrees, on the same stream with the same argument.
+3. The two paths agree at **every** expected version around the offset, compared **to each
+   other** rather than against restated literals. The first two tests each pin one path to
+   numbers, which would let both drift together if someone changed the semantics in both places;
+   this one fails whenever they disagree, whatever either decides the version is.
+4. A stream with **no** declared offset starts at zero through both paths — guarding against a
+   fix that reads the wrong key or defaults to something other than zero, which would satisfy the
+   first three while breaking every ordinary stream.
+
+Verified to have teeth by restoring the reviewed arithmetic: 2 of the 4 fail, and the parity test
+names the divergence directly —
+
+```
+the two paths disagreed at expected version 0: direct accepted = false, unit of work
+accepted = true
+```
+
+The two that kept passing are the direct-path characterization, which the defect does not touch,
+and the no-offset case, where there is nothing to diverge about. Both correct.
+
+#### B4.5 split, per the review
+
+It could not stay closed as one item while the default in-memory store ignores tenants:
+
+- **B4.5a** — infrastructure store's unit of work plus conformance: complete. That store
+  partitions by tenant, so it is judged against the same tenant-scoped assertions as the durable
+  one.
+- **B4.5b** — persistent-entity store's unit of work with matching version arithmetic: complete.
+- **B4.5c** — tenant-partitioned `StreamKey` for that store and running the harness against it:
+  **explicitly pending**. Until it lands, "In-Memory Store Does Not Silently Diverge" holds for
+  the infrastructure store only, and the default store is outside the harness. Stated that way in
+  `tasks.md` rather than implied by a closed checkbox.
+
+#### Verification after the corrections
+
+- `in_memory_version_offset_parity`: **4 passed**.
+- WORKSPACE: `cargo test --workspace` — **114 suites, 1 548 passed, 0 failed**, exit 0.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene` — all clean.
+
+**112 tasks, 55 complete, 57 pending.**

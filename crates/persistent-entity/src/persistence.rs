@@ -440,6 +440,11 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
         Ok(Box::new(StagingUnitOfWork {
             streams: Arc::clone(&self.streams),
+            // Cloned rather than shared, and exact: offsets are declared through
+            // `with_version_offset`, a builder that consumes `self`, so they are
+            // fixed before the store can be used and cannot change while a unit
+            // of work is open.
+            version_offsets: self.version_offsets.clone(),
             staged: HashMap::new(),
         }))
     }
@@ -506,13 +511,15 @@ impl Snapshot for InMemorySnapshotStore {
 /// disagree with the durable one about a case the shared conformance harness
 /// covers.
 ///
-/// Version offsets are deliberately not consulted here. They exist so a test can
-/// pretend a snapshot already covers earlier events, and they are read through
-/// `stream_version_offset` for recovery; a unit of work that silently added them
-/// to its own version arithmetic would answer a different question than the
-/// direct append path does.
+/// Version offsets are part of that arithmetic, not an exception to it. They exist
+/// so a test can pretend a snapshot already covers earlier events, and
+/// [`EventStore::append`] adds them to the stream length when deciding whether an
+/// expected version matches. A unit of work that left them out would reject an
+/// append the direct path accepts, on the same stream, with the same argument —
+/// so the version here is `offset + committed + staged`.
 struct StagingUnitOfWork<E> {
     streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    version_offsets: HashMap<StreamKey, i64>,
     staged: HashMap<StreamKey, Vec<StoredEvent<E>>>,
 }
 
@@ -530,9 +537,10 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
     ) -> Result<i64, PersistenceError> {
         let key = (aggregate_type.to_string(), aggregate_id.to_string());
 
+        let offset = self.version_offsets.get(&key).copied().unwrap_or(0);
         let committed = self.streams.lock().get(&key).map_or(0, Vec::len) as i64;
         let staged = self.staged.get(&key).map_or(0, Vec::len) as i64;
-        let current = committed + staged;
+        let current = offset + committed + staged;
 
         if current != expected_version {
             return Err(PersistenceError::Conflict {

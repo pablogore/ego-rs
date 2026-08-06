@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **110 tasks total** — 54 complete and 56 pending. Complete: B0.1–B0.3 (merged as
+> **112 tasks total** — 55 complete and 57 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -319,7 +319,9 @@ unchanged, which is the point of stopping here.
 - [x] B4.3 RED: `crates/integration-tests/tests/event_store_uow.rs` — dropping a UoW without calling `commit()` rolls back (real Postgres transaction).
 - [x] B4.4 GREEN: implement `PostgresEventStoreUnitOfWork` in `crates/persistence/src/postgres/event_store.rs`. `begin` takes `&self`, not `&mut self`: handing out a transaction does not mutate the store, so requiring exclusive access would force every caller behind a lock it does not need.
 - [ ] B4.4b GREEN **(not bundled)**: narrow `EventStore::append` from `&mut self` to `&self`, which is what would let `PersistenceFacade` drop its event-store lock entirely. Deliberately separate: it changes the facade's public shape a second time, and B4-ii's claim is transactional semantics, not lock removal.
-- [x] B4.5 GREEN: implement the in-memory `EventStoreUnitOfWork` equivalent; ensure tenant-scoped uniqueness matches the durable store exactly (event-store spec: "In-Memory Store Does Not Silently Diverge").
+- [x] B4.5a GREEN: implement the `EventStoreUnitOfWork` equivalent for **`ego-infrastructure`'s** in-memory store, and run the shared conformance harness against it. That store partitions by tenant — its `StreamKey` carries `Option<String>` — so it is judged against the same tenant-scoped assertions as the durable store, unit of work included.
+- [x] B4.5b GREEN: implement the `EventStoreUnitOfWork` equivalent for **`persistent-entity`'s** in-memory store, with version arithmetic matching its own direct append path — `offset + committed + staged`. Version offsets are part of that arithmetic, not an exception to it: the direct path adds them, so a unit of work that left them out would reject an append the direct path accepts on the same stream with the same argument. Pinned by `in_memory_version_offset_parity.rs`, which compares the two paths to each other rather than restating either one's numbers.
+- [ ] B4.5c **(explicit debt, not closed by B4-ii)**: give `persistent-entity`'s in-memory store a tenant-partitioned `StreamKey` and run the shared conformance harness against it. Today its key is `(aggregate_type, aggregate_id)` with `_tenant_id` unused in every method, so two streams sharing a type and an id in different tenants collide into one — and it is the **default** the runtime builder installs when no store is supplied. Until this lands, "In-Memory Store Does Not Silently Diverge" holds for the infrastructure store only, and this store is outside the harness. Changing the key alters behaviour for every test that relies on it, which is why it is its own task rather than a rider on a transactional-semantics slice.
 - [ ] B4.6 RED: `crates/domain/src/persistence/stored_event.rs` test — `StoredEvent` metadata round-trips an `operation_key` through storage and back (event-store spec scenario; verified constraint 3 — no metadata channel exists today).
 - [ ] B4.7 GREEN: add the metadata column/serialized field and bind it in the Postgres INSERT.
 - [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
