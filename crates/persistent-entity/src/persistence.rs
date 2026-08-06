@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 
 use ego_domain::persistence::{EventStore, PersistenceError, Snapshot, StoredEvent};
 use ego_domain::DomainEvent;
@@ -45,8 +47,9 @@ impl<E: DomainEvent> NoopEventStore<E> {
     }
 }
 
+#[async_trait]
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEventStore<E> {
-    fn append(
+    async fn append(
         &mut self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -57,7 +60,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
         Ok(0)
     }
 
-    fn load(
+    async fn load(
         &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -66,7 +69,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
         Ok(Vec::new())
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
@@ -106,18 +109,27 @@ impl Snapshot for NoopSnapshotStore {
 /// `Arc<Mutex<dyn ...>>` so that any backing store (in-memory, database,
 /// test stub) can be injected at construction time.
 ///
-/// The lock is `parking_lot::Mutex`, not `std::sync::Mutex`: a backing store
-/// that panics mid-call (a malformed adapter, a deserialization panic, a
-/// deliberately-injected test failure) must not permanently poison
-/// persistence for every other entity sharing this facade — the same
-/// non-poisoning rationale as `BoundedMailbox`'s queue and `EntityRegistry`'s
-/// map (see `openspec/changes/CORE-006A-activation-authority/design.md`).
+/// Neither lock is `std::sync::Mutex`, for the same reason as `BoundedMailbox`'s
+/// queue and `EntityRegistry`'s map: a backing store that panics mid-call (a
+/// malformed adapter, a deserialization panic, a deliberately-injected test
+/// failure) must not permanently poison persistence for every other entity
+/// sharing this facade.
+///
+/// The two locks are different types, and the asymmetry is deliberate rather
+/// than an oversight. `EventStore`'s storage methods are asynchronous, so its
+/// guard has to be held across an `.await` — `parking_lot`'s guard is not `Send`,
+/// which would make every future that touches the store non-`Send` and therefore
+/// unspawnable. `tokio::sync::Mutex` yields a `Send` guard and, like
+/// `parking_lot`, does not poison. `Snapshot` is still synchronous, so its lock
+/// has nothing to hold across and stays on the cheaper, non-async one. When that
+/// trait becomes asynchronous it converts too; converting it now would add an
+/// `.await` to acquire a lock nothing waits on.
 ///
 /// The default constructor (`PersistenceFacade::new()`) creates a no-op
 /// facade that accepts writes but never persists anything.  Use
 /// [`PersistenceFacade::with_stores`] to supply real stores.
 pub struct PersistenceFacade<E> {
-    event_store: Arc<Mutex<dyn EventStore<E> + Send>>,
+    event_store: Arc<AsyncMutex<dyn EventStore<E> + Send>>,
     snapshot_store: Arc<Mutex<dyn Snapshot + Send>>,
     _event: PhantomData<E>,
 }
@@ -134,7 +146,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
     /// Writes succeed but are discarded; loads return empty results.
     pub fn new() -> Self {
         Self {
-            event_store: Arc::new(Mutex::new(NoopEventStore::new())),
+            event_store: Arc::new(AsyncMutex::new(NoopEventStore::new())),
             snapshot_store: Arc::new(Mutex::new(NoopSnapshotStore)),
             _event: PhantomData,
         }
@@ -142,7 +154,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
 
     /// Creates a facade backed by the supplied event and snapshot stores.
     pub fn with_stores(
-        event_store: Arc<Mutex<dyn EventStore<E> + Send>>,
+        event_store: Arc<AsyncMutex<dyn EventStore<E> + Send>>,
         snapshot_store: Arc<Mutex<dyn Snapshot + Send>>,
     ) -> Self {
         Self {
@@ -183,12 +195,13 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         let snap_version = snap_data.as_ref().map(|s| s.version).unwrap_or(0);
 
         let (stored, stored_base): (Vec<StoredEvent<E>>, u64) = {
-            let store = self.event_store.lock();
+            let store = self.event_store.lock().await;
             // TODO: EventStore::load returns the full stream; events before snap_version are loaded
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
             let events = store
                 .load(aggregate_type, aggregate_id, tenant_id)
+                .await
                 .map_err(|e| e.to_string())?;
             let base = store.stream_version_offset(aggregate_type, aggregate_id, tenant_id);
             (events, base)
@@ -227,7 +240,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             .collect();
 
         let new_version = {
-            let mut store = self.event_store.lock();
+            let mut store = self.event_store.lock().await;
             store
                 .append(
                     aggregate_type,
@@ -236,6 +249,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
                     version as i64,
                     stored,
                 )
+                .await
                 .map_err(|e| e.to_string())?
         };
 
@@ -327,8 +341,9 @@ impl<E> InMemoryEventStore<E> {
     }
 }
 
+#[async_trait]
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryEventStore<E> {
-    fn append(
+    async fn append(
         &mut self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -356,7 +371,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         Ok(stream.len() as i64 + offset)
     }
 
-    fn load(
+    async fn load(
         &self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -366,7 +381,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         Ok(self.streams.get(&key).cloned().unwrap_or_default())
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {

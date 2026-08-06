@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use ego_domain::event::DomainEvent;
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
@@ -27,8 +28,9 @@ impl<E> Default for InMemoryEventStore<E> {
     }
 }
 
-impl<E: DomainEvent + Clone> EventStore<E> for InMemoryEventStore<E> {
-    fn append(
+#[async_trait]
+impl<E: DomainEvent + Clone + Send + Sync> EventStore<E> for InMemoryEventStore<E> {
+    async fn append(
         &mut self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -59,7 +61,7 @@ impl<E: DomainEvent + Clone> EventStore<E> for InMemoryEventStore<E> {
         Ok(current + count)
     }
 
-    fn load(
+    async fn load(
         &self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -76,7 +78,7 @@ impl<E: DomainEvent + Clone> EventStore<E> for InMemoryEventStore<E> {
         }
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {

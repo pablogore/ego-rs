@@ -153,7 +153,7 @@ fn sqlstate(err: &sqlx::Error) -> Option<String> {
 /// `append`'s own version check would reject the second row before the database
 /// ever saw it, so routing through it would test the in-process guard and prove
 /// nothing about the schema.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn the_database_refuses_a_duplicate_identity_for_a_tenant() {
     let (pool, _container) = start_pool().await;
 
@@ -182,7 +182,7 @@ async fn the_database_refuses_a_duplicate_identity_for_a_tenant() {
 /// partition where silent history duplication was already found. The partial
 /// index over `tenant_id IS NULL` is what closes it on a server that has no
 /// `NULLS NOT DISTINCT`.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn the_database_refuses_a_duplicate_identity_in_the_systemwide_partition() {
     let (pool, _container) = start_pool().await;
 
@@ -210,7 +210,7 @@ async fn the_database_refuses_a_duplicate_identity_in_the_systemwide_partition()
 /// this, an index that merely rejected everything would satisfy the two tests
 /// above. A tenant whose writes fail because another tenant wrote first would be
 /// a far worse defect than the duplication being prevented.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn two_tenants_may_hold_the_same_identity() {
     let (pool, _container) = start_pool().await;
 
@@ -292,6 +292,10 @@ async fn wait_until_a_statement_is_blocked(pool: &PgPool) {
 /// `current`, which the version check has already proven equal to
 /// `expected_version` — a conflict claiming expected and actual are the same
 /// number, which is self-contradictory and useless to act on.
+// Multi-thread, and for a real reason rather than an inherited one: the append
+// runs as its own task while this test body drives the competing transaction
+// forward. On a current-thread runtime the blocked append would never yield back
+// to the body that has to release it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_unique_violation_becomes_a_conflict_reporting_the_real_version() {
     let (pool, _container) = start_pool().await;
@@ -315,13 +319,15 @@ async fn a_unique_violation_becomes_a_conflict_reporting_the_real_version() {
 
     // (2, 3) The append's check reads 0, its insert blocks.
     let appending = tokio::spawn(async move {
-        store.append(
-            "order",
-            "blocked",
-            Some("tenant-1"),
-            0,
-            vec![event("LosesTheRace")],
-        )
+        store
+            .append(
+                "order",
+                "blocked",
+                Some("tenant-1"),
+                0,
+                vec![event("LosesTheRace")],
+            )
+            .await
     });
     wait_until_a_statement_is_blocked(&pool).await;
 
@@ -369,6 +375,9 @@ async fn a_unique_violation_becomes_a_conflict_reporting_the_real_version() {
 /// to. What it asserts holds either way: one winner, no `Internal` errors, one
 /// row. A loser reporting a generic failure is the "not a generic error" half of
 /// the requirement; a second row would mean the database did not hold.
+// Multi-thread because the race must actually be contested. A current-thread
+// runtime would interleave the writers but never overlap them, and a race test
+// that cannot race reports success without testing anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_appends_for_one_version_produce_one_winner_and_only_conflicts() {
     let (pool, _container) = start_pool().await;
@@ -387,13 +396,15 @@ async fn concurrent_appends_for_one_version_produce_one_winner_and_only_conflict
                 .await
                 .expect("each writer must be able to open the store");
             barrier.wait().await;
-            store.append(
-                "order",
-                "contested",
-                Some("tenant-1"),
-                0,
-                vec![event("Raced")],
-            )
+            store
+                .append(
+                    "order",
+                    "contested",
+                    Some("tenant-1"),
+                    0,
+                    vec![event("Raced")],
+                )
+                .await
         }));
     }
 

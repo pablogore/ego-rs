@@ -29,8 +29,7 @@ use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 /// The caller passes a store and a way to build an event. Every scenario uses
 /// its own aggregate id, so one store instance serves them all and the harness
 /// needs no way to construct a fresh one — which matters because building a
-/// store is asynchronous for some adapters and synchronous for others, while
-/// this trait is synchronous for all of them.
+/// store is asynchronous for some adapters and synchronous for others.
 ///
 /// # What is checked, and what is deliberately not
 ///
@@ -60,10 +59,10 @@ use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 /// # Panics
 ///
 /// Panics with a descriptive message on the first divergence from the contract.
-pub fn assert_event_store_conformance<E, S, F>(store: &mut S, make_event: F)
+pub async fn assert_event_store_conformance<E, S, F>(store: &mut S, make_event: F)
 where
     E: DomainEvent,
-    S: EventStore<E>,
+    S: EventStore<E> + ?Sized,
     F: Fn(&str) -> E,
 {
     let tenant = Some("conformance-tenant");
@@ -80,6 +79,7 @@ where
                 StoredEvent::without_correlation(make_event("Second")),
             ],
         )
+        .await
         .expect("appending two events to a fresh stream at expected version 0 must succeed");
     assert_eq!(
         advanced, 2,
@@ -88,6 +88,7 @@ where
 
     let loaded = store
         .load("conformance", "advances", tenant)
+        .await
         .expect("a stream that was just appended to must be loadable");
     assert_eq!(
         loaded.len(),
@@ -110,15 +111,18 @@ where
             0,
             vec![StoredEvent::without_correlation(make_event("Only"))],
         )
+        .await
         .expect("the first append must succeed");
 
-    let stale = store.append(
-        "conformance",
-        "stale",
-        tenant,
-        0,
-        vec![StoredEvent::without_correlation(make_event("Duplicate"))],
-    );
+    let stale = store
+        .append(
+            "conformance",
+            "stale",
+            tenant,
+            0,
+            vec![StoredEvent::without_correlation(make_event("Duplicate"))],
+        )
+        .await;
     match stale {
         Err(PersistenceError::Conflict {
             expected, actual, ..
@@ -140,7 +144,7 @@ where
     // --- An absent stream is absent -----------------------------------------
     // The event type is not required to be `Debug`, so the diagnostic reports the
     // shape of the unexpected result rather than its contents.
-    match store.load("conformance", "never-written", tenant) {
+    match store.load("conformance", "never-written", tenant).await {
         Err(PersistenceError::NotFound { .. }) => {}
         Ok(events) => panic!(
             "loading a stream that was never appended to must report it as not found, \
@@ -162,6 +166,7 @@ where
             0,
             vec![StoredEvent::without_correlation(make_event("Systemwide"))],
         )
+        .await
         .expect("a systemwide append at expected version 0 must succeed");
     assert_eq!(systemwide_first, 1);
 
@@ -175,6 +180,7 @@ where
                 "SystemwideAgain",
             ))],
         )
+        .await
         .expect(
             "a systemwide stream must see the history it just wrote: appending at expected \
              version 1 must succeed, not be rejected as though the stream were empty",
@@ -195,6 +201,7 @@ where
             0,
             vec![StoredEvent::without_correlation(make_event("Tenanted"))],
         )
+        .await
         .expect(
             "a tenant stream sharing a type and an id with a systemwide stream must be \
              independent of it",
@@ -202,6 +209,7 @@ where
 
     let systemwide = store
         .load("conformance", "shared-identity", None)
+        .await
         .expect("the systemwide stream must load");
     assert_eq!(
         systemwide.len(),
@@ -210,6 +218,7 @@ where
     );
     let tenanted = store
         .load("conformance", "shared-identity", tenant)
+        .await
         .expect("the tenant stream must load");
     assert_eq!(
         tenanted.len(),
@@ -221,6 +230,7 @@ where
     // --- The listing reports each partition's own streams, and only those ----
     let mut systemwide_listing = store
         .list_aggregate_ids(None)
+        .await
         .expect("listing the systemwide partition must succeed");
     systemwide_listing.sort();
     assert_eq!(
@@ -231,6 +241,7 @@ where
 
     let mut tenant_listing = store
         .list_aggregate_ids(tenant)
+        .await
         .expect("listing a tenant partition must succeed");
     tenant_listing.sort();
     assert_eq!(

@@ -28,8 +28,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 use async_trait::async_trait;
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
@@ -75,11 +75,16 @@ struct PanicOnLoadEventStore {
     /// activation attempt (FR-010 permits this; it just isn't what these
     /// tests want to isolate), which would also panic here and inflate
     /// `load_calls` past 1.
-    release_panic: Option<std::sync::mpsc::Receiver<()>>,
+    /// Held behind the async lock because `&self` must be `Sync` for the
+    /// trait's futures to be `Send`, and a receiver is `Send` but not `Sync`.
+    /// The lock is never contended — one receiver, one consumer — it exists to
+    /// satisfy that bound.
+    release_panic: Option<AsyncMutex<tokio::sync::mpsc::Receiver<()>>>,
 }
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for PanicOnLoadEventStore {
-    fn append(
+    async fn append(
         &mut self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -90,7 +95,7 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
         Ok(0)
     }
 
-    fn load(
+    async fn load(
         &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -98,12 +103,15 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = &self.release_panic {
-            let _ = release.recv();
+            // Awaited, not blocked on: this runs inside the store's own async
+            // method now, and a blocking receive here would park a runtime
+            // worker for as long as the test holds the gate.
+            let _ = release.lock().await.recv().await;
         }
         panic!("guaranteed_completion_tests: intentional panic during recovery load()");
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
@@ -119,8 +127,8 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
 #[tokio::test]
 async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
     let load_calls = Arc::new(AtomicUsize::new(0));
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(Mutex::new(PanicOnLoadEventStore {
+    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(AsyncMutex::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
             release_panic: None,
         }));
@@ -500,11 +508,11 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_once() {
     let load_calls = Arc::new(AtomicUsize::new(0));
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(Mutex::new(PanicOnLoadEventStore {
+    let (release_tx, release_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(AsyncMutex::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
-            release_panic: Some(release_rx),
+            release_panic: Some(AsyncMutex::new(release_rx)),
         }));
 
     let runtime = Arc::new(
@@ -584,7 +592,7 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
         );
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    let _ = release_tx.send(());
+    let _ = release_tx.send(()).await;
 
     let mut results: Vec<Result<CommandResult<TestEvent, TestState>, EntityError>> =
         Vec::with_capacity(N);
@@ -892,11 +900,12 @@ async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
 /// past the teardown window on their own.
 struct GatedPanicOnceEventStore {
     load_calls: Arc<AtomicUsize>,
-    release_panic: std::sync::mpsc::Receiver<()>,
+    release_panic: AsyncMutex<tokio::sync::mpsc::Receiver<()>>,
 }
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for GatedPanicOnceEventStore {
-    fn append(
+    async fn append(
         &mut self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -907,7 +916,7 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
         Ok(0)
     }
 
-    fn load(
+    async fn load(
         &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
@@ -915,10 +924,17 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         let call_number = self.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call_number == 1 {
-            // Synchronous, explicit wait for the test's release signal — not
-            // a sleep. Blocks this one Tokio worker thread; the other 7
-            // (`worker_threads = 8`) keep servicing the 100 caller tasks.
-            let _ = self.release_panic.recv();
+            // An explicit wait for the test's release signal — not a sleep, so
+            // the gate opens when the test says so rather than after a guessed
+            // interval.
+            //
+            // Awaited, not blocked on. This runs inside the store's own async
+            // method, so yielding here returns the worker to the runtime and the
+            // 100 caller tasks keep being serviced. A blocking receive would
+            // instead park a worker for as long as the test holds the gate —
+            // which is what this did while the store bridged async to sync, and
+            // what `block_in_place` was compensating for.
+            let _ = self.release_panic.lock().await.recv().await;
             panic!(
                 "guaranteed_completion_tests: intentional panic on the FIRST recovery attempt only"
             );
@@ -926,7 +942,7 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
         Ok(Vec::new())
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
@@ -957,11 +973,11 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() {
     let load_calls = Arc::new(AtomicUsize::new(0));
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let event_store: Arc<Mutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(Mutex::new(GatedPanicOnceEventStore {
+    let (release_tx, release_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
+        Arc::new(AsyncMutex::new(GatedPanicOnceEventStore {
             load_calls: load_calls.clone(),
-            release_panic: release_rx,
+            release_panic: AsyncMutex::new(release_rx),
         }));
 
     let runtime = Arc::new(
@@ -1044,7 +1060,7 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
-    let _ = release_tx.send(());
+    let _ = release_tx.send(()).await;
 
     let mut results: Vec<Result<CommandResult<TestEvent, TestState>, EntityError>> =
         Vec::with_capacity(N);

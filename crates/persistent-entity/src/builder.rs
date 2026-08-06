@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 
 use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::DomainEvent;
@@ -52,7 +53,7 @@ pub struct EntityRuntimeBuilder<
     registry: Option<Arc<EntityRegistry>>,
     event_bus_capacity: usize,
     /// Optionally injected event store. Defaults to in-memory.
-    event_store: Option<Arc<Mutex<dyn EventStore<E> + Send>>>,
+    event_store: Option<Arc<AsyncMutex<dyn EventStore<E> + Send>>>,
     /// Optionally injected snapshot store. Defaults to in-memory.
     snapshot_store: Option<Arc<Mutex<dyn Snapshot + Send>>>,
     /// Optional external-effects acceptance port (CORE-019 PR4 F-03 fix),
@@ -139,7 +140,7 @@ impl<
     }
 
     /// Inject a custom event store.  If not set, an [`InMemoryEventStore`] is used.
-    pub fn with_event_store(mut self, store: Arc<Mutex<dyn EventStore<E> + Send>>) -> Self {
+    pub fn with_event_store(mut self, store: Arc<AsyncMutex<dyn EventStore<E> + Send>>) -> Self {
         self.event_store = Some(store);
         self
     }
@@ -229,9 +230,9 @@ impl<
             tenant_id: self.tenant_id,
         };
 
-        let event_store: Arc<Mutex<dyn EventStore<E> + Send>> = self
+        let event_store: Arc<AsyncMutex<dyn EventStore<E> + Send>> = self
             .event_store
-            .unwrap_or_else(|| Arc::new(Mutex::new(InMemoryEventStore::new())));
+            .unwrap_or_else(|| Arc::new(AsyncMutex::new(InMemoryEventStore::new())));
 
         let snapshot_store: Arc<Mutex<dyn Snapshot + Send>> = self
             .snapshot_store

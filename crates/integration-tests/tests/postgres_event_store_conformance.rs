@@ -62,9 +62,9 @@ fn deserialize(
 
 type Deserializer = fn(&str, serde_json::Value) -> Result<ConformanceEvent, PersistenceError>;
 
-// `append`/`load` bridge into async code via `block_in_place`, which panics on a
-// current-thread runtime, so the multi-thread flavor is load-bearing.
-#[tokio::test(flavor = "multi_thread")]
+// The default current-thread runtime: the contract is asynchronous, so the
+// harness only awaits.
+#[tokio::test]
 async fn the_postgres_event_store_conforms() {
     let container = Postgres::default()
         .with_tag(POSTGRES_IMAGE_TAG)
@@ -105,7 +105,8 @@ async fn the_postgres_event_store_conforms() {
         kind: kind.to_string(),
         payload: serde_json::json!({ "kind": kind }),
         occurred_at: Utc::now(),
-    });
+    })
+    .await;
 
     // Keep the container alive until the assertions are done.
     drop(container);

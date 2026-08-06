@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **106 tasks total** — 46 complete and 60 pending. Complete: B0.1–B0.3 (merged as
+> **107 tasks total** — 48 complete and 59 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -313,13 +313,14 @@ unchanged, which is the point of stopping here.
 ### Phase B4: Async `EventStore` + Unit-of-Work Contract (needs A1 characterization tests)
 
 - [ ] B4.1 RED: `crates/domain/src/persistence/event_store.rs` — trait-level test (via a mock/double) asserting the new async `EventStore::begin() -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError>` shape compiles and is callable behind `Arc<dyn EventStore<E>>`.
-- [ ] B4.2 GREEN: change `EventStore` trait to async (AD-2); add `EventStoreUnitOfWork` trait with `append`, `confirm_receipt`, `commit`.
+- [x] B4.2a GREEN **(first slice)**: `EventStore` becomes asynchronous (AD-2) — `append`, `load` and `list_aggregate_ids` are `async`; `stream_version_offset` stays synchronous because it reports a static property of the store's configuration with no fallible path and no I/O. Uses `#[async_trait]`, not native `async fn` in trait: the trait is consumed as `dyn EventStore<E> + Send` behind a shared lock, and a native `async fn` makes a trait non-dyn-compatible. `PostgreSQLEventStore` loses its `block_in_place` + `block_on` bridge entirely. Behaviour unchanged: the full pre-existing suite passes untouched in substance.
+- [ ] B4.2b GREEN **(second slice)**: add the `EventStoreUnitOfWork` trait with `append`, `confirm_receipt`, `commit`.
 - [ ] B4.3 RED: `crates/integration-tests/tests/event_store_uow.rs` — dropping a UoW without calling `commit()` rolls back (real Postgres transaction).
 - [ ] B4.4 GREEN: implement `PostgresEventStoreUnitOfWork` in `crates/persistence/src/postgres/event_store.rs`, replacing the `block_on`-wrapped synchronous `append` (verified constraint 2) — `append(&mut self, ...)` becomes `&self`.
 - [ ] B4.5 GREEN: implement the in-memory `EventStoreUnitOfWork` equivalent; ensure tenant-scoped uniqueness matches the durable store exactly (event-store spec: "In-Memory Store Does Not Silently Diverge").
 - [ ] B4.6 RED: `crates/domain/src/persistence/stored_event.rs` test — `StoredEvent` metadata round-trips an `operation_key` through storage and back (event-store spec scenario; verified constraint 3 — no metadata channel exists today).
 - [ ] B4.7 GREEN: add the metadata column/serialized field and bind it in the Postgres INSERT.
-- [ ] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple.
+- [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
 
 ### Phase B5: Per-Aggregate `operation_receipts` (needs A2, A3, B4)
 

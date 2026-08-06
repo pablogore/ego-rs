@@ -180,13 +180,12 @@ async fn start_store() -> (
     (store, pool, container)
 }
 
-// `PostgreSQLEventStore::append`/`load` bridge into async code internally via
-// `tokio::task::block_in_place` (see `crates/persistence/src/postgres/event_store.rs`),
-// which panics outright on a current-thread runtime. `flavor = "multi_thread"`
-// is therefore load-bearing here, not a style choice — it is part of what
-// this file characterizes about the store's current (synchronous-looking,
-// actually-blocking) API.
-#[tokio::test(flavor = "multi_thread")]
+// These ran on `flavor = "multi_thread"` because the store bridged async to sync
+// with `block_in_place`, which panics outright on a current-thread runtime — a
+// storage detail that had leaked into a test attribute. The trait is asynchronous
+// now, the bridge is gone, and these run on the default current-thread runtime.
+// The change of attribute is itself part of what this file characterizes.
+#[tokio::test]
 async fn append_advances_the_version_and_load_returns_events_in_order() {
     let (mut store, _pool, _container) = start_store().await;
     let aggregate_type = "order";
@@ -203,6 +202,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
 
     let new_version = store
         .append(aggregate_type, aggregate_id, tenant, 0, events)
+        .await
         .expect("appending to a fresh aggregate at the correct expected version must succeed");
     assert_eq!(
         new_version, 2,
@@ -211,6 +211,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
 
     let loaded = store
         .load(aggregate_type, aggregate_id, tenant)
+        .await
         .expect("a stream that was just appended to must be loadable");
     assert_eq!(
         loaded.len(),
@@ -221,7 +222,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
     assert_eq!(loaded[1].event.event_type(), "OrderLineAdded");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check() {
     let (mut store, _pool, _container) = start_store().await;
     let aggregate_type = "order";
@@ -242,6 +243,7 @@ async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check(
                 "OrderCreated",
             ))],
         )
+        .await
         .expect("the first append at expected_version 0 must succeed");
     assert_eq!(first_version, 1);
 
@@ -250,16 +252,18 @@ async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check(
     // `SELECT COALESCE(MAX(version), 0)` read-then-compare inside `append` —
     // there is no unique index or constraint on the stream identity that
     // could produce this outcome instead (see the schema assertion below).
-    let retried = store.append(
-        aggregate_type,
-        aggregate_id,
-        tenant,
-        0,
-        vec![StoredEvent::without_correlation(recorded_event(
-            aggregate,
-            "OrderCreatedAgain",
-        ))],
-    );
+    let retried = store
+        .append(
+            aggregate_type,
+            aggregate_id,
+            tenant,
+            0,
+            vec![StoredEvent::without_correlation(recorded_event(
+                aggregate,
+                "OrderCreatedAgain",
+            ))],
+        )
+        .await;
 
     assert_eq!(
         retried,
