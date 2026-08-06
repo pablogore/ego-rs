@@ -103,16 +103,17 @@ async fn test_recovery_replays_seeded_events() {
 
     let event_store = Arc::new(Mutex::new(InMemoryEventStore::<TestEvent>::new()));
 
-    // EntityTriple::aggregate_id() returns "{entity_type}-{entity_id}".
-    // Pre-seed under the same key the actor will use for recovery.
-    let aggregate_key = "counter-c-recovery";
+    // Pre-seed under the same (type, id) identity the actor will use for
+    // recovery.
+    let aggregate_type = "counter";
+    let aggregate_id = "c-recovery";
     let events: Vec<StoredEvent<TestEvent>> = (1u64..=3)
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
     {
         let mut store = event_store.lock();
         store
-            .append(aggregate_key, None, 0, events)
+            .append(aggregate_type, aggregate_id, None, 0, events)
             .expect("pre-seed must succeed");
     }
 

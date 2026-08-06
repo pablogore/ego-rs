@@ -4,17 +4,28 @@ use crate::persistence::{PersistenceError, StoredEvent};
 /// Trait for appending and loading domain events.
 ///
 /// Implementations provide event-sourced persistence backed by any storage system.
+///
+/// The stream identity is `(aggregate_type, aggregate_id)`, not a single
+/// joined string. Keeping the type a distinct component rather than
+/// concatenating it into the identifier means a caller that needs one
+/// component back is never left trying to parse it out of a joined value —
+/// which, for at least one known caller, is not even possible in general
+/// (a type name that itself contains the join separator can make two
+/// different type/id pairs produce the identical joined string).
 pub trait EventStore<E: DomainEvent> {
     /// Append events to the event stream for the given aggregate.
     ///
-    /// - `aggregate_id`: The unique identifier of the aggregate.
+    /// - `aggregate_type`: The registered type this stream belongs to.
+    /// - `aggregate_id`: The bare identifier of the aggregate, distinct from its type.
     /// - `tenant_id`: Optional tenant scope. `Some("")` (empty string) is treated as missing tenant.
     /// - `expected_version`: Optimistic concurrency check. Use `0` for new aggregates.
     /// - `events`: The events to append, wrapped with optional metadata.
     ///
     /// Returns the new stream version on success, or a `PersistenceError`.
+    #[allow(clippy::too_many_arguments)]
     fn append(
         &mut self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
@@ -26,12 +37,17 @@ pub trait EventStore<E: DomainEvent> {
     /// Returns `PersistenceError::NotFound` if the aggregate stream does not exist.
     fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError>;
 
-    /// List all aggregate IDs known to this store, optionally scoped to a tenant.
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError>;
+    /// List all `(aggregate_type, aggregate_id)` pairs known to this store,
+    /// optionally scoped to a tenant.
+    fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError>;
 
     /// Returns the logical position of the first event that `load` would return.
     ///
@@ -43,7 +59,12 @@ pub trait EventStore<E: DomainEvent> {
     /// when recovering entity state.
     ///
     /// [`PersistenceFacade`]: persistent_entity::persistence::PersistenceFacade
-    fn stream_version_offset(&self, _aggregate_id: &str, _tenant_id: Option<&str>) -> u64 {
+    fn stream_version_offset(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+    ) -> u64 {
         0
     }
 }

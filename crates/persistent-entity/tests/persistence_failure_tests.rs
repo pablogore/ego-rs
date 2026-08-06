@@ -34,6 +34,7 @@ struct FailingEventStore;
 impl EventStore<TestEvent> for FailingEventStore {
     fn append(
         &mut self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -44,6 +45,7 @@ impl EventStore<TestEvent> for FailingEventStore {
 
     fn load(
         &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
@@ -55,7 +57,7 @@ impl EventStore<TestEvent> for FailingEventStore {
     fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
     }
 }
@@ -75,6 +77,7 @@ impl AppendFailingStore {
 impl EventStore<TestEvent> for AppendFailingStore {
     fn append(
         &mut self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -87,13 +90,17 @@ impl EventStore<TestEvent> for AppendFailingStore {
 
     fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
-        self.inner.load(aggregate_id, tenant_id)
+        self.inner.load(aggregate_type, aggregate_id, tenant_id)
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.inner.list_aggregate_ids(tenant_id)
     }
 }
@@ -126,7 +133,7 @@ async fn test_load_error_propagates_to_caller() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_snapshot_recovery_with_version_offset() {
     let event_store = Arc::new(Mutex::new(
-        InMemoryEventStore::<TestEvent>::new().with_version_offset("counter-snap-1", 5),
+        InMemoryEventStore::<TestEvent>::new().with_version_offset("counter", "snap-1", 5),
     ));
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 

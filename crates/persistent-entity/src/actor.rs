@@ -102,7 +102,8 @@ where
         let (snap_data, stored_events) = self
             .persistence
             .load_for_recovery(
-                &self.entity_id.aggregate_id(),
+                self.entity_id.aggregate_type(),
+                &self.entity_id.entity_id,
                 Some(&self.entity_id.tenant_id),
             )
             .await?;
@@ -227,7 +228,8 @@ where
                 let persist_result = self
                     .persistence
                     .persist_events(
-                        &self.entity_id.aggregate_id(),
+                        self.entity_id.aggregate_type(),
+                        &self.entity_id.entity_id,
                         Some(&self.entity_id.tenant_id),
                         self.version,
                         &events,

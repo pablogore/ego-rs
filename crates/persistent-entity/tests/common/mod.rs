@@ -83,25 +83,35 @@ impl CountingEventStore {
 impl EventStore<TestEvent> for CountingEventStore {
     fn append(
         &mut self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
         events: Vec<StoredEvent<TestEvent>>,
     ) -> Result<i64, PersistenceError> {
-        self.inner
-            .append(aggregate_id, tenant_id, expected_version, events)
+        self.inner.append(
+            aggregate_type,
+            aggregate_id,
+            tenant_id,
+            expected_version,
+            events,
+        )
     }
 
     fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.load(aggregate_id, tenant_id)
+        self.inner.load(aggregate_type, aggregate_id, tenant_id)
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
+    fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         self.inner.list_aggregate_ids(tenant_id)
     }
 }

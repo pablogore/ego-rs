@@ -170,7 +170,9 @@ async fn start_store() -> (
         .await
         .expect("the framework's own migrations must apply cleanly");
 
-    let store = PostgreSQLEventStore::new(pool.clone(), deserialize as Deserializer);
+    let store = PostgreSQLEventStore::open(pool.clone(), deserialize as Deserializer)
+        .await
+        .expect("the store must open once every row carries its aggregate type");
     (store, pool, container)
 }
 
@@ -183,6 +185,8 @@ async fn start_store() -> (
 #[tokio::test(flavor = "multi_thread")]
 async fn append_advances_the_version_and_load_returns_events_in_order() {
     let (mut store, _pool, _container) = start_store().await;
+    let aggregate_type = "order";
+    let aggregate_id = "1";
     let aggregate = "order-1";
     // A concrete tenant, deliberately — see the module-level note above these
     // tests about the NULL-tenant ("systemwide") mode against a real database.
@@ -194,7 +198,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
     ];
 
     let new_version = store
-        .append(aggregate, tenant, 0, events)
+        .append(aggregate_type, aggregate_id, tenant, 0, events)
         .expect("appending to a fresh aggregate at the correct expected version must succeed");
     assert_eq!(
         new_version, 2,
@@ -202,7 +206,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
     );
 
     let loaded = store
-        .load(aggregate, tenant)
+        .load(aggregate_type, aggregate_id, tenant)
         .expect("a stream that was just appended to must be loadable");
     assert_eq!(
         loaded.len(),
@@ -216,6 +220,8 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
 #[tokio::test(flavor = "multi_thread")]
 async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check() {
     let (mut store, _pool, _container) = start_store().await;
+    let aggregate_type = "order";
+    let aggregate_id = "2";
     let aggregate = "order-2";
     // A concrete tenant, deliberately — see the module-level note above these
     // tests about the NULL-tenant ("systemwide") mode against a real database.
@@ -223,7 +229,8 @@ async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check(
 
     let first_version = store
         .append(
-            aggregate,
+            aggregate_type,
+            aggregate_id,
             tenant,
             0,
             vec![StoredEvent::without_correlation(recorded_event(
@@ -240,7 +247,8 @@ async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check(
     // there is no unique index or constraint on the stream identity that
     // could produce this outcome instead (see the schema assertion below).
     let retried = store.append(
-        aggregate,
+        aggregate_type,
+        aggregate_id,
         tenant,
         0,
         vec![StoredEvent::without_correlation(recorded_event(

@@ -1443,3 +1443,109 @@ transition, one moment of change, no window between two states.
 
 `fmt`, `check --workspace --all-targets`, `clippy -D warnings` and the three
 `xtask verify-*`: all pass. `cargo test --workspace` was not run.
+
+---
+
+## Phase A2, second slice: the coordinated transition — COMPLETE
+
+Branch: `feat/prod-012-a2ii-coordinated-transition`, off the tracker.
+
+Everything that touches schema or data, landing as one transition with no window
+between two states: the column, the preflight and its four aborts, the transactional
+backfill, the switch-over of read and write identity, the post-verification,
+`SET NOT NULL`, the reverse operation, the report, the runbook, and a fail-closed
+open-time check.
+
+- [x] A2.1, A2.7 — preflight, before a single row is written. The scan runs, every row
+      is classified in memory, and the function **returns before the first `UPDATE`**.
+      Four aborts, each naming the offending rows: no registered type matches, more than
+      one matches, the bare identifier is empty or whitespace, and the post-split
+      identity would collide with another row's.
+- [x] A2.3 — migration `007` adds the nullable column; the operator tool performs the
+      forward step, which is not derivable from data alone.
+- [x] A2.4 — the switch-over: `EventStore` carries the type alongside the id
+      **synchronously**, the write path uses the structural identity, and the column
+      becomes mandatory. One step, because activating the identity before the data is
+      transformed forks history and making the column mandatory before the switch-over
+      would reject writes from the old path.
+- [x] A2.5 — the reverse operation rejoins exactly what was split and drops the column,
+      inside one transaction.
+- [x] A2.8 — post-verification: row count unchanged, post-split identity unique, and per
+      stream the versions consecutive from 1. Referential integrity is deliberately not
+      checked: no migration declares a foreign key, so a check would imply one exists.
+- [x] A2.9 — machine-readable report and a runbook binary that exits non-zero on abort,
+      so a pipeline can branch on the exit code without parsing the report.
+- [x] A2.10 — the fail-closed open-time check.
+
+### The guard, and why documentation was not enough
+
+Review found that nothing sequenced the backfill against the new code serving traffic.
+`migrations::run` adds the column at startup; the new queries then filter on the type.
+Deploying the new binary before running the backfill reproduces the exact hazard that
+got the first slice rejected — every historical stream reads as absent, the version check
+returns zero, and an append forks history while the original rows sit orphaned.
+
+"It is in the runbook" is the same class of guarantee already rejected once in this
+change. So the store now **refuses to open** while any row has `aggregate_type IS NULL`.
+
+Three properties, all required and all met:
+
+- It runs **after** the migration and **before** any store operation is possible. That
+  is enforced by the constructor's shape rather than by discipline: `open` returns a
+  result, so on the unmigrated path no store value exists and there is nothing to call a
+  read or an append on.
+- It runs on **every** open, with **no cached flag**. A cached answer goes stale exactly
+  when an old writer inserts one more untyped row mid-transition — the case worth
+  catching.
+- It fails with an explicit message that says *why*, not merely that it refused.
+
+`open` is now the only constructor. Leaving an unchecked one available would have made
+the guard advisory.
+
+**Cost, stated:** one existence query per open. That buys refusing to operate in a state
+where correctness is not achievable.
+
+### The runbook order, recorded in the binary itself
+
+```
+1. quiesce the old writers   — stop every process still writing untyped rows
+2. run the tool              — applies the migration, then the backfill
+3. read the report           — a non-zero exit means nothing was written
+4. the tool has already set the column mandatory on success
+5. start the new binary      — only now
+```
+
+Step 1 is the easiest to skip and the most damaging: while an old instance still inserts
+untyped rows, the tool can commit a table that was complete when checked and incomplete a
+moment later. The open-time check then refuses to start the new binary, which is the
+intended outcome but turns a clean transition into an outage to diagnose.
+
+The check does not replace the order. It makes getting the order wrong visible and
+recoverable instead of silent.
+
+### UNIT — hermetic
+
+- `cargo test -p ego-domain --lib`: **219 passed**, 0 failed.
+- `cargo test -p ego-persistence --lib`: **11 passed**, 0 failed.
+- `cargo test -p persistent-entity --lib`: **45 passed**, 0 failed.
+
+### INTEGRATION — real PostgreSQL
+
+- `cargo test -p ego-integration-tests`: **8 + 3 passed**, 0 failed. The eight cover the
+  four aborts, the clean path with row-count and stream-integrity preservation, the
+  zero-row case, the exact revert, and the open-time guard refusing and then admitting.
+  The three are the inherited characterization tests, adapted here because this is the
+  slice where the identity genuinely changes — which is exactly what that adaptation is
+  supposed to signal.
+
+### Static gates
+
+`fmt`, `check --workspace --all-targets`, `clippy -D warnings` and the three
+`xtask verify-*`: all pass. `cargo test --workspace` was not run.
+
+### Review budget — accepted exception
+
+Roughly 1,100 lines. The exception was accepted before the work started, on the grounds
+that this slice concentrates the dangerous operation and its entire proof, and that the
+additive half had already been split out to keep it reviewable on its own. The guard
+added to that total and is minimal logic directly required for the migration to be safe.
