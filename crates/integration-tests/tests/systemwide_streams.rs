@@ -135,8 +135,9 @@ async fn start_store() -> (
     (store, pool, container)
 }
 
-// `append`/`load` bridge into async code via `block_in_place`, which panics on a
-// current-thread runtime. `flavor = "multi_thread"` is load-bearing.
+// The default current-thread runtime is enough: the store's methods are
+// asynchronous, so nothing here bridges async to sync and no test in this file
+// needs concurrency.
 
 /// A systemwide stream is visible to its own reads: the version check sees the
 /// history it just wrote, so a second append advances rather than restarting.
@@ -145,7 +146,7 @@ async fn start_store() -> (
 /// read an empty stream, so it rejected `expected_version = 1` as stale while
 /// reporting the stream's version as 0 — and an append at `expected_version = 0`
 /// would have inserted a *second* version-1 row, duplicating history silently.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_systemwide_stream_advances_its_version_across_appends() {
     let (mut store, _pool, _container) = start_store().await;
 
@@ -160,6 +161,7 @@ async fn a_systemwide_stream_advances_its_version_across_appends() {
                 "OrderCreated",
             ))],
         )
+        .await
         .expect("the first systemwide append at expected version 0 must succeed");
     assert_eq!(first, 1);
 
@@ -174,6 +176,7 @@ async fn a_systemwide_stream_advances_its_version_across_appends() {
                 "OrderLineAdded",
             ))],
         )
+        .await
         .expect("the second systemwide append must see the first one's version");
     assert_eq!(
         second, 2,
@@ -182,7 +185,7 @@ async fn a_systemwide_stream_advances_its_version_across_appends() {
 }
 
 /// `load` returns a systemwide stream's events, in order.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn load_returns_a_systemwide_stream_rather_than_reporting_it_absent() {
     let (mut store, _pool, _container) = start_store().await;
 
@@ -197,10 +200,12 @@ async fn load_returns_a_systemwide_stream_rather_than_reporting_it_absent() {
                 StoredEvent::without_correlation(recorded_event("order-1", "OrderLineAdded")),
             ],
         )
+        .await
         .expect("appending a systemwide stream must succeed");
 
     let loaded = store
         .load("order", "1", None)
+        .await
         .expect("a systemwide stream that was just appended to must be loadable");
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].event.event_type(), "OrderCreated");
@@ -213,7 +218,7 @@ async fn load_returns_a_systemwide_stream_rather_than_reporting_it_absent() {
 /// Without this, "the systemwide read sees its own history" could be satisfied by
 /// a comparison that matches every row, which would pass the two tests above for
 /// entirely the wrong reason.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_stale_expected_version_is_still_rejected_for_a_systemwide_stream() {
     let (mut store, _pool, _container) = start_store().await;
 
@@ -228,18 +233,21 @@ async fn a_stale_expected_version_is_still_rejected_for_a_systemwide_stream() {
                 "OrderCreated",
             ))],
         )
+        .await
         .expect("the first systemwide append must succeed");
 
-    let retried = store.append(
-        "order",
-        "1",
-        None,
-        0,
-        vec![StoredEvent::without_correlation(recorded_event(
-            "order-1",
-            "OrderCreated",
-        ))],
-    );
+    let retried = store
+        .append(
+            "order",
+            "1",
+            None,
+            0,
+            vec![StoredEvent::without_correlation(recorded_event(
+                "order-1",
+                "OrderCreated",
+            ))],
+        )
+        .await;
     assert_eq!(
         retried,
         Err(PersistenceError::Conflict {
@@ -259,7 +267,7 @@ async fn a_stale_expected_version_is_still_rejected_for_a_systemwide_stream() {
 /// as equal to a concrete tenant. If it did, a systemwide read would return
 /// another tenant's events: an isolation breach, strictly worse than the
 /// invisibility being fixed.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_separate() {
     let (mut store, _pool, _container) = start_store().await;
 
@@ -274,6 +282,7 @@ async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_sep
                 "SystemwideEvent",
             ))],
         )
+        .await
         .expect("the systemwide append must succeed");
 
     // Same type, same id, different partition — so this is a fresh stream and
@@ -289,10 +298,12 @@ async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_sep
                 "TenantEvent",
             ))],
         )
+        .await
         .expect("a tenant stream sharing the identity must be independent of the systemwide one");
 
     let systemwide = store
         .load("order", "1", None)
+        .await
         .expect("the systemwide stream must load");
     assert_eq!(
         systemwide.len(),
@@ -303,6 +314,7 @@ async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_sep
 
     let tenant = store
         .load("order", "1", Some("tenant-1"))
+        .await
         .expect("the tenant stream must load");
     assert_eq!(
         tenant.len(),
@@ -314,7 +326,7 @@ async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_sep
 
 /// `list_aggregate_ids` lists systemwide aggregates, and lists them only in the
 /// partition they belong to.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn list_aggregate_ids_covers_the_systemwide_partition() {
     let (mut store, _pool, _container) = start_store().await;
 
@@ -329,6 +341,7 @@ async fn list_aggregate_ids_covers_the_systemwide_partition() {
                 "SystemwideEvent",
             ))],
         )
+        .await
         .expect("the systemwide append must succeed");
     store
         .append(
@@ -341,10 +354,12 @@ async fn list_aggregate_ids_covers_the_systemwide_partition() {
                 "TenantEvent",
             ))],
         )
+        .await
         .expect("the tenant append must succeed");
 
     let systemwide = store
         .list_aggregate_ids(None)
+        .await
         .expect("listing the systemwide partition must succeed");
     assert_eq!(
         systemwide,
@@ -354,6 +369,7 @@ async fn list_aggregate_ids_covers_the_systemwide_partition() {
 
     let tenant = store
         .list_aggregate_ids(Some("tenant-1"))
+        .await
         .expect("listing a tenant partition must succeed");
     assert_eq!(
         tenant,

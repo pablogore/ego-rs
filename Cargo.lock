@@ -773,6 +773,7 @@ dependencies = [
  "ego-application",
  "ego-domain",
  "ego-persistence",
+ "ego-testkit",
  "mockall 0.14.0",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -796,6 +797,7 @@ dependencies = [
  "chrono",
  "ego-domain",
  "ego-persistence",
+ "ego-testkit",
  "serde_json",
  "sqlx",
  "testcontainers",
@@ -807,6 +809,7 @@ dependencies = [
 name = "ego-persistence"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ego-domain",
  "log",

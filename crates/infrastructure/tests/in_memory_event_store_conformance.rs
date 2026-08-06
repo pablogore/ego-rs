@@ -44,13 +44,19 @@ impl DomainEvent for ConformanceEvent {
     }
 }
 
-#[test]
-fn the_in_memory_event_store_conforms() {
+// A plain `#[tokio::test]`, current-thread: the contract is asynchronous now, but
+// this store does no I/O, so nothing here needs a multi-thread runtime. The
+// PostgreSQL suite used to require `flavor = "multi_thread"` because the store
+// bridged async to sync with `block_in_place`, which panics on a current-thread
+// runtime — a storage detail that had leaked into test attributes.
+#[tokio::test]
+async fn the_in_memory_event_store_conforms() {
     let mut store: InMemoryEventStore<ConformanceEvent> = InMemoryEventStore::new();
 
     assert_event_store_conformance(&mut store, |kind| ConformanceEvent {
         kind: kind.to_string(),
         payload: serde_json::json!({ "kind": kind }),
         occurred_at: Utc::now(),
-    });
+    })
+    .await;
 }

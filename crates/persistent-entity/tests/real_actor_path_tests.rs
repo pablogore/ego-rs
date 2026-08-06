@@ -2,6 +2,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -101,7 +102,7 @@ async fn test_recovery_replays_seeded_events() {
     use ego_domain::persistence::{EventStore, StoredEvent};
     use persistent_entity::persistence::InMemoryEventStore;
 
-    let event_store = Arc::new(Mutex::new(InMemoryEventStore::<TestEvent>::new()));
+    let event_store = Arc::new(AsyncMutex::new(InMemoryEventStore::<TestEvent>::new()));
 
     // Pre-seed under the same (type, id) identity the actor will use for
     // recovery.
@@ -111,9 +112,10 @@ async fn test_recovery_replays_seeded_events() {
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
     {
-        let mut store = event_store.lock();
+        let mut store = event_store.lock().await;
         store
             .append(aggregate_type, aggregate_id, None, 0, events)
+            .await
             .expect("pre-seed must succeed");
     }
 

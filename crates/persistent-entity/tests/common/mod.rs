@@ -80,8 +80,9 @@ impl CountingEventStore {
     }
 }
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for CountingEventStore {
-    fn append(
+    async fn append(
         &mut self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -89,29 +90,33 @@ impl EventStore<TestEvent> for CountingEventStore {
         expected_version: i64,
         events: Vec<StoredEvent<TestEvent>>,
     ) -> Result<i64, PersistenceError> {
-        self.inner.append(
-            aggregate_type,
-            aggregate_id,
-            tenant_id,
-            expected_version,
-            events,
-        )
+        self.inner
+            .append(
+                aggregate_type,
+                aggregate_id,
+                tenant_id,
+                expected_version,
+                events,
+            )
+            .await
     }
 
-    fn load(
+    async fn load(
         &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.load(aggregate_type, aggregate_id, tenant_id)
+        self.inner
+            .load(aggregate_type, aggregate_id, tenant_id)
+            .await
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
-        self.inner.list_aggregate_ids(tenant_id)
+        self.inner.list_aggregate_ids(tenant_id).await
     }
 }

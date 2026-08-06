@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::event::DomainEvent;
 use crate::persistence::{PersistenceError, StoredEvent};
 
@@ -12,6 +14,30 @@ use crate::persistence::{PersistenceError, StoredEvent};
 /// which, for at least one known caller, is not even possible in general
 /// (a type name that itself contains the join separator can make two
 /// different type/id pairs produce the identical joined string).
+///
+/// # Why the storage methods are asynchronous
+///
+/// Every implementation that talks to a real database is asynchronous
+/// underneath. Presenting a synchronous surface over it does not remove the
+/// wait; it only hides where the wait happens. The PostgreSQL implementation
+/// used to bridge the gap with `block_in_place` plus `block_on`, which pinned a
+/// runtime worker for the duration of each round trip and made the store
+/// unusable on a current-thread runtime — a constraint that leaked all the way
+/// into test attributes.
+///
+/// # Why `#[async_trait]` and not `async fn` in trait
+///
+/// Native `async fn` in traits is stable, and it is not usable here: this trait
+/// is consumed as `dyn EventStore<E> + Send` behind a shared lock, and a native
+/// `async fn` makes a trait non-dyn-compatible. `#[async_trait]` boxes the
+/// returned futures, which costs one allocation per call and keeps the trait
+/// object that every caller depends on.
+///
+/// `stream_version_offset` stays synchronous deliberately. It reports a static
+/// property of how a store was configured, has no fallible path and no I/O, and
+/// no implementation consults storage to answer it — making it asynchronous
+/// would add a boxed future per call to describe a constant.
+#[async_trait]
 pub trait EventStore<E: DomainEvent> {
     /// Append events to the event stream for the given aggregate.
     ///
@@ -23,7 +49,7 @@ pub trait EventStore<E: DomainEvent> {
     ///
     /// Returns the new stream version on success, or a `PersistenceError`.
     #[allow(clippy::too_many_arguments)]
-    fn append(
+    async fn append(
         &mut self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -35,7 +61,7 @@ pub trait EventStore<E: DomainEvent> {
     /// Load all events for the given aggregate in the given tenant.
     ///
     /// Returns `PersistenceError::NotFound` if the aggregate stream does not exist.
-    fn load(
+    async fn load(
         &self,
         aggregate_type: &str,
         aggregate_id: &str,
@@ -44,7 +70,7 @@ pub trait EventStore<E: DomainEvent> {
 
     /// List all `(aggregate_type, aggregate_id)` pairs known to this store,
     /// optionally scoped to a tenant.
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError>;

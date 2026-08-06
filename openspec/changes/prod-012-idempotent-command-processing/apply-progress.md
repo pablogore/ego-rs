@@ -1866,3 +1866,94 @@ row where a green test run coexisted with a failing static gate. Fixed with a na
 alias before commit.
 
 **A3 complete. 106 tasks, 46 complete, 60 pending.**
+
+---
+
+## Phase B4, first slice: the asynchronous `EventStore` — COMPLETE
+
+Branch: `feat/prod-012-b4i-async-event-store`, off the tracker at `c3e1dd4`.
+
+B4 ships in three slices. This one changes the contract and every caller, and adds no new
+capability: no unit of work, no receipts, no metadata column. Behaviour is meant to be
+identical, and the pre-existing suite is the evidence.
+
+### The trait
+
+`append`, `load` and `list_aggregate_ids` are now `async`. `stream_version_offset` stays
+synchronous: it reports a static property of how a store was configured, has no fallible
+path and no I/O, and no implementation consults storage to answer it — making it async would
+add a boxed future per call to describe a constant.
+
+`#[async_trait]`, not native `async fn` in trait. Native `async fn` is stable and unusable
+here: the trait is consumed as `dyn EventStore<E> + Send` behind a shared lock, and a native
+`async fn` makes a trait non-dyn-compatible. The cost is one allocation per call; the
+alternative is losing the trait object every caller depends on.
+
+### What the bridge was costing
+
+`PostgreSQLEventStore` presented a synchronous surface over an asynchronous driver by
+wrapping each method body in `block_in_place` + `block_on`. That never removed the wait — it
+only hid where the wait happened, pinned a runtime worker for the duration of every round
+trip, and made the store panic outright on a current-thread runtime.
+
+That last part had leaked out of the storage layer and into test attributes. Three test files
+carried `flavor = "multi_thread"` with comments explaining it was "load-bearing" because of
+`block_in_place`. With the bridge gone those comments were false, so they are corrected and
+the files now run on the default current-thread runtime — which is the demonstration, not
+just the claim. Two tests keep `multi_thread` and their comments now give the real reason:
+one drives a competing transaction while an append is blocked, the other needs a race to
+actually be contested.
+
+### The lock had to change, and only one of them
+
+`PersistenceFacade` holds its stores behind `Arc<Mutex<dyn ...>>`. `parking_lot`'s guard is
+not `Send`, so holding it across an `.await` makes every future that touches the store
+non-`Send` and therefore unspawnable. The event-store lock is now `tokio::sync::Mutex`, which
+yields a `Send` guard and, like `parking_lot`, does not poison — so the original
+non-poisoning rationale is preserved, not discarded.
+
+The snapshot lock stays on `parking_lot`. `Snapshot` is still synchronous, so its guard has
+nothing to hold across; converting it now would add an `.await` to acquire a lock nothing
+waits on. The asymmetry is deliberate and documented at the field, so it reads as a decision
+rather than an oversight.
+
+This is a **public API change**: `with_event_store` and `PersistenceFacade::with_stores` now
+take `Arc<tokio::sync::Mutex<dyn EventStore<E> + Send>>`.
+
+### A test double that would have quietly parked a worker
+
+Two doubles in `guaranteed_completion_tests.rs` gate on a `std::sync::mpsc::Receiver`. Two
+problems surfaced at once: a receiver is `Send` but not `Sync`, so `&self` could not satisfy
+the trait's `Send` future bound; and a blocking `recv()` inside an async method parks a
+runtime worker — which `block_in_place` used to compensate for by handing the runtime a
+replacement thread, and nothing does now.
+
+Wrapping the receiver in a lock would have fixed the type error and left the second problem
+in place. They now use `tokio::sync::mpsc` and await, which is what an async double should
+do.
+
+### Scope boundary, stated
+
+`Repository` and `Snapshot` still bridge with `block_in_place` + `block_on` in
+`crates/persistence/src/postgres/`. They are separate traits and are not part of B4. The
+remaining references to `block_in_place` are those two implementations plus three historical
+mentions in comments explaining what the event store used to do.
+
+### Verification
+
+Behaviour-preservation is the claim, so the evidence is the pre-existing suite passing:
+
+- UNIT: ego-domain **219**, ego-persistence **13**, ego-infrastructure **24**,
+  persistent-entity **45**, ego-testkit **86**.
+- `persistent-entity` integration tests — the actor recovery, activation-ordering,
+  persistence-failure and guaranteed-completion paths: **45 + 13 + 5 + 7 + 6 + 6 + 3 = 85
+  passed**.
+- HERMETIC conformance, now on a current-thread runtime: **1 passed**.
+- INTEGRATION, real PostgreSQL: **9 + 3 + 1 + 3 + 5 + 5 = 26 passed**, 0 failed.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene` — all clean. `cargo test --workspace` not run.
+
+Clippy again caught what the suite did not: three now-unused `parking_lot::Mutex` imports.
+Fourth slice in a row.
+
+**107 tasks, 48 complete, 59 pending.**
