@@ -75,6 +75,9 @@ fn split_aggregate_id(raw: &str, registered_types: &[String]) -> SplitOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackfillReport {
     pub rows_scanned: u64,
+    /// Rows whose split was consolidated. Zero on every refusal, including a
+    /// rolled-back one: rows were written there, but none of them persisted,
+    /// and this field reports what an operator will find in the table.
     pub rows_rewritten: u64,
     pub outcome: BackfillOutcome,
 }
@@ -83,13 +86,25 @@ pub struct BackfillReport {
 #[serde(rename_all = "snake_case")]
 pub enum BackfillOutcome {
     /// Every row split unambiguously under the registered type list, no
-    /// post-split identity collided with another row's, and the rewrite —
-    /// including making the column mandatory — committed as one transaction.
+    /// post-split identity collided with another row's, the rewritten table
+    /// passed post-verification, and the rewrite — including making the column
+    /// mandatory — committed as one transaction.
     Committed,
     /// At least one row failed a precondition. Nothing was written: the
     /// whole scan ran inside one transaction which ended without writing rather than
     /// committed, so the table is exactly as it was before this attempt.
     Aborted(AbortReport),
+    /// The rewrite ran and post-verification then rejected the result, so the
+    /// whole transaction was rolled back.
+    ///
+    /// This is a genuinely different outcome from [`Self::Aborted`], not a
+    /// synonym: there, no row was ever written and the guarantee comes from the
+    /// ordering; here, rows *were* written inside the transaction and the
+    /// guarantee comes from discarding them. The table is unchanged either way,
+    /// but an operator reading the report is looking at two different events,
+    /// and side effects that a rollback does not undo — an advanced sequence,
+    /// for instance — belong to this one only.
+    RolledBack(AbortReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -98,6 +113,10 @@ pub struct AbortReport {
     /// The primary-key `id` of every row that violated `reason`, so an
     /// operator can go straight to the offending data instead of re-scanning
     /// the table to find it.
+    ///
+    /// Empty for [`AbortReason::RowCountChanged`], which is a property of the
+    /// table as a whole: the rows that appeared were not in the scan, so there
+    /// are no scanned ids to name. Their count is in the reason itself.
     pub offending_row_ids: Vec<i64>,
 }
 
@@ -119,6 +138,30 @@ pub enum AbortReason {
     /// splitting — the same collision the eventual unique index would refuse,
     /// caught here before any row is rewritten.
     PostSplitIdentityWouldCollide,
+    /// Post-verification: the table holds a different number of rows than the
+    /// scan saw. Something inserted or deleted rows while the rewrite was in
+    /// flight — the case the runbook's "quiesce the old writers first" step
+    /// exists to prevent, caught here rather than consolidated.
+    RowCountChanged { scanned: u64, found: u64 },
+    /// Post-verification: two rows in the *written* table share one
+    /// `(tenant_id, aggregate_type, aggregate_id, version)` identity.
+    ///
+    /// The preflight check for the same condition runs against the split values
+    /// computed in memory, which is not the same claim: it proves the intended
+    /// result was collision-free, not that the table now is. This one reads the
+    /// rows as they were actually written.
+    PostSplitIdentityIsNotUnique,
+    /// Post-verification: some stream's versions are not the consecutive run
+    /// `1..=n`.
+    ///
+    /// This is the check that proves the transformation did not re-partition
+    /// history. The split changes which rows belong to which stream, and a
+    /// mistake there shows up as a stream missing its first version or carrying
+    /// a hole. The tool cannot tell a hole it created from one that was already
+    /// in the data, so it refuses either way and names the rows: consolidating
+    /// on the assumption that the gap was pre-existing is exactly the guess this
+    /// migration must not make.
+    StreamVersionsAreNotConsecutiveFromOne,
 }
 
 /// A database error surfaced while running the backfill. Distinguished from
@@ -155,9 +198,24 @@ struct ScannedRow {
 }
 
 /// Splits every row's `aggregate_id` against `registered_types`, rewrites the
-/// table to store the type and the bare id separately, and makes the new
-/// column mandatory — all inside one transaction, so a preflight failure or a
-/// mid-run database error leaves the table exactly as it was.
+/// table to store the type and the bare id separately, verifies the result, and
+/// makes the new column mandatory — all inside one transaction, so a preflight
+/// failure, a failed verification, or a mid-run database error leaves the table
+/// exactly as it was.
+///
+/// The run has two distinct judgment stages and they are not interchangeable:
+///
+/// - **Preflight**, before the first write, over values computed in memory. It
+///   decides whether the transformation is *defined* for this table at all.
+/// - **Post-verification**, after every write and before the column becomes
+///   mandatory, over the rows as they were actually written. It decides whether
+///   the transformation *did what it claimed* — row count preserved, the new
+///   identity unique, and every stream's versions the consecutive run `1..=n`.
+///
+/// A preflight failure means nothing was ever written. A verification failure
+/// means the writes are discarded by rolling back. Both leave the table
+/// untouched, and the report distinguishes them because they are different
+/// events for whoever has to act on them.
 ///
 /// Preflight order does not change which rows end up reported: each check
 /// only fires when no earlier check already found a violation elsewhere in
@@ -278,6 +336,82 @@ pub async fn backfill_aggregate_type(
             .bind(row.id)
             .execute(&mut *tx)
             .await?;
+    }
+
+    // Post-verification, against the rows as they were actually written and
+    // still inside the same transaction. The preflight checks judged the
+    // *intended* result computed in memory; these judge the table. Only if all
+    // three pass does the column become mandatory and the transaction commit.
+    let rolled_back = |reason: AbortReason, offending_row_ids: Vec<i64>| BackfillReport {
+        rows_scanned,
+        rows_rewritten: 0,
+        outcome: BackfillOutcome::RolledBack(AbortReport {
+            reason,
+            offending_row_ids,
+        }),
+    };
+
+    let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&mut *tx)
+        .await?;
+    if found as u64 != rows_scanned {
+        tx.rollback().await?;
+        return Ok(rolled_back(
+            AbortReason::RowCountChanged {
+                scanned: rows_scanned,
+                found: found as u64,
+            },
+            Vec::new(),
+        ));
+    }
+
+    // Both of the checks below compare stream identity with IS NOT DISTINCT
+    // FROM rather than =, because tenant_id is nullable and `NULL = NULL` is
+    // NULL: an untenanted stream would silently never match itself and its
+    // violations would go unreported. GROUP BY already treats nulls as equal,
+    // so only the join back to the offending rows needs saying.
+    let duplicate_row_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT e.id FROM events e \
+         JOIN (SELECT tenant_id, aggregate_type, aggregate_id, version FROM events \
+               GROUP BY tenant_id, aggregate_type, aggregate_id, version \
+               HAVING COUNT(*) > 1) duplicated \
+           ON e.tenant_id IS NOT DISTINCT FROM duplicated.tenant_id \
+          AND e.aggregate_type IS NOT DISTINCT FROM duplicated.aggregate_type \
+          AND e.aggregate_id = duplicated.aggregate_id \
+          AND e.version = duplicated.version \
+         ORDER BY e.id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !duplicate_row_ids.is_empty() {
+        tx.rollback().await?;
+        return Ok(rolled_back(
+            AbortReason::PostSplitIdentityIsNotUnique,
+            duplicate_row_ids,
+        ));
+    }
+
+    // Uniqueness has just been established, so per stream COUNT(*) is the
+    // number of distinct versions; a run starting at 1 with no holes is then
+    // exactly MIN = 1 and MAX = COUNT(*).
+    let discontinuous_row_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT e.id FROM events e \
+         JOIN (SELECT tenant_id, aggregate_type, aggregate_id FROM events \
+               GROUP BY tenant_id, aggregate_type, aggregate_id \
+               HAVING MIN(version) <> 1 OR MAX(version) <> COUNT(*)) broken \
+           ON e.tenant_id IS NOT DISTINCT FROM broken.tenant_id \
+          AND e.aggregate_type IS NOT DISTINCT FROM broken.aggregate_type \
+          AND e.aggregate_id = broken.aggregate_id \
+         ORDER BY e.id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !discontinuous_row_ids.is_empty() {
+        tx.rollback().await?;
+        return Ok(rolled_back(
+            AbortReason::StreamVersionsAreNotConsecutiveFromOne,
+            discontinuous_row_ids,
+        ));
     }
 
     sqlx::query("ALTER TABLE events ALTER COLUMN aggregate_type SET NOT NULL")

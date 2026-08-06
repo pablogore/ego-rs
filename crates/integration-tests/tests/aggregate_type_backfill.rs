@@ -268,6 +268,87 @@ async fn post_split_identity_collision_aborts_and_names_both_rows() {
 }
 
 // ---------------------------------------------------------------------------
+// Post-verification — the writes ran and were discarded
+// ---------------------------------------------------------------------------
+
+/// A stream whose versions are not the consecutive run `1..=n` stops the
+/// transition, and nothing is consolidated.
+///
+/// Every row here splits cleanly, so preflight has no objection and the rewrite
+/// does run. The refusal comes from post-verification reading the written rows
+/// back: `user-7` holds versions 1 and 3, which is not a stream this migration
+/// may consolidate. Per-stream version continuity is the property that proves
+/// the transformation did not re-partition history, and the tool cannot
+/// distinguish a hole it created from one that was already there — so it refuses
+/// either way rather than guessing that the gap was pre-existing.
+///
+/// Three assertions, because "it refused" is not the same claim as "nothing
+/// changed": the outcome must be the rolled-back one and name the rows, the data
+/// must still be in its joined pre-split form, and the column must still be
+/// nullable. The last one matters most — a column left mandatory would be a
+/// consolidated fragment of a transition that was supposed to be all-or-nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_with_a_version_gap_rolls_the_whole_transformation_back() {
+    let (pool, _container) = start_pool().await;
+
+    let v1 = insert_raw_event(&pool, "user-7", Some("tenant-1"), 1).await;
+    let v3 = insert_raw_event(&pool, "user-7", Some("tenant-1"), 3).await;
+    // A well-formed stream alongside it, to pin that the refusal is total rather
+    // than per-row: this row splits cleanly and still must not be consolidated.
+    let untouched = insert_raw_event(&pool, "organization-org-1", None, 1).await;
+
+    let report =
+        aggregate_type_backfill::backfill_aggregate_type(&pool, &types(&["user", "organization"]))
+            .await
+            .expect("the backfill call itself must not error");
+
+    assert_eq!(report.rows_scanned, 3);
+    assert_eq!(
+        report.rows_rewritten, 0,
+        "a rolled-back run consolidated no rows, whatever it wrote inside the transaction"
+    );
+    match report.outcome {
+        BackfillOutcome::RolledBack(abort) => {
+            assert_eq!(
+                abort.reason,
+                AbortReason::StreamVersionsAreNotConsecutiveFromOne
+            );
+            let mut offending = abort.offending_row_ids.clone();
+            offending.sort();
+            let mut expected = vec![v1, v3];
+            expected.sort();
+            assert_eq!(
+                offending, expected,
+                "both rows of the discontinuous stream must be named, and only those"
+            );
+        }
+        other => panic!("expected a rolled-back run, got {other:?}"),
+    }
+
+    // Nothing was consolidated: the identifiers are still joined and no type was
+    // recorded, for the offending stream and the clean one alike.
+    let rows: Vec<(i64, String, Option<String>)> =
+        sqlx::query_as("SELECT id, aggregate_id, aggregate_type FROM events ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("the table must still be readable");
+    assert_eq!(
+        rows,
+        vec![
+            (v1, "user-7".to_string(), None),
+            (v3, "user-7".to_string(), None),
+            (untouched, "organization-org-1".to_string(), None),
+        ],
+        "every row must be exactly as it was before the attempt"
+    );
+
+    assert!(
+        !aggregate_type_column_is_not_null(&pool).await,
+        "the column must still be nullable: SET NOT NULL runs only after verification passes"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Happy path, including the trivial (zero-row) case a fresh environment hits
 // ---------------------------------------------------------------------------
 

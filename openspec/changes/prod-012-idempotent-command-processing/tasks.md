@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **103 tasks total** — 29 complete and 74 pending. Complete: B0.1–B0.3 (merged as
+> **103 tasks total** — 38 complete and 65 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -125,7 +125,7 @@ Chain strategy: hybrid
       (b) an `aggregate_id` that is empty or whitespace-only, since the column is `NOT NULL` but not non-empty;
       (c) a post-split identity `(tenant_id, aggregate_type, aggregate_id, version)` that would collide with another row's — detected here rather than discovered when A3 tries to build its unique index.
       No write happens unless all three pass, alongside A2.1's ambiguity check.
-- [x] A2.8 RED/GREEN: **post-verification, after the backfill.** Row count unchanged; the post-split identity is unique across the table; and per identity the `version` sequence is gap-free and starts at 1. Referential integrity is deliberately **not** checked: no migration in this repository declares a foreign key, so there is nothing to verify and a check would only imply otherwise. Stream integrity is the meaningful analogue and is what A2.8 asserts.
+- [x] A2.8 RED/GREEN: **post-verification, after the `UPDATE`s and before `SET NOT NULL`, inside the same transaction.** Row count unchanged; the post-split identity is unique across the table; and per identity the `version` sequence is gap-free and starts at 1. Referential integrity is deliberately **not** checked: no migration in this repository declares a foreign key, so there is nothing to verify and a check would only imply otherwise. Stream integrity is the meaningful analogue and is what A2.8 asserts. These checks read the rows **as written**, which is a different claim from the preflight ones computed in memory; failing any of them rolls the whole transaction back and reports which of the two stages refused.
 - [x] A2.9 GREEN: the backfill tool emits a machine-readable report — rows scanned, rows rewritten, and every abort with its reason and offending row identifiers — and the exact command sequence is recorded as a runbook so the external pipeline can execute it unchanged when it exists. Evidence is a deliverable of this slice, not a by-product of running it locally.
 - [x] A2.10 RED/GREEN **(second slice)**: a fail-closed open-time check — the Postgres event store refuses to open while any row has `aggregate_type IS NULL`, after the migration and before any store operation is possible, on every open with no cached flag. A cached answer goes stale exactly when an old writer inserts one more untyped row mid-transition, which is the case worth catching. Proven against real PostgreSQL: refuses with a row present, opens after the backfill completes, and the refusal precedes any read or write because the constructor returns a result and no store value exists on the error path. The runbook records the order — quiesce old writers, migrate and backfill, verify, make the column mandatory, then start the new binary — and the check exists because that order cannot be enforced by a document.
 - [x] A2.6 Gate: nothing in A3/B5 lands until A2.1–A2.5 and A2.7–A2.10 all pass under `crates/integration-tests` against real Postgres (per design.md AD-9 cost statement). A failing precondition leaves data untouched by construction, so a red gate here is a stop, never a partial migration.

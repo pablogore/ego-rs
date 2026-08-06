@@ -1470,9 +1470,11 @@ open-time check.
       would reject writes from the old path.
 - [x] A2.5 — the reverse operation rejoins exactly what was split and drops the column,
       inside one transaction.
-- [x] A2.8 — post-verification: row count unchanged, post-split identity unique, and per
-      stream the versions consecutive from 1. Referential integrity is deliberately not
-      checked: no migration declares a foreign key, so a check would imply one exists.
+- [x] A2.8 — post-verification, after the `UPDATE`s and before `SET NOT NULL`, inside the
+      same transaction: row count unchanged, post-split identity unique **as written**, and
+      per stream the versions the consecutive run `1..=n`. Any failure rolls the whole
+      transaction back. Referential integrity is deliberately not checked: no migration
+      declares a foreign key, so a check would imply one exists.
 - [x] A2.9 — machine-readable report and a runbook binary that exits non-zero on abort,
       so a pipeline can branch on the exit code without parsing the report.
 - [x] A2.10 — the fail-closed open-time check.
@@ -1549,3 +1551,55 @@ Roughly 1,100 lines. The exception was accepted before the work started, on the 
 that this slice concentrates the dangerous operation and its entire proof, and that the
 additive half had already been split out to keep it reviewable on its own. The guard
 added to that total and is minimal logic directly required for the migration to be safe.
+
+
+### Review round two — A2.8 was claimed and not implemented
+
+Review of #262 found the blocker: the flow was `SELECT` + preflight → `UPDATE` → `SET NOT
+NULL` → `commit`, with **nothing in between**. The post-verification A2.8 committed to did
+not exist. The count was never re-read, uniqueness was checked only over the values
+computed in memory before the writes, and per-stream version continuity was checked
+**nowhere at all**. A historical stream holding versions 1 and 3 would have been
+consolidated. The clean-path test passed because its fixture is well-formed, which is
+exactly why it could not catch this.
+
+Corrected: three checks now run after the writes and before the column becomes mandatory,
+against the rows as they were actually written, and any failure rolls the transaction back.
+
+Two consequences worth naming, because neither is cosmetic:
+
+- **`RolledBack` is a new outcome, distinct from `Aborted`.** In a preflight abort no row
+  was ever written and the guarantee comes from the ordering; in a rollback rows *were*
+  written and the guarantee comes from discarding them. Both leave the table unchanged,
+  but they are different events for an operator, and effects a rollback does not undo — an
+  advanced sequence — belong only to the second. Collapsing them into one variant would
+  have repeated the imprecision already corrected once in this slice, where a comment
+  called an unwritten transaction a "rollback".
+- **Both post-verification queries compare stream identity with `IS NOT DISTINCT FROM`,
+  not `=`.** `tenant_id` is nullable and `NULL = NULL` is `NULL`, so an untenanted stream
+  would never match itself and its violations would have gone unreported — a check that
+  silently exempts exactly the rows it was meant to examine. `GROUP BY` already treats
+  nulls as equal; only the join back to the offending rows needed it.
+
+Why per-stream continuity is the right check and not an arbitrary strictness: the split
+changes which rows belong to which stream, so a mis-partition shows up as a stream missing
+version 1 or carrying a hole. It is the property that proves the transformation preserved
+history's shape. The tool cannot distinguish a hole it created from one already in the
+data, so it refuses either way — consolidating on the assumption that the gap was
+pre-existing is precisely the guess this migration must not make.
+
+New test: `a_stream_with_a_version_gap_rolls_the_whole_transformation_back`. Every row in it
+splits cleanly, so preflight has no objection and the rewrite genuinely runs; the refusal
+comes from reading the written rows back. It asserts three separate things, because "it
+refused" is not the same claim as "nothing changed": the outcome names both rows of the
+discontinuous stream and only those, every row is still in its joined pre-split form
+including the well-formed stream alongside it, and the column is **still nullable**. That
+last assertion is the load-bearing one — a column left mandatory would be a consolidated
+fragment of a transition that is supposed to be all-or-nothing.
+
+Also corrected: `tasks.md` claimed 29 complete and 74 pending while this slice marks nine
+more. Now 38 and 65, matching both the checkbox count and the PR body.
+
+Re-verified after the correction: integration **9 passed** (the eight above plus the new
+one), plus the 3 characterization tests. Unit 219 / 11 / 45. `fmt`, `check`, `clippy -D
+warnings` and the three `xtask verify-*` clean.

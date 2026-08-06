@@ -19,7 +19,7 @@
 //! ```text
 //! 1. quiesce the old writers   — stop every process still writing untyped rows
 //! 2. run this tool             — applies the migration, then the backfill
-//! 3. read the report           — a non-zero exit means nothing was written
+//! 3. read the report           — a non-zero exit means nothing was consolidated
 //! 4. the tool has already set the column mandatory on success
 //! 5. start the new binary      — only now
 //! ```
@@ -86,7 +86,13 @@ async fn main() {
             );
             match report.outcome {
                 BackfillOutcome::Committed => std::process::exit(0),
-                BackfillOutcome::Aborted(_) => std::process::exit(1),
+                // Both refusals share one exit code: what a pipeline has to
+                // decide is whether the transition consolidated, and it did
+                // not in either case. Which of the two it was, and why, is in
+                // the report on stdout.
+                BackfillOutcome::Aborted(_) | BackfillOutcome::RolledBack(_) => {
+                    std::process::exit(1)
+                }
             }
         }
         Err(err) => {
