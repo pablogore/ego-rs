@@ -20,6 +20,9 @@ pub mod error;
 /// Event store contract — append and load domain events.
 pub mod event_store;
 
+/// Resolution of a caller-supplied tenant scope into the value a store files under.
+pub mod tenant;
+
 /// Aggregate repository contract — save, load, and delete.
 pub mod repository;
 
@@ -34,3 +37,4 @@ pub use event_store::{EventStore, EventStoreUnitOfWork};
 pub use repository::Repository;
 pub use snapshot::Snapshot;
 pub use stored_event::StoredEvent;
+pub use tenant::resolve_tenant;

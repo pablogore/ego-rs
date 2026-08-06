@@ -2,12 +2,15 @@
 //! actor uses, against both implementations of the event store.
 //!
 //! An aggregate with no events yet is the ordinary state of every entity the first
-//! time it is addressed. Whether the store reports that as an absent stream or as
-//! an empty one is an implementation choice; whether *recovery* treats it as a
-//! failure is not.
+//! time it is addressed. Whether *recovery* treats that as a failure is the
+//! question these tests pin.
 //!
-//! This file exists because the two stores answered differently and only the
-//! forgiving one was ever wired into a recovery test.
+//! The file exists because the two stores once answered differently — the durable
+//! one reporting absence, the in-memory one an empty stream — and only the
+//! forgiving one was ever wired into a recovery test, which is how recovery came
+//! to propagate absence as an error unnoticed. Both report absence now, so this
+//! suite no longer covers a divergence; it covers the behaviour that replaced it,
+//! against both.
 
 use chrono::{DateTime, Utc};
 use ego_domain::event::DomainEvent;
@@ -152,10 +155,10 @@ async fn recovery_of_a_fresh_aggregate_succeeds_against_the_durable_store() {
 
 /// The in-memory store reaches the identical outcome through the facade.
 ///
-/// The point is not that both work — it is that both work *the same way*. The two
-/// stores disagree about how to report an absent stream, and this asserts that the
-/// disagreement is invisible to recovery, which is the only caller that has to
-/// care.
+/// The point is not that both work — it is that both work *the same way*, and that
+/// this stays true as either implementation changes. Both report an absent stream
+/// the same way today; when that last held only for one of them, recovery was
+/// broken against the other and nothing said so.
 #[tokio::test]
 async fn recovery_of_a_fresh_aggregate_succeeds_against_the_in_memory_store() {
     let facade: PersistenceFacade<RecoveredEvent> = PersistenceFacade::with_stores(

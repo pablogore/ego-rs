@@ -16,4 +16,7 @@ ego-domain = { path = "../domain" }
 chrono = "0.4.45"
 
 [dev-dependencies]
+# The shared EventStore conformance harness. Dev-only: testkit is tooling, and no
+# production crate may depend on it at build time; verify-layers excludes dev edges.
+ego-testkit = { path = "../testkit" }
 tokio = { version = "1.0", features = ["test-util"] }

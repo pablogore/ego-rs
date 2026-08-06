@@ -104,17 +104,25 @@ async fn test_recovery_replays_seeded_events() {
 
     let event_store = Arc::new(AsyncMutex::new(InMemoryEventStore::<TestEvent>::new()));
 
-    // Pre-seed under the same (type, id) identity the actor will use for
-    // recovery.
+    // Pre-seed under the same (type, id, tenant) identity the actor will use for
+    // recovery — all three components, not two.
+    //
+    // This test used to seed with no tenant at all and still recover, because the
+    // in-memory store shared one namespace across every tenant. It does not any
+    // more, and that is the whole point: the actor recovers under
+    // `Some("default")` — the tenant `EntityRuntimeBuilder` assigns in
+    // single-tenant mode, which is its default — so a stream seeded into the
+    // systemwide scope is a different stream and recovery would find nothing.
     let aggregate_type = "counter";
     let aggregate_id = "c-recovery";
+    let tenant = Some("default");
     let events: Vec<StoredEvent<TestEvent>> = (1u64..=3)
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
     {
         let mut store = event_store.lock().await;
         store
-            .append(aggregate_type, aggregate_id, None, 0, events)
+            .append(aggregate_type, aggregate_id, tenant, 0, events)
             .await
             .expect("pre-seed must succeed");
     }
