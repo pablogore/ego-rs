@@ -1752,3 +1752,117 @@ the state is possible.
 
 Clippy again caught something the passing test run did not — an unused import in the new
 conformance test. Fixed before commit, not deferred.
+
+---
+
+## Phase A3, second slice: database-enforced stream identity — COMPLETE
+
+Same branch as A3-i, third commit. A3 is now fully complete.
+
+### The strategy, chosen by measurement rather than assumption
+
+A single conventional `UNIQUE (tenant_id, aggregate_type, aggregate_id, version)` would have
+been wrong, and wrong in the exact place this change already found damage: PostgreSQL treats
+every NULL as distinct from every other NULL, so such an index permits unlimited duplicate
+identities in the tenant-less partition.
+
+`NULLS NOT DISTINCT` expresses the intent in one index, but it arrived in PostgreSQL 15 and
+this workspace declares 14 as its floor (README.md). That was verified against the pinned
+`14-alpine` image rather than taken from documentation:
+
+```
+ERROR:  syntax error at or near "NULLS"
+LINE 1: ...CREATE UNIQUE INDEX ux ON probe (a, b) NULLS NOT DISTINCT;
+                                                  ^
+pg_index.indnullsnotdistinct present on 14: 0 columns
+```
+
+So the equivalent strategy is stated explicitly: two partial unique indexes over
+complementary predicates. Every row satisfies exactly one of `tenant_id IS NOT NULL` and
+`tenant_id IS NULL`, so together they cover the table with no gap and no overlap — the same
+semantics the store's queries express with `IS NOT DISTINCT FROM`.
+
+The systemwide half omits `tenant_id` from its column list, because its predicate already
+fixes that column to NULL for every row it contains; including it would index a constant. The
+asymmetry is deliberate and pinned rather than left to be rediscovered.
+
+### The `23505` translation, and the lie it used to tell
+
+The mapping to `PersistenceError::Conflict` already existed and was unreachable. Making it
+reachable exposed that it reported `actual: current` — and the in-process check immediately
+above has *already proven* `current == expected_version`. So the first real conflict this
+schema could produce would have claimed the expected and actual versions were the same
+number: self-contradictory, and useless to whoever has to act on it.
+
+The aborted transaction cannot be queried, so the stream is re-read on another connection.
+That value is a reading taken after the failure rather than at the instant of it, which is
+the only thing "actual" can mean once a competing writer exists. Documented as such at the
+call site.
+
+### Reaching the branch deterministically
+
+Inside one transaction the violation is unreachable by construction: the version check reads
+`MAX(version)`, so no existing row sits where the insert is about to write. It needs a
+competing commit between the read and the insert.
+
+The test creates that window without depending on timing. Another connection inserts the
+row and **does not commit** — invisible to the version check, but the unique index already
+holds its slot. `append` then reads 0, agrees, issues its `INSERT`, and **blocks**. The test
+polls `pg_locks` until it observes an ungranted lock, then commits the competing
+transaction, at which point the blocked insert fails with `23505`.
+
+The blocking observation is also what identifies *which* guard fired: had the in-process
+check caught this, `append` would have returned immediately and nothing would have waited.
+
+### Both new guarantees verified to have teeth
+
+Neither was assumed to work. Each was broken on purpose and observed to fail:
+
+1. **Restoring the old `actual: current`** — the deterministic test fails with `left: 0,
+   right: 1`. That `0` is positive proof the `23505` branch executed, since the version check
+   had read the stream as empty and passed.
+2. **Unregistering migration 008** — four of the five uniqueness tests fail, and the
+   migration-registry guard added in A3-i objects by name:
+   `these migration files exist but no code runs them: ["008_events_stream_identity_unique"]`.
+   The fifth, "two tenants may hold the same identity", correctly keeps passing: it does not
+   depend on the index.
+
+Both reversions were then restored and the diff confirmed to hold only intended changes.
+
+### The characterization test did what it was written to do
+
+`events_table_provides_no_uniqueness_guarantee_for_the_stream_identity_today` failed on this
+slice with `left: 3, right: 1` — exactly as its own failure message instructed: *"update this
+test to assert the new guarantee instead of the gap"*. Rewritten, not deleted, so the file
+still records the transition. It now asserts only that a unique guarantee exists; the precise
+shape lives in `schema_index_assertion.rs`, because two places to update is one place to
+forget.
+
+### A defect found in already-merged code
+
+The event store's open-time refusal message had lost its line continuations and shipped with
+runs of eighteen spaces inside an operator-facing string. It is in the merged tracker — it
+went in with A2-ii and was not caught in review either. Restored, and verified by
+reconstructing the runtime value rather than eyeballing the source. A scan of every string
+literal in `crates/` for interior space runs found no others. I do not have a confirmed cause
+and am not inventing one.
+
+### Held out of scope, as instructed
+
+No receipts, no reservations, no fencing, no async surface, no unit of work. The store stays
+synchronous and gains no handle.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: **9 + 3 + 1 + 3 + 5 + 5 = 26 passed**, 0 failed.
+- HERMETIC conformance: in-memory store **1 passed**.
+- UNIT: ego-domain **219**, ego-persistence **13**, ego-infrastructure **24**,
+  persistent-entity **45**, ego-testkit **86**.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene` — all clean. `cargo test --workspace` not run.
+
+Clippy caught a `type_complexity` violation the passing suite did not — the third slice in a
+row where a green test run coexisted with a failing static gate. Fixed with a named type
+alias before commit.
+
+**A3 complete. 106 tasks, 46 complete, 60 pending.**

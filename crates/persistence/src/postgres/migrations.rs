@@ -15,6 +15,11 @@ const MIGRATION_003_CREATE_SNAPSHOTS: &str = include_str!("migrations/003_create
 const MIGRATION_007_ADD_AGGREGATE_TYPE: &str =
     include_str!("migrations/007_add_aggregate_type_to_events.sql");
 
+/// Migration SQL for the pair of partial unique indexes that enforce the event
+/// stream identity.
+const MIGRATION_008_STREAM_IDENTITY_UNIQUE: &str =
+    include_str!("migrations/008_events_stream_identity_unique.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -43,6 +48,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "007_add_aggregate_type_to_events",
             MIGRATION_007_ADD_AGGREGATE_TYPE,
+        ),
+        (
+            "008_events_stream_identity_unique",
+            MIGRATION_008_STREAM_IDENTITY_UNIQUE,
         ),
     ]
 }

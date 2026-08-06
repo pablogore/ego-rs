@@ -77,7 +77,10 @@ impl<E, F> PostgreSQLEventStore<E, F> {
 
         if unmigrated {
             return Err(PersistenceError::Internal(
-                "refusing to open the event store: at least one row has no aggregate type,                  which means the backfill has not completed. Reading or writing now would                  treat existing streams as absent and fork their history. Run the backfill                  to completion first, then start this process."
+                "refusing to open the event store: at least one row has no aggregate type, \
+                 which means the backfill has not completed. Reading or writing now would \
+                 treat existing streams as absent and fork their history. Run the backfill \
+                 to completion first, then start this process."
                     .to_string(),
             ));
         }
@@ -151,7 +154,7 @@ where
             for (i, stored) in events.iter().enumerate() {
                 let event_version = current + (i as i64) + 1;
                 let event = &stored.event;
-                sqlx::query(
+                let inserted = sqlx::query(
                     r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at)
                        VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                 )
@@ -163,19 +166,58 @@ where
                 .bind(event.payload().clone())
                 .bind(*event.occurred_at())
                 .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    if let sqlx::Error::Database(db_err) = &e {
-                        if db_err.code().as_deref() == Some("23505") {
-                            return PersistenceError::Conflict {
-                                aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
-                                expected: expected_version,
-                                actual: current,
-                            };
-                        }
+                .await;
+
+                if let Err(e) = inserted {
+                    let is_identity_collision = matches!(
+                        &e,
+                        sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505")
+                    );
+                    if !is_identity_collision {
+                        return Err(PersistenceError::Internal(format!(
+                            "failed to insert event: {e}"
+                        )));
                     }
-                    PersistenceError::Internal(format!("failed to insert event: {}", e))
-                })?;
+
+                    // The database refused a row at a version this transaction had
+                    // just read as free, which means another writer committed one
+                    // in between. That is a concurrency conflict, not an internal
+                    // error, and the caller's retry is the correct response.
+                    //
+                    // The version cannot be reported from `current`: the check
+                    // above already established that `current == expected_version`,
+                    // so reusing it would produce a conflict claiming the expected
+                    // and actual versions are the same — self-contradictory, and
+                    // useless to whoever has to act on it. This transaction is
+                    // aborted and can no longer be queried, so the stream is
+                    // re-read on another connection. That value is a reading taken
+                    // after the failure rather than at the instant of it, which is
+                    // the only thing "actual" can mean once a competing writer
+                    // exists.
+                    drop(tx);
+                    let actual: i64 = sqlx::query_scalar(
+                        r#"SELECT COALESCE(MAX(version), 0) FROM events
+                           WHERE aggregate_type = $1 AND aggregate_id = $2
+                             AND tenant_id IS NOT DISTINCT FROM $3"#,
+                    )
+                    .bind(&aggregate_type)
+                    .bind(&aggregate_id)
+                    .bind(&tenant)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|read_back| {
+                        PersistenceError::Internal(format!(
+                            "the stream identity was already taken ({e}), and re-reading the \
+                             stream to report its current version also failed: {read_back}"
+                        ))
+                    })?;
+
+                    return Err(PersistenceError::Conflict {
+                        aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
+                        expected: expected_version,
+                        actual,
+                    });
+                }
             }
 
             tx.commit().await.map_err(|e| {
