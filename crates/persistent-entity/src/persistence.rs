@@ -1,8 +1,10 @@
 //! A simple persistence facade.
 //!
-//! This module provides a [`PersistenceFacade`] that wraps concrete
-//! [`EventStore`] and [`Snapshot`] implementations behind `Arc<Mutex<dyn ...>>`
-//! so both production and test code can supply any backing store.
+//! This module provides a [`PersistenceFacade`] that holds concrete
+//! [`EventStore`] and [`Snapshot`] implementations behind trait objects, so both
+//! production and test code can supply any backing store. The event store is held
+//! as `Arc<dyn EventStore<..> + Send + Sync>`; the snapshot store still needs a
+//! lock, and the facade's own documentation says why.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -144,15 +146,10 @@ impl Snapshot for NoopSnapshotStore {
 
 /// A facade for persistence operations.
 ///
-/// Wraps an [`EventStore`] and a [`Snapshot`] implementation behind
-/// `Arc<Mutex<dyn ...>>` so that any backing store (in-memory, database,
-/// test stub) can be injected at construction time.
-///
-/// Neither lock is `std::sync::Mutex`, for the same reason as `BoundedMailbox`'s
-/// queue and `EntityRegistry`'s map: a backing store that panics mid-call (a
-/// malformed adapter, a deserialization panic, a deliberately-injected test
-/// failure) must not permanently poison persistence for every other entity
-/// sharing this facade.
+/// Holds an [`EventStore`] and a [`Snapshot`] implementation behind trait objects,
+/// so that any backing store (in-memory, database, test stub) can be injected at
+/// construction time. The two are held differently, and the next two paragraphs are
+/// the reason.
 ///
 /// The event store is held **without** a lock. It used to sit behind one only
 /// because `EventStore::append` demanded `&mut self`, and the lock existed to
@@ -162,12 +159,16 @@ impl Snapshot for NoopSnapshotStore {
 /// its own state through a pool handle or an interior lock does not need a second
 /// one wrapped around it.
 ///
-/// The snapshot store still has one, because `Snapshot` is still synchronous and
-/// still takes `&mut self`. It stays on `parking_lot::Mutex`, which does not
-/// poison — a backing store that panics mid-call must not permanently poison
-/// persistence for every other entity sharing this facade, the same rationale as
-/// `BoundedMailbox`'s queue and `EntityRegistry`'s map. When that trait narrows the
-/// same way, its lock goes too.
+/// The snapshot store still has one — the only lock this facade holds — because
+/// `Snapshot` is still synchronous and still takes `&mut self`, so a shared facade
+/// has no other way to produce the exclusive borrow it asks for.
+///
+/// That lock is `parking_lot::Mutex`, not `std::sync::Mutex`, for the same reason as
+/// `BoundedMailbox`'s queue and `EntityRegistry`'s map: it does not poison, and a
+/// backing store that panics mid-call (a malformed adapter, a deserialization panic,
+/// a deliberately-injected test failure) must not permanently poison persistence for
+/// every other entity sharing this facade. When `Snapshot` narrows the way
+/// `EventStore` just did, this lock goes too.
 ///
 /// The default constructor (`PersistenceFacade::new()`) creates a no-op
 /// facade that accepts writes but never persists anything.  Use

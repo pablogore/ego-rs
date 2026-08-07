@@ -2517,8 +2517,8 @@ so counts are unchanged: **115 tasks, 60 complete, 55 pending.**
 
 ## B4.4b: appending takes a shared reference — COMPLETE
 
-Branch: `feat/prod-012-b44b-shared-append`, off the tracker at `ae547f4`. With this, B4 is closed
-apart from the `B4.7a` debt.
+Branch: `feat/prod-012-b44b-shared-append`, off the tracker at `ae547f4`. This completes B4.4b. B4
+is **not** closed: `B4.7a` remains open.
 
 ### Why the lock existed, and why it should not have
 
@@ -2582,4 +2582,38 @@ lines anywhere in 11 307 bytes of output.
 - STATIC, re-run after the documentation edits: `fmt`, `clippy -D warnings`, `verify-layers`
   (17 crates, 0 violations), `verify-isolation`, `verify-hygiene`.
 
-**115 tasks, 61 complete, 54 pending. B4 closed except B4.7a.**
+**115 tasks, 61 complete, 54 pending. B4.4b complete; B4 still has `B4.7a` open.**
+
+### Review round one on B4.4b — three stale doc blocks, one self-contradicting
+
+All three findings correct, and the second is worse than reported.
+
+**1. The module doc** still said the facade wraps *both* stores behind `Arc<Mutex<dyn ...>>`. Now
+says the event store is held as `Arc<dyn EventStore<..> + Send + Sync>` and points at the facade's
+own documentation for why the snapshot store differs.
+
+**2. `PersistenceFacade`'s doc contradicted itself inside one block.** I added the correct paragraph
+— "the event store is held **without** a lock" — and left the two sentences above it saying it wraps
+both stores behind `Arc<Mutex<dyn ...>>` and that "**neither** lock is `std::sync::Mutex`". A reader
+had no way to tell which half was current, which is worse than a wholly stale comment: a stale block
+is uniformly wrong and eventually distrusted, while a self-contradicting one lends the wrong half
+the credibility of the right one.
+
+The non-poisoning rationale moved down to the snapshot paragraph, where the only remaining lock
+actually lives, instead of sitting above as a claim about two.
+
+**3. The `#[async_trait]` rationale** said the trait is consumed as `dyn EventStore<E> + Send`
+*behind a shared lock*. Corrected, and sharpened in the process: the trait object is what forces the
+choice, not how it happens to be held. The lock is gone and the dyn-compatibility requirement is
+not, because callers still need to hold *some* store without naming which one. The original wording
+tied a permanent constraint to a temporary arrangement.
+
+**Also corrected: the state phrasing.** Two places said B4 was "closed except B4.7a". A phase with an
+open task is not closed — B4.4b is complete, and B4 still has `B4.7a`. Saying otherwise turns a
+tracked debt into a footnote on something declared finished.
+
+Scanned for any surviving claim that both stores share a lock: the remaining `Arc<Mutex<dyn ...>>`
+occurrences are all `snapshot_store`, which genuinely is one.
+
+Re-verified: `fmt` and `clippy -D warnings` clean. Documentation-only, so counts are unchanged:
+**115 tasks, 61 complete, 54 pending.**
