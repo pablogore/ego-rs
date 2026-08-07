@@ -102,3 +102,47 @@ reference-app --all-targets` (zero warnings attributable to
 | W-3 | Updated both stale occurrences of "Associating a user with a tenant org" (Phase 5's TASK-014 note and the traceability table) to "Ensuring a tenant org exists", matching `specs/reference-service/spec.md`'s already-corrected scenario title. | `openspec/changes/core-018-production-reference-service/tasks.md` (lines 125, 240) |
 
 **Current verdict: PASS, 0 CRITICAL, 0 WARNING, 0 SUGGESTION.** Ready for `sdd-archive`.
+
+---
+
+## Addendum — 2026-08-08: verification downgraded to PARTIAL
+
+**Verdict above is superseded. Current status: PARTIAL.**
+
+This is an addendum rather than an edit. Everything above was true when written and
+independently re-verified at the time; the record stands. What changed is the world,
+not the report — the evidence was subsequently deleted from the repository.
+
+`examples/reference-app/tests/e2e_register.rs` was removed. It violated CC-R11 (No
+Infrastructure Dependency) and UT-R2 (No Real Infrastructure) by binding a real
+socket, and `scripts/detect-integration-tests.sh` was failing on the workspace as a
+whole. The coverage is tracked for reconstruction in a separate Testcontainers
+workspace: **issue #275**, scope in `docs/integration-test-backlog.md`.
+
+### What is still verified
+
+`e2e_register.rs` was **co-evidence**, never sole evidence, for all three rows that
+cite it. Each retains in-process coverage:
+
+| Requirement | Surviving evidence |
+|---|---|
+| Happy Path — successful registration | `register_user_guard_chain.rs > successful_registration_returns_ok_output`, `http_route.rs > valid_bearer_jwt_and_body_returns_201` |
+| HTTP Route Reaches RegisterUser | `http_route.rs` (4/4, via `tower::oneshot`) |
+| Security Context Extraction — missing/invalid credentials rejected | `security_extractor.rs`, `http_route.rs > missing_authorization_header_returns_401…` |
+
+### What is no longer verified
+
+The proposal's named success criterion:
+
+> "A real HTTP request against a running axum server completes registration
+> end-to-end."
+
+`http_route.rs` drives the router through `tower::oneshot` — in-process, no socket,
+no HTTP client, no server task. That proves the route and its error mapping; it does
+**not** prove the criterion above, and treating it as equivalent would be the exact
+substitution `e2e_register.rs` existed to prevent. The 401-without-JWT and
+register-both-entities paths over a real `axum::serve()` are unproven today.
+
+**Report this change as: implemented and contractually tested; real HTTP transport
+not verified.** Restoring PASS requires #275, not a re-reading of the tests that
+remain.

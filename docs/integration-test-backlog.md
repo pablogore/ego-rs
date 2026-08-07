@@ -1,6 +1,29 @@
 # Integration-test backlog
 
 Every test target removed from this workspace, and the coverage each one held.
+**52 tests across 13 targets.**
+
+**Tracked as issue #275.** This document is the authoritative scope; the issue is
+the counted work item. A note in a document is not a schedule — if you are reading
+this to find out whether the work is planned, the answer is in #275, not here.
+
+## Status of the affected behaviour
+
+Until #275 closes, any report on the behaviour below must read: **"implemented and
+contractually tested; real PostgreSQL and transports not verified."** Nothing here
+is a claim that the in-process suites cover it.
+
+## Index by category
+
+| Category | What was lost | Where |
+|---|---|---|
+| **SQL / migrations** | `aggregate_type` backfill: clean split, revert, zero-row commit, store refusing to open until complete; aborts proven to run *before* the first `UPDATE` | §1 `aggregate_type_backfill` |
+| **Constraints** | Index shapes read from `pg_index` rather than the `.sql`; complete tenant-partitioned uniqueness pairs with no gap or overlap; the reservation table's AD-1 partial pair; refusal of inconsistent completions and non-positive fencing tokens | §1 `schema_index_assertion`, `reservation_store_postgres` |
+| **Concurrency** | Concurrent appends yielding one winner and only conflicts; unique violation surfacing as a conflict with the real version; six contenders racing one expired lease. Determinism came from polling `pg_locks`, never from sleeping | §1 `stream_identity_uniqueness`, `reservation_store_postgres` |
+| **Fencing** | A takeover whose `UPDATE` waits on a row lock re-checking the lease it read, with the window forced open via `SELECT … FOR UPDATE`; exhaustion at the storable token limit changing nothing | §1 `reservation_store_postgres` — **highest value, see the note there** |
+| **Readiness** | `probe()` against a real database: reachable, empty-table, non-mutating, and the down-and-back-up transition | §1 `reservation_store_readiness_postgres` |
+| **Recovery** | Unit-of-work rollback and isolation; recovery of a never-persisted aggregate against both implementations; NULL-tenant streams under SQL three-valued logic | §1 `event_store_uow`, `recovery_of_a_fresh_aggregate`, `systemwide_streams` |
+| **Transport / e2e** | Real socket bind and bounded graceful shutdown; OTLP wire round-trip asserting received ids; CORE-018's real-HTTP end-to-end criterion | §2, §3, §4 |
 
 ## Why they were removed
 
