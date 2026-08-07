@@ -676,6 +676,27 @@ impl RuntimeBuilder {
                 )) as Arc<dyn ego_domain::health::HealthContributor>
             },
         ));
+        // The registered reservation store contributes its own readiness, from
+        // the SAME `Arc` handed to `RuntimeInner` below — `Arc::clone` of the
+        // field, never a second construction and never a second read of the
+        // configuration. Two instances built from one config would be a store
+        // that dispatch reserves through and a *different* store that readiness
+        // reports on, and the report would be true about the wrong thing.
+        //
+        // Keyed on the store being present, not on the enforcement mode. A
+        // `Compatibility` runtime with no store registered adds no contributor
+        // at all and stays ready, which is correct: it never promised to
+        // reserve anything, so there is no dependency to be down. A
+        // `Compatibility` runtime that *did* register one is still dispatching
+        // through it, so it is still a real dependency and is checked. The
+        // remaining combination — `MandatoryKey` with no store — cannot reach
+        // this line, because `validate_idempotency` already refused the build.
+        if let Some(store) = &self.idempotency_reservation_store {
+            health_contributors.push(Arc::new(
+                crate::health::OperationReservationStoreHealthContributor::new(Arc::clone(store)),
+            )
+                as Arc<dyn ego_domain::health::HealthContributor>);
+        }
         let health_aggregator = Arc::new(HealthAggregator::new(
             HealthRegistry::from_contributors(health_contributors),
             HealthAggregationConfig::default(),
@@ -1220,6 +1241,106 @@ mod tests {
                 "registration-only stub".to_string(),
             ))
         }
+
+        async fn probe(&self) -> Result<(), ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+    }
+
+    /// A reservation store whose `probe` answers from a script and counts its calls.
+    ///
+    /// The count is what makes instance identity provable: a contributor wired to a
+    /// second store built from the same configuration would leave this one at zero
+    /// while still reporting perfectly healthy. Its five real methods panic, so a
+    /// readiness check that reserved, renewed or purged anything fails loudly rather
+    /// than passing while mutating the table it is supposed to be observing.
+    struct ProbeCountingStore {
+        outcome: std::sync::Mutex<Result<(), ego_domain::operation::ReservationError>>,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ProbeCountingStore {
+        fn new(outcome: Result<(), ego_domain::operation::ReservationError>) -> Arc<Self> {
+            Arc::new(Self {
+                outcome: std::sync::Mutex::new(outcome),
+                probes: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        fn probes(&self) -> usize {
+            self.probes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Changes what the next probe answers — the store going down, or coming
+        /// back, without the runtime being rebuilt.
+        fn set(&self, outcome: Result<(), ego_domain::operation::ReservationError>) {
+            *self.outcome.lock().expect("probe outcome mutex poisoned") = outcome;
+        }
+    }
+
+    #[async_trait]
+    impl ego_domain::operation::OperationReservationStore for ProbeCountingStore {
+        async fn reserve(
+            &self,
+            _req: ego_domain::operation::ReserveRequest,
+        ) -> Result<
+            ego_domain::operation::ReservationOutcome,
+            ego_domain::operation::ReservationError,
+        > {
+            panic!("a readiness probe must never reserve an operation");
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never renew a lease");
+        }
+
+        async fn complete(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _response: ego_domain::operation::StoredResponse,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never complete a reservation");
+        }
+
+        async fn abandon(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never abandon a reservation");
+        }
+
+        async fn purge_completed_before(
+            &self,
+            _cutoff: chrono::DateTime<chrono::Utc>,
+            _batch: usize,
+        ) -> Result<u64, ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never purge reservations");
+        }
+
+        async fn probe(&self) -> Result<(), ego_domain::operation::ReservationError> {
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.outcome
+                .lock()
+                .expect("probe outcome mutex poisoned")
+                .clone()
+        }
+    }
+
+    /// The contributor's report within a readiness fold, by name.
+    fn reservation_store_report(
+        report: &ego_domain::health::HealthReport,
+    ) -> Option<&ego_domain::health::ContributorReport> {
+        report
+            .contributors
+            .iter()
+            .find(|c| c.name == crate::health::OPERATION_RESERVATION_STORE_CONTRIBUTOR)
     }
 
     // ---- The fail-closed default (B3.6) ---------------------------------------
@@ -1349,6 +1470,288 @@ mod tests {
         assert!(
             !Arc::ptr_eq(retained, &first),
             "the first registration must not survive alongside it"
+        );
+    }
+
+    // ---- Readiness for the registered store (B3.7) -----------------------------
+    //
+    // B3.6 above covers "no store registered at all": the build is refused and no
+    // runtime exists. These cover the other failure, which cannot be decided at
+    // startup — the store is registered, the process started, and the backing store
+    // has since become unreachable.
+
+    /// Registering a store registers its readiness contributor.
+    ///
+    /// The wiring is one `push` and is easy to omit while everything else keeps
+    /// working: dispatch would reserve through the store, readiness would report on
+    /// nothing, and the instance would keep taking traffic straight through an
+    /// outage. Nothing else in the suite would notice, which is why this asserts the
+    /// contributor is present by name rather than only that the report is healthy.
+    #[tokio::test]
+    async fn registering_a_reservation_store_registers_its_readiness_contributor() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        let contributor = reservation_store_report(&report).unwrap_or_else(|| {
+            panic!(
+                "a registered store must contribute to readiness; present: {:?}",
+                report
+                    .contributors
+                    .iter()
+                    .map(|c| &c.name)
+                    .collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            contributor.status,
+            ego_domain::health::HealthStatus::Healthy
+        );
+        assert_eq!(
+            contributor.requirement,
+            ego_domain::health::DependencyRequirement::Required
+        );
+        assert_eq!(report.status, ego_domain::health::HealthStatus::Healthy);
+    }
+
+    /// Readiness probes the exact instance the runtime dispatches through.
+    ///
+    /// Two assertions, because either alone is satisfiable by the wrong wiring. The
+    /// probe count proves the contributor reached *this* object — a contributor built
+    /// from a second store over the same configuration would leave it at zero while
+    /// reporting a perfectly healthy, entirely unrelated connection. `Arc::ptr_eq`
+    /// proves the runtime kept the same one, so the thing that was probed is the
+    /// thing a reservation will go through.
+    #[tokio::test]
+    async fn readiness_probes_the_same_store_instance_the_runtime_retained() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let registered = store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>;
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(Arc::clone(&registered))
+            .build();
+
+        assert_eq!(store.probes(), 0, "building must not probe the store");
+
+        rt.readiness().await;
+
+        assert_eq!(
+            store.probes(),
+            1,
+            "readiness must probe the registered instance itself, not a second store \
+             built from the same configuration"
+        );
+        let retained = rt
+            .inner()
+            .operation_reservation_store()
+            .expect("an enforcing runtime retains its store");
+        assert!(
+            Arc::ptr_eq(retained, &registered),
+            "the probed instance and the dispatched instance must be one object"
+        );
+    }
+
+    /// An unreachable store makes the runtime not ready.
+    ///
+    /// The error is reported as `Unavailable` and, because the store is a `Required`
+    /// dependency, it clamps the whole report to `Unhealthy` rather than degrading
+    /// it. Serving while it is down means a retried request cannot be recognised as
+    /// a retry and gets executed a second time.
+    #[tokio::test]
+    async fn a_store_that_cannot_be_reached_makes_the_runtime_not_ready() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(
+            report.status,
+            ego_domain::health::HealthStatus::Unhealthy,
+            "a store error must never fold in as ready"
+        );
+        let contributor =
+            reservation_store_report(&report).expect("the contributor must still be reported");
+        assert_eq!(
+            contributor.code,
+            Some(ego_domain::health::HealthCode::Unavailable)
+        );
+    }
+
+    /// The store's error text never reaches the readiness report.
+    ///
+    /// A driver's connection error routinely quotes the DSN it failed on, and a DSN
+    /// routinely carries a password. Readiness payloads are commonly served
+    /// unauthenticated, so this asserts on the whole rendered report rather than on
+    /// the contributor's code alone.
+    #[tokio::test]
+    async fn a_store_failure_never_puts_credentials_in_the_readiness_report() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "error connecting to postgres://ego:sup3r-s3cret@db.internal:5432/ego".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let rendered = format!("{:?}", rt.readiness().await);
+
+        assert!(
+            !rendered.contains("sup3r-s3cret"),
+            "the readiness report must not carry the store's error text: {rendered}"
+        );
+        assert!(
+            !rendered.contains("db.internal"),
+            "the readiness report must not carry the store's connection detail: {rendered}"
+        );
+    }
+
+    /// Compatibility with no store registered is ready, and contributes nothing.
+    ///
+    /// It never promised to reserve anything, so there is no dependency to be down.
+    /// A contributor that reported the *absence* of a store as a failure would make
+    /// every not-yet-adopted deployment permanently un-ready — turning an explicit,
+    /// supported opt-out into an outage.
+    #[tokio::test]
+    async fn compatibility_without_a_store_is_ready_and_contributes_nothing() {
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(
+            report.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "declining enforcement is a supported configuration, not a failure"
+        );
+        assert!(
+            reservation_store_report(&report).is_none(),
+            "with no store registered there is nothing to report on: {:?}",
+            report.contributors
+        );
+    }
+
+    /// Compatibility *with* a store still checks it.
+    ///
+    /// The wiring keys on the store being present, not on the mode, and this is why:
+    /// a `Compatibility` runtime that registered one is still dispatching through it,
+    /// so it is still a real dependency. Keying on the mode instead would leave that
+    /// deployment reporting ready with its store down.
+    #[tokio::test]
+    async fn compatibility_with_a_registered_store_still_checks_it() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert!(
+            reservation_store_report(&report).is_some(),
+            "a registered store is a dependency regardless of the enforcement mode"
+        );
+        assert_eq!(report.status, ego_domain::health::HealthStatus::Unhealthy);
+    }
+
+    /// Losing the store stops traffic, and never touches liveness.
+    ///
+    /// This is the separation stated as an executable claim. Readiness goes
+    /// unhealthy, so the instance leaves rotation. Liveness stays healthy with no
+    /// contributors at all, so nothing kills the process.
+    ///
+    /// Restarting on a lost database would be actively harmful: the replacement comes
+    /// up against the same unreachable store, fails identically, and under a
+    /// restart-on-failure supervisor loops — replacing a recoverable outage with a
+    /// crash loop that clears no state. The recovery case below is what actually
+    /// happens instead.
+    #[tokio::test]
+    async fn losing_the_store_fails_readiness_without_touching_liveness() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Unhealthy
+        );
+
+        let liveness = rt.liveness();
+        assert_eq!(
+            liveness.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "an unreachable dependency is not a reason to kill the process"
+        );
+        assert!(
+            liveness.contributors.is_empty(),
+            "liveness consults no contributor, including this one: {:?}",
+            liveness.contributors
+        );
+    }
+
+    /// Readiness recovers on its own once the store is reachable again.
+    ///
+    /// Each probe answers from the store as it is *now*, so there is no latched
+    /// failure to clear and no restart needed to clear it. Without this, an outage
+    /// that ended would leave the instance permanently out of rotation — the
+    /// asserted-once cases above are all compatible with a report that never
+    /// recovers.
+    #[tokio::test]
+    async fn readiness_recovers_when_the_store_becomes_reachable_again() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>
+            )
+            .build();
+
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Healthy
+        );
+
+        store.set(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Unhealthy
+        );
+
+        store.set(Ok(()));
+        let recovered = rt.readiness().await;
+        assert_eq!(
+            recovered.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "readiness must reflect the store's current reachability, not the worst it \
+             has ever been"
+        );
+        assert_eq!(
+            reservation_store_report(&recovered)
+                .expect("the contributor is still registered")
+                .code,
+            None,
+            "a recovered contributor must carry no failure code"
         );
     }
 

@@ -25,6 +25,12 @@ use ego_domain::health::{
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 
+mod reservation_store;
+
+pub use reservation_store::{
+    OperationReservationStoreHealthContributor, OPERATION_RESERVATION_STORE_CONTRIBUTOR,
+};
+
 /// The set of registered health contributors (TASK-006).
 ///
 /// Cheap to clone (`Vec<Arc<dyn HealthContributor>>`) — a `HealthAggregator`

@@ -10,6 +10,7 @@ publish = false
 [dev-dependencies]
 ego-domain = { path = "../domain" }
 ego-persistence = { path = "../persistence" }
+ego-service-sdk = { path = "../service-sdk" }
 ego-testkit = { path = "../testkit" }
 parking_lot = "0.12"
 persistent-entity = { path = "../persistent-entity" }

@@ -326,6 +326,15 @@ impl OperationReservationStore for InMemoryOperationReservationStore {
         }
         Ok(eligible.len() as u64)
     }
+
+    async fn probe(&self) -> Result<(), ReservationError> {
+        // A map in this process cannot become unreachable: if the caller is
+        // running, so is the store. There is nothing to check and nothing that
+        // could fail, so this is `Ok(())` rather than a lock acquisition —
+        // taking the mutex would only add a way for a poisoned lock to make a
+        // health probe panic.
+        Ok(())
+    }
 }
 
 #[cfg(test)]

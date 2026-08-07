@@ -468,6 +468,32 @@ impl OperationReservationStore for PostgresOperationReservationStore {
 
         Ok(deleted.rows_affected())
     }
+
+    async fn probe(&self) -> Result<(), ReservationError> {
+        // Against the reservation table, not `SELECT 1`. Both prove a
+        // connection can be acquired and a statement round-tripped; only this
+        // one also proves the schema this store writes to is actually there.
+        // A pool that connects to a database whose migration has not run yet
+        // answers `SELECT 1` happily, and the first real `reserve` is then the
+        // thing that discovers the missing table — after the process has
+        // already been reported ready and handed traffic.
+        //
+        // `LIMIT 1` with no predicate and a discarded row: the planner stops
+        // at the first tuple (or at the first empty page), so the cost does
+        // not grow with the table. Reading a row rather than counting them
+        // keeps it that way — `COUNT(*)` would scan the whole table on every
+        // readiness probe.
+        //
+        // `fetch_optional`, because an empty table is a perfectly reachable
+        // store. Zero rows is not an error here; it is the normal state of a
+        // freshly migrated deployment.
+        sqlx::query("SELECT 1 FROM operation_reservations LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+
+        Ok(())
+    }
 }
 
 impl PostgresOperationReservationStore {
