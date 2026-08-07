@@ -3021,3 +3021,55 @@ diagnostic they emit — adding a line shifted it, and they never execute so the
   `verify-hygiene`.
 
 **117 tasks, 69 complete, 48 pending.** B3.7 is the last of B3.
+
+### Review round one on B3.6 — the registration was nominal, and the tracker was inflated
+
+Both findings correct.
+
+**The store was registered and then dropped on the floor.** `idempotency_reservation_store` appeared
+in exactly two places: the setter and `validate_idempotency`. `build()` assembled `RuntimeInner`
+without it, so a runtime accepted the "enforcing with a store" configuration and the store ceased to
+exist the moment the builder was consumed. `with_operation_reservation_store` was nominal, and B6
+would have found nothing to consume.
+
+The existing test could not see it, and that is the instructive part: it asserted only that the build
+*succeeded*. Registering, dropping, and never registering at all all satisfy that.
+
+Fixed by retaining it in `RuntimeInner` beside the `TenantResolver` it sits next to conceptually, and
+exposing it through a `pub(crate)` accessor — deliberately not public, because idempotent dispatch is
+the only caller and a public accessor would invite reaching around the `#[idempotent]` seam to reserve
+operations by hand, which is the one path the enforcement mode cannot police.
+
+Three tests replace the one:
+
+- `Arc::ptr_eq` proves the runtime holds *the registered instance*, not merely some store.
+- `Compatibility` without a store retains `None`, so a caller finding `None` knows enforcement is off
+  rather than that a registration was missed — sound only because the builder refuses to produce an
+  enforcing runtime without one.
+- The second registration replaces the first, **observed through the retained instance**. The previous
+  version asserted only that the build succeeded, which keeping the first, keeping the second, and
+  keeping neither all satisfy.
+
+Teeth, both reproducing the reported defect exactly: passing `None` at the hand-over fails with *"an
+enforcing runtime must retain the store it was given"*, and changing the setter to `get_or_insert`
+fails with *"the second registration must replace the first"*.
+
+The seam has no production caller yet, which clippy correctly reported. Marked
+`#[cfg_attr(not(test), expect(dead_code, ...))]` — `expect` rather than `allow` so the attribute
+becomes an error the moment B6 supplies a caller, and gated on `not(test)` because the tests do call
+it, so an unconditional expectation would be unfulfilled in the test build. Two intermediate attempts
+failed exactly that way before the gate was right.
+
+**The tracker was inflated.** B3.6a and B3.6b were described in their own text as "required by B3.6"
+and "the default's blast radius" — which is an admission that they are consequences of one
+requirement, not requirements of their own. Recording them as counted units moved the total 115 → 117
+and credited three completions for delivering one thing. Folded back into B3.6's text as prose.
+**115 total, 67 complete, 48 pending.**
+
+Noted and left alone: `try_build` runs the validation twice, since it validates and then delegates to
+`build`, which validates again. `build` cannot skip its own check — it is a public entry point — and
+`try_build` must check first or the panic would unwind before it could return the error. The
+redundancy is one enum match and one `Option::is_none`, pure and O(1).
+
+Re-verified: `ego-service-sdk --lib` **270 passed**; WORKSPACE **119 suites, 1 563 passed, 0 failed**;
+`fmt`, `clippy -D warnings`, and the three `verify-*` clean.

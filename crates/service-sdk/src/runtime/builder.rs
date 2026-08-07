@@ -696,6 +696,7 @@ impl RuntimeBuilder {
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
+                self.idempotency_reservation_store,
                 self.observability,
                 effect_acceptor_impl,
                 self.effect_drain_deadline,
@@ -1283,29 +1284,72 @@ mod tests {
         assert!(rt.security_providers().is_none());
     }
 
-    /// Enforcement with a store registered builds.
+    /// The runtime retains the very store that was registered.
     ///
-    /// The other half of the pair. Without it, "the default refuses" would also be
-    /// satisfied by a builder that refuses unconditionally.
+    /// `Arc::ptr_eq`, not "a store is present": registration that type-checks and then
+    /// drops the value on the floor would satisfy any weaker assertion, and the whole
+    /// point of the setter is that idempotent dispatch later reaches *this* instance.
+    /// A store that vanishes at build time makes the method nominal and leaves the
+    /// dispatch it exists for with nothing to call.
     #[test]
-    fn the_default_mode_with_a_reservation_store_builds() {
+    fn the_registered_reservation_store_is_the_one_the_runtime_keeps() {
+        let store: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
         let rt = RuntimeBuilder::new()
-            .with_operation_reservation_store(Arc::new(UnusableReservationStore))
+            .with_operation_reservation_store(Arc::clone(&store))
             .build();
-        assert!(rt.security_providers().is_none());
+
+        let retained = rt
+            .inner()
+            .operation_reservation_store()
+            .expect("an enforcing runtime must retain the store it was given");
+        assert!(
+            Arc::ptr_eq(retained, &store),
+            "the runtime must hold the registered instance, not merely some store"
+        );
     }
 
-    /// Registering twice keeps the last store rather than accumulating.
+    /// Compatibility without a store retains nothing.
     ///
-    /// Pinning the choice rather than leaving it to be discovered: two stores would
-    /// mean two places a key could be reserved and no answer to which one decides.
+    /// So a caller finding `None` knows enforcement is off, rather than that a
+    /// registration was missed — the builder refuses to produce an enforcing runtime
+    /// without one, which is what makes that reading sound.
+    #[test]
+    fn compatibility_without_a_store_retains_none() {
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build();
+        assert!(rt.inner().operation_reservation_store().is_none());
+    }
+
+    /// Registering twice keeps the second, observed through the retained instance.
+    ///
+    /// Two stores would mean two places a key could be reserved and no answer to which
+    /// one decides. Asserting only that the build succeeds would leave that unpinned:
+    /// keeping the first, keeping the second, and keeping neither all build fine.
     #[test]
     fn registering_a_second_reservation_store_replaces_the_first() {
+        let first: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
+        let second: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
         let rt = RuntimeBuilder::new()
-            .with_operation_reservation_store(Arc::new(UnusableReservationStore))
-            .with_operation_reservation_store(Arc::new(UnusableReservationStore))
+            .with_operation_reservation_store(Arc::clone(&first))
+            .with_operation_reservation_store(Arc::clone(&second))
             .build();
-        assert!(rt.security_providers().is_none());
+
+        let retained = rt
+            .inner()
+            .operation_reservation_store()
+            .expect("a store was registered");
+        assert!(
+            Arc::ptr_eq(retained, &second),
+            "the second registration must replace the first"
+        );
+        assert!(
+            !Arc::ptr_eq(retained, &first),
+            "the first registration must not survive alongside it"
+        );
     }
 
     struct StubAuthn;
