@@ -20,6 +20,10 @@ const MIGRATION_007_ADD_AGGREGATE_TYPE: &str =
 const MIGRATION_008_STREAM_IDENTITY_UNIQUE: &str =
     include_str!("migrations/008_events_stream_identity_unique.sql");
 
+/// Migration SQL for the (nullable) `operation_key` column on `events`.
+const MIGRATION_009_ADD_OPERATION_KEY: &str =
+    include_str!("migrations/009_add_operation_key_to_events.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -52,6 +56,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "008_events_stream_identity_unique",
             MIGRATION_008_STREAM_IDENTITY_UNIQUE,
+        ),
+        (
+            "009_add_operation_key_to_events",
+            MIGRATION_009_ADD_OPERATION_KEY,
         ),
     ]
 }

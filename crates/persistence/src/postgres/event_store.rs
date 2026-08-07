@@ -8,6 +8,7 @@ use sqlx::FromRow;
 use sqlx::PgPool;
 
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::OperationKey;
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 use crate::postgres::resolve_tenant;
@@ -23,6 +24,7 @@ struct EventRow {
     event_type: String,
     payload: serde_json::Value,
     created_at: chrono::DateTime<chrono::Utc>,
+    operation_key: Option<String>,
 }
 
 /// PostgreSQL event store backed by a PgPool.
@@ -153,8 +155,8 @@ where
             let event_version = current + (i as i64) + 1;
             let event = &stored.event;
             let inserted = sqlx::query(
-                    r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                    r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at, operation_key)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
                 )
                 .bind(&aggregate_type)
                 .bind(&aggregate_id)
@@ -163,6 +165,7 @@ where
                 .bind(event.event_type())
                 .bind(event.payload().clone())
                 .bind(*event.occurred_at())
+            .bind(stored.operation_key.as_ref().map(|k| k.as_str()))
                 .execute(&mut *tx)
                 .await;
 
@@ -234,7 +237,7 @@ where
         let tenant = resolve_tenant(tenant_id)?;
 
         let rows: Vec<EventRow> = sqlx::query_as(
-                    r#"SELECT aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at
+                    r#"SELECT aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at, operation_key
                    FROM events WHERE aggregate_type = $1 AND aggregate_id = $2
                      AND tenant_id IS NOT DISTINCT FROM $3
                    ORDER BY version ASC"#,
@@ -256,7 +259,23 @@ where
             .into_iter()
             .map(|row| {
                 let event = (self.deserialize)(&row.event_type, row.payload)?;
-                Ok(StoredEvent::without_correlation(event))
+                let stored = StoredEvent::without_correlation(event);
+                // A stored key was validated on the way in, so failing to parse it
+                // on the way out means the row was written by something that did
+                // not go through `OperationKey`. Surfacing that rather than
+                // dropping the key keeps the store from quietly returning an event
+                // as though it had no operation behind it.
+                match row.operation_key {
+                    None => Ok(stored),
+                    Some(raw) => {
+                        let key = OperationKey::parse(raw.clone()).map_err(|e| {
+                            PersistenceError::Internal(format!(
+                                "stored operation_key {raw:?} is not a valid operation key: {e}"
+                            ))
+                        })?;
+                        Ok(stored.with_operation_key(key))
+                    }
+                }
             })
             .collect();
 
@@ -361,8 +380,8 @@ where
             let event_version = current + (i as i64) + 1;
             let event = &stored.event;
             let inserted = sqlx::query(
-                r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                r#"INSERT INTO events (aggregate_type, aggregate_id, tenant_id, version, event_type, payload, created_at, operation_key)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
             )
             .bind(aggregate_type)
             .bind(aggregate_id)
@@ -371,6 +390,7 @@ where
             .bind(event.event_type())
             .bind(event.payload().clone())
             .bind(*event.occurred_at())
+            .bind(stored.operation_key.as_ref().map(|k| k.as_str()))
             .execute(&mut *self.tx)
             .await;
 
