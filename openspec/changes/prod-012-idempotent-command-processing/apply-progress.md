@@ -2377,3 +2377,138 @@ Re-verified: `fmt` and `clippy -D warnings` clean; `recovery_of_a_fresh_aggregat
 `recovery_absorbs_only_absence` **1 passed**, `default_store_conformance` **1 passed**,
 `persistent-entity` lib **45 passed**. Comment-only changes, so counts are unchanged: **114 tasks,
 58 complete, 56 pending.**
+
+---
+
+## Phase B4, third slice: the operation key on stored events — COMPLETE
+
+Branch: `feat/prod-012-b4iii-operation-key-metadata`, off the tracker at `90a9a24`. B4 is now
+complete except `B4.4b`, which was deliberately never bundled.
+
+### What "no metadata channel exists today" turned out to mean
+
+The plan recorded that as a verified constraint, and it is true: nothing carried an operation key.
+While adding one I described the neighbouring `correlation_id` field as universally discarded, and
+that was wrong — corrected below in the review round.
+
+### The field
+
+`operation_key: Option<OperationKey>`, attached through a builder step rather than a fourth
+constructor parameter, so every existing call site keeps compiling and a caller with no key does not
+have to say so by passing `None`.
+
+`Option` because not every event comes from an externally-keyed operation — one replayed by a
+projection, or produced by an internal timer, has no client operation behind it. A mandatory field
+would force adapters to invent a value for the absence, which is how "no key" becomes a key that
+looks real.
+
+### The column
+
+A dedicated `operation_key VARCHAR(255)`, not a generic `metadata JSONB`. The operation is a
+first-class identity here, not incidental annotation; a blob would be unqueryable without expression
+indexes while inviting anything at all to be dumped in.
+
+Nullable, and staying nullable, for the same reason the field is `Option`.
+
+`VARCHAR(255)` against a key the domain caps at 255 **bytes**. The units differ and the bound holds
+in the safe direction: Postgres counts characters, and a 255-byte UTF-8 string is at most 255
+characters, so every key the domain admits fits. The reverse would not hold — a 255-character
+multi-byte string exceeds 255 bytes and `OperationKey::parse` rejects it before it reaches the
+column.
+
+Deliberately unindexed. Nothing queries events by operation key: suppression decisions read the
+receipt table, and an index for a query that does not exist costs every write to serve none.
+
+Migration `009`. The plan had that number pencilled in for `operation_receipts`; `tasks.md` now says
+the later numbers are indicative rather than reserved, since B3 and B5 can land in either order and
+whoever lands second takes the next free number.
+
+### Two write paths, pinned separately
+
+The direct append and the unit of work write through **separate code**, so a key surviving one
+proves nothing about the other. Both bind it, and the harness asserts both — the direct path in its
+own section, the unit of work inside the committed-unit-of-work section.
+
+Each path was then broken on its own to confirm the assertions are not covering for each other. Both
+teeth checks assert their patch applied before drawing any conclusion, which is the rule adopted
+after a silently-empty patch reported success in the previous slice:
+
+- Direct append stops binding → *"the operation key attached to the first event must come back
+  exactly"* (harness line 278).
+- Unit of work stops binding → *"an operation key attached inside a unit of work must survive its
+  commit"* (harness line 389).
+
+Different assertions, different lines, one path each.
+
+### Reading it back
+
+`load` parses the stored string into an `OperationKey` and **fails** if it cannot. A stored key was
+validated on the way in, so an unparseable value means the row was written by something that did not
+go through `OperationKey`. Surfacing that beats dropping the key, which would return the event as
+though no operation had produced it — a false answer to exactly the question the column exists to
+answer.
+
+### Where the assertion lives, and why that mattered here
+
+In the shared conformance harness, so all three implementations must honour it. That placement
+immediately earned itself: both in-memory stores passed the new assertion **by construction** —
+they keep whole `StoredEvent` values — while the durable one failed. The RED isolated the one
+implementation with work to do, without anyone having to guess which.
+
+`ego-persistence`'s unit-test count reads 10 where it read 13 before, and that is accounted for
+rather than a loss: the three `resolve_tenant` tests moved to the domain with the function in B4.5c,
+where `ego-domain` went 219 → 223 (three moved plus a new whitespace-boundary case), and now 226
+with the three new `StoredEvent` cases.
+
+### Verification
+
+- HERMETIC: `ego-domain` **226 passed**; `default_store_conformance` and
+  `in_memory_event_store_conformance` pass the new assertion by construction.
+- INTEGRATION, real PostgreSQL: `postgres_event_store_conformance` **1 passed**.
+- WORKSPACE: `cargo test --workspace` — **117 suites, 1 557 passed, 0 failed**.
+- STATIC: `fmt`, `clippy -D warnings` (clean first time), `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene`.
+
+**115 tasks, 60 complete, 55 pending.**
+
+### Review round one on B4-iii — an overbroad claim, contradicted by the patch itself
+
+The finding is correct, and the wrong statement was mine in four places: `StoredEvent`'s doc,
+`tasks.md`, this file, and the PR body. I wrote that **no adapter** reads or writes
+`correlation_id`, that the field universally does not round-trip, and that it is discarded at the
+boundary.
+
+Verified against the code rather than re-argued:
+
+| Implementation | `correlation_id` |
+|---|---|
+| `ego-infrastructure` in-memory | **kept** — `load` returns `events.clone()`, whole `StoredEvent` values |
+| `persistent-entity` in-memory | **kept** — same |
+| PostgreSQL | **dropped** — never bound on insert, and `load` rebuilds with `without_correlation` |
+| shared conformance harness | **no assertion at all** — zero references |
+
+So the debt is not a universal gap. It is a **divergence**, and one the harness does not pin —
+which is precisely why the two behaviours could differ without anything failing. That is the same
+shape as the systemwide tenant comparison, the unit-of-work version offsets, and the absent-stream
+report: three prior instances in this change, and I described the fourth as something else.
+
+Worse, the claim contradicted the patch it sat inside. The same slice documents that both in-memory
+stores pass the new `operation_key` assertion **by construction, because they keep whole
+`StoredEvent` values** — which is exactly the mechanism that also preserves `correlation_id`. The
+evidence against my own sentence was two paragraphs away from it.
+
+Corrected everywhere to describe what each store does and to say that the shared contract requires
+neither, so a caller can rely on neither keeping it nor losing it. Closing it means deciding what
+the contract *should* require and then making the durable store meet that — which changes what an
+existing setter observably does, and is why it stays its own task.
+
+### B4.6's description corrected too
+
+It claimed the round trip through storage was proven in `stored_event.rs`. A domain unit test cannot
+reach storage. What that file pins is what it can: that neither constructor attaches a key, that
+attaching one leaves the other fields alone, and that attaching twice keeps the last rather than
+refusing or accumulating. The round trip is asserted by the shared harness, against all three
+implementations and across both write paths.
+
+Re-verified after the corrections: `fmt` and `clippy -D warnings` clean. Documentation-only changes,
+so counts are unchanged: **115 tasks, 60 complete, 55 pending.**

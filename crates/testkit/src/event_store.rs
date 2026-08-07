@@ -20,6 +20,7 @@
 //! it.
 
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::OperationKey;
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
 /// Asserts that an [`EventStore`] implementation honours the parts of the
@@ -36,9 +37,10 @@ use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 /// Checked: version advance, rejection of a stale expected version, ordered
 /// readback, that a tenant partition and the systemwide partition are separate
 /// streams even when they share a type and an id, that the aggregate listing
-/// reports each partition's own streams and only those, and the unit-of-work
+/// reports each partition's own streams and only those, the unit-of-work
 /// semantics — staged appends invisible until commit, durable after it, and
-/// discarded when the unit of work is dropped.
+/// discarded when the unit of work is dropped — and that an attached
+/// `operation_key` survives the round trip.
 ///
 /// Not checked: durability, concurrency, snapshotting, or anything an
 /// implementation may reasonably decide for itself. A conformance harness that
@@ -241,6 +243,49 @@ where
         "the systemwide listing must hold exactly the streams written without a tenant"
     );
 
+    // --- An attached operation key survives the round trip -------------------
+    // Storage that silently drops it would leave a later reader unable to tell
+    // which operation wrote which history, which is the question a
+    // duplicate-suppression decision has to answer about events that already
+    // exist. The in-memory stores keep whole `StoredEvent` values, so they pass
+    // this by construction; the durable one has to write a column and read it
+    // back, and putting the assertion here is what stops those two from drifting.
+    {
+        let key = OperationKey::parse("conformance-operation-key")
+            .expect("the harness's own key must be valid");
+        store
+            .append(
+                "conformance",
+                "carries-a-key",
+                tenant,
+                0,
+                vec![
+                    StoredEvent::without_correlation(make_event("Keyed"))
+                        .with_operation_key(key.clone()),
+                    // A second event in the same batch without a key, so the
+                    // assertion cannot pass by attaching the key to everything.
+                    StoredEvent::without_correlation(make_event("Unkeyed")),
+                ],
+            )
+            .await
+            .expect("appending an event that carries an operation key must succeed");
+
+        let loaded = store
+            .load("conformance", "carries-a-key", tenant)
+            .await
+            .expect("the stream must load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0].operation_key.as_ref(),
+            Some(&key),
+            "the operation key attached to the first event must come back exactly"
+        );
+        assert_eq!(
+            loaded[1].operation_key, None,
+            "an event appended without an operation key must not acquire one"
+        );
+    }
+
     // --- A unit of work either lands whole or not at all ---------------------
     // Asserted here rather than only against the durable store, because a staging
     // implementation and a transactional one can only be trusted to agree if the
@@ -296,13 +341,17 @@ where
         .begin()
         .await
         .expect("a conforming store must be able to open a unit of work");
+    // The first event carries an operation key: a unit of work writes through its
+    // own code path, so the key surviving a direct append proves nothing about it.
+    let uow_key =
+        OperationKey::parse("conformance-uow-key").expect("the harness's own key must be valid");
     uow.append(
         "conformance",
         "committed-uow",
         tenant,
         0,
         vec![
-            StoredEvent::without_correlation(make_event("One")),
+            StoredEvent::without_correlation(make_event("One")).with_operation_key(uow_key.clone()),
             StoredEvent::without_correlation(make_event("Two")),
         ],
     )
@@ -337,6 +386,15 @@ where
     );
     assert_eq!(committed[0].event.event_type(), "One");
     assert_eq!(committed[2].event.event_type(), "Three");
+    assert_eq!(
+        committed[0].operation_key.as_ref(),
+        Some(&uow_key),
+        "an operation key attached inside a unit of work must survive its commit"
+    );
+    assert_eq!(
+        committed[1].operation_key, None,
+        "and must not spread to the events appended beside it"
+    );
 
     let mut tenant_listing = store
         .list_aggregate_ids(tenant)
@@ -347,6 +405,7 @@ where
         tenant_listing,
         vec![
             ("conformance".to_string(), "advances".to_string()),
+            ("conformance".to_string(), "carries-a-key".to_string()),
             ("conformance".to_string(), "committed-uow".to_string()),
             ("conformance".to_string(), "shared-identity".to_string()),
             ("conformance".to_string(), "stale".to_string()),
