@@ -879,6 +879,7 @@ name = "ego-service-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "console-exporter",
  "ego-domain",
  "ego-runtime",

@@ -187,7 +187,12 @@ mod tests {
 
     fn make_state() -> AppState {
         AppState::new(
-            RuntimeBuilder::new().build().resolver(),
+            RuntimeBuilder::new()
+                .with_idempotency_enforcement_mode(
+                    ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+                )
+                .build()
+                .resolver(),
             std::sync::Arc::new(StubAuthn),
         )
     }

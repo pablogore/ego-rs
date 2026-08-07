@@ -119,6 +119,9 @@ fn make_proxy(
     let inner: Arc<dyn TenantContractService> = service;
     let chain = Arc::new(InterceptorChain::new());
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_tenant_enforcement_mode(mode)
         .build();
     let runtime_weak = Arc::downgrade(rt.inner());
@@ -281,7 +284,11 @@ async fn divergent_ingress_values_converge_to_one_authoritative_value() {
 
 #[test]
 fn direct_tenant_mutation_cannot_override_derived_authenticated_tenant() {
-    let rt = RuntimeBuilder::new().build();
+    let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
     rt.inner()
         .enforce_tenant(&mut ctx)
@@ -304,7 +311,11 @@ fn direct_tenant_mutation_cannot_override_derived_authenticated_tenant() {
 
 #[test]
 fn downstream_mutation_attempt_does_not_affect_operation_already_in_progress() {
-    let rt = RuntimeBuilder::new().build();
+    let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
     rt.inner()
         .enforce_tenant(&mut ctx)

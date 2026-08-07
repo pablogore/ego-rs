@@ -185,7 +185,11 @@ fn make_runtime_with_observability(
     authz: Arc<dyn AuthorizationProvider>,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> (Runtime, std::sync::Weak<RuntimeInner>) {
-    let mut builder = RuntimeBuilder::new().with_security(Arc::new(StubAuthnProvider), authz);
+    let mut builder = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .with_security(Arc::new(StubAuthnProvider), authz);
     if let Some(obs) = observability {
         builder = builder.with_observability(obs);
     }

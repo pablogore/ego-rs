@@ -280,7 +280,25 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
             .with_read_side_sink(read_side_sink),
     );
 
-    let mut builder = App::builder().security(authn.clone(), authz);
+    let mut builder = App::builder()
+        // This service has not adopted operation-key enforcement yet, and says so.
+        //
+        // The builder's default is the enforcing variant, which refuses to start
+        // without a registered `OperationReservationStore` — a runtime that promises
+        // every mutating operation carries a client-supplied key and has nowhere to
+        // reserve one cannot keep the promise. Declaring `Compatibility` is how a
+        // deployment states it is still in transition.
+        //
+        // Deliberately not registered here: the in-memory reservation store. It would
+        // make the build succeed and would make this look adopted while giving no
+        // durability at all — a configuration that appears productive and is not is
+        // worse than an honest declaration that enforcement is off. Adopting it means
+        // registering the durable store, which is a separate decision with a
+        // migration behind it.
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .security(authn.clone(), authz);
     // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
     // query-side `UsersByTenantStore` — distinct from the untouched read-side
     // *engine* path above (`ReadSideHandles`/`TagSchedulerImpl::spawn`,

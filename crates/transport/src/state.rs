@@ -94,6 +94,9 @@ mod tests {
     async fn registered_tag_resolves_through_app_state() {
         let echo: Arc<dyn Echo> = Arc::new(EchoImpl);
         let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+            )
             .with_service::<EchoTag>(echo)
             .expect("registers cleanly")
             .build();

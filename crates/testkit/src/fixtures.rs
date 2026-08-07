@@ -131,7 +131,9 @@ impl FixtureBuilder {
             unauthenticated: false,
             authorization: Arc::new(ScriptedAuthorizationProvider::allow_all()),
             config: TestConfig::new(),
-            runtime_builder: RuntimeBuilder::new(),
+            runtime_builder: RuntimeBuilder::new().with_idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+            ),
         }
     }
 

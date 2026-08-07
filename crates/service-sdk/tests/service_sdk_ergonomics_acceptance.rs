@@ -160,6 +160,9 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
     // --- Scenario 1: minimal service, no deps ---------------------------
     // Define -> with_service -> build() -> resolve() -> invoke.
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<MinimalGreeterTag>(Arc::new(MinimalGreeterImpl) as Arc<dyn MinimalGreeter>)
         .expect("first registration for a fresh tag succeeds")
         .build();
@@ -177,6 +180,9 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
     // with_adapter/with_config -> with_injectable -> try_build() ->
     // Injectable::build(rt.inner()) -> invoke.
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_adapter(Arc::new(NotifierAdapter("notifier".to_string())))
         .with_config(Arc::new(10u32))
         .with_injectable::<ConfiguredGreeter>()
@@ -195,6 +201,9 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
     // must fail fast, naming both the missing type and the requesting
     // service, never reaching Injectable::build.
     let err = match RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_config(Arc::new(10u32))
         .with_injectable::<ConfiguredGreeter>()
         .try_build()
@@ -243,6 +252,9 @@ async fn full_developer_journey_from_minimal_service_to_protected_service() {
     // closed with the same guard order and SecurityError the hand-rolled
     // path enforces when no tenant can be resolved from the context.
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<ProtectedGreeterTag>(
             Arc::new(ProtectedGreeterImpl) as Arc<dyn ProtectedGreeter>
         )

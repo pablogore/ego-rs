@@ -37,7 +37,11 @@ fn make_state() -> AppState {
         Hs256AuthenticationProvider::try_new(config, resolver, Arc::new(SystemClock))
             .expect("valid JWT provider config"),
     );
-    let rt = RuntimeBuilder::new().build();
+    let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     AppState::new(rt.resolver(), provider)
 }
 

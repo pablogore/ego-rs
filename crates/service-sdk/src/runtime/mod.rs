@@ -34,6 +34,7 @@ pub(crate) use tenant::CrossTenantGrant;
 /// `#[cfg(test)]` modules here rather than in `crates/integration-tests/`.
 #[cfg(test)]
 mod integration_tests {
+    use super::IdempotencyEnforcementMode;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -83,7 +84,10 @@ mod integration_tests {
             .expect("logger constructs")
             .expect("enabled settings yield a logger");
 
-        let rt = RuntimeBuilder::new().with_logger(logger).build();
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_logger(logger)
+            .build();
         let rt_logger = rt.logger().expect("runtime holds the logger").clone();
 
         let ctx = ServiceContext::new().with_logger(rt_logger.clone());
@@ -126,7 +130,10 @@ mod integration_tests {
             .log(Severity::Info, "record-3")
             .expect("record 3 logs");
 
-        let rt = RuntimeBuilder::new().with_logger(logger).build();
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_logger(logger)
+            .build();
 
         assert!(rt.shutdown().is_ok());
 

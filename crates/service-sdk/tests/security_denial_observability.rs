@@ -124,6 +124,9 @@ fn make_runtime(
     std::sync::Weak<ego_service_sdk::runtime::RuntimeInner>,
 ) {
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_security(Arc::new(StubAuthnProvider), authz)
         .with_observability(observability)
         .build();

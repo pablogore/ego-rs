@@ -827,6 +827,22 @@ pub enum RuntimeError {
         /// The name of the requesting service, when known.
         service_name: Option<&'static str>,
     },
+    /// Idempotency enforcement is on and no reservation store was registered.
+    ///
+    /// A variant of its own rather than a [`Self::DependencyNotFound`] with some
+    /// existing [`DependencyKind`]: none of those kinds describes this, and each
+    /// carries a fix hint naming the registration method for *its* kind. Reusing one
+    /// would tell the reader to call `.adapter(...)`, which does not register a
+    /// reservation store — a misdirecting error is worse than a terse one.
+    #[error(
+        "idempotency enforcement is on (IdempotencyEnforcementMode::MandatoryKey) but no \
+         OperationReservationStore is registered — a runtime that requires a client-supplied \
+         operation key has nowhere to reserve it. Register one with \
+         .with_operation_reservation_store(store), or state that this deployment has not \
+         adopted enforcement with \
+         .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)"
+    )]
+    OperationReservationStoreNotRegistered,
 }
 
 // ---------------------------------------------------------------------------

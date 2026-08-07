@@ -106,6 +106,9 @@ fn app_with_tracer(tracer: Arc<SpyTracer>) -> Router {
     let register_user = Arc::new(RegisterUserImpl::new(org_runtime, user_runtime, None));
 
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_security(Arc::new(UnusedAuthn), Arc::new(AllowAll))
         .with_tracer(tracer as Arc<dyn Tracer>)
         .with_service::<RegisterUserTag>(register_user)
