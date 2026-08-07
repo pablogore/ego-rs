@@ -489,3 +489,112 @@ async fn wait_until_a_statement_is_blocked(pool: &PgPool) {
          the takeover never reached its UPDATE — both are failures, not flakes"
     );
 }
+
+/// A takeover that cannot mint a storable token reports exhaustion and changes
+/// nothing.
+///
+/// The boundary is the **column's**, not the domain counter's, and the two differ.
+/// The domain counts in `u64`; `BIGINT` is `i64`. At `i64::MAX` the domain's own
+/// increment still succeeds because `u64` has room, so an unchecked conversion would
+/// land on `i64::MIN` — a value PostgreSQL accepts, and which is *less* than the
+/// token it displaced. The invariant the whole fencing mechanism rests on would be
+/// retired silently, at exactly the point the domain believed it had covered.
+///
+/// The row is seeded directly, because reaching this state through the port would
+/// take `i64::MAX` takeovers. That is the same reason the domain exposes a
+/// constructor from a raw value.
+///
+/// Asserting the refusal is only half of it: a call that reports exhaustion must also
+/// leave owner, token and lease exactly as they were, because a partial takeover would
+/// be worse than a refused one — two callers would believe they hold the lease.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_takeover_at_the_storable_token_limit_reports_exhaustion_and_changes_nothing() {
+    use chrono::Duration;
+    use ego_domain::operation::{
+        OperationFingerprint, OperationKey, OperationReservationStore, OwnerId, ReservationError,
+        ReserveRequest,
+    };
+    use ego_domain::Clock;
+
+    let (pool, _container) = start_pool().await;
+    let (store, clock) = fresh(&pool).await;
+
+    let expired_at = clock.now() - Duration::seconds(1);
+    sqlx::query(
+        "INSERT INTO operation_reservations \
+           (tenant_id, operation_key, fingerprint, owner_id, fencing_token, lease_until, state) \
+         VALUES (NULL, 'op-at-the-limit', 'fp-1', 'owner-original', $1, $2, 'in_progress')",
+    )
+    .bind(i64::MAX)
+    .bind(expired_at)
+    .execute(&pool)
+    .await
+    .expect("seeding a reservation at the storable limit must succeed");
+
+    let outcome = store
+        .reserve(ReserveRequest {
+            tenant: None,
+            operation_key: OperationKey::parse("op-at-the-limit").expect("valid key"),
+            fingerprint: OperationFingerprint::new("fp-1"),
+            owner_id: OwnerId::new("owner-contender"),
+            lease_until: clock.now() + Duration::seconds(30),
+        })
+        .await;
+
+    assert_eq!(
+        outcome,
+        Err(ReservationError::FencingExhausted),
+        "a takeover that cannot mint a storable token must report exhaustion rather than wrap"
+    );
+
+    let (owner, token, lease_until): (String, i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT owner_id, fencing_token, lease_until FROM operation_reservations \
+         WHERE operation_key = 'op-at-the-limit'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("the row must still be there");
+
+    assert_eq!(owner, "owner-original", "the owner must be unchanged");
+    assert_eq!(token, i64::MAX, "the token must be unchanged");
+    assert_eq!(lease_until, expired_at, "the lease must be unchanged");
+}
+
+/// The table refuses a non-positive fencing token.
+///
+/// The adapter never writes one — its conversion is checked — so this is the guard
+/// against anything else that writes here. Without it, a token of zero or a negative
+/// one could sit in the table and the store would read it back as an enormous
+/// positive number, so the reservation would appear to hold a token nobody minted.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_table_refuses_a_non_positive_fencing_token() {
+    let (pool, _container) = start_pool().await;
+
+    for (label, token) in [("zero", 0i64), ("negative", -1i64), ("i64::MIN", i64::MIN)] {
+        let inserted = sqlx::query(
+            "INSERT INTO operation_reservations \
+               (tenant_id, operation_key, fingerprint, owner_id, fencing_token, lease_until, \
+                state) \
+             VALUES (NULL, $1, 'fp', 'owner', $2, NOW(), 'in_progress')",
+        )
+        .bind(format!("op-token-{label}"))
+        .bind(token)
+        .execute(&pool)
+        .await;
+
+        assert!(
+            inserted.is_err(),
+            "a fencing token of {label} ({token}) must be refused by the table"
+        );
+    }
+
+    // Triangulation: the constraint rejects non-positive values, not every value.
+    sqlx::query(
+        "INSERT INTO operation_reservations \
+           (tenant_id, operation_key, fingerprint, owner_id, fencing_token, lease_until, state) \
+         VALUES (NULL, 'op-token-one', 'fp', 'owner', 1, NOW(), 'in_progress')",
+    )
+    .execute(&pool)
+    .await
+    .expect("the first token the sequence mints must be accepted");
+}

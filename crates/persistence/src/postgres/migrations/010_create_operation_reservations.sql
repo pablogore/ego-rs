@@ -27,10 +27,17 @@
 -- unpurgeable forever and an in-progress row with one would be purgeable while
 -- still held.
 --
--- `fencing_token` is BIGINT and strictly increases on every takeover. Overflow is
--- a real, if remote, boundary: the domain surfaces it as a distinct error rather
--- than wrapping, because a wrapped token could compare equal to a fence a
--- displaced owner still holds and would stop fencing anything.
+-- `fencing_token` is BIGINT and strictly increases on every takeover, and the
+-- boundary that matters is **this column's**, not the domain counter's. The domain
+-- counts in u64; BIGINT is i64. At i64::MAX the domain's own increment still
+-- succeeds — u64 has room — so an unchecked conversion would land on i64::MIN, a
+-- value this column would happily accept and which is *less* than the token it
+-- displaced. The adapter converts with a checked cast and reports exhaustion at the
+-- storage limit; the CHECK below is the table's own guard, for anything that writes
+-- here without going through the adapter.
+--
+-- A token is therefore always positive. Zero is excluded too: the sequence starts at
+-- one, so zero could only arrive from a writer that did not mint it.
 
 CREATE TABLE IF NOT EXISTS operation_reservations (
     id            BIGSERIAL PRIMARY KEY,
@@ -47,6 +54,8 @@ CREATE TABLE IF NOT EXISTS operation_reservations (
 
     CONSTRAINT operation_reservations_state_known
         CHECK (state IN ('in_progress', 'completed')),
+    CONSTRAINT operation_reservations_fencing_token_is_positive
+        CHECK (fencing_token > 0),
     CONSTRAINT operation_reservations_completion_is_consistent
         CHECK (
             (state = 'in_progress' AND completed_at IS NULL AND response IS NULL)

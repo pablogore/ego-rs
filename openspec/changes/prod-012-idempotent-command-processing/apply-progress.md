@@ -2791,12 +2791,21 @@ now says it is not the thing carrying the guarantee.
 
 ### Clock skew, documented at the store
 
-Expiry reads the injected `Clock`, never the database's `now()` (AD-8). Two nodes with skewed clocks
-can therefore disagree about whether a lease lapsed, and that is **not** a correctness breach: the
-node that wrongly believes it lapsed takes over, the takeover mints a strictly greater token, and
-every later mutation by the displaced owner fails with `StaleOwner`. Skew costs wasted work, never a
-double execution. Expiry decides when an attempt is permitted; fencing is what makes the outcome
-safe. Stated at the module, because a reader who assumes otherwise will try to "fix" the clock.
+Expiry reads the injected `Clock`, never the database's `now()` (AD-8), so two nodes with skewed
+clocks can disagree about whether a lease lapsed. The first version of this note said that costs
+"wasted work, never a double execution", which is **wrong** and was corrected in review.
+
+What skew actually costs: a premature takeover, and with it concurrent work — the displaced owner may
+still be executing when the new one starts. What the fencing token guarantees: the displaced owner
+cannot mutate or finalise *this reservation*, so the completion eventually recorded and replayed is
+the current owner's. What it does not guarantee: anything about an external effect already in flight.
+A token is a predicate on a row; it neither cancels a request that has left the process nor prevents a
+second one.
+
+Avoiding a duplicated external effect requires the effect boundary to carry the fence or to be
+idempotent itself — B6's subject. So expiry decides when an attempt is permitted, fencing decides
+whose reservation outcome is authoritative, and neither makes two concurrent executions impossible
+until that wiring lands.
 
 ### One helper deleted rather than kept
 
@@ -2825,3 +2834,63 @@ integration is two levels of verification, not two definitions.
   `verify-isolation`, `verify-hygiene`.
 
 **115 tasks, 66 complete, 49 pending.**
+
+### Review round one on B3-i — a real defect at the storage boundary, and an overclaim
+
+**The token could wrap silently, and the migration comment denied it.**
+
+The domain counts tokens in `u64`; the column is `BIGINT`, which is `i64`. The adapter converted with
+`as i64` at eight sites. Verified arithmetically before fixing:
+
+```
+displaced token : 9223372036854775807   (i64::MAX)
+next() (u64)    : 9223372036854775808   <- checked_add succeeds; u64::MAX is not reached
+after `as i64`  : -9223372036854775808  <- PostgreSQL accepts this
+strictly greater? False
+```
+
+So the invariant the whole fencing mechanism rests on — a new token is strictly greater than the one
+it displaces — was retired silently at exactly the point the domain believed it had covered.
+`FencingExhausted` was only ever reachable at `u64::MAX`, which is not the limit that exists.
+
+The exhaustion the port names is the **storage** limit, and that is the honest reading: a token that
+cannot be stored cannot fence anything.
+
+Fixed in one place rather than eight. `token_for_storage` converts with `i64::try_from` and maps
+overflow to `FencingExhausted`; `token_from_storage` converts back with `u64::try_from` and reports a
+non-positive stored value as a backend error rather than reinterpreting the bits into an enormous
+positive number. `mutate_owned` converts once and hands the result to each mutator's closure, so the
+three of them cannot drift. The batch limit is *clamped* rather than refused, and that is safe because
+it is an upper bound — removing fewer rows than asked never violates "at most `batch`", whereas an
+unchecked cast would wrap to a negative limit and delete nothing.
+
+The migration comment now says the boundary is the column's, not the counter's, and the table carries
+`CHECK (fencing_token > 0)` for anything that writes without going through the adapter. Zero is
+excluded too: the sequence starts at one, so zero could only come from a writer that did not mint it.
+
+Two tests: a row seeded at `i64::MAX` with an expired lease reports `FencingExhausted` **and leaves
+owner, token and lease untouched** — a partial takeover would be worse than a refused one, since two
+callers would believe they hold the lease. And the table refuses zero, `-1` and `i64::MIN`, with a
+triangulating insert of `1` so the constraint is shown to reject non-positive values rather than every
+value.
+
+Teeth: reintroducing the unchecked cast fails the boundary test — and the failure shows the two layers
+are independently live, because the CHECK catches the negative row first:
+
+```
+left:  Err(Backend("... violates check constraint
+                    \"operation_reservations_fencing_token_is_positive\""))
+right: Err(FencingExhausted)
+```
+
+The checked conversion is what produces the *correct* error; the constraint is what stops the bad row
+even if the conversion regresses.
+
+**The clock-skew claim was too strong.** See the corrected section above: the token protects the
+reservation's mutation and its authoritative outcome, not an external effect already in flight, and
+skew *can* cause a double execution until the effect boundary carries the fence or is idempotent
+itself. That is B6's subject. Corrected at the store module, here, and in the PR body.
+
+Re-verified: `reservation_store_postgres` **10 passed**; `fmt`, `clippy -D warnings`, and the three
+`verify-*` clean. WORKSPACE: **119 suites, 1 554 passed, 0 failed** — two more than before the
+corrections, which are the two new tests.

@@ -11,13 +11,27 @@
 //! machine runs.
 //!
 //! And it means two nodes with skewed clocks can disagree about whether a lease has
-//! expired. That is **not** a correctness breach, and the reason is the fencing
-//! token rather than the clock: a node that wrongly believes a lease lapsed takes
-//! over, the takeover mints a strictly greater token, and every later mutation by
-//! the displaced owner fails with [`ReservationError::StaleOwner`]. Skew causes a
-//! premature takeover — wasted work — never a double execution. Expiry only decides
-//! *when* an attempt is permitted; fencing is what makes the outcome safe. A reader
-//! who assumes otherwise will try to "fix" the clock and make things worse.
+//! expired. What that costs, stated precisely rather than reassuringly:
+//!
+//! - A premature takeover becomes possible, and with it **concurrent work**: the
+//!   displaced owner may still be executing when the new one starts.
+//! - The fencing token guarantees the displaced owner cannot **mutate or finalise
+//!   this reservation** — its `renew`, `complete` and `abandon` all fail with
+//!   [`ReservationError::StaleOwner`], so the completion that is eventually recorded
+//!   and replayed is the current owner's.
+//! - It guarantees **nothing about an external effect already in flight**. A token
+//!   is a predicate on a row; it neither cancels a request that has left the process
+//!   nor prevents a second one. Avoiding a duplicated external effect requires the
+//!   effect boundary itself to carry the fence or to be idempotent on its own —
+//!   which is B6's subject, not this store's.
+//!
+//! So expiry decides when an attempt is *permitted*, and fencing decides whose
+//! reservation outcome is *authoritative*. Neither makes two concurrent executions
+//! impossible, and an earlier version of this note claimed skew could never cause a
+//! double execution. It can, until the effect boundary is wired.
+//!
+//! Tightening the clocks is therefore worth doing for the wasted work it avoids, and
+//! is not a substitute for that wiring.
 //!
 //! # Selection within a purge batch is not a promise
 //!
@@ -76,6 +90,49 @@ impl PostgresOperationReservationStore {
 /// Maps a storage failure into the port's opaque backend variant.
 fn storage(err: sqlx::Error) -> ReservationError {
     ReservationError::Backend(err.to_string())
+}
+
+/// Converts a token into the column's type, refusing rather than wrapping.
+///
+/// The domain counts tokens in `u64`; this column is `BIGINT`, which is `i64`. The
+/// two ranges differ, and the difference is not academic: at `i64::MAX` the domain's
+/// `next()` still succeeds — `u64` has room — and an unchecked cast would land on
+/// `i64::MIN`, a value PostgreSQL accepts and which is *less* than the token it
+/// displaced. The type's whole promise is that a new token is strictly greater than
+/// the one it replaces, so wrapping there would silently retire the guarantee at
+/// exactly the boundary the domain thought it had covered.
+///
+/// The exhaustion the port names is therefore the *storage* limit, not `u64`'s. That
+/// is the honest reading: a token that cannot be stored cannot fence anything.
+fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
+    i64::try_from(token.value()).map_err(|_| ReservationError::FencingExhausted)
+}
+
+/// Rebuilds a token from the column, refusing a value no writer of ours could
+/// produce.
+///
+/// A negative token means the row was written by something that did not go through
+/// this adapter — the table's own CHECK forbids it. Reinterpreting the bits as `u64`
+/// would turn it into an enormous positive number and carry on, so the reservation
+/// would appear to hold a token nobody minted.
+fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
+    let value = u64::try_from(raw).map_err(|_| {
+        ReservationError::Backend(format!(
+            "stored fencing_token {raw} is not positive, which the table's own CHECK forbids"
+        ))
+    })?;
+    Ok(FencingToken::from_value(value))
+}
+
+/// Converts a batch limit into the column's type.
+///
+/// Clamped rather than refused, and safe to clamp because `batch` is an *upper*
+/// bound: removing fewer rows than asked never violates "at most `batch`". A caller
+/// requesting more rows than `i64::MAX` is asking for more than can exist, so the
+/// clamp changes nothing observable — unlike an unchecked cast, which would wrap to a
+/// negative limit and delete nothing at all.
+fn batch_for_storage(batch: usize) -> i64 {
+    i64::try_from(batch).unwrap_or(i64::MAX)
 }
 
 /// The `tenant_id` a row is filed under, as the database sees it.
@@ -151,7 +208,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
         .bind(&key)
         .bind(req.fingerprint.as_str())
         .bind(req.owner_id.as_str())
-        .bind(FencingToken::initial().value() as i64)
+        .bind(token_for_storage(FencingToken::initial())?)
         .bind(req.lease_until)
         .execute(&self.pool)
         .await
@@ -225,7 +282,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             // because a later change to the lease predicate would otherwise remove
             // the only guard silently. It is not, however, the thing carrying the
             // guarantee, and an earlier version of this comment claimed it was.
-            let displaced = FencingToken::from_value(existing.fencing_token as u64);
+            let displaced = token_from_storage(existing.fencing_token)?;
             let next = displaced.next().ok_or(ReservationError::FencingExhausted)?;
 
             let took_over = sqlx::query(
@@ -238,7 +295,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
                      AND lease_until <= $7"#,
             )
             .bind(req.owner_id.as_str())
-            .bind(next.value() as i64)
+            .bind(token_for_storage(next)?)
             .bind(req.lease_until)
             .bind(&tenant)
             .bind(&key)
@@ -270,7 +327,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
                 return Ok(ReservationOutcome::OwnedInProgress(Lease {
                     operation_id,
                     owner_id: req.owner_id,
-                    fencing_token: FencingToken::from_value(after.fencing_token as u64),
+                    fencing_token: token_from_storage(after.fencing_token)?,
                     lease_until: after.lease_until,
                 }));
             }
@@ -281,7 +338,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             return Ok(ReservationOutcome::OwnedInProgress(Lease {
                 operation_id,
                 owner_id: req.owner_id,
-                fencing_token: FencingToken::from_value(existing.fencing_token as u64),
+                fencing_token: token_from_storage(existing.fencing_token)?,
                 lease_until: existing.lease_until,
             }));
         }
@@ -294,7 +351,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
         fence: &OwnerFence,
         until: DateTime<Utc>,
     ) -> Result<(), ReservationError> {
-        self.mutate_owned(fence, |tenant, key, now| {
+        self.mutate_owned(fence, |tenant, key, token, now| {
             sqlx::query(
                 r#"UPDATE operation_reservations
                    SET lease_until = $1
@@ -309,7 +366,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             .bind(tenant)
             .bind(key)
             .bind(fence.owner_id.as_str().to_string())
-            .bind(fence.fencing_token.value() as i64)
+            .bind(token)
             .bind(now)
         })
         .await
@@ -321,7 +378,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
         response: StoredResponse,
     ) -> Result<(), ReservationError> {
         let bytes = response.as_bytes().to_vec();
-        self.mutate_owned(fence, move |tenant, key, now| {
+        self.mutate_owned(fence, move |tenant, key, token, now| {
             sqlx::query(
                 r#"UPDATE operation_reservations
                    SET state = 'completed', completed_at = $1, response = $2
@@ -337,14 +394,14 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             .bind(tenant)
             .bind(key)
             .bind(fence.owner_id.as_str().to_string())
-            .bind(fence.fencing_token.value() as i64)
+            .bind(token)
             .bind(now)
         })
         .await
     }
 
     async fn abandon(&self, fence: &OwnerFence) -> Result<(), ReservationError> {
-        self.mutate_owned(fence, |tenant, key, now| {
+        self.mutate_owned(fence, |tenant, key, token, now| {
             sqlx::query(
                 r#"DELETE FROM operation_reservations
                    WHERE tenant_id IS NOT DISTINCT FROM $1
@@ -357,7 +414,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             .bind(tenant)
             .bind(key)
             .bind(fence.owner_id.as_str().to_string())
-            .bind(fence.fencing_token.value() as i64)
+            .bind(token)
             .bind(now)
         })
         .await
@@ -391,7 +448,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
                )"#,
         )
         .bind(cutoff)
-        .bind(batch as i64)
+        .bind(batch_for_storage(batch))
         .execute(&self.pool)
         .await
         .map_err(storage)?;
@@ -419,15 +476,19 @@ impl PostgresOperationReservationStore {
         F: FnOnce(
             Option<String>,
             String,
+            i64,
             DateTime<Utc>,
         )
             -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments>,
     {
         let tenant = tenant_column(fence.operation_id.tenant());
         let key = fence.operation_id.operation_key().as_str().to_string();
+        // Converted here rather than in each caller: one place to be right about the
+        // range difference between the domain's counter and the column.
+        let token = token_for_storage(fence.fencing_token)?;
         let now = self.clock.now();
 
-        let affected = build(tenant, key, now)
+        let affected = build(tenant, key, token, now)
             .execute(&self.pool)
             .await
             .map_err(storage)?
