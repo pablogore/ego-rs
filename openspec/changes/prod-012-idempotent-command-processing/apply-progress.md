@@ -2894,3 +2894,50 @@ itself. That is B6's subject. Corrected at the store module, here, and in the PR
 Re-verified: `reservation_store_postgres` **10 passed**; `fmt`, `clippy -D warnings`, and the three
 `verify-*` clean. WORKSPACE: **119 suites, 1 554 passed, 0 failed** — two more than before the
 corrections, which are the two new tests.
+
+### Review round two on B3-i — the guard did not reject what its documentation claimed
+
+Correct on all three points.
+
+`token_from_storage` expressed its guard as `u64::try_from(raw)`, which rejects negatives and
+**accepts zero**. So the function built a `FencingToken(0)` — a token no sequence mints, since it
+starts at one — while its own documentation said it refused anything not positive, the migration said
+tokens start at one, and this file's own report said zero was rejected. Three statements agreeing
+with each other and disagreeing with the code.
+
+The constraint kept zero out of a valid table, so nothing reopened the wraparound and the normal path
+was never at risk. What was wrong was the adapter's second line of defence, and the fact that four
+places described it incorrectly.
+
+Now an explicit `raw <= 0`, with the `u64` conversion kept below it — expressed as a conversion rather
+than a cast, so a later change to the guard cannot silently reintroduce a wrap.
+
+A focused unit test covers `0`, `-1`, `i64::MIN` and, triangulating, `1` and `i64::MAX`. **Zero is
+tested first, deliberately**: it is the value a `u64` conversion accepts, so it is the one that
+regresses if the guard is ever collapsed back into that conversion, and a failure should name that
+case rather than surface as a message quibble about `i64::MIN`.
+
+That ordering was not a guess. The first version of the test listed `i64::MIN` first, and the teeth
+check then failed on the *message text* for `i64::MIN` rather than on zero being accepted — the
+regression was caught, but the diagnostic pointed at the wrong thing. Reordered, the same teeth check
+reports:
+
+```
+a non-positive stored token must be refused, but 0 was accepted as FencingToken(0)
+```
+
+A second unit test pins the write side: the limit itself is storable, and one past it reports
+`FencingExhausted` rather than wrapping. That is the durable boundary test's property, asserted at the
+conversion so a regression is named here before it has to be inferred from a reservation behaving
+oddly.
+
+**The stale comment.** The PostgreSQL constraint test still said that without the constraint the store
+would read a negative back as an enormous positive number. With the checked conversion it no longer
+would — it refuses. Rewritten to say what each layer does: the constraint stops the row being written
+by anything that reaches the table without the adapter; the adapter's guard keeps the store honest
+against a schema it cannot re-verify on every deployment. Neither makes the other redundant, and the
+earlier teeth check showed both firing on one defect from different sides.
+
+Re-verified: `ego-persistence --lib` **12 passed**, `reservation_store_postgres` **10 passed**,
+WORKSPACE **119 suites, 1 556 passed, 0 failed**, `fmt`, `clippy -D warnings` and the three `verify-*`
+clean. Counts unchanged: **115 tasks, 66 complete, 49 pending.**

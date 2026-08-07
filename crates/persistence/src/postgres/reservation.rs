@@ -111,15 +111,28 @@ fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
 /// Rebuilds a token from the column, refusing a value no writer of ours could
 /// produce.
 ///
-/// A negative token means the row was written by something that did not go through
-/// this adapter — the table's own CHECK forbids it. Reinterpreting the bits as `u64`
-/// would turn it into an enormous positive number and carry on, so the reservation
-/// would appear to hold a token nobody minted.
+/// The sequence starts at one, so a stored token is always positive and anything else
+/// means the row was written by something that did not go through this adapter. The
+/// table's own CHECK forbids it, and this is the second line rather than the only
+/// one: a store that trusted the constraint would be trusting a schema it does not
+/// re-verify on every deployment.
+///
+/// The predicate is `raw <= 0`, not a `u64` conversion. `u64::try_from` rejects
+/// negatives and **accepts zero**, which is exactly the value this function's own
+/// promise excludes — a `FencingToken(0)` is a token nobody minted, and the earlier
+/// version of this code built one while its documentation said it would not.
 fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
+    if raw <= 0 {
+        return Err(ReservationError::Backend(format!(
+            "stored fencing_token {raw} is not positive; the sequence starts at 1 and the \
+             table's own CHECK forbids anything else"
+        )));
+    }
+    // Positive by the check above, so the conversion cannot fail — but expressed as a
+    // conversion rather than a cast, so a later change to the guard cannot silently
+    // reintroduce a wrap.
     let value = u64::try_from(raw).map_err(|_| {
-        ReservationError::Backend(format!(
-            "stored fencing_token {raw} is not positive, which the table's own CHECK forbids"
-        ))
+        ReservationError::Backend(format!("stored fencing_token {raw} is not representable"))
     })?;
     Ok(FencingToken::from_value(value))
 }
@@ -498,5 +511,69 @@ impl PostgresOperationReservationStore {
             return Err(ReservationError::StaleOwner);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stored-token guard admits exactly the positive values.
+    ///
+    /// Zero is the case worth naming: `u64::try_from` accepts it, so a guard expressed
+    /// only as that conversion would build a `FencingToken(0)` — a token no sequence
+    /// mints, since it starts at one — while claiming to reject anything not positive.
+    /// That is what this test exists to pin, and one is included so the guard is shown
+    /// to admit the first real token rather than reject everything.
+    #[test]
+    fn a_stored_token_must_be_positive() {
+        // Zero first, deliberately. It is the value a `u64` conversion accepts, so it
+        // is the one that regresses if the guard is ever expressed as that conversion
+        // alone — and a failure here should name that case rather than surface as a
+        // message quibble about `i64::MIN`, which any conversion rejects anyway.
+        for rejected in [0, -1, i64::MIN] {
+            let err = match token_from_storage(rejected) {
+                Err(err) => err,
+                Ok(token) => panic!(
+                    "a non-positive stored token must be refused, but {rejected} was accepted \
+                     as {token:?}"
+                ),
+            };
+            match err {
+                ReservationError::Backend(message) => assert!(
+                    message.contains("is not positive"),
+                    "the error must say what was wrong with the stored value: {message}"
+                ),
+                other => panic!("expected Backend for {rejected}, got {other:?}"),
+            }
+        }
+
+        let accepted =
+            token_from_storage(1).expect("the first token the sequence mints must be accepted");
+        assert_eq!(accepted, FencingToken::initial());
+
+        let large = token_from_storage(i64::MAX).expect("the largest storable token is valid");
+        assert_eq!(large.value(), i64::MAX as u64);
+    }
+
+    /// A token beyond the column's range is refused rather than wrapped.
+    ///
+    /// The other half of the boundary the durable test covers end-to-end: this pins the
+    /// conversion itself, so a regression is named here before it has to be inferred
+    /// from a reservation behaving oddly.
+    #[test]
+    fn a_token_the_column_cannot_hold_is_refused() {
+        let at_limit = FencingToken::from_value(i64::MAX as u64);
+        assert_eq!(
+            token_for_storage(at_limit).expect("the limit itself is storable"),
+            i64::MAX
+        );
+
+        let past_limit = at_limit.next().expect("u64 still has room past i64::MAX");
+        assert_eq!(
+            token_for_storage(past_limit),
+            Err(ReservationError::FencingExhausted),
+            "a token u64 can hold but the column cannot must report exhaustion, not wrap"
+        );
     }
 }

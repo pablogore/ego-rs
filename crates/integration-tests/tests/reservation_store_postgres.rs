@@ -562,10 +562,17 @@ async fn a_takeover_at_the_storable_token_limit_reports_exhaustion_and_changes_n
 
 /// The table refuses a non-positive fencing token.
 ///
-/// The adapter never writes one — its conversion is checked — so this is the guard
-/// against anything else that writes here. Without it, a token of zero or a negative
-/// one could sit in the table and the store would read it back as an enormous
-/// positive number, so the reservation would appear to hold a token nobody minted.
+/// The adapter never writes one, and no longer reads one either: its stored-token
+/// guard rejects anything at or below zero, so a bad row would surface as an error
+/// rather than as a token nobody minted. This constraint is the layer *before* that —
+/// it stops the row from being written at all, by anything that reaches this table
+/// without going through the adapter.
+///
+/// The two are worth having separately. The constraint keeps the table honest for
+/// every writer; the adapter's guard keeps the store honest even against a schema it
+/// cannot re-verify on every deployment. Neither makes the other redundant, and the
+/// teeth check on the checked conversion showed both firing on the same defect from
+/// different sides.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_table_refuses_a_non_positive_fencing_token() {
     let (pool, _container) = start_pool().await;
