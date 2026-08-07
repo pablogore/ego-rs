@@ -2617,3 +2617,103 @@ occurrences are all `snapshot_store`, which genuinely is one.
 
 Re-verified: `fmt` and `clippy -D warnings` clean. Documentation-only, so counts are unchanged:
 **115 tasks, 61 complete, 54 pending.**
+
+---
+
+## B3-0: the reservation conformance harness — preparatory slice
+
+Branch: `feat/prod-012-b30-reservation-conformance-harness`, off the tracker at `a6b1607`.
+
+**No task is marked complete and no task is added.** `tasks.md` has no item describing this
+extraction, and inserting one would move the total off 115. Counts stay **61 complete, 54 pending**.
+
+### Why this precedes the durable store
+
+B3.1 as written says to write a PostgreSQL test file "mirroring B2's deterministic scenarios".
+*Mirroring* is how two copies of a contract come to exist, and this change has already paid for
+that four times — the systemwide tenant comparison, the unit-of-work version offsets, the
+absent-stream report, and the default store's tenant-partitioned key. In every one, the hermetic
+suite exercised the implementation that happened to be right.
+
+Lease ownership, expiry and fencing are the correctness core of idempotency. A divergence there is a
+hole in the guarantee, not an inconvenience. So the scenarios move to one place first, and the
+durable implementation is judged against them rather than against a copy.
+
+### What was extracted, and what was not
+
+The port has **five** methods: `reserve`, `renew`, `complete`, `abandon`,
+`purge_completed_before`. None has a default body. (An earlier note in this file said "six" — that
+was wrong; the five named ones are the whole trait.)
+
+Of B2's 16 scenarios, **15 are contract and were extracted. One is not.**
+
+`a_lock_wait_that_spans_expiry_rejects_the_lapsed_holder` takes `store.records.lock()` — the
+in-memory double's private mutex — to construct a lock wait that spans expiry. No other
+implementation has that mutex, and its own doc-comment already describes the construction as
+depending on it. It is a test about this implementation, not about the port, so it stays in the
+double's module.
+
+**`purge_completed_before` has no scenario at all.** It appears once in the file — its own
+implementation. The port specifies its behaviour (never purge an `InProgress` reservation regardless
+of age; return the number of rows purged) and nothing asserts any of it. Writing one here would be
+adding semantics to an extraction, so the gap is recorded, not filled.
+
+### Shape
+
+Two group functions plus an aggregate that only composes them: `assert_reserve_conformance` (7
+scenarios — every outcome the port admits plus the atomic takeover), `assert_lease_mutation_conformance`
+(8 — stale rejection, lapsed rejection at the exact expiry instant, renewal cadence), and
+`assert_reservation_store_conformance`. Each scenario has exactly one definition.
+
+The caller passes an **async factory** rather than a store. The original scenarios each built their
+own store and clock and depend on that isolation — several advance the clock and then assert what a
+*second* owner observes, which a shared store would let a neighbouring scenario disturb. Sharing one
+store with distinct keys would have been a different contract, quietly. The factory is async because
+a durable implementation must reach its database to hand back a clean store.
+
+### Preservation, verified mechanically rather than asserted
+
+Comparing the old test module against the new harness plus the double's remaining test, by
+observable surface:
+
+```
+store calls        reserve 27→27 · renew 5→5 · complete 4→4 · abandon 3→3
+outcomes asserted  Fresh 9→9 · TakenOver 7→7 · OwnedInProgress 2→2
+                   OtherInProgress 2→2 · Conflict 1→1 · Succeeded 1→1
+errors asserted    StaleOwner 7→7
+```
+
+Identical in every count. Nothing was added and nothing dropped.
+
+### Teeth, one per required property
+
+Each patch asserted its own anchor count before running — the rule adopted after a silently-empty
+patch reported success two slices ago. The first attempt at the second check **did not compile**, so
+it proved nothing and was redone rather than reported.
+
+| Mutation | Fails with |
+|---|---|
+| `reserve`'s expiry becomes strict (`>=` → `>`) | *"an un-renewed lease is takeover-eligible exactly at its configured length, got OtherInProgress"* |
+| takeover reuses the displaced token instead of minting a greater one | *"takeover fencing token must be strictly greater than the original"* |
+
+Different properties, different assertions.
+
+### Held out
+
+`PostgresOperationReservationStore` does not exist, not even as a partial type — confirmed by
+searching the tree. A partial implementation of this port cannot be contractually valid: all five
+methods are required and none has an honest "not applicable" answer, so a reserve-only adapter could
+only exist by returning errors the contract does not define. That is the correction that produced
+this slice.
+
+### Verification
+
+- `ego-testkit --lib`: **72 passed**, 0 failed.
+- WORKSPACE: `cargo test --workspace` — **118 suites, 1 544 passed, 0 failed**.
+  The tracker read 1 558. The difference is exactly **14**, the net change in testkit test functions
+  (15 removed, 1 added); the 15 scenarios still run, inside the one conformance test. Suite count is
+  unchanged at 118 because no test binary was added or removed.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene` — all clean.
+
+**115 tasks, 61 complete, 54 pending — unchanged, as this slice is preparatory.**

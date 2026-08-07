@@ -24,6 +24,7 @@ mod jwt;
 mod logger;
 mod providers;
 mod reservation;
+mod reservation_conformance;
 mod security;
 
 pub use assertions::{assert_authorized, assert_denied};
@@ -42,4 +43,8 @@ pub use jwt::TestJwtBuilder;
 pub use logger::{CapturedRecord, CapturingLogger};
 pub use providers::{RecordingDataProvider, StaticDataProvider};
 pub use reservation::{InMemoryOperationReservationStore, TestClock};
+pub use reservation_conformance::{
+    assert_lease_mutation_conformance, assert_reservation_store_conformance,
+    assert_reserve_conformance,
+};
 pub use security::{authenticated, authenticated_with_claims};
