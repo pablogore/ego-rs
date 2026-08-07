@@ -2717,3 +2717,111 @@ this slice.
   `verify-isolation`, `verify-hygiene` — all clean.
 
 **115 tasks, 61 complete, 54 pending — unchanged, as this slice is preparatory.**
+
+---
+
+## B3-i: the durable reservation store — COMPLETE
+
+Branch: `feat/prod-012-b3i-postgres-reservation-store`, off the tracker at `16a41ac`. Closes
+B3.1–B3.5. B3.6 and B3.7 remain.
+
+### The boundary the design now states (AD-11)
+
+Recorded before any code: `purge_completed_before` guarantees eligibility strictly before the
+cutoff, never removing an `InProgress` row, the batch limit, and the returned count. It does **not**
+guarantee which eligible rows a call chooses. Against a fixed cutoff, successive calls drain the
+whole set however each batch chooses — every call removes rows and none adds any. Ordering would
+only bound how long an individual old row waits, and nothing here depends on that bound. The durable
+query therefore carries no `ORDER BY`, so a caller cannot come to depend on one.
+
+### All five methods, and why not fewer
+
+`reserve`, `renew`, `complete`, `abandon`, `purge_completed_before`. A partial implementation of this
+port cannot be contractually valid — every method is required and none has an honest "not
+applicable" answer — so a reserve-only adapter could only exist by returning errors the contract does
+not define.
+
+The three fence-verifying mutators share one shape that puts the full triple **and** the lease bound
+in the `WHERE`. Verification and mutation are therefore one statement: a read-then-write would leave
+a window in which the lease lapses or the row is taken over between the check and the change. Zero
+rows affected means "not yours", "not that token", or "no longer valid", and the port makes no
+distinction — all three are `StaleOwner` and all three leave the row unmodified.
+
+### The table refuses what the code would never write
+
+Two CHECK constraints: the state is one of the two the contract defines, and a completion carries
+both its timestamp and its response or neither. Purge eligibility is measured from `completed_at`, so
+a completed row without one would be unpurgeable forever and an in-progress row with one purgeable
+while still held. The store never writes either shape; the database refuses them anyway, which is
+what makes the invariant hold against anything else that writes to the table.
+
+### Teeth, and two findings they produced
+
+Every patch asserted its anchor count first. Two of them **failed to apply** and were redone rather
+than interpreted — one found two matching sites where one was expected, the other hit an
+indentation that differed from the assumption. A third attempt failed on a cargo incremental-cache
+glitch and was rerun with `CARGO_INCREMENTAL=0`.
+
+| Mutation | Result |
+|---|---|
+| `IS NOT DISTINCT FROM` → `=` in the identity lookup | **4 of 6 conformance tests fail** — a systemwide reservation becomes invisible to its own lookup |
+| the three mutators stop rejecting a lapsed holder | fails on *"an expired holder must not renew"* |
+| purge eligibility `<` → `<=` | fails the boundary scenario (checked against the double) |
+| purge drops its batch limit | fails *"a call removes at most `batch` rows"* |
+| purge also removes `InProgress` | fails *"an InProgress reservation is never purged"* |
+
+**Finding one: the six-contender race proves less than it looks like it does.** Neutralising the
+takeover `UPDATE`'s guards left it green. Each contender re-reads the row before updating, so after
+the first takeover commits the others see a future `lease_until` and reject in Rust — the `UPDATE`'s
+own predicates never decide anything, and the window they protect is rarely open on a fast local
+database. A race test that sometimes exercises nothing reports success either way.
+
+So the window is forced open rather than raced for, with the technique that worked for the
+unique-violation path in A3-ii: another transaction locks the row, the takeover's `UPDATE` blocks,
+the holder extends the lease and commits, and the blocked update must re-check against the row that
+now exists. Neutralising `lease_until <= $N` makes it report `TakenOver` of a renewed lease.
+
+**Finding two: `fencing_token = $N` is redundant, and the comment said otherwise.** It claimed that
+predicate "is what makes exactly one `UPDATE` match". It is not — `lease_until <= $N` is, and every
+path that changes the token also pushes the lease into the future, which that predicate already
+rejects. No test distinguishes them, which was checked rather than assumed. The predicate stays,
+because a conditional update that names the version it read is the correct shape for one and because
+a later change to the lease predicate would otherwise remove the only guard silently — but the code
+now says it is not the thing carrying the guarantee.
+
+### Clock skew, documented at the store
+
+Expiry reads the injected `Clock`, never the database's `now()` (AD-8). Two nodes with skewed clocks
+can therefore disagree about whether a lease lapsed, and that is **not** a correctness breach: the
+node that wrongly believes it lapsed takes over, the takeover mints a strictly greater token, and
+every later mutation by the displaced owner fails with `StaleOwner`. Skew costs wasted work, never a
+double execution. Expiry decides when an attempt is permitted; fencing is what makes the outcome
+safe. Stated at the module, because a reader who assumes otherwise will try to "fix" the clock.
+
+### One helper deleted rather than kept
+
+Clippy found `operation_id_from` unused: no method rebuilds an identity from a row, because every one
+receives it from the caller. Its two unit tests asserted that a systemwide and a tenanted identity
+differ under one key — which the domain already tests as
+`operation_id_is_scoped_by_tenant_and_key`. A helper existing only to be tested, and tests
+duplicating a domain property, both removed.
+
+### B7.2 reframed, not duplicated
+
+Its verb was "implement", which B3-i makes obsolete. Reworded to harden the existing purge for
+production — batched observable execution, safe for concurrent workers. B7.1 stays as the durable
+retention-policy integration test: asserting a guarantee in the shared contract and again in durable
+integration is two levels of verification, not two definitions.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: `reservation_store_postgres` **8 passed** — the aggregate contract,
+  the three groups in isolation, the catalog shape, the CHECK constraints, and the two concurrency
+  tests.
+- HERMETIC: `ego-testkit --lib` **72 passed** (the purge group joined the existing conformance test).
+- WORKSPACE: `cargo test --workspace` — **119 suites, 1 552 passed, 0 failed**. Against B3-0's
+  118/1 544: one new suite (this file) and eight new tests.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene`.
+
+**115 tasks, 66 complete, 49 pending.**

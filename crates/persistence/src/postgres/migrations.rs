@@ -24,6 +24,10 @@ const MIGRATION_008_STREAM_IDENTITY_UNIQUE: &str =
 const MIGRATION_009_ADD_OPERATION_KEY: &str =
     include_str!("migrations/009_add_operation_key_to_events.sql");
 
+/// Migration SQL for the durable operation-reservation table.
+const MIGRATION_010_CREATE_OPERATION_RESERVATIONS: &str =
+    include_str!("migrations/010_create_operation_reservations.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -60,6 +64,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "009_add_operation_key_to_events",
             MIGRATION_009_ADD_OPERATION_KEY,
+        ),
+        (
+            "010_create_operation_reservations",
+            MIGRATION_010_CREATE_OPERATION_RESERVATIONS,
         ),
     ]
 }

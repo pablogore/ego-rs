@@ -4,6 +4,9 @@ pub mod aggregate_type_backfill;
 pub mod event_store;
 pub mod migrations;
 pub mod repository;
+
+/// The durable operation-reservation store.
+pub mod reservation;
 pub mod snapshot;
 
 pub use event_store::PostgreSQLEventStore;
