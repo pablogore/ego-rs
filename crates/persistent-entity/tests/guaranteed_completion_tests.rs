@@ -85,7 +85,7 @@ struct PanicOnLoadEventStore {
 #[async_trait::async_trait]
 impl EventStore<TestEvent> for PanicOnLoadEventStore {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -141,11 +141,11 @@ impl EventStore<TestEvent> for PanicOnLoadEventStore {
 #[tokio::test]
 async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
     let load_calls = Arc::new(AtomicUsize::new(0));
-    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(AsyncMutex::new(PanicOnLoadEventStore {
+    let event_store: Arc<dyn EventStore<TestEvent> + Send + Sync> =
+        Arc::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
             release_panic: None,
-        }));
+        });
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
         .passivation_timeout(Duration::from_secs(3600))
@@ -523,11 +523,11 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
 async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_once() {
     let load_calls = Arc::new(AtomicUsize::new(0));
     let (release_tx, release_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(AsyncMutex::new(PanicOnLoadEventStore {
+    let event_store: Arc<dyn EventStore<TestEvent> + Send + Sync> =
+        Arc::new(PanicOnLoadEventStore {
             load_calls: load_calls.clone(),
             release_panic: Some(AsyncMutex::new(release_rx)),
-        }));
+        });
 
     let runtime = Arc::new(
         EntityRuntimeBuilder::<TestEvent>::new()
@@ -920,7 +920,7 @@ struct GatedPanicOnceEventStore {
 #[async_trait::async_trait]
 impl EventStore<TestEvent> for GatedPanicOnceEventStore {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -1002,11 +1002,11 @@ impl EventStore<TestEvent> for GatedPanicOnceEventStore {
 async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() {
     let load_calls = Arc::new(AtomicUsize::new(0));
     let (release_tx, release_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let event_store: Arc<AsyncMutex<dyn EventStore<TestEvent> + Send>> =
-        Arc::new(AsyncMutex::new(GatedPanicOnceEventStore {
+    let event_store: Arc<dyn EventStore<TestEvent> + Send + Sync> =
+        Arc::new(GatedPanicOnceEventStore {
             load_calls: load_calls.clone(),
             release_panic: AsyncMutex::new(release_rx),
-        }));
+        });
 
     let runtime = Arc::new(
         EntityRuntimeBuilder::<TestEvent>::new()

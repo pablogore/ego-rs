@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 
 use parking_lot::Mutex;
 
@@ -35,7 +34,7 @@ struct FailingEventStore;
 #[async_trait::async_trait]
 impl EventStore<TestEvent> for FailingEventStore {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -93,7 +92,7 @@ impl AppendFailingStore {
 #[async_trait::async_trait]
 impl EventStore<TestEvent> for AppendFailingStore {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -140,7 +139,7 @@ impl EventStore<TestEvent> for AppendFailingStore {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_load_error_propagates_to_caller() {
-    let event_store = Arc::new(AsyncMutex::new(FailingEventStore));
+    let event_store = Arc::new(FailingEventStore);
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
@@ -165,9 +164,9 @@ async fn test_load_error_propagates_to_caller() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_snapshot_recovery_with_version_offset() {
-    let event_store = Arc::new(AsyncMutex::new(
+    let event_store = Arc::new(
         InMemoryEventStore::<TestEvent>::new().with_version_offset("counter", "snap-1", 5),
-    ));
+    );
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     {
@@ -206,7 +205,7 @@ async fn test_snapshot_recovery_with_version_offset() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_persist_failure_drains_mailbox() {
-    let event_store = Arc::new(AsyncMutex::new(AppendFailingStore::new()));
+    let event_store = Arc::new(AppendFailingStore::new());
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()

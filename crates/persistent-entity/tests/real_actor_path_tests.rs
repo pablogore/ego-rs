@@ -2,7 +2,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -102,7 +101,7 @@ async fn test_recovery_replays_seeded_events() {
     use ego_domain::persistence::{EventStore, StoredEvent};
     use persistent_entity::persistence::InMemoryEventStore;
 
-    let event_store = Arc::new(AsyncMutex::new(InMemoryEventStore::<TestEvent>::new()));
+    let event_store = Arc::new(InMemoryEventStore::<TestEvent>::new());
 
     // Pre-seed under the same (type, id, tenant) identity the actor will use for
     // recovery — all three components, not two.
@@ -119,13 +118,10 @@ async fn test_recovery_replays_seeded_events() {
     let events: Vec<StoredEvent<TestEvent>> = (1u64..=3)
         .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
         .collect();
-    {
-        let mut store = event_store.lock().await;
-        store
-            .append(aggregate_type, aggregate_id, tenant, 0, events)
-            .await
-            .expect("pre-seed must succeed");
-    }
+    event_store
+        .append(aggregate_type, aggregate_id, tenant, 0, events)
+        .await
+        .expect("pre-seed must succeed");
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
         .passivation_timeout(Duration::from_secs(3600))

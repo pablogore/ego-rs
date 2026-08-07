@@ -25,7 +25,6 @@ use std::sync::Arc;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::Mutex as AsyncMutex;
 
 const POSTGRES_IMAGE_TAG: &str = "14-alpine";
 
@@ -137,7 +136,7 @@ async fn recovery_of_a_fresh_aggregate_succeeds_against_the_durable_store() {
     let (store, _container) = postgres_store().await;
 
     let facade: PersistenceFacade<RecoveredEvent> = PersistenceFacade::with_stores(
-        Arc::new(AsyncMutex::new(store)),
+        Arc::new(store),
         Arc::new(parking_lot::Mutex::new(InMemorySnapshotStore::new())),
     );
 
@@ -162,7 +161,7 @@ async fn recovery_of_a_fresh_aggregate_succeeds_against_the_durable_store() {
 #[tokio::test]
 async fn recovery_of_a_fresh_aggregate_succeeds_against_the_in_memory_store() {
     let facade: PersistenceFacade<RecoveredEvent> = PersistenceFacade::with_stores(
-        Arc::new(AsyncMutex::new(InMemoryEventStore::<RecoveredEvent>::new())),
+        Arc::new(InMemoryEventStore::<RecoveredEvent>::new()),
         Arc::new(parking_lot::Mutex::new(InMemorySnapshotStore::new())),
     );
 

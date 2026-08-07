@@ -1,8 +1,10 @@
 //! A simple persistence facade.
 //!
-//! This module provides a [`PersistenceFacade`] that wraps concrete
-//! [`EventStore`] and [`Snapshot`] implementations behind `Arc<Mutex<dyn ...>>`
-//! so both production and test code can supply any backing store.
+//! This module provides a [`PersistenceFacade`] that holds concrete
+//! [`EventStore`] and [`Snapshot`] implementations behind trait objects, so both
+//! production and test code can supply any backing store. The event store is held
+//! as `Arc<dyn EventStore<..> + Send + Sync>`; the snapshot store still needs a
+//! lock, and the facade's own documentation says why.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -10,7 +12,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
 
 use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{
@@ -53,7 +54,7 @@ impl<E: DomainEvent> NoopEventStore<E> {
 #[async_trait]
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEventStore<E> {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -145,31 +146,35 @@ impl Snapshot for NoopSnapshotStore {
 
 /// A facade for persistence operations.
 ///
-/// Wraps an [`EventStore`] and a [`Snapshot`] implementation behind
-/// `Arc<Mutex<dyn ...>>` so that any backing store (in-memory, database,
-/// test stub) can be injected at construction time.
+/// Holds an [`EventStore`] and a [`Snapshot`] implementation behind trait objects,
+/// so that any backing store (in-memory, database, test stub) can be injected at
+/// construction time. The two are held differently, and the next two paragraphs are
+/// the reason.
 ///
-/// Neither lock is `std::sync::Mutex`, for the same reason as `BoundedMailbox`'s
-/// queue and `EntityRegistry`'s map: a backing store that panics mid-call (a
-/// malformed adapter, a deserialization panic, a deliberately-injected test
-/// failure) must not permanently poison persistence for every other entity
-/// sharing this facade.
+/// The event store is held **without** a lock. It used to sit behind one only
+/// because `EventStore::append` demanded `&mut self`, and the lock existed to
+/// produce that exclusive borrow — which then serialised every append in the
+/// process, holding the lock across a full database round trip. Narrowing `append`
+/// to `&self` removed the reason, so the lock went with it: a store that reaches
+/// its own state through a pool handle or an interior lock does not need a second
+/// one wrapped around it.
 ///
-/// The two locks are different types, and the asymmetry is deliberate rather
-/// than an oversight. `EventStore`'s storage methods are asynchronous, so its
-/// guard has to be held across an `.await` — `parking_lot`'s guard is not `Send`,
-/// which would make every future that touches the store non-`Send` and therefore
-/// unspawnable. `tokio::sync::Mutex` yields a `Send` guard and, like
-/// `parking_lot`, does not poison. `Snapshot` is still synchronous, so its lock
-/// has nothing to hold across and stays on the cheaper, non-async one. When that
-/// trait becomes asynchronous it converts too; converting it now would add an
-/// `.await` to acquire a lock nothing waits on.
+/// The snapshot store still has one — the only lock this facade holds — because
+/// `Snapshot` is still synchronous and still takes `&mut self`, so a shared facade
+/// has no other way to produce the exclusive borrow it asks for.
+///
+/// That lock is `parking_lot::Mutex`, not `std::sync::Mutex`, for the same reason as
+/// `BoundedMailbox`'s queue and `EntityRegistry`'s map: it does not poison, and a
+/// backing store that panics mid-call (a malformed adapter, a deserialization panic,
+/// a deliberately-injected test failure) must not permanently poison persistence for
+/// every other entity sharing this facade. When `Snapshot` narrows the way
+/// `EventStore` just did, this lock goes too.
 ///
 /// The default constructor (`PersistenceFacade::new()`) creates a no-op
 /// facade that accepts writes but never persists anything.  Use
 /// [`PersistenceFacade::with_stores`] to supply real stores.
 pub struct PersistenceFacade<E> {
-    event_store: Arc<AsyncMutex<dyn EventStore<E> + Send>>,
+    event_store: Arc<dyn EventStore<E> + Send + Sync>,
     snapshot_store: Arc<Mutex<dyn Snapshot + Send>>,
     _event: PhantomData<E>,
 }
@@ -186,7 +191,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
     /// Writes succeed but are discarded; loads return empty results.
     pub fn new() -> Self {
         Self {
-            event_store: Arc::new(AsyncMutex::new(NoopEventStore::new())),
+            event_store: Arc::new(NoopEventStore::new()),
             snapshot_store: Arc::new(Mutex::new(NoopSnapshotStore)),
             _event: PhantomData,
         }
@@ -194,7 +199,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
 
     /// Creates a facade backed by the supplied event and snapshot stores.
     pub fn with_stores(
-        event_store: Arc<AsyncMutex<dyn EventStore<E> + Send>>,
+        event_store: Arc<dyn EventStore<E> + Send + Sync>,
         snapshot_store: Arc<Mutex<dyn Snapshot + Send>>,
     ) -> Self {
         Self {
@@ -235,7 +240,6 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         let snap_version = snap_data.as_ref().map(|s| s.version).unwrap_or(0);
 
         let (stored, stored_base): (Vec<StoredEvent<E>>, u64) = {
-            let store = self.event_store.lock().await;
             // TODO: EventStore::load returns the full stream; events before snap_version are loaded
             // then discarded. Adding load_from_version(since: u64) to the trait would allow stores
             // to skip pre-snapshot events server-side and avoid the O(N) full load.
@@ -257,12 +261,18 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             // history could not be *read* — not that there is none. Recovering an
             // unreadable stream as a fresh entity would append from version zero
             // over history it never saw.
-            let events = match store.load(aggregate_type, aggregate_id, tenant_id).await {
+            let events = match self
+                .event_store
+                .load(aggregate_type, aggregate_id, tenant_id)
+                .await
+            {
                 Ok(events) => events,
                 Err(PersistenceError::NotFound { .. }) => Vec::new(),
                 Err(other) => return Err(other.to_string()),
             };
-            let base = store.stream_version_offset(aggregate_type, aggregate_id, tenant_id);
+            let base =
+                self.event_store
+                    .stream_version_offset(aggregate_type, aggregate_id, tenant_id);
             (events, base)
         };
 
@@ -299,8 +309,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
             .collect();
 
         let new_version = {
-            let mut store = self.event_store.lock().await;
-            store
+            self.event_store
                 .append(
                     aggregate_type,
                     aggregate_id,
@@ -432,7 +441,7 @@ impl<E> InMemoryEventStore<E> {
 #[async_trait]
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryEventStore<E> {
     async fn append(
-        &mut self,
+        &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,

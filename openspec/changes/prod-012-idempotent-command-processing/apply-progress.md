@@ -2512,3 +2512,108 @@ implementations and across both write paths.
 
 Re-verified after the corrections: `fmt` and `clippy -D warnings` clean. Documentation-only changes,
 so counts are unchanged: **115 tasks, 60 complete, 55 pending.**
+
+---
+
+## B4.4b: appending takes a shared reference — COMPLETE
+
+Branch: `feat/prod-012-b44b-shared-append`, off the tracker at `ae547f4`. This completes B4.4b. B4
+is **not** closed: `B4.7a` remains open.
+
+### Why the lock existed, and why it should not have
+
+`EventStore::append` demanded `&mut self`. A facade shared between actors cannot hand out an
+exclusive borrow of a store, so it manufactured one with a lock — and then held that lock for the
+whole append, across a full database round trip. Every entity sharing a facade queued behind every
+other one.
+
+Appending is not a mutation *of the store*. Every implementation reaches whatever state it owns
+through a pool handle or an interior lock, because a store shared between actors cannot be
+exclusively borrowed across a round trip anyway. The `&mut self` was never buying exclusivity over
+anything; it was only forcing callers to obtain a lock in order to satisfy the signature.
+
+So `append` narrows to `&self`, all nine implementations follow, and the facade holds
+`Arc<dyn EventStore<E> + Send + Sync>` with no lock at all.
+
+`EventStoreUnitOfWork::append` keeps `&mut self`. That one owns a transaction, which is a genuine
+exclusive borrow — the distinction the trait now expresses instead of applying the stricter receiver
+to both.
+
+The snapshot store keeps its `parking_lot::Mutex`: `Snapshot` is still synchronous and still takes
+`&mut self`. When it narrows the same way, its lock goes too.
+
+### The property is asserted behaviourally, not by reading the struct
+
+`facade_appends_concurrently.rs` makes one append block until a second arrives, using a store whose
+`append` waits on a barrier that only two concurrent appends can clear. A reviewer can see that the
+field has no lock; a test has to show that nothing else serialises, and that a future change
+reintroducing serialisation fails.
+
+Verified to have teeth: reintroducing serialisation — a `tokio::sync::Mutex<()>` held across the
+append — makes the test time out after ten seconds and fail with the message naming the cause. The
+patch asserted all four of its anchors matched before running, per the rule adopted two slices ago.
+
+### A regex did damage, and this is the second time
+
+Removing the locks from the test harnesses with an unanchored regex also mangled a nested
+`Some(AsyncMutex::new(release_rx))` — the gate channel's lock in `guaranteed_completion_tests.rs`,
+which is **not** a store lock and must stay, because a `Receiver` is `Send` but not `Sync` and the
+store now has to be `Sync`. It produced a syntax error rather than silent breakage, which is the
+only reason it was cheap.
+
+Repaired, and then verified by reading the diff rather than trusting the repair: every removed line
+mentioning a lock is an event-store lock; the gate's lock survives at five sites; no
+`parking_lot::Mutex` was removed anywhere except two doc-comment lines that were rewritten; and the
+`snapshot_store` field is untouched.
+
+That is the second regex incident in this change, after the silently-empty patch. Both were caught,
+neither by luck the second time — but the pattern is clear enough to record: mechanical edits across
+files I did not write get an anchor count and a diff review, not a substitution and a green build.
+
+### Verification
+
+Read from the run's own output rather than inferred from an exit code — the pipeline's exit status
+reflects a trailing `echo`, so it proves nothing on its own. What proves it: **118 suites, 1 558
+passed, 0 failed, 0 ignored**, the completion marker present, and no `error:`, `FAILED` or panic
+lines anywhere in 11 307 bytes of output.
+
+- WORKSPACE: `cargo test --workspace` — 118 suites, 1 558 passed, 0 failed.
+- `facade_appends_concurrently` **1 passed**; fails on a 10s timeout when serialisation is restored.
+- STATIC, re-run after the documentation edits: `fmt`, `clippy -D warnings`, `verify-layers`
+  (17 crates, 0 violations), `verify-isolation`, `verify-hygiene`.
+
+**115 tasks, 61 complete, 54 pending. B4.4b complete; B4 still has `B4.7a` open.**
+
+### Review round one on B4.4b — three stale doc blocks, one self-contradicting
+
+All three findings correct, and the second is worse than reported.
+
+**1. The module doc** still said the facade wraps *both* stores behind `Arc<Mutex<dyn ...>>`. Now
+says the event store is held as `Arc<dyn EventStore<..> + Send + Sync>` and points at the facade's
+own documentation for why the snapshot store differs.
+
+**2. `PersistenceFacade`'s doc contradicted itself inside one block.** I added the correct paragraph
+— "the event store is held **without** a lock" — and left the two sentences above it saying it wraps
+both stores behind `Arc<Mutex<dyn ...>>` and that "**neither** lock is `std::sync::Mutex`". A reader
+had no way to tell which half was current, which is worse than a wholly stale comment: a stale block
+is uniformly wrong and eventually distrusted, while a self-contradicting one lends the wrong half
+the credibility of the right one.
+
+The non-poisoning rationale moved down to the snapshot paragraph, where the only remaining lock
+actually lives, instead of sitting above as a claim about two.
+
+**3. The `#[async_trait]` rationale** said the trait is consumed as `dyn EventStore<E> + Send`
+*behind a shared lock*. Corrected, and sharpened in the process: the trait object is what forces the
+choice, not how it happens to be held. The lock is gone and the dyn-compatibility requirement is
+not, because callers still need to hold *some* store without naming which one. The original wording
+tied a permanent constraint to a temporary arrangement.
+
+**Also corrected: the state phrasing.** Two places said B4 was "closed except B4.7a". A phase with an
+open task is not closed — B4.4b is complete, and B4 still has `B4.7a`. Saying otherwise turns a
+tracked debt into a footnote on something declared finished.
+
+Scanned for any surviving claim that both stores share a lock: the remaining `Arc<Mutex<dyn ...>>`
+occurrences are all `snapshot_store`, which genuinely is one.
+
+Re-verified: `fmt` and `clippy -D warnings` clean. Documentation-only, so counts are unchanged:
+**115 tasks, 61 complete, 54 pending.**

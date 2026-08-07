@@ -313,7 +313,7 @@ async fn a_unique_violation_becomes_a_conflict_reporting_the_real_version() {
     .await
     .expect("the competing insert must succeed inside its own transaction");
 
-    let mut store = PostgreSQLEventStore::open(pool.clone(), deserialize as Deserializer)
+    let store = PostgreSQLEventStore::open(pool.clone(), deserialize as Deserializer)
         .await
         .expect("the store must open");
 
@@ -392,7 +392,7 @@ async fn concurrent_appends_for_one_version_produce_one_winner_and_only_conflict
         let pool = pool.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
-            let mut store = PostgreSQLEventStore::open(pool, deserialize as Deserializer)
+            let store = PostgreSQLEventStore::open(pool, deserialize as Deserializer)
                 .await
                 .expect("each writer must be able to open the store");
             barrier.wait().await;

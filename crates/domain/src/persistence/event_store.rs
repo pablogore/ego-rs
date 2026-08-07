@@ -27,11 +27,16 @@ use crate::persistence::{PersistenceError, StoredEvent};
 ///
 /// # Why `#[async_trait]` and not `async fn` in trait
 ///
-/// Native `async fn` in traits is stable, and it is not usable here: this trait
-/// is consumed as `dyn EventStore<E> + Send` behind a shared lock, and a native
-/// `async fn` makes a trait non-dyn-compatible. `#[async_trait]` boxes the
-/// returned futures, which costs one allocation per call and keeps the trait
-/// object that every caller depends on.
+/// Native `async fn` in traits is stable, and it is not usable here: this trait is
+/// consumed as a trait object — `Arc<dyn EventStore<E> + Send + Sync>` — and a
+/// native `async fn` makes a trait non-dyn-compatible. `#[async_trait]` boxes the
+/// returned futures, which costs one allocation per call and keeps the trait object
+/// every caller depends on.
+///
+/// The trait object is what forces the choice, not how it happens to be held. It
+/// was behind a lock when `append` demanded `&mut self`; that lock is gone and the
+/// dyn-compatibility requirement is not, because callers still need to hold *some*
+/// store without naming which one.
 ///
 /// `stream_version_offset` stays synchronous deliberately. It reports a static
 /// property of how a store was configured, has no fallible path and no I/O, and
@@ -48,9 +53,18 @@ pub trait EventStore<E: DomainEvent> {
     /// - `events`: The events to append, wrapped with optional metadata.
     ///
     /// Returns the new stream version on success, or a `PersistenceError`.
+    /// Takes `&self`, not `&mut self`. Appending is not a mutation *of the store*:
+    /// every implementation reaches whatever state it owns through a pool handle or
+    /// an interior lock, because a store shared between actors cannot be exclusively
+    /// borrowed for the duration of a database round trip anyway. Demanding an
+    /// exclusive borrow only forced callers behind a lock to obtain one, and that
+    /// lock then serialised every append in the process.
+    ///
+    /// The exclusive borrow that a write genuinely needs belongs to
+    /// [`EventStoreUnitOfWork`], which owns a transaction and takes `&mut self`.
     #[allow(clippy::too_many_arguments)]
     async fn append(
-        &mut self,
+        &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,

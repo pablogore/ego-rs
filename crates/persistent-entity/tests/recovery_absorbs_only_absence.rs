@@ -17,7 +17,6 @@ use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError
 use parking_lot::Mutex;
 use persistent_entity::persistence::{InMemorySnapshotStore, PersistenceFacade};
 use persistent_entity::testing::TestEvent;
-use tokio::sync::Mutex as AsyncMutex;
 
 /// A store whose `load` fails for a reason that is not absence.
 ///
@@ -29,7 +28,7 @@ struct UnreadableEventStore;
 #[async_trait]
 impl EventStore<TestEvent> for UnreadableEventStore {
     async fn append(
-        &mut self,
+        &self,
         _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
@@ -66,7 +65,7 @@ impl EventStore<TestEvent> for UnreadableEventStore {
 
 fn facade_over(store: UnreadableEventStore) -> PersistenceFacade<TestEvent> {
     PersistenceFacade::with_stores(
-        Arc::new(AsyncMutex::new(store)),
+        Arc::new(store),
         Arc::new(Mutex::new(InMemorySnapshotStore::new())),
     )
 }

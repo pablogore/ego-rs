@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
@@ -37,7 +36,7 @@ fn build_runtime() -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> 
 fn build_fast_passivation_runtime_with_counter(
     load_calls: Arc<AtomicUsize>,
 ) -> Arc<persistent_entity::runtime::EntityRuntime<TestEvent>> {
-    let event_store = Arc::new(AsyncMutex::new(CountingEventStore::new(load_calls)));
+    let event_store = Arc::new(CountingEventStore::new(load_calls));
     Arc::new(
         persistent_entity::builder::EntityRuntimeBuilder::new()
             .passivation_timeout(std::time::Duration::from_millis(500))

@@ -83,7 +83,7 @@ impl CountingEventStore {
 #[async_trait::async_trait]
 impl EventStore<TestEvent> for CountingEventStore {
     async fn append(
-        &mut self,
+        &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
