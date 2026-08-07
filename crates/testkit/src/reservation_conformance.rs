@@ -32,13 +32,18 @@
 //! The factory is asynchronous because a durable implementation needs to reach its
 //! database to hand back a clean store, while an in-memory one simply allocates.
 //!
-//! # What this contract does not cover
+//! # What the purge contract does and does not promise
 //!
-//! [`OperationReservationStore::purge_completed_before`] has **no scenario here**,
-//! because none existed to extract. The port specifies its behaviour — never purge
-//! an `InProgress` reservation regardless of age, return the number of rows
-//! purged — and no test asserts any of it. Writing one would be adding semantics
-//! to an extraction, so the gap is recorded rather than filled.
+//! [`OperationReservationStore::purge_completed_before`] guarantees eligibility, the
+//! `batch` limit, the returned count, and that an `InProgress` reservation is never
+//! removed. It does **not** guarantee which eligible rows a call chooses when more
+//! are eligible than `batch` admits, so the scenarios here assert count,
+//! preservation of the ineligible, and eventual drainage through successive calls —
+//! never identities. Against a fixed `cutoff` the eligible set strictly shrinks with
+//! every call, so drainage holds however each batch chooses.
+//!
+//! An implementation may pick a deterministic order when its query needs one
+//! operationally; the contract must not let a caller observe it.
 
 use std::sync::Arc;
 
@@ -82,6 +87,25 @@ fn fence_of(lease: &ego_domain::operation::Lease) -> OwnerFence {
         owner_id: lease.owner_id.clone(),
         fencing_token: lease.fencing_token,
     }
+}
+
+/// Moves `clock` to exactly `at`, using the only mutator `TestClock` exposes.
+///
+/// A `set` method would be more direct and would widen the double's surface for the
+/// benefit of this file alone. Every scenario starts from a fresh clock at
+/// [`epoch`] and only ever moves forward, so an advance by the difference is
+/// equivalent — and it fails loudly rather than silently rewinding if that ever
+/// stops being true.
+fn position(clock: &TestClock, at: DateTime<Utc>) {
+    let delta = at - clock.now();
+    assert!(
+        delta >= Duration::zero(),
+        "a scenario tried to move the clock backwards, from {} to {at}: TestClock only \
+         advances, and a scenario that needs to rewind is asserting something other than \
+         what it says",
+        clock.now()
+    );
+    clock.advance(delta);
 }
 
 /// Reserves a key, advances the clock past its lease, and lets a second owner take
@@ -612,12 +636,259 @@ where
     }
 }
 
+/// The seven scenarios that pin [`OperationReservationStore::purge_completed_before`].
+///
+/// Observation goes through the port, never through an implementation's storage: a
+/// purged reservation is one that `reserve` now reports as `Fresh`, and a surviving
+/// completed one still replays its `Succeeded` response. That keeps the scenarios
+/// meaningful against a durable store, which has no in-process map to inspect.
+///
+/// # Why no scenario names which rows a batch chose
+///
+/// Selection within a batch is not part of the contract. Asserting identities here
+/// would turn an implementation detail into a promise callers could build on, and
+/// would fail a durable store that orders its claim query for its own operational
+/// reasons. What is asserted instead: the count, that ineligible rows survive, and
+/// that successive calls drain the eligible set.
+///
+/// # Panics
+///
+/// Panics on the first divergence, naming the scenario and what it expected.
+pub async fn assert_purge_conformance<S, F, Fut>(fresh: F)
+where
+    S: OperationReservationStore,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = (S, Arc<TestClock>)>,
+{
+    /// Completes a reservation at exactly `at`, so `completed_at` is deterministic.
+    ///
+    /// The clock is positioned first because `complete` stamps `completed_at` from
+    /// it; the lease is opened generously so the completion is never rejected for
+    /// having lapsed, which would make the scenario assert the wrong thing.
+    async fn completed_at<S: OperationReservationStore>(
+        store: &S,
+        clock: &TestClock,
+        key: &str,
+        at: DateTime<Utc>,
+        response: &[u8],
+    ) {
+        position(clock, at);
+        let outcome = store
+            .reserve(request("owner-a", key, at + Duration::seconds(300)))
+            .await
+            .unwrap();
+        let fence = match outcome {
+            ReservationOutcome::Fresh(lease) => fence_of(&lease),
+            other => panic!("setup: expected Fresh for {key}, got {other:?}"),
+        };
+        store
+            .complete(&fence, StoredResponse::new(response.to_vec()))
+            .await
+            .unwrap();
+    }
+
+    /// Whether a completed reservation is still there, asked through the port: a
+    /// survivor replays its response, a purged one reads as a fresh key.
+    async fn survives<S: OperationReservationStore>(
+        store: &S,
+        clock: &TestClock,
+        key: &str,
+    ) -> bool {
+        let outcome = store
+            .reserve(request("probe", key, clock.now() + Duration::seconds(300)))
+            .await
+            .unwrap();
+        match outcome {
+            ReservationOutcome::Succeeded(_) => true,
+            ReservationOutcome::Fresh(_) => false,
+            other => panic!("probing {key} must observe Succeeded or Fresh, got {other:?}"),
+        }
+    }
+
+    let t0 = epoch();
+    let cutoff = t0 + Duration::seconds(100);
+
+    // --- 1, 2. Eligibility is strictly before the cutoff --------------------
+    {
+        let (store, clock) = fresh().await;
+        completed_at(
+            &store,
+            &clock,
+            "op-before",
+            t0 + Duration::seconds(50),
+            b"old",
+        )
+        .await;
+        completed_at(&store, &clock, "op-at", cutoff, b"boundary").await;
+        completed_at(
+            &store,
+            &clock,
+            "op-after",
+            cutoff + Duration::seconds(50),
+            b"new",
+        )
+        .await;
+
+        let purged = store.purge_completed_before(cutoff, 10).await.unwrap();
+        assert_eq!(
+            purged, 1,
+            "only the reservation completed strictly before the cutoff is eligible"
+        );
+
+        position(&clock, cutoff + Duration::seconds(500));
+        assert!(
+            !survives(&store, &clock, "op-before").await,
+            "a reservation completed before the cutoff must be purged"
+        );
+        assert!(
+            survives(&store, &clock, "op-at").await,
+            "a reservation completed at exactly the cutoff must survive: eligibility is \
+             strictly earlier, not earlier-or-equal"
+        );
+        assert!(
+            survives(&store, &clock, "op-after").await,
+            "a reservation completed after the cutoff must survive"
+        );
+    }
+
+    // --- 3. An InProgress reservation is never purged, however old ----------
+    {
+        let (store, clock) = fresh().await;
+        position(&clock, t0);
+        store
+            .reserve(request("owner-a", "op-live", t0 + Duration::seconds(30)))
+            .await
+            .unwrap();
+
+        // Far past both its lease and the cutoff: age is irrelevant here. Only
+        // lease expiry and takeover resolve an InProgress reservation.
+        position(&clock, cutoff + Duration::seconds(10_000));
+        let purged = store.purge_completed_before(clock.now(), 10).await.unwrap();
+        assert_eq!(purged, 0, "an InProgress reservation is never purged");
+
+        // It survives as a reservation, not as a completed record: a second owner
+        // takes it over, which it could not if the row were gone.
+        let after = store
+            .reserve(request(
+                "owner-b",
+                "op-live",
+                clock.now() + Duration::seconds(30),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(after, ReservationOutcome::TakenOver(_)),
+            "the reservation must still be there to take over, got {after:?}"
+        );
+    }
+
+    // --- 4, 5. At most `batch`, and the count is exactly what went ----------
+    {
+        let (store, clock) = fresh().await;
+        for i in 0..5 {
+            completed_at(
+                &store,
+                &clock,
+                &format!("op-batch-{i}"),
+                t0 + Duration::seconds(i),
+                b"x",
+            )
+            .await;
+        }
+
+        let purged = store.purge_completed_before(cutoff, 2).await.unwrap();
+        assert_eq!(purged, 2, "a call removes at most `batch` rows");
+
+        // The count is the number actually removed, not the number requested:
+        // three remain eligible, so a batch of 10 removes three.
+        let rest = store.purge_completed_before(cutoff, 10).await.unwrap();
+        assert_eq!(
+            rest, 3,
+            "the return value is the number of rows removed, not the batch size"
+        );
+
+        let none_left = store.purge_completed_before(cutoff, 10).await.unwrap();
+        assert_eq!(none_left, 0, "nothing eligible remains");
+    }
+
+    // --- 6. A batch of zero removes nothing --------------------------------
+    {
+        let (store, clock) = fresh().await;
+        completed_at(&store, &clock, "op-zero", t0, b"x").await;
+
+        let purged = store.purge_completed_before(cutoff, 0).await.unwrap();
+        assert_eq!(purged, 0, "a batch of zero removes nothing");
+
+        position(&clock, cutoff + Duration::seconds(500));
+        assert!(
+            survives(&store, &clock, "op-zero").await,
+            "a batch of zero must leave the eligible row in place"
+        );
+    }
+
+    // --- 7. More eligible than the batch: count, preservation, drainage -----
+    {
+        let (store, clock) = fresh().await;
+        for i in 0..4 {
+            completed_at(
+                &store,
+                &clock,
+                &format!("op-drain-{i}"),
+                t0 + Duration::seconds(i),
+                b"x",
+            )
+            .await;
+        }
+        // One ineligible row, completed after the cutoff, to prove a batch never
+        // reaches past eligibility no matter how it chooses within it.
+        completed_at(
+            &store,
+            &clock,
+            "op-drain-ineligible",
+            cutoff + Duration::seconds(10),
+            b"keep",
+        )
+        .await;
+
+        // Successive calls drain the eligible set. No scenario says which rows any
+        // individual call took — only that every call removes at most `batch`, and
+        // that the set is empty once the calls stop removing anything.
+        let mut removed_total = 0u64;
+        let mut calls = 0;
+        loop {
+            let removed = store.purge_completed_before(cutoff, 2).await.unwrap();
+            assert!(
+                removed <= 2,
+                "no call may exceed its batch, removed {removed}"
+            );
+            if removed == 0 {
+                break;
+            }
+            removed_total += removed;
+            calls += 1;
+            assert!(
+                calls <= 4,
+                "draining four eligible rows must not need more than four calls"
+            );
+        }
+        assert_eq!(
+            removed_total, 4,
+            "successive calls must drain exactly the eligible set"
+        );
+
+        position(&clock, cutoff + Duration::seconds(500));
+        assert!(
+            survives(&store, &clock, "op-drain-ineligible").await,
+            "draining the eligible set must never remove an ineligible row"
+        );
+    }
+}
+
 /// The whole shared contract: every scenario, in one call.
 ///
 /// This function **composes** the groups and states nothing of its own. An
-/// implementation that satisfies this satisfies everything the port's extracted
-/// scenarios specify — with the one documented exception of
-/// `purge_completed_before`, for which no scenario exists to run.
+/// implementation that satisfies this satisfies everything the port specifies —
+/// all five methods, including purge, within the bounds the purge group documents.
 ///
 /// # Panics
 ///
@@ -630,4 +901,5 @@ where
 {
     assert_reserve_conformance(fresh).await;
     assert_lease_mutation_conformance(fresh).await;
+    assert_purge_conformance(fresh).await;
 }

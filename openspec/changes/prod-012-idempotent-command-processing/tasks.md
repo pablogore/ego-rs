@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **115 tasks total** — 61 complete and 54 pending. Complete: B0.1–B0.3 (merged as
+> **115 tasks total** — 66 complete and 49 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -302,11 +302,11 @@ unchanged, which is the point of stopping here.
 
 ### Phase B3: Postgres Reservation Store + Readiness (needs A1, A4; cross-edge to B2)
 
-- [ ] B3.1 RED: `crates/integration-tests/tests/reservation_store_postgres.rs` — `reserve`/`renew`/`complete`/`abandon`/`purge_completed_before` against real Postgres, mirroring B2's deterministic scenarios under `TestClock`-equivalent injected time.
-- [ ] B3.2 GREEN: migration for `operation_reservations` at the next free number + AD-1 partial-index pair on `(tenant_id, operation_key)`.
-- [ ] B3.3 GREEN: implement `PostgresOperationReservationStore` — parameterized `$N` binds only, no interpolation (Security table).
-- [ ] B3.4 RED: concurrent-takeover test — two processes racing to take over the same expired lease; exactly one succeeds atomically.
-- [ ] B3.5 GREEN: implement the atomic conditional-update takeover query.
+- [x] B3.1 RED/GREEN: `crates/integration-tests/tests/reservation_store_postgres.rs` runs the **shared** conformance contract from `ego-testkit` — not a copy of B2's scenarios. Both implementations execute the identical definitions, which is what the B3-0 extraction was for. Each scenario gets a store over a freshly truncated table and a clock at the shared epoch, matching the isolation the in-memory factory gives by allocating a new map.
+- [x] B3.2 GREEN: migration `010_create_operation_reservations.sql` — the table plus the AD-1 partial pair on `(tenant_id, operation_key)`, the systemwide half covering the key alone because its predicate already fixes the tenant to NULL. Also two CHECK constraints: the state is one of the two the contract defines, and a completion carries both its timestamp and its response or neither. Purge eligibility is measured from `completed_at`, so a completed row without one would be unpurgeable forever and an in-progress row with one purgeable while still held — the database refuses both rather than trusting writers. A catalog assertion pins the index shape, because the behavioural scenarios would keep passing against a single conventional `UNIQUE`.
+- [x] B3.3 GREEN: `PostgresOperationReservationStore` implements **all five** methods — `reserve`, `renew`, `complete`, `abandon`, `purge_completed_before` — and satisfies the whole shared contract. Parameterised `$N` binds only, never interpolation: an operation key is client-supplied. Every `tenant_id` comparison is `IS NOT DISTINCT FROM`, so a systemwide reservation is visible to its own lookup; verified by neutralising it, which fails four of the six conformance tests. The three mutators share one shape that puts the full triple *and* the lease bound in the `WHERE`, so verification and mutation are one statement rather than a read-then-write with a window in it.
+- [x] B3.4 RED/GREEN: two concurrency tests, because one was not enough. Six contenders racing one expired lease yield exactly one winner whose token advanced by exactly one — but each contender re-reads before updating, so that test never exercises the `UPDATE`'s own guards, which was verified by neutralising them and watching it stay green. The second forces the window open instead of racing for it: another transaction locks the row, the takeover's `UPDATE` blocks, the holder extends the lease and commits, and the blocked update must re-check and report the current holder. Neutralising the lease predicate makes that one report a takeover of a renewed lease.
+- [x] B3.5 GREEN: the atomic conditional-update takeover. `lease_until <= $N` is the load-bearing predicate — it is what judges a waiting caller against the row that exists rather than the row it read. `fencing_token = $N` is a compare-and-swap on the row version and is **redundant given** that predicate: every path that changes the token also pushes the lease into the future. No test distinguishes them, checked rather than assumed, and the code says so instead of claiming the token guard carries the guarantee.
 - [ ] B3.6 GREEN: `RuntimeBuilder::with_operation_reservation_store(...)`; `build()`/`try_build()` fails when enforcing mode resolves and no store is registered (service-sdk spec scenario).
 - [ ] B3.7 **Open-question task — readiness during migrations and store unavailability.** RED: test asserting the readiness endpoint reports not-ready when the registered `OperationReservationStore`'s health contributor (following the existing `crates/service-sdk/src/health/mod.rs` `check() -> HealthCheck` contributor pattern) cannot reach Postgres, while a runtime with no store registered at all fails at **startup**, never reaching readiness. GREEN: implement `OperationReservationStoreHealthContributor` registered alongside the store in `RuntimeBuilder`; document explicitly that startup fail-closed covers "no store registered" and the readiness contributor covers "store registered but unreachable after start" — these are the two distinct failure modes, not one.
 
@@ -371,7 +371,7 @@ unchanged, which is the point of stopping here.
 ### Phase B7: Retention, Purge, Observability (needs B3, B6)
 
 - [ ] B7.1 RED: `crates/integration-tests/tests/purge.rs` — reservation purge-eligibility is measured from `completed_at`, never `created_at`; an `InProgress` reservation is never TTL-purged.
-- [ ] B7.2 GREEN: implement `purge_completed_before(cutoff, batch)` on `PostgresOperationReservationStore`, batched and observable.
+- [ ] B7.2 GREEN **(reframed by B3-i)**: harden the already-implemented `purge_completed_before` for production — batched execution that is observable, and safe for multiple concurrent workers. B3-i implements a correct single-worker purge satisfying the port's four guarantees (eligibility strictly before the cutoff, never an `InProgress` row, the batch limit, the returned count); what remains here is multi-worker safety and instrumentation, not the implementation.
 - [ ] B7.3 RED: two-concurrent-workers test — overlapping eligible rows purged exactly once, no deadlock, no double-purge.
 - [ ] B7.4 GREEN: implement the concurrency-safe purge query (e.g. `SELECT ... FOR UPDATE SKIP LOCKED` or equivalent row-claiming pattern).
 - [ ] B7.5 RED: receipts survive the ordinary purge job — only an explicit aggregate/tenant deletion removes them (D5, idempotent-command-processing spec scenario).

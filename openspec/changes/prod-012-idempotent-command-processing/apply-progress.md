@@ -2717,3 +2717,227 @@ this slice.
   `verify-isolation`, `verify-hygiene` — all clean.
 
 **115 tasks, 61 complete, 54 pending — unchanged, as this slice is preparatory.**
+
+---
+
+## B3-i: the durable reservation store — COMPLETE
+
+Branch: `feat/prod-012-b3i-postgres-reservation-store`, off the tracker at `16a41ac`. Closes
+B3.1–B3.5. B3.6 and B3.7 remain.
+
+### The boundary the design now states (AD-11)
+
+Recorded before any code: `purge_completed_before` guarantees eligibility strictly before the
+cutoff, never removing an `InProgress` row, the batch limit, and the returned count. It does **not**
+guarantee which eligible rows a call chooses. Against a fixed cutoff, successive calls drain the
+whole set however each batch chooses — every call removes rows and none adds any. Ordering would
+only bound how long an individual old row waits, and nothing here depends on that bound. The durable
+query therefore carries no `ORDER BY`, so a caller cannot come to depend on one.
+
+### All five methods, and why not fewer
+
+`reserve`, `renew`, `complete`, `abandon`, `purge_completed_before`. A partial implementation of this
+port cannot be contractually valid — every method is required and none has an honest "not
+applicable" answer — so a reserve-only adapter could only exist by returning errors the contract does
+not define.
+
+The three fence-verifying mutators share one shape that puts the full triple **and** the lease bound
+in the `WHERE`. Verification and mutation are therefore one statement: a read-then-write would leave
+a window in which the lease lapses or the row is taken over between the check and the change. Zero
+rows affected means "not yours", "not that token", or "no longer valid", and the port makes no
+distinction — all three are `StaleOwner` and all three leave the row unmodified.
+
+### The table refuses what the code would never write
+
+Two CHECK constraints: the state is one of the two the contract defines, and a completion carries
+both its timestamp and its response or neither. Purge eligibility is measured from `completed_at`, so
+a completed row without one would be unpurgeable forever and an in-progress row with one purgeable
+while still held. The store never writes either shape; the database refuses them anyway, which is
+what makes the invariant hold against anything else that writes to the table.
+
+### Teeth, and two findings they produced
+
+Every patch asserted its anchor count first. Two of them **failed to apply** and were redone rather
+than interpreted — one found two matching sites where one was expected, the other hit an
+indentation that differed from the assumption. A third attempt failed on a cargo incremental-cache
+glitch and was rerun with `CARGO_INCREMENTAL=0`.
+
+| Mutation | Result |
+|---|---|
+| `IS NOT DISTINCT FROM` → `=` in the identity lookup | **4 of 6 conformance tests fail** — a systemwide reservation becomes invisible to its own lookup |
+| the three mutators stop rejecting a lapsed holder | fails on *"an expired holder must not renew"* |
+| purge eligibility `<` → `<=` | fails the boundary scenario (checked against the double) |
+| purge drops its batch limit | fails *"a call removes at most `batch` rows"* |
+| purge also removes `InProgress` | fails *"an InProgress reservation is never purged"* |
+
+**Finding one: the six-contender race proves less than it looks like it does.** Neutralising the
+takeover `UPDATE`'s guards left it green. Each contender re-reads the row before updating, so after
+the first takeover commits the others see a future `lease_until` and reject in Rust — the `UPDATE`'s
+own predicates never decide anything, and the window they protect is rarely open on a fast local
+database. A race test that sometimes exercises nothing reports success either way.
+
+So the window is forced open rather than raced for, with the technique that worked for the
+unique-violation path in A3-ii: another transaction locks the row, the takeover's `UPDATE` blocks,
+the holder extends the lease and commits, and the blocked update must re-check against the row that
+now exists. Neutralising `lease_until <= $N` makes it report `TakenOver` of a renewed lease.
+
+**Finding two: `fencing_token = $N` is redundant, and the comment said otherwise.** It claimed that
+predicate "is what makes exactly one `UPDATE` match". It is not — `lease_until <= $N` is, and every
+path that changes the token also pushes the lease into the future, which that predicate already
+rejects. No test distinguishes them, which was checked rather than assumed. The predicate stays,
+because a conditional update that names the version it read is the correct shape for one and because
+a later change to the lease predicate would otherwise remove the only guard silently — but the code
+now says it is not the thing carrying the guarantee.
+
+### Clock skew, documented at the store
+
+Expiry reads the injected `Clock`, never the database's `now()` (AD-8), so two nodes with skewed
+clocks can disagree about whether a lease lapsed. The first version of this note said that costs
+"wasted work, never a double execution", which is **wrong** and was corrected in review.
+
+What skew actually costs: a premature takeover, and with it concurrent work — the displaced owner may
+still be executing when the new one starts. What the fencing token guarantees: the displaced owner
+cannot mutate or finalise *this reservation*, so the completion eventually recorded and replayed is
+the current owner's. What it does not guarantee: anything about an external effect already in flight.
+A token is a predicate on a row; it neither cancels a request that has left the process nor prevents a
+second one.
+
+Avoiding a duplicated external effect requires the effect boundary to carry the fence or to be
+idempotent itself — B6's subject. So expiry decides when an attempt is permitted, fencing decides
+whose reservation outcome is authoritative, and neither makes two concurrent executions impossible
+until that wiring lands.
+
+### One helper deleted rather than kept
+
+Clippy found `operation_id_from` unused: no method rebuilds an identity from a row, because every one
+receives it from the caller. Its two unit tests asserted that a systemwide and a tenanted identity
+differ under one key — which the domain already tests as
+`operation_id_is_scoped_by_tenant_and_key`. A helper existing only to be tested, and tests
+duplicating a domain property, both removed.
+
+### B7.2 reframed, not duplicated
+
+Its verb was "implement", which B3-i makes obsolete. Reworded to harden the existing purge for
+production — batched observable execution, safe for concurrent workers. B7.1 stays as the durable
+retention-policy integration test: asserting a guarantee in the shared contract and again in durable
+integration is two levels of verification, not two definitions.
+
+### Verification
+
+- INTEGRATION, real PostgreSQL: `reservation_store_postgres` **8 passed** — the aggregate contract,
+  the three groups in isolation, the catalog shape, the CHECK constraints, and the two concurrency
+  tests.
+- HERMETIC: `ego-testkit --lib` **72 passed** (the purge group joined the existing conformance test).
+- WORKSPACE: `cargo test --workspace` — **119 suites, 1 552 passed, 0 failed**. Against B3-0's
+  118/1 544: one new suite (this file) and eight new tests.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations),
+  `verify-isolation`, `verify-hygiene`.
+
+**115 tasks, 66 complete, 49 pending.**
+
+### Review round one on B3-i — a real defect at the storage boundary, and an overclaim
+
+**The token could wrap silently, and the migration comment denied it.**
+
+The domain counts tokens in `u64`; the column is `BIGINT`, which is `i64`. The adapter converted with
+`as i64` at eight sites. Verified arithmetically before fixing:
+
+```
+displaced token : 9223372036854775807   (i64::MAX)
+next() (u64)    : 9223372036854775808   <- checked_add succeeds; u64::MAX is not reached
+after `as i64`  : -9223372036854775808  <- PostgreSQL accepts this
+strictly greater? False
+```
+
+So the invariant the whole fencing mechanism rests on — a new token is strictly greater than the one
+it displaces — was retired silently at exactly the point the domain believed it had covered.
+`FencingExhausted` was only ever reachable at `u64::MAX`, which is not the limit that exists.
+
+The exhaustion the port names is the **storage** limit, and that is the honest reading: a token that
+cannot be stored cannot fence anything.
+
+Fixed in one place rather than eight. `token_for_storage` converts with `i64::try_from` and maps
+overflow to `FencingExhausted`; `token_from_storage` converts back with `u64::try_from` and reports a
+non-positive stored value as a backend error rather than reinterpreting the bits into an enormous
+positive number. `mutate_owned` converts once and hands the result to each mutator's closure, so the
+three of them cannot drift. The batch limit is *clamped* rather than refused, and that is safe because
+it is an upper bound — removing fewer rows than asked never violates "at most `batch`", whereas an
+unchecked cast would wrap to a negative limit and delete nothing.
+
+The migration comment now says the boundary is the column's, not the counter's, and the table carries
+`CHECK (fencing_token > 0)` for anything that writes without going through the adapter. Zero is
+excluded too: the sequence starts at one, so zero could only come from a writer that did not mint it.
+
+Two tests: a row seeded at `i64::MAX` with an expired lease reports `FencingExhausted` **and leaves
+owner, token and lease untouched** — a partial takeover would be worse than a refused one, since two
+callers would believe they hold the lease. And the table refuses zero, `-1` and `i64::MIN`, with a
+triangulating insert of `1` so the constraint is shown to reject non-positive values rather than every
+value.
+
+Teeth: reintroducing the unchecked cast fails the boundary test — and the failure shows the two layers
+are independently live, because the CHECK catches the negative row first:
+
+```
+left:  Err(Backend("... violates check constraint
+                    \"operation_reservations_fencing_token_is_positive\""))
+right: Err(FencingExhausted)
+```
+
+The checked conversion is what produces the *correct* error; the constraint is what stops the bad row
+even if the conversion regresses.
+
+**The clock-skew claim was too strong.** See the corrected section above: the token protects the
+reservation's mutation and its authoritative outcome, not an external effect already in flight, and
+skew *can* cause a double execution until the effect boundary carries the fence or is idempotent
+itself. That is B6's subject. Corrected at the store module, here, and in the PR body.
+
+Re-verified: `reservation_store_postgres` **10 passed**; `fmt`, `clippy -D warnings`, and the three
+`verify-*` clean. WORKSPACE: **119 suites, 1 554 passed, 0 failed** — two more than before the
+corrections, which are the two new tests.
+
+### Review round two on B3-i — the guard did not reject what its documentation claimed
+
+Correct on all three points.
+
+`token_from_storage` expressed its guard as `u64::try_from(raw)`, which rejects negatives and
+**accepts zero**. So the function built a `FencingToken(0)` — a token no sequence mints, since it
+starts at one — while its own documentation said it refused anything not positive, the migration said
+tokens start at one, and this file's own report said zero was rejected. Three statements agreeing
+with each other and disagreeing with the code.
+
+The constraint kept zero out of a valid table, so nothing reopened the wraparound and the normal path
+was never at risk. What was wrong was the adapter's second line of defence, and the fact that four
+places described it incorrectly.
+
+Now an explicit `raw <= 0`, with the `u64` conversion kept below it — expressed as a conversion rather
+than a cast, so a later change to the guard cannot silently reintroduce a wrap.
+
+A focused unit test covers `0`, `-1`, `i64::MIN` and, triangulating, `1` and `i64::MAX`. **Zero is
+tested first, deliberately**: it is the value a `u64` conversion accepts, so it is the one that
+regresses if the guard is ever collapsed back into that conversion, and a failure should name that
+case rather than surface as a message quibble about `i64::MIN`.
+
+That ordering was not a guess. The first version of the test listed `i64::MIN` first, and the teeth
+check then failed on the *message text* for `i64::MIN` rather than on zero being accepted — the
+regression was caught, but the diagnostic pointed at the wrong thing. Reordered, the same teeth check
+reports:
+
+```
+a non-positive stored token must be refused, but 0 was accepted as FencingToken(0)
+```
+
+A second unit test pins the write side: the limit itself is storable, and one past it reports
+`FencingExhausted` rather than wrapping. That is the durable boundary test's property, asserted at the
+conversion so a regression is named here before it has to be inferred from a reservation behaving
+oddly.
+
+**The stale comment.** The PostgreSQL constraint test still said that without the constraint the store
+would read a negative back as an enormous positive number. With the checked conversion it no longer
+would — it refuses. Rewritten to say what each layer does: the constraint stops the row being written
+by anything that reaches the table without the adapter; the adapter's guard keeps the store honest
+against a schema it cannot re-verify on every deployment. Neither makes the other redundant, and the
+earlier teeth check showed both firing on one defect from different sides.
+
+Re-verified: `ego-persistence --lib` **12 passed**, `reservation_store_postgres` **10 passed**,
+WORKSPACE **119 suites, 1 556 passed, 0 failed**, `fmt`, `clippy -D warnings` and the three `verify-*`
+clean. Counts unchanged: **115 tasks, 66 complete, 49 pending.**

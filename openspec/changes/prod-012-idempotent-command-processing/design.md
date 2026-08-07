@@ -358,6 +358,40 @@ idempotency.
 makes available, and that is the whole dependency: nothing needs to be shared with
 the effects subsystem.
 
+### AD-11 — What purge guarantees, and what it deliberately does not
+
+**Decision**: `purge_completed_before(cutoff, batch)` guarantees exactly four things, and
+row *selection within a batch* is not one of them.
+
+Guaranteed:
+
+1. **Eligibility** — only a `Completed` reservation whose `completed_at` is *strictly*
+   earlier than `cutoff`. A reservation completed at exactly `cutoff` survives.
+2. **Never `InProgress`** — regardless of age. Only lease expiry and takeover resolve one
+   of those (D5).
+3. **Limit** — at most `batch` rows are removed by one call.
+4. **Count** — the return value is exactly the number of rows the call removed.
+
+Not guaranteed: **which** eligible rows a call chooses when more are eligible than `batch`
+admits. A caller may not depend on any order.
+
+**Why leaving it unspecified is safe.** Against a fixed `cutoff`, successive calls drain the
+whole eligible set regardless of how each batch chooses — every call removes rows and none
+adds any, so the eligible set strictly shrinks until it is empty. Ordering would only bound
+*how long* an individual old row waits, and nothing in this change depends on that bound.
+
+**Why not specify oldest-first anyway.** It would cost an `ORDER BY completed_at` in the
+durable query and a sorted iteration in the in-memory store, and — more importantly — it
+would become a promise callers could build on. A guarantee that exists only because it was
+cheap to add is one that later has to be preserved when it stops being cheap.
+
+An implementation **may** choose a deterministic order when its query needs one
+operationally: PostgreSQL's row-claiming pattern (B7.4) will likely want one to keep
+concurrent workers from contending on the same rows. That is an implementation's own
+business. The contract must not let a caller observe it, which is why the shared
+conformance harness asserts count, non-eligible preservation, and eventual drainage through
+successive calls — never identities.
+
 ### AD-9 — Migration ordering and reversibility
 
 The repository already ships migrations `001`–`006`

@@ -44,7 +44,7 @@ pub use logger::{CapturedRecord, CapturingLogger};
 pub use providers::{RecordingDataProvider, StaticDataProvider};
 pub use reservation::{InMemoryOperationReservationStore, TestClock};
 pub use reservation_conformance::{
-    assert_lease_mutation_conformance, assert_reservation_store_conformance,
-    assert_reserve_conformance,
+    assert_lease_mutation_conformance, assert_purge_conformance,
+    assert_reservation_store_conformance, assert_reserve_conformance,
 };
 pub use security::{authenticated, authenticated_with_claims};
