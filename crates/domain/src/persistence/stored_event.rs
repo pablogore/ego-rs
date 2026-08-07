@@ -7,22 +7,30 @@ use crate::operation::OperationKey;
 ///
 /// # Which of these fields storage actually carries
 ///
-/// `operation_key` round-trips: an adapter that persists a stored event must write
-/// it and return it on load, and the shared conformance harness requires that of
-/// every implementation.
+/// `operation_key` round-trips everywhere. An adapter that persists a stored event
+/// must write it and return it on load, and the shared conformance harness
+/// requires that of every implementation, so the guarantee holds by obligation
+/// rather than by coincidence.
 ///
-/// `correlation_id` does **not**. No adapter has ever read or written it — the
-/// field exists on the type and is discarded at the boundary. That is stated here
-/// rather than left for a caller to discover after trusting it, and it is recorded
-/// as debt rather than fixed alongside the key: making it round-trip changes what
-/// an existing setter does, which needs its own slice.
+/// `correlation_id` is **not** guaranteed, and what it does depends on the store.
+/// The in-memory implementations keep whole `StoredEvent` values, so it survives
+/// there. The PostgreSQL implementation neither writes it nor reconstructs it, so
+/// it is dropped there. Nothing in the shared contract requires either behaviour,
+/// which is why the two differ — a caller cannot rely on the field, and cannot
+/// rely on losing it.
+///
+/// That divergence is recorded as debt rather than fixed alongside the key: closing
+/// it means deciding what the contract should require and then making the durable
+/// store meet it, which changes what an existing setter observably does and needs
+/// its own verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEvent<E> {
     /// The domain event payload.
     pub event: E,
     /// Optional correlation identifier for tracing across service boundaries.
     ///
-    /// **Not persisted.** See the type-level note.
+    /// **Persistence is store-dependent and unspecified** — kept by the in-memory
+    /// stores, dropped by PostgreSQL. See the type-level note.
     pub correlation_id: Option<String>,
     /// The client-supplied operation this event was produced by, when there was
     /// one.

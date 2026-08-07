@@ -2387,14 +2387,9 @@ complete except `B4.4b`, which was deliberately never bundled.
 
 ### What "no metadata channel exists today" turned out to mean
 
-The plan recorded that as a verified constraint. It is true, and slightly worse than it reads:
-`StoredEvent` already had a `correlation_id` field, and **no adapter has ever read or written it**.
-So there was a field that looked like a metadata channel and silently discarded whatever a caller
-put in it.
-
-That is now documented on the type — including which of its two metadata fields storage actually
-carries — and registered as `B4.7a`. Not fixed alongside the key: making `correlation_id`
-round-trip changes what an existing setter does, which needs its own verification.
+The plan recorded that as a verified constraint, and it is true: nothing carried an operation key.
+While adding one I described the neighbouring `correlation_id` field as universally discarded, and
+that was wrong — corrected below in the review round.
 
 ### The field
 
@@ -2475,3 +2470,45 @@ with the three new `StoredEvent` cases.
   `verify-isolation`, `verify-hygiene`.
 
 **115 tasks, 60 complete, 55 pending.**
+
+### Review round one on B4-iii — an overbroad claim, contradicted by the patch itself
+
+The finding is correct, and the wrong statement was mine in four places: `StoredEvent`'s doc,
+`tasks.md`, this file, and the PR body. I wrote that **no adapter** reads or writes
+`correlation_id`, that the field universally does not round-trip, and that it is discarded at the
+boundary.
+
+Verified against the code rather than re-argued:
+
+| Implementation | `correlation_id` |
+|---|---|
+| `ego-infrastructure` in-memory | **kept** — `load` returns `events.clone()`, whole `StoredEvent` values |
+| `persistent-entity` in-memory | **kept** — same |
+| PostgreSQL | **dropped** — never bound on insert, and `load` rebuilds with `without_correlation` |
+| shared conformance harness | **no assertion at all** — zero references |
+
+So the debt is not a universal gap. It is a **divergence**, and one the harness does not pin —
+which is precisely why the two behaviours could differ without anything failing. That is the same
+shape as the systemwide tenant comparison, the unit-of-work version offsets, and the absent-stream
+report: three prior instances in this change, and I described the fourth as something else.
+
+Worse, the claim contradicted the patch it sat inside. The same slice documents that both in-memory
+stores pass the new `operation_key` assertion **by construction, because they keep whole
+`StoredEvent` values** — which is exactly the mechanism that also preserves `correlation_id`. The
+evidence against my own sentence was two paragraphs away from it.
+
+Corrected everywhere to describe what each store does and to say that the shared contract requires
+neither, so a caller can rely on neither keeping it nor losing it. Closing it means deciding what
+the contract *should* require and then making the durable store meet that — which changes what an
+existing setter observably does, and is why it stays its own task.
+
+### B4.6's description corrected too
+
+It claimed the round trip through storage was proven in `stored_event.rs`. A domain unit test cannot
+reach storage. What that file pins is what it can: that neither constructor attaches a key, that
+attaching one leaves the other fields alone, and that attaching twice keeps the last rather than
+refusing or accumulating. The round trip is asserted by the shared harness, against all three
+implementations and across both write paths.
+
+Re-verified after the corrections: `fmt` and `clippy -D warnings` clean. Documentation-only changes,
+so counts are unchanged: **115 tasks, 60 complete, 55 pending.**
