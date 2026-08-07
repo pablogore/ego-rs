@@ -148,7 +148,7 @@ async fn start_store() -> (
 /// would have inserted a *second* version-1 row, duplicating history silently.
 #[tokio::test]
 async fn a_systemwide_stream_advances_its_version_across_appends() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
 
     let first = store
         .append(
@@ -187,7 +187,7 @@ async fn a_systemwide_stream_advances_its_version_across_appends() {
 /// `load` returns a systemwide stream's events, in order.
 #[tokio::test]
 async fn load_returns_a_systemwide_stream_rather_than_reporting_it_absent() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
 
     store
         .append(
@@ -220,7 +220,7 @@ async fn load_returns_a_systemwide_stream_rather_than_reporting_it_absent() {
 /// entirely the wrong reason.
 #[tokio::test]
 async fn a_stale_expected_version_is_still_rejected_for_a_systemwide_stream() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
 
     store
         .append(
@@ -269,7 +269,7 @@ async fn a_stale_expected_version_is_still_rejected_for_a_systemwide_stream() {
 /// invisibility being fixed.
 #[tokio::test]
 async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_separate() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
 
     store
         .append(
@@ -328,7 +328,7 @@ async fn a_systemwide_stream_and_a_tenant_stream_with_the_same_identity_stay_sep
 /// partition they belong to.
 #[tokio::test]
 async fn list_aggregate_ids_covers_the_systemwide_partition() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
 
     store
         .append(

@@ -187,7 +187,7 @@ async fn start_store() -> (
 // The change of attribute is itself part of what this file characterizes.
 #[tokio::test]
 async fn append_advances_the_version_and_load_returns_events_in_order() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
     let aggregate_type = "order";
     let aggregate_id = "1";
     let aggregate = "order-1";
@@ -224,7 +224,7 @@ async fn append_advances_the_version_and_load_returns_events_in_order() {
 
 #[tokio::test]
 async fn append_rejects_a_stale_expected_version_via_the_explicit_version_check() {
-    let (mut store, _pool, _container) = start_store().await;
+    let (store, _pool, _container) = start_store().await;
     let aggregate_type = "order";
     let aggregate_id = "2";
     let aggregate = "order-2";

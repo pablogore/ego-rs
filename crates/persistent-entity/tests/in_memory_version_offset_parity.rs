@@ -37,7 +37,7 @@ fn events(count: usize) -> Vec<StoredEvent<TestEvent>> {
 /// visible here first.
 #[tokio::test]
 async fn the_direct_path_treats_the_offset_as_part_of_the_version() {
-    let mut store = store();
+    let store = store();
 
     let rejected = store
         .append(AGGREGATE_TYPE, AGGREGATE_ID, None, 0, events(1))
@@ -105,7 +105,7 @@ async fn the_unit_of_work_path_treats_the_offset_as_part_of_the_version() {
 
     // And the committed result is what the direct path would then read: the offset
     // is a property of the stream, not of the path that wrote to it.
-    let mut store_again = store;
+    let store_again = store;
     let next = store_again
         .append(AGGREGATE_TYPE, AGGREGATE_ID, None, OFFSET + 1, events(1))
         .await
@@ -123,7 +123,7 @@ async fn the_unit_of_work_path_treats_the_offset_as_part_of_the_version() {
 #[tokio::test]
 async fn the_two_paths_agree_on_every_expected_version_around_the_offset() {
     for expected in 0..=(OFFSET + 1) {
-        let mut direct = store();
+        let direct = store();
         let direct_outcome = direct
             .append(AGGREGATE_TYPE, AGGREGATE_ID, None, expected, events(1))
             .await
@@ -151,7 +151,7 @@ async fn the_two_paths_agree_on_every_expected_version_around_the_offset() {
 /// which would pass the tests above while breaking every ordinary stream.
 #[tokio::test]
 async fn a_stream_without_an_offset_starts_at_zero_through_both_paths() {
-    let mut direct = store();
+    let direct = store();
     let accepted = direct
         .append(AGGREGATE_TYPE, "no-offset-declared", None, 0, events(1))
         .await

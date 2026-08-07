@@ -40,7 +40,7 @@ impl<E> Default for InMemoryEventStore<E> {
 #[async_trait]
 impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryEventStore<E> {
     async fn append(
-        &mut self,
+        &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,

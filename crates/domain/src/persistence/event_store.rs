@@ -48,9 +48,18 @@ pub trait EventStore<E: DomainEvent> {
     /// - `events`: The events to append, wrapped with optional metadata.
     ///
     /// Returns the new stream version on success, or a `PersistenceError`.
+    /// Takes `&self`, not `&mut self`. Appending is not a mutation *of the store*:
+    /// every implementation reaches whatever state it owns through a pool handle or
+    /// an interior lock, because a store shared between actors cannot be exclusively
+    /// borrowed for the duration of a database round trip anyway. Demanding an
+    /// exclusive borrow only forced callers behind a lock to obtain one, and that
+    /// lock then serialised every append in the process.
+    ///
+    /// The exclusive borrow that a write genuinely needs belongs to
+    /// [`EventStoreUnitOfWork`], which owns a transaction and takes `&mut self`.
     #[allow(clippy::too_many_arguments)]
     async fn append(
-        &mut self,
+        &self,
         aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
