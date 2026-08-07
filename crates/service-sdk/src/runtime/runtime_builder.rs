@@ -22,6 +22,7 @@ use std::time::Duration;
 use crate::runtime::error::RuntimeInfraError;
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::OperationReservationStore;
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -272,6 +273,19 @@ pub struct RuntimeInner {
     tenant_resolver: TenantResolver,
     /// The logger constructed by the host and registered via `RuntimeBuilder::with_logger`.
     logger: Option<Arc<KITLogger>>,
+    /// The reservation store registered via
+    /// `RuntimeBuilder::with_operation_reservation_store`, retained so idempotent
+    /// dispatch can reach the same instance the host supplied.
+    ///
+    /// `None` under `IdempotencyEnforcementMode::Compatibility`, which is the mode a
+    /// deployment declares when it has not adopted enforcement. It cannot be `None`
+    /// under the enforcing variant: the builder refuses to produce a runtime in that
+    /// state.
+    ///
+    /// Read only through [`RuntimeInner::operation_reservation_store`], which is
+    /// what keeps this field from being reported unused — the accessor carries the
+    /// awaiting-its-consumer marker, not the field.
+    idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
     /// Observability sink for macro-guard security denials (CORE-012A AD-2).
     /// `None` by default — behaviorally identical to `NoopObservability`
     /// discarding events, keeping `ego-service-sdk` free of an
@@ -367,6 +381,7 @@ impl RuntimeInner {
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
+        idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
         observability: Option<Arc<dyn Observability>>,
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
@@ -381,6 +396,7 @@ impl RuntimeInner {
             teardown,
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
+            idempotency_reservation_store,
             observability,
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
@@ -579,6 +595,33 @@ impl RuntimeInner {
         Ok(())
     }
 
+    /// The registered reservation store, if this runtime has one.
+    ///
+    /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it lives
+    /// inside this crate; a public accessor would invite reaching around the
+    /// `#[idempotent]` seam to reserve operations by hand, which is the one path the
+    /// enforcement mode cannot police.
+    ///
+    /// Returns `None` only under
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility):
+    /// the builder refuses to produce an enforcing runtime without one, so a caller
+    /// that finds `None` here knows enforcement is off rather than that a
+    /// registration was missed.
+    /// `#[expect]` rather than `#[allow]` on purpose: the attribute becomes an error
+    /// the moment a production caller appears, so it cannot outlive its reason.
+    ///
+    /// Gated on `not(test)` because the tests below do call it — an unconditional
+    /// expectation would be unfulfilled in the test build and fail there instead.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by #[idempotent] dispatch, landing in B6")
+    )]
+    pub(crate) fn operation_reservation_store(
+        &self,
+    ) -> Option<&Arc<dyn OperationReservationStore>> {
+        self.idempotency_reservation_store.as_ref()
+    }
+
     /// Mints a cross-tenant permit authorizing access to `destination`
     /// (CORE-008A AD-008, FR-005/FR-006).
     ///
@@ -672,6 +715,7 @@ impl RuntimeInner {
             TenantResolver::new(mode),
             None,
             None,
+            None,
             Duration::from_secs(5),
             None,
         )
@@ -696,6 +740,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
             Some(obs),
             None,
             Duration::from_secs(5),
@@ -727,6 +772,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
             None,
             None,
             Duration::from_secs(5),
@@ -827,6 +873,22 @@ pub enum RuntimeError {
         /// The name of the requesting service, when known.
         service_name: Option<&'static str>,
     },
+    /// Idempotency enforcement is on and no reservation store was registered.
+    ///
+    /// A variant of its own rather than a [`Self::DependencyNotFound`] with some
+    /// existing [`DependencyKind`]: none of those kinds describes this, and each
+    /// carries a fix hint naming the registration method for *its* kind. Reusing one
+    /// would tell the reader to call `.adapter(...)`, which does not register a
+    /// reservation store — a misdirecting error is worse than a terse one.
+    #[error(
+        "idempotency enforcement is on (IdempotencyEnforcementMode::MandatoryKey) but no \
+         OperationReservationStore is registered — a runtime that requires a client-supplied \
+         operation key has nowhere to reserve it. Register one with \
+         .with_operation_reservation_store(store), or state that this deployment has not \
+         adopted enforcement with \
+         .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)"
+    )]
+    OperationReservationStoreNotRegistered,
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,6 +1623,7 @@ mod tests {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            None,
             None,
             None,
             Duration::from_secs(5),

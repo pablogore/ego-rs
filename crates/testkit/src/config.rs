@@ -94,7 +94,11 @@ mod tests {
         // Stronger than the old direct-`.typed`-inspection test: drains into a
         // real `RuntimeBuilder` and observes both values through the real
         // `resolve_config::<C>()` seam a service would use.
-        let rt = config.drain_into(RuntimeBuilder::new()).build();
+        let rt = config
+            .drain_into(RuntimeBuilder::new().with_idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+            ))
+            .build();
         assert_eq!(*rt.inner().resolve_config::<u32>().unwrap(), 42);
         assert_eq!(
             *rt.inner().resolve_config::<String>().unwrap(),
@@ -106,7 +110,11 @@ mod tests {
     fn with_value_same_type_twice_overwrites_prior_value() {
         let config = TestConfig::new().with_value(1u32).with_value(2u32);
 
-        let rt = config.drain_into(RuntimeBuilder::new()).build();
+        let rt = config
+            .drain_into(RuntimeBuilder::new().with_idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+            ))
+            .build();
         assert_eq!(*rt.inner().resolve_config::<u32>().unwrap(), 2);
     }
 

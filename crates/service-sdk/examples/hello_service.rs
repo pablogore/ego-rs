@@ -50,6 +50,9 @@ async fn main() {
     //    compose the app — the canonical `App::builder()` entrypoint.
     let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .service_instance::<HelloServiceTag>(instance)
         .build()
         .expect("composition succeeds");
@@ -78,6 +81,9 @@ mod tests {
     async fn hello_service_registers_resolves_and_invokes() {
         let instance: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
         let app = App::builder()
+            .idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+            )
             .service_instance::<HelloServiceTag>(instance)
             .build()
             .expect("composition succeeds");

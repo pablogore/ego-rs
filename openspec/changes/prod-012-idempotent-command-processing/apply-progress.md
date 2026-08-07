@@ -2941,3 +2941,135 @@ earlier teeth check showed both firing on one defect from different sides.
 Re-verified: `ego-persistence --lib` **12 passed**, `reservation_store_postgres` **10 passed**,
 WORKSPACE **119 suites, 1 556 passed, 0 failed**, `fmt`, `clippy -D warnings` and the three `verify-*`
 clean. Counts unchanged: **115 tasks, 66 complete, 49 pending.**
+
+---
+
+## B3.6: the fail-closed registration — COMPLETE
+
+Branch: `feat/prod-012-b36-runtime-reservation-store`, off the tracker at `f7c91f3`. B3.7 remains.
+
+### What reconciling the two construction paths found
+
+The task text assumes the validation can live in `try_build()` with `build()` as a wrapper that
+panics. The delegation runs the **other way**: `try_build()` calls `build()`, and its own comment says
+so — *"Calls the existing infallible `Self::build` unchanged"*. There are 11 `try_build()` call sites,
+8 in `builder.rs`'s own tests, 2 in an acceptance test, and **one in production** at `app/mod.rs:637`.
+
+So the shape that satisfies "no duplicated validation" without inverting an existing structure: one
+private `validate_idempotency`, called by both. `build()` panics on its error; `try_build()` returns
+it — and validates **before** delegating, because `build` panics and a check afterwards could never
+return the error it exists to return.
+
+`RuntimeError` needed a new variant. None of `DependencyKind`'s four (adapter, config, projection,
+entity) describes a reservation store, and each carries a `fix_hint` naming the registration method
+for *its* kind — reusing one would have told the reader to call `.adapter(...)`, which does not
+register a store. A misdirecting error is worse than a terse one.
+
+### The blast radius was the point
+
+93 tests in `ego-service-sdk --lib` failed the moment the check went in, before a single call site was
+touched. That is the fail-closed default demonstrating it has teeth rather than being asserted to.
+
+Final migration: **48 construction sites across 24 files** declare `Compatibility` explicitly. None is
+given the in-memory store. Registering the double would make every build succeed and make each of
+those runtimes *look* adopted while providing no durability — a configuration that appears productive
+and is not, which is worse than an honest declaration that enforcement is off.
+
+`builder.rs` and `app/mod.rs` route their unrelated tests through `#[cfg(test)]`-local `compat()` /
+`compat_app()` helpers, so the default does not turn every test into a statement about a topic it is
+not testing. The six tests that *are* about the default call `RuntimeBuilder::new()` directly: a helper
+that pre-answers the question is no way to test the answer.
+
+### `AppBuilder` had to forward both — required by the choice, not an expansion of it
+
+Its `build()` delegates to `try_build()`, and `runtime_builder` is private with no escape hatch. So
+without the two forwarding methods the facade could neither adopt enforcement nor decline it, and every
+application — including the reference app, which uses it — would fail to build.
+
+Noted at the method: `AppBuilder` does not forward the *tenant* enforcement mode, and that asymmetry is
+not an inconsistency to copy. Tenant enforcement is permissive by default and needs no bootstrap
+decision; this one refuses to start until the decision is made.
+
+### Two places where the declaration is more than mechanical
+
+The reference app's real bootstrap and the `Resolvable` doc example both carry the reasoning, because
+both are read as guidance. The doc example mattered most: a user copies documentation, and one showing
+`RuntimeBuilder::new()…build()` would be showing code that panics. It surfaced as the only failing
+doctest.
+
+### Four regex incidents, and what they cost
+
+This slice produced two more mechanical-edit failures, bringing the campaign total to four:
+
+- A blind replace landed **inside a doc comment** that mentions `RuntimeBuilder::new()` as prose,
+  producing a parse error. Redone skipping any line whose first non-space characters are `//` or `*`.
+- The same pattern matched `TokioRuntimeBuilder::new()` and `EntityRuntimeBuilder::new()` — different
+  types that merely end the same way. Reverted 28 files and redone with `(?<![A-Za-z0-9_])`, which is
+  what should have been there from the start.
+
+Both broke the build rather than passing quietly, which is the only reason they were cheap. Also
+reverted: the patch had touched two `compile_fail/` trybuild fixtures, whose whole purpose is the exact
+diagnostic they emit — adding a line shifted it, and they never execute so they never reach the check.
+
+### Verification
+
+- `ego-service-sdk --lib`: **269 passed**, 0 failed — including the six new cases.
+- Each of the six run individually as well as in the suite.
+- Doctests: **1 passed** after the example was corrected.
+- WORKSPACE: `cargo test --workspace` — **119 suites, 1 562 passed, 0 failed**.
+- STATIC: `fmt`, `clippy -D warnings`, `verify-layers` (17 crates, 0 violations), `verify-isolation`,
+  `verify-hygiene`.
+
+**117 tasks, 69 complete, 48 pending.** B3.7 is the last of B3.
+
+### Review round one on B3.6 — the registration was nominal, and the tracker was inflated
+
+Both findings correct.
+
+**The store was registered and then dropped on the floor.** `idempotency_reservation_store` appeared
+in exactly two places: the setter and `validate_idempotency`. `build()` assembled `RuntimeInner`
+without it, so a runtime accepted the "enforcing with a store" configuration and the store ceased to
+exist the moment the builder was consumed. `with_operation_reservation_store` was nominal, and B6
+would have found nothing to consume.
+
+The existing test could not see it, and that is the instructive part: it asserted only that the build
+*succeeded*. Registering, dropping, and never registering at all all satisfy that.
+
+Fixed by retaining it in `RuntimeInner` beside the `TenantResolver` it sits next to conceptually, and
+exposing it through a `pub(crate)` accessor — deliberately not public, because idempotent dispatch is
+the only caller and a public accessor would invite reaching around the `#[idempotent]` seam to reserve
+operations by hand, which is the one path the enforcement mode cannot police.
+
+Three tests replace the one:
+
+- `Arc::ptr_eq` proves the runtime holds *the registered instance*, not merely some store.
+- `Compatibility` without a store retains `None`, so a caller finding `None` knows enforcement is off
+  rather than that a registration was missed — sound only because the builder refuses to produce an
+  enforcing runtime without one.
+- The second registration replaces the first, **observed through the retained instance**. The previous
+  version asserted only that the build succeeded, which keeping the first, keeping the second, and
+  keeping neither all satisfy.
+
+Teeth, both reproducing the reported defect exactly: passing `None` at the hand-over fails with *"an
+enforcing runtime must retain the store it was given"*, and changing the setter to `get_or_insert`
+fails with *"the second registration must replace the first"*.
+
+The seam has no production caller yet, which clippy correctly reported. Marked
+`#[cfg_attr(not(test), expect(dead_code, ...))]` — `expect` rather than `allow` so the attribute
+becomes an error the moment B6 supplies a caller, and gated on `not(test)` because the tests do call
+it, so an unconditional expectation would be unfulfilled in the test build. Two intermediate attempts
+failed exactly that way before the gate was right.
+
+**The tracker was inflated.** B3.6a and B3.6b were described in their own text as "required by B3.6"
+and "the default's blast radius" — which is an admission that they are consequences of one
+requirement, not requirements of their own. Recording them as counted units moved the total 115 → 117
+and credited three completions for delivering one thing. Folded back into B3.6's text as prose.
+**115 total, 67 complete, 48 pending.**
+
+Noted and left alone: `try_build` runs the validation twice, since it validates and then delegates to
+`build`, which validates again. `build` cannot skip its own check — it is a public entry point — and
+`try_build` must check first or the panic would unwind before it could return the error. The
+redundancy is one enum match and one `Option::is_none`, pure and O(1).
+
+Re-verified: `ego-service-sdk --lib` **270 passed**; WORKSPACE **119 suites, 1 563 passed, 0 failed**;
+`fmt`, `clippy -D warnings`, and the three `verify-*` clean.

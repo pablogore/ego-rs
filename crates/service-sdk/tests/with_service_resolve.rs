@@ -54,7 +54,11 @@ impl HelloService for OtherHelloServiceImpl {
 #[test]
 fn first_registration_for_a_tag_succeeds() {
     let inner: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
-    let result = RuntimeBuilder::new().with_service::<HelloServiceTag>(inner);
+    let result = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .with_service::<HelloServiceTag>(inner);
     assert!(
         result.is_ok(),
         "first registration for a fresh tag must succeed"
@@ -67,6 +71,9 @@ async fn duplicate_registration_is_rejected_and_the_original_remains_resolvable(
     let second: Arc<dyn HelloService> = Arc::new(OtherHelloServiceImpl);
 
     let after_first = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<HelloServiceTag>(first)
         .expect("first registration must succeed");
 
@@ -108,6 +115,9 @@ async fn duplicate_registration_is_rejected_and_the_original_remains_resolvable(
 async fn registered_tag_resolves_to_a_fully_guarded_invokable_proxy() {
     let inner: Arc<dyn HelloService> = Arc::new(HelloServiceImpl);
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<HelloServiceTag>(inner)
         .expect("registration succeeds")
         .build();
@@ -125,7 +135,11 @@ async fn registered_tag_resolves_to_a_fully_guarded_invokable_proxy() {
 
 #[test]
 fn unregistered_tag_resolves_to_service_not_found_not_a_panic() {
-    let rt = RuntimeBuilder::new().build();
+    let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let result = rt.resolve::<HelloServiceTag>();
     assert!(matches!(result, Err(RuntimeError::ServiceNotFound { .. })));
 }
@@ -180,6 +194,9 @@ impl TenantScopedHello for TenantScopedHelloImpl {
 async fn tenant_scoped_operation_resolved_via_resolve_still_fails_closed() {
     let inner: Arc<dyn TenantScopedHello> = Arc::new(TenantScopedHelloImpl);
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<TenantScopedHelloTag>(inner)
         .expect("registration succeeds")
         .build();

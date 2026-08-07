@@ -31,6 +31,9 @@ async fn lookup(
     sku: &str,
 ) -> Result<CommandResult<PriceLooked, PricingState>, EntityError> {
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .register_data_provider("pricing", provider)
         .unwrap()
         .build();

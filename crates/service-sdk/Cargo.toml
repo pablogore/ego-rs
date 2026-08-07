@@ -24,6 +24,9 @@ ego-runtime = { path = "../runtime" }
 persistent-entity = { path = "../persistent-entity" }
 
 [dev-dependencies]
+# Only the reservation-store test stub names `DateTime<Utc>`, which the port's
+# signature requires. The crate itself never touches chrono.
+chrono = { version = "0.4", features = ["serde"] }
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
 # PROD-005 PR2: `#[tokio::test(start_paused = true)]` for deterministic
 # virtual-time health-aggregation timeout tests (feature unifies with the

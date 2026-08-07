@@ -166,6 +166,9 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
     // `App::builder().entity::<UserEntity>(...)`, exactly as `build_runtime`
     // does, then resolve it back out via `App::resolve_entity`.
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .entity::<UserEntity>(user_runtime.clone())
         .build()
         .expect("build succeeds");

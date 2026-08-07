@@ -17,7 +17,11 @@ use std::sync::{Arc, Weak};
 
 /// Shared fixture: an empty `Runtime` for tests that only need proxy/DI wiring.
 fn test_runtime() -> Runtime {
-    RuntimeBuilder::new().build()
+    RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build()
 }
 
 /// Shared fixture: a fresh interceptor chain plus a weak handle to `rt`, the

@@ -63,6 +63,9 @@ use persistent_entity::persistent_entity::PersistentEntity;
 use persistent_entity::runtime::EntityRuntime;
 
 use crate::di::{AdapterRef, ConfigValue, EntityRuntimeRef, Injectable, ProjectionRef};
+use ego_domain::operation::OperationReservationStore;
+
+use crate::runtime::IdempotencyEnforcementMode;
 use crate::runtime::{
     HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver,
 };
@@ -434,6 +437,36 @@ impl AppBuilder {
         self
     }
 
+    /// Sets how a missing client-supplied operation key is treated.
+    ///
+    /// Forwarded because the underlying builder's default is fail-closed: a runtime
+    /// under [`IdempotencyEnforcementMode::MandatoryKey`] cannot be built without a
+    /// reservation store, so an application needs a way either to register one or to
+    /// state that it has not adopted enforcement yet. Without this method the facade
+    /// would offer neither, and every application would fail to build.
+    ///
+    /// Note that `AppBuilder` does *not* forward the tenant enforcement mode. That is
+    /// not an inconsistency to copy: tenant enforcement has a permissive-by-default
+    /// posture that needs no decision at bootstrap, while this one refuses to start
+    /// until the decision is made.
+    pub fn idempotency_enforcement_mode(mut self, mode: IdempotencyEnforcementMode) -> Self {
+        self.runtime_builder = self.runtime_builder.with_idempotency_enforcement_mode(mode);
+        self
+    }
+
+    /// Registers the single [`OperationReservationStore`] operations are reserved
+    /// through.
+    ///
+    /// This is the other half of the decision above: registering a store is how an
+    /// application adopts enforcement rather than deferring it.
+    pub fn operation_reservation_store(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+    ) -> Self {
+        self.runtime_builder = self.runtime_builder.with_operation_reservation_store(store);
+        self
+    }
+
     /// Registers an external-effect executor — thin delegation to
     /// [`RuntimeBuilder::register_effect_executor`] (review F1). This is
     /// what makes [`App::start`] actually have effects to start:
@@ -641,6 +674,17 @@ impl AppBuilder {
 
 #[cfg(test)]
 mod tests {
+
+    /// An `AppBuilder` that has explicitly not adopted idempotency enforcement.
+    ///
+    /// `#[cfg(test)]` and local, so nothing production-facing can reach it and no
+    /// example or host bootstrap can inherit a relaxed mode from it. Tests whose
+    /// subject *is* the enforcement decision construct the builder directly.
+    use crate::runtime::IdempotencyEnforcementMode;
+
+    fn compat_app() -> AppBuilder {
+        App::builder().idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+    }
     use super::*;
 
     #[derive(Debug, PartialEq)]
@@ -693,7 +737,7 @@ mod tests {
     // registration has one documented, testable outcome").
     #[test]
     fn duplicate_adapter_registration_is_rejected() {
-        let result = App::builder()
+        let result = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .adapter(Arc::new(StubAdapter(2)))
             .build();
@@ -714,7 +758,7 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct OtherAdapter(u32);
 
-        let app = App::builder()
+        let app = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .adapter(Arc::new(OtherAdapter(2)))
             .build()
@@ -730,7 +774,7 @@ mod tests {
     // dup-guard and performs the explicit override.
     #[test]
     fn replace_adapter_bypasses_the_duplicate_guard() {
-        let app = App::builder()
+        let app = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .replace_adapter(Arc::new(StubAdapter(2)))
             .build()
@@ -747,7 +791,7 @@ mod tests {
 
     #[test]
     fn registered_config_value_resolves_after_build() {
-        let app = App::builder()
+        let app = compat_app()
             .config(Arc::new(StubConfig("hello".to_string())))
             .build()
             .expect("build succeeds");
@@ -798,7 +842,7 @@ mod tests {
             }
         }
 
-        let app = App::builder()
+        let app = compat_app()
             .security(Arc::new(StubAuthn), Arc::new(StubAuthz))
             .build()
             .expect("build succeeds");
@@ -813,7 +857,7 @@ mod tests {
     fn registered_logger_is_present_on_the_built_runtime() {
         use kitlogger::KITLogger;
 
-        let app = App::builder()
+        let app = compat_app()
             .logger(Arc::new(KITLogger::default()))
             .build()
             .expect("build succeeds");
@@ -831,7 +875,7 @@ mod tests {
     fn registered_observability_hook_does_not_prevent_build() {
         use crate::test_support::RecordingObservability;
 
-        let app = App::builder()
+        let app = compat_app()
             .observability(Arc::new(RecordingObservability::new()))
             .build();
         assert!(
@@ -845,7 +889,7 @@ mod tests {
     // own contract exactly (no silent last-write-wins).
     #[test]
     fn duplicate_effect_type_registration_is_rejected() {
-        let result = App::builder()
+        let result = compat_app()
             .effect_executor(["dup.effect"], Arc::new(StubExecutor))
             .effect_executor(["dup.effect"], Arc::new(StubExecutor))
             .build();
@@ -877,7 +921,7 @@ mod tests {
             }
         }
 
-        let ok = App::builder()
+        let ok = compat_app()
             .data_provider("provider-a", Arc::new(StubProvider))
             .build();
         assert!(
@@ -885,7 +929,7 @@ mod tests {
             "a single data provider registration must succeed"
         );
 
-        let dup = App::builder()
+        let dup = compat_app()
             .data_provider("provider-b", Arc::new(StubProvider))
             .data_provider("provider-b", Arc::new(StubProvider))
             .build();
@@ -906,7 +950,7 @@ mod tests {
     // build").
     #[test]
     fn projection_registers_and_resolves() {
-        let app = App::builder()
+        let app = compat_app()
             .projection(Arc::new(StubProjection(7)))
             .build()
             .expect("build succeeds");
@@ -921,7 +965,7 @@ mod tests {
     // (spec "Duplicate ... fails closed", "surfaced through `build()`").
     #[test]
     fn projection_rejects_duplicate_registration_at_build() {
-        let result = App::builder()
+        let result = compat_app()
             .projection(Arc::new(StubProjection(1)))
             .projection(Arc::new(StubProjection(2)))
             .build();
@@ -940,6 +984,7 @@ mod tests {
     #[test]
     fn runtimebuilder_and_appbuilder_projection_registration_are_equivalent() {
         let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
             .with_projection(Arc::new(StubProjection(42)))
             .unwrap()
             .build();
@@ -948,7 +993,7 @@ mod tests {
             .resolve_projection::<StubProjection>()
             .unwrap();
 
-        let via_app_builder = App::builder()
+        let via_app_builder = compat_app()
             .projection(Arc::new(StubProjection(42)))
             .build()
             .expect("build succeeds");
@@ -971,7 +1016,7 @@ mod tests {
     #[test]
     fn entity_registers_and_resolves() {
         let runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let app = App::builder()
+        let app = compat_app()
             .entity::<TestEntity>(runtime)
             .build()
             .expect("build succeeds");
@@ -987,7 +1032,7 @@ mod tests {
         let runtime_a = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let runtime_b = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
 
-        let result = App::builder()
+        let result = compat_app()
             .entity::<TestEntity>(runtime_a)
             .entity::<TestEntity>(runtime_b)
             .build();
@@ -1007,6 +1052,7 @@ mod tests {
     fn runtimebuilder_and_appbuilder_entity_registration_are_equivalent() {
         let via_runtime_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
             .with_entity::<TestEntity>(via_runtime_builder_rt.clone())
             .unwrap()
             .build();
@@ -1027,7 +1073,7 @@ mod tests {
         );
 
         let via_app_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let via_app_builder = App::builder()
+        let via_app_builder = compat_app()
             .entity::<TestEntity>(via_app_builder_rt.clone())
             .build()
             .expect("build succeeds");
@@ -1047,9 +1093,7 @@ mod tests {
     // nothing").
     #[test]
     fn build_starts_nothing_and_no_tokio_runtime_is_required() {
-        let app = App::builder()
-            .build()
-            .expect("build succeeds without Tokio");
+        let app = compat_app().build().expect("build succeeds without Tokio");
         assert!(
             app.runtime.effect_acceptor().is_none(),
             "no executor was registered and start() was never called"
@@ -1065,7 +1109,7 @@ mod tests {
     // (not a dead clone) while only exposing `resolve`/`logger`.
     #[test]
     fn app_resolver_sees_the_same_registered_logger_as_the_underlying_runtime() {
-        let app = App::builder()
+        let app = compat_app()
             .logger(Arc::new(KITLogger::default()))
             .build()
             .expect("build succeeds");
@@ -1110,7 +1154,7 @@ mod tests {
     // `Some` post-start when an executor was registered.
     #[tokio::test]
     async fn start_starts_effects_when_an_executor_was_registered() {
-        let app = App::builder()
+        let app = compat_app()
             .effect_executor(["test.effect"], Arc::new(StubExecutor))
             .build()
             .expect("build succeeds");
@@ -1132,7 +1176,7 @@ mod tests {
         let read_model = Arc::new(Mutex::new(vec!["initial".to_string()]));
         let stop_ran = Arc::new(AtomicBool::new(false));
 
-        let app = App::builder().build().expect("build succeeds");
+        let app = compat_app().build().expect("build succeeds");
         let stop_ran_clone = stop_ran.clone();
         app.register_shutdown(async move {
             stop_ran_clone.store(true, Ordering::SeqCst);
@@ -1160,7 +1204,7 @@ mod tests {
     // others").
     #[tokio::test]
     async fn shutdown_runs_every_participant_and_surfaces_the_first_error() {
-        let app = App::builder().build().expect("build succeeds");
+        let app = compat_app().build().expect("build succeeds");
         let second_ran = Arc::new(AtomicBool::new(false));
         let second_ran_clone = second_ran.clone();
 
