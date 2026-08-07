@@ -28,11 +28,5 @@ mockall = { workspace = true }
 tokio-test = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
+# `InMemorySpanExporter` for the `#[cfg(test)]` tracing suites in `src`.
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "testing"] }
-# F2: real OTLP stub-collector integration tests (gRPC + HTTP wire round-trip)
-opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "trace"] }
-tonic = "0.14"
-tokio-stream = { version = "0.1", features = ["net"] }
-prost = "0.14"
-axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

@@ -46,9 +46,10 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
 // CORE-028 Stage 2 (task 5.2, design.md Testing Strategy): the design doc's
 // own test plan for this feature is exactly this cheap, non-async assertion
 // — the query handle `build_runtime`'s `.projection(...)` call registers
-// must be resolvable through the DI path. `e2e_register.rs` separately
-// proves the resolved handle observes live engine writes, which needs the
-// full HTTP/JWT stack; reachability alone does not.
+// must be resolvable through the DI path. That the resolved handle observes
+// live engine writes needs the full HTTP/JWT stack over a real socket, and is
+// no longer proven anywhere in this workspace — see
+// `docs/integration-test-backlog.md`. Reachability alone does not establish it.
 #[test]
 fn build_runtime_registers_the_read_model_as_a_resolvable_projection() {
     let config = AppConfig::default();
@@ -198,8 +199,8 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
     // `EffectAcceptor` (mirroring `build_runtime`, which registers none
     // either), so a real, successful write here is `EffectsAcceptanceFailed`,
     // not `Events` — a committed write with a post-commit warning attached,
-    // never a command failure (same as `e2e_register.rs`/
-    // `register_user_partial_failure.rs` handle it).
+    // never a command failure (same as `register_user_partial_failure.rs`
+    // handles it).
     match fresh_result {
         CommandResult::Events { new_state, .. }
         | CommandResult::EffectsAcceptanceFailed { new_state, .. } => assert_eq!(

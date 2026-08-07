@@ -325,8 +325,12 @@ where
 /// Rollback-on-drop is not implemented here and is not a gap: `sqlx`'s
 /// `Transaction` already rolls back when dropped without being committed, and
 /// re-implementing that would mean tracking commit state a second time in order
-/// to disagree with it. The behaviour is asserted against a real database rather
-/// than taken on trust — see `crates/integration-tests/tests/event_store_uow.rs`.
+/// to disagree with it.
+///
+/// This rests on `sqlx`'s own documented guarantee and is currently **not**
+/// asserted here: the tests that proved it against a real transaction were moved
+/// out of this workspace, and no in-process double can stand in for one. See
+/// `docs/integration-test-backlog.md` for the properties awaiting reconstruction.
 pub struct PostgresEventStoreUnitOfWork<E> {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
     /// A separate handle, used only to re-read a stream's version after the

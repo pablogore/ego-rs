@@ -31,7 +31,8 @@ pub(crate) use tenant::CrossTenantGrant;
 /// Per the testing skill's Decision Gates table, these exercise only
 /// in-memory state (kitlogger's capture-buffer exporter, `serde_json::json!`
 /// values) — no real DB/broker/HTTP — so they live as ordinary
-/// `#[cfg(test)]` modules here rather than in `crates/integration-tests/`.
+/// `#[cfg(test)]` modules here, which is where anything needing no
+/// infrastructure belongs.
 #[cfg(test)]
 mod integration_tests {
     use super::IdempotencyEnforcementMode;
