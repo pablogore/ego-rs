@@ -506,9 +506,53 @@ where
         let tenant = receipt.tenant().map(|t| t.as_str().to_string());
         let key = receipt.operation_key().as_str();
 
-        // Read inside `tx`, so the check sees this transaction's own uncommitted
-        // writes: two confirmations of the same identity in one unit of work
-        // reconcile against each other rather than both looking like the first.
+        // `ON CONFLICT DO NOTHING` rather than letting the unique violation
+        // surface, and that choice is load-bearing rather than stylistic.
+        //
+        // A raw 23505 **aborts this transaction**, after which nothing further
+        // can be read from it — including the fingerprint of the row that won.
+        // An implementation that treated every violation as a conflict would
+        // therefore refuse an ordinary concurrent retry of the *same* request,
+        // which is precisely the case idempotency exists to serve. Swallowing
+        // the conflict keeps the transaction alive so the winning row can be
+        // read and compared.
+        //
+        // No conflict target is named: the identity is enforced by the AD-1
+        // complementary partial pair, and a bare `DO NOTHING` covers whichever
+        // of the two a given row falls under. Naming one would miss the other
+        // partition — the systemwide one, where a duplicate is least visible.
+        //
+        // A competing writer that has inserted but not committed blocks this
+        // statement until it resolves. That wait is correct: the answer to
+        // "does this identity exist?" is not knowable until the other
+        // transaction commits or rolls back.
+        let inserted = sqlx::query(
+            r#"INSERT INTO operation_receipts
+                   (tenant_id, aggregate_type, aggregate_id, operation_key, fingerprint, response)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(&tenant)
+        .bind(receipt.aggregate_type())
+        .bind(receipt.aggregate_id())
+        .bind(key)
+        .bind(receipt.fingerprint().as_str())
+        .bind(receipt.response().as_bytes())
+        .execute(&mut *self.tx)
+        .await
+        .map_err(|e| PersistenceError::Internal(format!("failed to write receipt: {e}")))?;
+
+        // No commit anywhere in this method, deliberately: it stages. Committing
+        // would make the receipt durable ahead of the events it describes, which
+        // is the exact split the unit of work exists to prevent.
+        if inserted.rows_affected() > 0 {
+            return Ok(());
+        }
+
+        // Nothing was written, so a row for this identity already exists —
+        // either committed before this transaction opened, or staged earlier
+        // within it. Both are readable here, and only the fingerprint decides
+        // which of the two answers is right.
         let existing: Option<(String,)> = sqlx::query_as(
             r#"SELECT fingerprint FROM operation_receipts
                WHERE aggregate_type = $1 AND aggregate_id = $2
@@ -521,70 +565,32 @@ where
         .bind(key)
         .fetch_optional(&mut *self.tx)
         .await
-        .map_err(|e| PersistenceError::Internal(format!("failed to read receipt: {e}")))?;
+        .map_err(|e| {
+            PersistenceError::Internal(format!("failed to read the winning receipt: {e}"))
+        })?;
 
-        if let Some((stored,)) = existing {
-            // A matching fingerprint is an ordinary retry: idempotent, nothing to
-            // write. A differing one is a *different request* reusing an
-            // operation key — refused, never overwritten, because replacing it
-            // would hand one caller another caller's stored result.
-            return if stored == receipt.fingerprint().as_str() {
-                Ok(())
-            } else {
-                Err(PersistenceError::Conflict {
-                    aggregate_id: format!(
-                        "{}-{}",
-                        receipt.aggregate_type(),
-                        receipt.aggregate_id()
-                    ),
-                    expected: 0,
-                    actual: 0,
-                })
-            };
+        match existing {
+            // The same request, arriving twice. Idempotent success: the stored
+            // row already says what this call was going to say.
+            Some((stored,)) if stored == receipt.fingerprint().as_str() => Ok(()),
+            // A different request reusing an operation key. Refused, never
+            // overwritten — replacing it would hand one caller another caller's
+            // stored result.
+            Some(_) => Err(PersistenceError::Conflict {
+                aggregate_id: format!("{}-{}", receipt.aggregate_type(), receipt.aggregate_id()),
+                expected: 0,
+                actual: 0,
+            }),
+            // The insert was suppressed by a conflict, so a row exists; a read
+            // that then finds none means the identity this query builds does not
+            // match the one the indexes enforce. Reporting success would confirm
+            // a receipt nobody can look up.
+            None => Err(PersistenceError::Internal(
+                "a receipt insert conflicted with a row the equivalent lookup cannot find; \
+                 the write and read identities disagree"
+                    .to_string(),
+            )),
         }
-
-        let inserted = sqlx::query(
-            r#"INSERT INTO operation_receipts
-                   (tenant_id, aggregate_type, aggregate_id, operation_key, fingerprint, response)
-               VALUES ($1, $2, $3, $4, $5, $6)"#,
-        )
-        .bind(&tenant)
-        .bind(receipt.aggregate_type())
-        .bind(receipt.aggregate_id())
-        .bind(key)
-        .bind(receipt.fingerprint().as_str())
-        .bind(receipt.response().as_bytes())
-        .execute(&mut *self.tx)
-        .await;
-
-        // No commit here, and deliberately so: this method stages. Committing
-        // would make the receipt durable ahead of the events it describes, which
-        // is the exact split the unit of work exists to prevent.
-        if let Err(e) = inserted {
-            let lost_the_race = matches!(
-                &e,
-                sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505")
-            );
-            return Err(if lost_the_race {
-                // The read above found nothing, so a competing writer committed
-                // this identity in between. Its fingerprint is unreadable from
-                // this aborted transaction, and the safe reading of an unknown
-                // fingerprint is "not mine".
-                PersistenceError::Conflict {
-                    aggregate_id: format!(
-                        "{}-{}",
-                        receipt.aggregate_type(),
-                        receipt.aggregate_id()
-                    ),
-                    expected: 0,
-                    actual: 0,
-                }
-            } else {
-                PersistenceError::Internal(format!("failed to write receipt: {e}"))
-            });
-        }
-
-        Ok(())
     }
 
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {

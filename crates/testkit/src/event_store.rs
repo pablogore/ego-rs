@@ -505,6 +505,35 @@ where
         "the receipt must round-trip the response a matching retry will replay"
     );
 
+    // The same request arriving twice is an idempotent success, not a conflict.
+    // This is the row of the contract a naive implementation gets wrong: one
+    // that lets the uniqueness violation surface cannot read the winning row
+    // afterwards — the transaction is already aborted — and so refuses an
+    // ordinary retry, which is the exact case idempotency exists to serve.
+    let mut repeat = store
+        .begin()
+        .await
+        .expect("opening a unit of work must succeed");
+    repeat
+        .confirm_receipt(&receipt)
+        .await
+        .expect("re-confirming the identical receipt must succeed idempotently, not conflict");
+    repeat
+        .commit()
+        .await
+        .expect("committing an idempotent re-confirmation must succeed");
+
+    let after_repeat = store
+        .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+        .await
+        .expect("a lookup after an idempotent re-confirmation must succeed")
+        .expect("the receipt must still be there");
+    assert_eq!(
+        after_repeat.response().as_bytes(),
+        b"the recorded outcome",
+        "an idempotent re-confirmation must leave the stored response as it was"
+    );
+
     // A different request reusing the operation key is refused, not answered
     // with someone else's result and not silently overwriting the receipt.
     let mut conflicting = store
