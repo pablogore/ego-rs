@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 73 complete and 43 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 75 complete and 41 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -335,8 +335,8 @@ unchanged, which is the point of stopping here.
 - [x] B5.2 GREEN: migration for `operation_receipts` at the next free number — `009` is taken by the `operation_key` column, and the numbers named in this plan are indicative rather than reserved, since B3 and B5 can land in either order + AD-1 partial-index pair on `(tenant_id, aggregate_type, aggregate_id, operation_key)`, storing the fingerprint.
 - [x] B5.3a GREEN **(deferred here from B4.2b)**: add `confirm_receipt` to the `EventStoreUnitOfWork` trait. It was left out of B4-ii because nothing backed it — no table, no receipt type, no caller — and a trait method every implementation answers "not yet" is a premise without backing.
 - [x] B5.3 GREEN: implement `confirm_receipt` on `EventStoreUnitOfWork` for both implementors, joining the same transaction as `append`.
-- [ ] B5.4 RED **(reframed by AD-3b/AD-3e)**: `crates/persistent-entity` test — the actor consults the receipt before dispatch, keyed on `(operation_key, fingerprint)` taken from `CommandContext` and never recomputed. A matching fingerprint replays without invoking `handle_command`; a mismatched one returns a permanent conflict without invoking `handle_command`. The replay must be observably a **replay**: the test asserts that post-commit effect acceptance is not re-entered, since a hit that rebuilt an ordinary `CommandResult::Events` would dispatch side effects the first execution already dispatched — the receipt would then prevent the state transition while permitting the duplicate it exists to stop (persistent-entity spec scenarios).
-- [ ] B5.5 GREEN **(reframed by AD-3c/AD-3e)**: add receipt-consultation gating in `crates/persistent-entity/src/actor.rs` before the `handle_command` call at line ~214, via `EventStore::find_receipt`. Return `CommandResult::Replayed { outcome }` — a public variant carrying the `AggregateOutcome` and **no state**, per the corrected AD-3c/AD-3e. It reconstructs neither the original result nor the original state: AD-3c records why neither is recoverable. Update every exhaustive match in the workspace explicitly, never with a `_` that could hide semantics, and give `RegisterUserImpl` concrete behaviour for it rather than letting current state stand in implicitly. A receipt that cannot be read is an internal error and never a re-execution; gap detection inside a range is **not** promised, because `EventStore::load` infers versions from positions and cannot prove it.
+- [x] B5.4 RED **(reframed by AD-3b/AD-3e)**: `crates/persistent-entity` test — the actor consults the receipt before dispatch, keyed on `(operation_key, fingerprint)` taken from `CommandContext` and never recomputed. A matching fingerprint replays without invoking `handle_command`; a mismatched one returns a permanent conflict without invoking `handle_command`. The replay must be observably a **replay**: the test asserts that post-commit effect acceptance is not re-entered, since a hit that rebuilt an ordinary `CommandResult::Events` would dispatch side effects the first execution already dispatched — the receipt would then prevent the state transition while permitting the duplicate it exists to stop (persistent-entity spec scenarios).
+- [x] B5.5 GREEN **(reframed by AD-3c/AD-3e)**: add receipt-consultation gating in `crates/persistent-entity/src/actor.rs` before the `handle_command` call at line ~214, via `EventStore::find_receipt`. Return `CommandResult::Replayed { outcome }` — a public variant carrying the `AggregateOutcome` and **no state**, per the corrected AD-3c/AD-3e. It reconstructs neither the original result nor the original state: AD-3c records why neither is recoverable. Update every exhaustive match in the workspace explicitly, never with a `_` that could hide semantics, and give `RegisterUserImpl` concrete behaviour for it rather than letting current state stand in implicitly. A receipt that cannot be read is an internal error and never a re-execution; gap detection inside a range is **not** promised, because `EventStore::load` infers versions from positions and cannot prove it.
 - [ ] B5.6 RED **(reframed by AD-3c)**: zero-event branch test — `actor.rs:220`'s `CommandResult::NoEvents` path now opens a **real** unit of work to confirm `AggregateOutcome::NoEvents`, appending nothing (today it opens none — verified constraint 1). `NoEvents` is the only valid encoding of an empty range, so the test must also reject an `Events` range that describes nothing.
 - [ ] B5.7 GREEN **(reframed by AD-3c)**: change the zero-event branch to `begin()` → `confirm_receipt(AggregateOutcome::NoEvents)` → `commit()`, with no `append`. The `Ok(events)` branch must move off `persistence.persist_events(...)`, which owns and closes its own transaction, onto the same `begin()` → `append` → `confirm_receipt` → `commit()` sequence — otherwise the receipt cannot share the events' transaction, which is the whole point of B5. A command carrying no `operation_key` keeps the existing path and pays for no extra transaction.
 - [x] B5.7a **(debt created by AD-3b, on already-merged code)**: `OperationReceipt` currently stores `ego_domain::operation::reservation::StoredResponse` — literally the reservation's type, imported across the two scopes AD-3b separates. Replace it with `AggregateOutcome`, rename the reservation's own to `StoredServiceResponse`, and rename migration `011`'s `response` column accordingly. This touches `crates/domain/src/operation/receipt.rs`, `011_create_operation_receipts.sql`, the Postgres adapter and the shared conformance harness — landed in `febeaaa`/`d5cd752` before the two scopes were distinguished. The two may share a byte representation; they share neither semantics nor ownership, and the shared name is how the scopes were merged in the first place.
@@ -357,6 +357,27 @@ unchanged, which is the point of stopping here.
       **The bridge must not live in a transport adapter.** It belongs to the dispatch
       path every transport shares, so each adapter decides only how to *extract* the
       key while everything from `ServiceContext` inward is one identical path.
+      **BLOCKING ACCEPTANCE CRITERION — the multi-aggregate recovery scenario.**
+      Promoted here from B5, and deliberately not left as a generic follow-up: it
+      is the scenario that justifies the whole receipt layer, and it cannot run
+      until this bridge exists. B5 proved the mechanism *locally* — prior lookup,
+      replay, permanent conflict, error propagation, no fallback and no writes,
+      all in `crates/persistent-entity/tests/receipt_gating.rs`. What it could not
+      prove is the integration, because `RegisterUserImpl` builds
+      `CommandContext::new(..)` for both entities with no key and no fingerprint
+      (`application.rs:250`, `:287`), so the gate never fires there. Wiring that by
+      hand would have tested a transient integration different from the specified
+      architecture: `ServiceContext` slot 3 → each entity's `CommandContext` →
+      the receipt gate. The scenario:
+      - one service `operation_key`, with the per-aggregate identity derived from it;
+      - an existing receipt for `tenant_organization`, a miss for `user`;
+      - organization returns `Replayed` and its handler does not run;
+      - its read-side is not republished and its effects are not accepted again;
+      - the workflow continues to the user step;
+      - the user handler runs **exactly once** and confirms its own receipt;
+      - `RegisterOutput` completes without presenting current state as a historical result;
+      - **a mutation dropping the propagation into either `CommandContext` must kill
+        the test** — otherwise it proves the bridge exists rather than that it works.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
 - [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.

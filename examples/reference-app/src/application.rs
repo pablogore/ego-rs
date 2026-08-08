@@ -256,6 +256,17 @@ impl RegisterUser for RegisterUserImpl {
                 self.publish_read_side(&input.tenant_id, events);
             }
             CommandResult::NoEvents { .. } => {}
+            // This step already happened under this operation key. Its events
+            // were projected when they were first written, so republishing
+            // would duplicate read-side work for a command that did not run.
+            //
+            // The workflow continues to the user step regardless: that is the
+            // whole point of a per-aggregate receipt after a partial failure —
+            // the org is confirmed, the user may still be missing. Nothing here
+            // needs data from the org step, so no current-state read is
+            // required; if it ever did, that read would be explicit and would
+            // not be presented as this command's historical answer.
+            CommandResult::Replayed { .. } => {}
         }
 
         // Then register the User. On failure here, the org write above is
@@ -294,6 +305,12 @@ impl RegisterUser for RegisterUserImpl {
                         self.publish_read_side(&input.tenant_id, events);
                     }
                     CommandResult::NoEvents { .. } => {}
+                    // The user step already happened under this key. Same
+                    // reasoning as the org branch: its events were projected
+                    // when written. The response below is composed from the
+                    // request, not from a replayed result, so a replay of this
+                    // step is safe to fall through to success.
+                    CommandResult::Replayed { .. } => {}
                 }
                 self.record("register_user.success", &input.user_id, "completed");
                 Ok(RegisterOutput {

@@ -98,5 +98,16 @@ async fn user_write_failure_leaves_org_persisted_as_a_benign_reusable_orphan() {
         CommandResult::EffectsAcceptanceFailed { .. } => {
             panic!("this handler never describes external effects — unreachable");
         }
+        // This scenario sends no operation key, so no receipt was ever written
+        // and no lookup can hit. Kept exhaustive for the same reason as the
+        // variant above: were idempotency later wired into this path, a
+        // wildcard would let a replay quietly satisfy an assertion written
+        // about a fresh execution.
+        CommandResult::Replayed { .. } => {
+            panic!(
+                "re-ensure replayed a receipt — this scenario sends no operation key, \
+                 so nothing should have been recorded to replay"
+            );
+        }
     }
 }
