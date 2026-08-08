@@ -1,11 +1,41 @@
 # Integration-test backlog
 
-Every test target removed from this workspace, and the coverage each one held.
-**52 tests across 13 targets.**
+An inventory of the **invariants** that left this workspace when 13 targets were
+removed, and where each one used to be asserted. The count — 52 tests — is a
+record of what was deleted, not a target to reach.
 
-**Tracked as issue #275.** This document is the authoritative scope; the issue is
-the counted work item. A note in a document is not a schedule — if you are reading
-this to find out whether the work is planned, the answer is in #275, not here.
+**Tracked as issue #275.** This document is the authoritative inventory; the issue
+is the counted work item and carries the rebuild's binding constraints. A note in a
+document is not a schedule — if you are reading this to find out whether the work is
+planned, the answer is in #275, not here.
+
+## Governing rule — read before using anything below
+
+**This is not a mandate to recreate 52 tests.** It is a list of properties that are
+currently unverified. The rebuild recovers *invariants*, not cardinality, and the
+old topology is explicitly not the target: it took 20–35 minutes per run, and
+reproducing it would trade one constitutional problem for an unusable one.
+
+The rebuilt suite is surgical, and every constraint below binds:
+
+- **Invariants, not count.** One test may cover several entries here; several
+  entries may collapse into one. Finishing with far fewer than 52 tests is the
+  expected outcome, not a shortfall.
+- **No duplicated contract coverage.** Anything already proven by the in-process
+  contract, conformance, or unit suites must not be re-asserted against
+  infrastructure. Infrastructure is for what infrastructure alone can show.
+- **Each infrastructure test justifies itself.** Every retained test states the
+  property that *cannot* be established in-process. No justification, no test.
+- **One PostgreSQL per run.** A single container is reused across the whole run;
+  per-test containers are what made the old suite unusable.
+- **Time budget:** whole suite **≤5 minutes**; any individual slice **≤1–2 minutes**.
+  These are the acceptance criteria of the rebuild, not aspirations.
+- **No arbitrary waits.** No `sleep`, no fixed timeouts standing in for a condition.
+  Synchronise on observable state — the `pg_locks` poll below is the pattern.
+
+Each **"Rebuild requirement"** note names the invariant that must survive and the
+mechanism that made it observable. It is not an instruction to restore the test that
+carried it.
 
 ## Status of the affected behaviour
 
