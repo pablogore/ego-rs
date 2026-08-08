@@ -359,6 +359,26 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         Ok(new_version as u64)
     }
 
+    /// Looks up the receipt for one operation against one aggregate.
+    ///
+    /// A minimal delegation to [`EventStore::find_receipt`], and deliberately
+    /// nothing more. It does not expose the store, and it has no fallback: a
+    /// read error is returned as an error, never softened into "no receipt".
+    /// "No receipt" means *run the command*, so a facade that swallowed a read
+    /// failure would re-execute an operation that already completed — the exact
+    /// duplicate the receipt exists to prevent.
+    pub async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        self.event_store
+            .find_receipt(aggregate_type, aggregate_id, tenant_id, operation_key)
+            .await
+    }
+
     /// Stores a snapshot.
     pub async fn store_snapshot(
         &self,
