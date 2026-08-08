@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use sqlx::FromRow;
 use sqlx::PgPool;
 
+use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::OperationKey;
+use ego_domain::operation::reservation::StoredResponse;
+use ego_domain::operation::{OperationFingerprint, OperationKey, OperationReceipt};
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 use crate::postgres::resolve_tenant;
@@ -307,6 +309,59 @@ where
         Ok(rows)
     }
 
+    async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        let tenant = resolve_tenant(tenant_id)?;
+
+        // `IS NOT DISTINCT FROM` rather than `=`, for the same reason every other
+        // tenant-partitioned query here uses it: plain equality never matches SQL
+        // NULL, so the systemwide partition would silently report every lookup as
+        // a miss and re-run operations that already completed.
+        let row: Option<(Option<String>, String, Vec<u8>)> = sqlx::query_as(
+            r#"SELECT tenant_id, fingerprint, response FROM operation_receipts
+               WHERE aggregate_type = $1 AND aggregate_id = $2
+                 AND tenant_id IS NOT DISTINCT FROM $3
+                 AND operation_key = $4"#,
+        )
+        .bind(aggregate_type)
+        .bind(aggregate_id)
+        .bind(&tenant)
+        .bind(operation_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PersistenceError::Internal(format!("failed to read receipt: {e}")))?;
+
+        let Some((stored_tenant, fingerprint, response)) = row else {
+            return Ok(None);
+        };
+
+        let tenant = match stored_tenant {
+            Some(raw) => Some(TenantId::new(raw).map_err(|_| {
+                PersistenceError::Internal(
+                    "a stored receipt carries a tenant_id the domain rejects".to_string(),
+                )
+            })?),
+            None => None,
+        };
+        let key = OperationKey::parse(operation_key).map_err(|e| {
+            PersistenceError::Internal(format!("a stored receipt carries an invalid key: {e}"))
+        })?;
+
+        Ok(Some(OperationReceipt::new(
+            aggregate_type,
+            aggregate_id,
+            tenant,
+            key,
+            OperationFingerprint::new(fingerprint),
+            StoredResponse::new(response),
+        )))
+    }
+
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
         let tx =
             self.pool.begin().await.map_err(|e| {
@@ -442,6 +497,94 @@ where
         }
 
         Ok(new_version)
+    }
+
+    async fn confirm_receipt(
+        &mut self,
+        receipt: &OperationReceipt,
+    ) -> Result<(), PersistenceError> {
+        let tenant = receipt.tenant().map(|t| t.as_str().to_string());
+        let key = receipt.operation_key().as_str();
+
+        // Read inside `tx`, so the check sees this transaction's own uncommitted
+        // writes: two confirmations of the same identity in one unit of work
+        // reconcile against each other rather than both looking like the first.
+        let existing: Option<(String,)> = sqlx::query_as(
+            r#"SELECT fingerprint FROM operation_receipts
+               WHERE aggregate_type = $1 AND aggregate_id = $2
+                 AND tenant_id IS NOT DISTINCT FROM $3
+                 AND operation_key = $4"#,
+        )
+        .bind(receipt.aggregate_type())
+        .bind(receipt.aggregate_id())
+        .bind(&tenant)
+        .bind(key)
+        .fetch_optional(&mut *self.tx)
+        .await
+        .map_err(|e| PersistenceError::Internal(format!("failed to read receipt: {e}")))?;
+
+        if let Some((stored,)) = existing {
+            // A matching fingerprint is an ordinary retry: idempotent, nothing to
+            // write. A differing one is a *different request* reusing an
+            // operation key — refused, never overwritten, because replacing it
+            // would hand one caller another caller's stored result.
+            return if stored == receipt.fingerprint().as_str() {
+                Ok(())
+            } else {
+                Err(PersistenceError::Conflict {
+                    aggregate_id: format!(
+                        "{}-{}",
+                        receipt.aggregate_type(),
+                        receipt.aggregate_id()
+                    ),
+                    expected: 0,
+                    actual: 0,
+                })
+            };
+        }
+
+        let inserted = sqlx::query(
+            r#"INSERT INTO operation_receipts
+                   (tenant_id, aggregate_type, aggregate_id, operation_key, fingerprint, response)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(&tenant)
+        .bind(receipt.aggregate_type())
+        .bind(receipt.aggregate_id())
+        .bind(key)
+        .bind(receipt.fingerprint().as_str())
+        .bind(receipt.response().as_bytes())
+        .execute(&mut *self.tx)
+        .await;
+
+        // No commit here, and deliberately so: this method stages. Committing
+        // would make the receipt durable ahead of the events it describes, which
+        // is the exact split the unit of work exists to prevent.
+        if let Err(e) = inserted {
+            let lost_the_race = matches!(
+                &e,
+                sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505")
+            );
+            return Err(if lost_the_race {
+                // The read above found nothing, so a competing writer committed
+                // this identity in between. Its fingerprint is unreadable from
+                // this aborted transaction, and the safe reading of an unknown
+                // fingerprint is "not mine".
+                PersistenceError::Conflict {
+                    aggregate_id: format!(
+                        "{}-{}",
+                        receipt.aggregate_type(),
+                        receipt.aggregate_id()
+                    ),
+                    expected: 0,
+                    actual: 0,
+                }
+            } else {
+                PersistenceError::Internal(format!("failed to write receipt: {e}"))
+            });
+        }
+
+        Ok(())
     }
 
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {

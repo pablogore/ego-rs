@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::event::DomainEvent;
+use crate::operation::OperationReceipt;
 use crate::persistence::{PersistenceError, StoredEvent};
 
 /// Trait for appending and loading domain events.
@@ -122,6 +123,27 @@ pub trait EventStore<E: DomainEvent> {
     /// semantics it does not provide. Every store answers this explicitly, and a
     /// store that genuinely cannot offer one says so with an error.
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError>;
+
+    /// Looks up the receipt for one operation against one aggregate, if any.
+    ///
+    /// This is the read half of [`EventStoreUnitOfWork::confirm_receipt`], and it
+    /// deliberately lives on the store rather than on a unit of work: the caller
+    /// asking "did this already happen?" is deciding whether to open a
+    /// transaction at all, so requiring one first would invert the question.
+    ///
+    /// Reads only what is committed. A receipt staged in an open unit of work is
+    /// not yet an answer to anyone — that is the same visibility rule appends
+    /// follow, applied to the thing that records them.
+    ///
+    /// `Ok(None)` means no such operation has completed against this aggregate.
+    /// It is not an error: a miss is the ordinary first-execution case.
+    async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError>;
 }
 
 /// A unit of work over the event store: a span in which appends either all
@@ -169,6 +191,37 @@ pub trait EventStoreUnitOfWork<E: DomainEvent>: Send {
         expected_version: i64,
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError>;
+
+    /// Records, inside this unit of work, that one operation has completed.
+    ///
+    /// The receipt shares the fate of everything else staged here: invisible
+    /// until [`commit`](Self::commit) succeeds, gone if this unit of work is
+    /// dropped. That is the whole reason it is a method here rather than a
+    /// separate store — a receipt written on its own connection could survive a
+    /// rollback of the events it claims to describe, and would then report an
+    /// operation as done whose effects never happened.
+    ///
+    /// # Implementations must not commit
+    ///
+    /// This method stages; it never ends the transaction. An implementation that
+    /// commits internally would make the receipt durable ahead of the events and
+    /// reintroduce exactly the split this contract exists to prevent.
+    ///
+    /// # A conflicting fingerprint is refused, never overwritten
+    ///
+    /// The receipt's identity is `(tenant, aggregate_type, aggregate_id,
+    /// operation_key)` — the fingerprint is not part of it. So a second receipt
+    /// for the same identity carrying a *different* fingerprint is a different
+    /// request reusing an operation key, and must be reported as
+    /// [`PersistenceError::Conflict`] rather than replacing what is there.
+    /// Overwriting would let one caller's result be handed to another.
+    ///
+    /// There is no default implementation, for the same reason
+    /// [`EventStore::begin`] has none: a default could only pretend or fail, and
+    /// a store that answers "not yet" for every caller is a premise with nothing
+    /// behind it.
+    async fn confirm_receipt(&mut self, receipt: &OperationReceipt)
+        -> Result<(), PersistenceError>;
 
     /// Makes everything appended in this unit of work durable, as one step.
     ///

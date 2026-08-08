@@ -120,6 +120,17 @@ impl EventStore<TestEvent> for CountingEventStore {
         self.inner.list_aggregate_ids(tenant_id).await
     }
 
+    /// This double does not model receipts; reporting a miss keeps it from
+    /// claiming an operation completed that it never recorded.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<ego_domain::operation::OperationReceipt>, PersistenceError> {
+        Ok(None)
+    }
     /// These doubles exist to inject failures into the direct append path, and
     /// none of the tests using them opens a unit of work. An explicit refusal is
     /// the honest answer: it cannot silently behave like a transaction, and if a

@@ -19,8 +19,10 @@
 //! adapter is judged against it instead of against its own author's reading of
 //! it.
 
+use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::OperationKey;
+use ego_domain::operation::reservation::StoredResponse;
+use ego_domain::operation::{OperationFingerprint, OperationKey, OperationReceipt};
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
 /// Asserts that an [`EventStore`] implementation honours the parts of the
@@ -411,5 +413,129 @@ where
             ("conformance".to_string(), "stale".to_string()),
         ],
         "the tenant listing must hold exactly that tenant's streams"
+    );
+    // --- A receipt shares the fate of the unit of work that confirmed it -----
+    //
+    // The receipt is what makes "did this already happen?" answerable, so a
+    // store where it can become durable independently of the events it
+    // describes would report operations as done whose effects never landed.
+    // These four assertions pin that it cannot.
+    let receipt_key =
+        OperationKey::parse("conformance-receipt").expect("a non-empty operation key must parse");
+    let receipt_tenant =
+        TenantId::new("conformance-tenant").expect("a non-empty tenant id must parse");
+    let receipt = OperationReceipt::new(
+        "conformance",
+        "receipted",
+        Some(receipt_tenant.clone()),
+        receipt_key.clone(),
+        OperationFingerprint::new("fingerprint-a"),
+        StoredResponse::new(b"the recorded outcome".to_vec()),
+    );
+
+    assert_eq!(
+        store
+            .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+            .await
+            .expect("looking up an absent receipt must succeed, not error"),
+        None,
+        "an operation that never ran must report no receipt: a miss is the \
+         ordinary first-execution case, not a failure"
+    );
+
+    // Dropped without committing. Nothing it staged may survive.
+    {
+        let mut discarded = store
+            .begin()
+            .await
+            .expect("opening a unit of work must succeed");
+        discarded
+            .confirm_receipt(&receipt)
+            .await
+            .expect("confirming a receipt inside a unit of work must succeed");
+        assert_eq!(
+            store
+                .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+                .await
+                .expect("a lookup during an open unit of work must succeed"),
+            None,
+            "a receipt confirmed in an open unit of work must be invisible until \
+             that unit of work commits"
+        );
+    }
+    assert_eq!(
+        store
+            .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+            .await
+            .expect("a lookup after a discarded unit of work must succeed"),
+        None,
+        "dropping a unit of work without committing must discard its receipt, \
+         exactly as it discards its appends"
+    );
+
+    // Committed with zero events. This is the case the receipt exists for: a
+    // success that emits nothing has no event row to carry its completion, so
+    // without a receipt it is indistinguishable from a command that never ran.
+    let mut empty = store
+        .begin()
+        .await
+        .expect("opening a unit of work must succeed");
+    empty
+        .confirm_receipt(&receipt)
+        .await
+        .expect("confirming a receipt must succeed");
+    empty
+        .commit()
+        .await
+        .expect("committing a unit of work that appended no events must succeed");
+
+    let found = store
+        .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+        .await
+        .expect("a lookup after commit must succeed")
+        .expect("a committed receipt must be found, even though no event was appended");
+    assert_eq!(
+        found.fingerprint().as_str(),
+        "fingerprint-a",
+        "the receipt must round-trip the fingerprint it was confirmed with"
+    );
+    assert_eq!(
+        found.response().as_bytes(),
+        b"the recorded outcome",
+        "the receipt must round-trip the response a matching retry will replay"
+    );
+
+    // A different request reusing the operation key is refused, not answered
+    // with someone else's result and not silently overwriting the receipt.
+    let mut conflicting = store
+        .begin()
+        .await
+        .expect("opening a unit of work must succeed");
+    let other_fingerprint = OperationReceipt::new(
+        "conformance",
+        "receipted",
+        Some(receipt_tenant),
+        receipt_key.clone(),
+        OperationFingerprint::new("fingerprint-b"),
+        StoredResponse::new(b"a different outcome".to_vec()),
+    );
+    let refused = conflicting.confirm_receipt(&other_fingerprint).await;
+    assert!(
+        matches!(refused, Err(PersistenceError::Conflict { .. })),
+        "confirming a receipt for an existing identity under a different \
+         fingerprint must be refused as a conflict, never overwrite what is \
+         stored: overwriting would hand one caller another caller's result"
+    );
+    drop(conflicting);
+
+    let unchanged = store
+        .find_receipt("conformance", "receipted", tenant, receipt_key.as_str())
+        .await
+        .expect("a lookup after a refused confirmation must succeed")
+        .expect("the original receipt must still be there");
+    assert_eq!(
+        unchanged.response().as_bytes(),
+        b"the recorded outcome",
+        "a refused confirmation must leave the stored response untouched"
     );
 }

@@ -60,6 +60,17 @@ impl EventStore<TestEvent> for RendezvousEventStore {
         Ok(Vec::new())
     }
 
+    /// This double does not model receipts; reporting a miss keeps it from
+    /// claiming an operation completed that it never recorded.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<ego_domain::operation::OperationReceipt>, PersistenceError> {
+        Ok(None)
+    }
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<TestEvent>>, PersistenceError> {
         Err(PersistenceError::Internal(
             "this test double does not implement unit-of-work semantics".to_string(),

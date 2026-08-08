@@ -3,10 +3,51 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::OperationReceipt;
 use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 type StreamKey = (String, String, Option<String>);
+
+/// The logical identity of a receipt: aggregate scope plus operation key.
+///
+/// Four components, not two. The same operation key against two different
+/// aggregates is two operations, and keying on `(tenant, operation_key)` alone
+/// would let one aggregate's completion suppress another's work.
+type ReceiptKey = (String, String, Option<String>, String);
+
+/// Refuses a receipt that would replace an existing one carrying a different
+/// fingerprint, and reports whether the write is redundant.
+///
+/// A matching fingerprint is an ordinary retry and is idempotent. A differing
+/// one is a *different request* reusing an operation key, and answering it with
+/// the stored response would hand one caller another's result — so it is a
+/// conflict, never an overwrite.
+fn reconcile(
+    existing: Option<&OperationReceipt>,
+    incoming: &OperationReceipt,
+) -> Result<(), PersistenceError> {
+    match existing {
+        Some(found) if found.fingerprint() != incoming.fingerprint() => {
+            Err(PersistenceError::Conflict {
+                aggregate_id: format!("{}-{}", incoming.aggregate_type(), incoming.aggregate_id()),
+                expected: 0,
+                actual: 0,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Builds the lookup key for a receipt.
+fn receipt_key(receipt: &OperationReceipt) -> ReceiptKey {
+    (
+        receipt.aggregate_type().to_string(),
+        receipt.aggregate_id().to_string(),
+        receipt.tenant().map(|t| t.as_str().to_string()),
+        receipt.operation_key().as_str().to_string(),
+    )
+}
 
 /// In-memory event store.
 ///
@@ -21,12 +62,17 @@ type StreamKey = (String, String, Option<String>);
 /// its guard never needs to be `Send`.
 pub struct InMemoryEventStore<E> {
     streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    /// Committed receipts, shared with every unit of work this store hands out
+    /// for the same reason the streams are: a unit of work publishes into the
+    /// same store after the borrow that created it has ended.
+    receipts: Arc<Mutex<HashMap<ReceiptKey, OperationReceipt>>>,
 }
 
 impl<E> InMemoryEventStore<E> {
     pub fn new() -> Self {
         InMemoryEventStore {
             streams: Arc::new(Mutex::new(HashMap::new())),
+            receipts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -106,7 +152,26 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         Ok(Box::new(InMemoryEventStoreUnitOfWork {
             streams: Arc::clone(&self.streams),
             staged: HashMap::new(),
+            receipts: Arc::clone(&self.receipts),
+            staged_receipts: HashMap::new(),
         }))
+    }
+
+    async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        let tenant = resolve_tenant(tenant_id)?;
+        let key = (
+            aggregate_type.to_string(),
+            aggregate_id.to_string(),
+            tenant,
+            operation_key.to_string(),
+        );
+        Ok(lock(&self.receipts).get(&key).cloned())
     }
 }
 
@@ -125,6 +190,12 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
 struct InMemoryEventStoreUnitOfWork<E> {
     streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
     staged: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+    receipts: Arc<Mutex<HashMap<ReceiptKey, OperationReceipt>>>,
+    /// Receipts confirmed here but not yet published. Staged rather than written
+    /// through, so dropping this unit of work discards them exactly as it
+    /// discards appends — the receipt shares the events' fate or it is not a
+    /// receipt for them.
+    staged_receipts: HashMap<ReceiptKey, OperationReceipt>,
 }
 
 #[async_trait]
@@ -159,10 +230,30 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         Ok(current + count)
     }
 
+    async fn confirm_receipt(
+        &mut self,
+        receipt: &OperationReceipt,
+    ) -> Result<(), PersistenceError> {
+        let key = receipt_key(receipt);
+        reconcile(lock(&self.receipts).get(&key), receipt)?;
+        reconcile(self.staged_receipts.get(&key), receipt)?;
+        self.staged_receipts.insert(key, receipt.clone());
+        Ok(())
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
+        // Both maps are published under their own locks, taken one at a time and
+        // never across an await, so a caller committing on one thread cannot
+        // deadlock against a reader on another.
         let mut streams = lock(&self.streams);
         for (key, events) in self.staged {
             streams.entry(key).or_default().extend(events);
+        }
+        drop(streams);
+
+        let mut receipts = lock(&self.receipts);
+        for (key, receipt) in self.staged_receipts {
+            receipts.insert(key, receipt);
         }
         Ok(())
     }

@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **115 tasks total** — 67 complete and 48 pending. Complete: B0.1–B0.3 (merged as
+> **115 tasks total** — 72 complete and 43 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -331,10 +331,10 @@ unchanged, which is the point of stopping here.
 
 ### Phase B5: Per-Aggregate `operation_receipts` (needs A2, A3, B4)
 
-- [ ] B5.1 RED: `crates/integration-tests/tests/receipts.rs` — zero-event success still writes a receipt inside the same (empty) transaction (event-store + idempotent-command-processing spec scenarios).
-- [ ] B5.2 GREEN: migration for `operation_receipts` at the next free number — `009` is taken by the `operation_key` column, and the numbers named in this plan are indicative rather than reserved, since B3 and B5 can land in either order + AD-1 partial-index pair on `(tenant_id, aggregate_type, aggregate_id, operation_key)`, storing the fingerprint.
-- [ ] B5.3a GREEN **(deferred here from B4.2b)**: add `confirm_receipt` to the `EventStoreUnitOfWork` trait. It was left out of B4-ii because nothing backed it — no table, no receipt type, no caller — and a trait method every implementation answers "not yet" is a premise without backing.
-- [ ] B5.3 GREEN: implement `confirm_receipt` on `EventStoreUnitOfWork` for both implementors, joining the same transaction as `append`.
+- [x] B5.1 RED **(retargeted by #274)**: extend `ego-testkit`'s shared `EventStore` conformance harness with the zero-event receipt scenario — a success producing no events still confirms its receipt inside the same transaction, and dropping that unit of work without committing leaves no receipt behind. Exercised in-process by `crates/infrastructure/tests/in_memory_event_store_conformance.rs` and `crates/persistent-entity/tests/default_store_conformance.rs`. It belongs in the shared harness rather than in a test of its own so the durable store answers the same definition later under #275, instead of a parallel copy of it (event-store + idempotent-command-processing spec scenarios). The original target `crates/integration-tests/tests/receipts.rs` no longer exists; #274 removed that crate. Real-PostgreSQL atomicity of the empty transaction is inventoried in #275 §6 and is not claimed here.
+- [x] B5.2 GREEN: migration for `operation_receipts` at the next free number — `009` is taken by the `operation_key` column, and the numbers named in this plan are indicative rather than reserved, since B3 and B5 can land in either order + AD-1 partial-index pair on `(tenant_id, aggregate_type, aggregate_id, operation_key)`, storing the fingerprint.
+- [x] B5.3a GREEN **(deferred here from B4.2b)**: add `confirm_receipt` to the `EventStoreUnitOfWork` trait. It was left out of B4-ii because nothing backed it — no table, no receipt type, no caller — and a trait method every implementation answers "not yet" is a premise without backing.
+- [x] B5.3 GREEN: implement `confirm_receipt` on `EventStoreUnitOfWork` for both implementors, joining the same transaction as `append`.
 - [ ] B5.4 RED: `crates/persistent-entity` test — actor consults the receipt before dispatch; matching fingerprint no-ops without invoking `handle_command`; mismatched fingerprint returns a permanent conflict without invoking `handle_command` (persistent-entity spec scenarios).
 - [ ] B5.5 GREEN: add receipt-consultation gating in `crates/persistent-entity/src/actor.rs` before the `handle_command` call at line ~213.
 - [ ] B5.6 RED: zero-event branch test — `actor.rs:219`'s `CommandResult::NoEvents` path now opens a transaction to confirm the receipt (today it never opens one — verified constraint 1).
@@ -370,7 +370,7 @@ unchanged, which is the point of stopping here.
 
 ### Phase B7: Retention, Purge, Observability (needs B3, B6)
 
-- [ ] B7.1 RED: `crates/integration-tests/tests/purge.rs` — reservation purge-eligibility is measured from `completed_at`, never `created_at`; an `InProgress` reservation is never TTL-purged.
+- [ ] B7.1 RED **(retargeted and narrowed by #274)**: add the discriminating `completed_at`-vs-`created_at` scenario to `assert_purge_conformance` in `crates/testkit/src/reservation_conformance.rs` — reserve at `t0`, advance the clock, complete at `t0 + Δ`, then purge with a cutoff falling between the two: the reservation must survive, because eligibility reads `completed_at`. The seven existing scenarios cannot catch a store that reads `created_at` instead: the `completed_at` helper positions the clock and completes at the same instant, so both columns hold the same value in every one of them. The second half of this task's original claim — an `InProgress` reservation is never TTL-purged, however old — is **already covered** by scenario 3 of that same harness, landed with B3-i, and needs no new test. The original target `crates/integration-tests/tests/purge.rs` no longer exists; #274 removed that crate, and the durable store answers this same harness later under #275.
 - [ ] B7.2 GREEN **(reframed by B3-i)**: harden the already-implemented `purge_completed_before` for production — batched execution that is observable, and safe for multiple concurrent workers. B3-i implements a correct single-worker purge satisfying the port's four guarantees (eligibility strictly before the cutoff, never an `InProgress` row, the batch limit, the returned count); what remains here is multi-worker safety and instrumentation, not the implementation.
 - [ ] B7.3 RED: two-concurrent-workers test — overlapping eligible rows purged exactly once, no deadlock, no double-purge.
 - [ ] B7.4 GREEN: implement the concurrency-safe purge query (e.g. `SELECT ... FOR UPDATE SKIP LOCKED` or equivalent row-claiming pattern).
