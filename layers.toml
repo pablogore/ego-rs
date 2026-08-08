@@ -31,4 +31,3 @@
 "ego-service-sdk" = "sdk"
 "ego-service-sdk-macros" = "tooling"
 "ego-testkit" = "tooling"
-"ego-integration-tests" = "tooling"

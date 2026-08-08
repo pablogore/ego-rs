@@ -20,8 +20,14 @@ phases:
   apply:
     status: complete
   verify:
-    status: pass
-    artifact: verify-report.md
+    # Downgraded from `pass` on 2026-08-08. `e2e_register.rs` — the only evidence
+    # for the proposal's "a real HTTP request against a running axum server
+    # completes registration end-to-end" criterion — was deleted for violating
+    # CC-R11/UT-R2. The three requirement rows citing it retain in-process
+    # co-evidence; the end-to-end-over-a-real-socket claim does not.
+    # Restoring `pass` requires issue #275, not a re-reading of what remains.
+    status: partial
+    artifact: verify-report.md  # see the 2026-08-08 addendum
   archive:
     status: complete
     artifact: archive-report.md

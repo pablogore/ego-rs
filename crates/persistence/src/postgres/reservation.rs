@@ -279,11 +279,15 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             // separate statements, so between them another caller can take the
             // reservation over or its owner can renew it. Re-checking the lease
             // inside the update means a caller that waited on the row lock is judged
-            // against the row that exists, not the row it remembers. Proven by
-            // neutralising it — see
-            // `reservation_store_postgres::a_takeover_that_waits_on_a_row_lock_rechecks_the_lease`,
-            // which then reports a takeover of a lease that was renewed during the
-            // wait.
+            // against the row that exists, not the row it remembers.
+            //
+            // This was proven by neutralising the predicate and watching a test that
+            // forced the read/write window open report a takeover of a lease renewed
+            // during the wait. That test needed a real transaction holding a real row
+            // lock and has been moved out of this workspace, so the predicate is
+            // currently unguarded by any test here — see
+            // `docs/integration-test-backlog.md`. It stays because the reasoning above
+            // holds, not because something still checks it.
             //
             // `fencing_token = $N` is a compare-and-swap on the row version, and it
             // is **redundant given the predicate above**: every path that could

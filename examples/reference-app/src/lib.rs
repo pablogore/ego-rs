@@ -67,7 +67,7 @@ use crate::application::{RegisterUserImpl, RegisterUserTag};
 use crate::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore};
 
 /// Signing key `build_runtime`'s `Hs256AuthenticationProvider` verifies
-/// against — `pub` so tests (e.g. `http_route.rs`, `e2e_register.rs`) can
+/// against — `pub` so tests (e.g. `http_route.rs`) can
 /// mint tokens that authenticate against the exact same runtime, rather
 /// than duplicating this literal.
 ///

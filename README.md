@@ -14,27 +14,22 @@ A hexagonal, actor-oriented, deterministic backend framework for Rust.
 ## Requirements
 
 - Rust — see `rust-toolchain.toml` for the pinned version.
-- **PostgreSQL 14 or later** for the `ego-persistence` backend. This is the
-  declared minimum this workspace supports; it tracks PostgreSQL's own
-  support lifecycle rather than any feature this framework uses today.
-  `crates/integration-tests` pins its testcontainer to that exact major
-  version so the suite characterizes the declared floor, not whatever image
-  happens to be newest.
-- **A reachable Docker daemon**, because `crates/integration-tests` starts real
-  containers. `cargo test --workspace` therefore needs it too — those tests fail
-  loudly rather than skipping, so a missing daemon looks like a test failure by
-  design.
+- **PostgreSQL 14 or later** to *run* an application on the `ego-persistence`
+  backend. This is the declared minimum this workspace supports; it tracks
+  PostgreSQL's own support lifecycle rather than any feature this framework uses
+  today.
 
-  Note that the Docker CLI and these tests find the daemon differently: the CLI
-  reads its own context, while the test harness uses `DOCKER_HOST` and otherwise
-  falls back to `/var/run/docker.sock`. On a setup where that path is absent or a
-  dangling symlink — common with Colima, Podman, or Rancher Desktop — `docker`
-  commands work while the tests cannot connect. Point the harness at the real
-  socket:
+**No Docker, and no database, is required to build or test this workspace.**
+`cargo test --workspace` runs entirely in-process. That is a constitutional
+requirement, not a convenience: CC-R11 (No Infrastructure Dependency) and UT-R4
+(No Testcontainers) forbid infrastructure in these tests, and
+`scripts/detect-integration-tests.sh` enforces it in CI.
 
-  ```sh
-  export DOCKER_HOST="unix://$(docker context inspect --format '{{.Endpoints.docker.Host}}' | sed 's|unix://||')"
-  ```
+Coverage that genuinely needs a real database or socket will live in a separate
+integration workspace outside this repository. That workspace does not exist yet:
+until issue #275 closes, those invariants remain unverified.
+`docs/integration-test-backlog.md` records every such property and what it must
+assert, so that work is deferred rather than lost.
 
 ## Crates
 
