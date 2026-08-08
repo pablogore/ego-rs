@@ -25,9 +25,11 @@ requirement, not a convenience: CC-R11 (No Infrastructure Dependency) and UT-R4
 (No Testcontainers) forbid infrastructure in these tests, and
 `scripts/detect-integration-tests.sh` enforces it in CI.
 
-Coverage that genuinely needs a real database or socket will live in a separate
-integration workspace outside this repository. That workspace does not exist yet:
-until issue #275 closes, those invariants remain unverified.
+Coverage that genuinely needs a real database or socket will live in `integration-tests/`
+— outside the root Cargo workspace, inside this repository, as an independent Cargo
+workspace that the root neither compiles nor runs. It is invoked explicitly with
+`cargo test --manifest-path integration-tests/Cargo.toml`. That workspace does not
+exist yet: until issue #275 closes, those invariants remain unverified.
 `docs/integration-test-backlog.md` records every such property and what it must
 assert, so that work is deferred rather than lost.
 
