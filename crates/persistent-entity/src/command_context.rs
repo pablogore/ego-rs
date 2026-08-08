@@ -3,7 +3,7 @@
 //! This module provides context information that is available during command processing,
 //! including metadata about the command execution environment.
 
-use ego_domain::operation::OperationKey;
+use ego_domain::operation::{OperationFingerprint, OperationKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -37,6 +37,24 @@ pub struct CommandContext {
     /// makes — never regenerated, normalised, or reconstructed along the
     /// way.
     pub operation_key: Option<OperationKey>,
+
+    /// The fingerprint of the request this command came from — **exactly** the
+    /// one the idempotency slot passed to `OperationReservationStore::reserve`.
+    ///
+    /// Part of the public contract, and additive: it carries data, never
+    /// behaviour. Two rules make it trustworthy.
+    ///
+    /// **The actor never recomputes it.** A fingerprint derived a second time
+    /// from a re-serialised request can differ from the first for reasons that
+    /// have nothing to do with the request changing — map ordering, float
+    /// formatting, an added default field. A retry would then look like a
+    /// different request and be refused, so the value is carried rather than
+    /// recovered.
+    ///
+    /// **`None` keeps the non-idempotent path.** A command that arrived without
+    /// idempotency enforcement has no fingerprint to record, and inventing one
+    /// would manufacture an identity the caller never asked for.
+    pub fingerprint: Option<OperationFingerprint>,
 }
 
 impl CommandContext {
@@ -56,6 +74,7 @@ impl CommandContext {
             causation_id: None,
             metadata: HashMap::new(),
             operation_key: None,
+            fingerprint: None,
         }
     }
 }

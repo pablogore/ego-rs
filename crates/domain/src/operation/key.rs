@@ -95,7 +95,7 @@ impl fmt::Display for OperationKey {
 /// Replay vs. Conflict" requirement). `OperationFingerprint` carries no
 /// opinion about how the fingerprint is computed from a request payload —
 /// that is a caller concern; this type only guarantees stable equality.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct OperationFingerprint(String);
 
 impl OperationFingerprint {

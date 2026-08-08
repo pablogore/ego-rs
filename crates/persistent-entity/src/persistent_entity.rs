@@ -150,6 +150,7 @@ mod tests {
             causation_id: None,
             metadata: std::collections::HashMap::new(),
             operation_key: None,
+            fingerprint: None,
         }
     }
 

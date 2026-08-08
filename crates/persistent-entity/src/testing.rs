@@ -263,5 +263,6 @@ pub fn create_test_context() -> CommandContext {
         causation_id: None,
         metadata: HashMap::new(),
         operation_key: None,
+        fingerprint: None,
     }
 }

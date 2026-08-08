@@ -60,6 +60,7 @@ mod tests {
             causation_id: None,
             metadata: HashMap::new(),
             operation_key: None,
+            fingerprint: None,
         };
         let env = CommandEnvelope {
             command: 42u32,
@@ -80,6 +81,7 @@ mod tests {
             causation_id: None,
             metadata: HashMap::new(),
             operation_key: None,
+            fingerprint: None,
         };
         let (tx, rx) = oneshot::channel::<Result<CommandErasedResult, EntityError>>();
         let _env = ActorEnvelope {
