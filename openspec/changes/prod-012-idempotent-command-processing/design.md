@@ -202,8 +202,29 @@ a name that blurs that is how the two scopes were merged in the first place.
 
 ### AD-3c — What an `AggregateOutcome` contains
 
-**Decision**: the receipt records the *shape* of the durable transition, not a
-copy of it.
+**Decision**: the receipt records **evidence that a transition was confirmed**.
+It is not, and must not be presented as, material sufficient to rebuild the
+original `CommandResult`.
+
+An earlier revision of this section claimed it was. That claim was wrong, and it
+was wrong in four independent ways, each verified against the code rather than
+argued:
+
+1. **A version range does not survive compaction.** `EventStore::load` returns
+   the physical stream and the logical version is `index + stream_version_offset`
+   (`persistence.rs:299-324`). A snapshot that compacts the stream moves what a
+   given `version_from` addresses.
+2. **Continuity cannot be verified through this API.** `load` returns
+   `Vec<StoredEvent<E>>` with no versions attached — the version is *inferred*
+   from the index, so enumeration always yields a contiguous sequence whether or
+   not the table has a gap. A real gap is undetectable from here.
+3. **The state at `version_to` cannot be rebuilt.** `apply_events` moves forward
+   from the current state, and no API stops replay at a chosen version.
+4. **`NoEvents` cannot identify its moment, and adding a version does not fix
+   it.** On a fresh aggregate the observed version is `0`, and the state at
+   version `0` lives in no event at all — it is the entity's initial state,
+   which only the implementation knows. That is precisely the case the receipt
+   was introduced for.
 
 ```rust
 enum AggregateOutcome {
@@ -213,6 +234,14 @@ enum AggregateOutcome {
     NoEvents,
 }
 ```
+
+**Also rejected: returning the aggregate's *current* state as the replayed
+result.** It would avoid reconstruction entirely and break idempotency
+silently. If `K` left the aggregate at version 10 and later commands took it to
+14, a retry of `K` answering with version 14 makes one operation key produce two
+different logical results. A completed operation hides this behind the
+reservation; a **partially failed multi-aggregate** operation does not — and
+that is exactly when the receipt is consulted.
 
 **Rejected: serialising `CommandResult<E, S>`.** Its `new_state` is redundant —
 on a hit the original events are already committed, so the actor's current state
@@ -266,8 +295,35 @@ durable.
 
 ### AD-3e — A receipt hit replays; it does not re-run the pipeline
 
-**Decision**: the hit path is a **distinguishable** route, not a reconstruction
-of the ordinary one.
+**Decision**: a hit returns an explicit control result that carries **no state
+and no reconstructed history**:
+
+```rust
+CommandResult::Replayed { outcome: AggregateOutcome }
+```
+
+It asserts exactly one thing, and deliberately nothing more:
+
+> This aggregate's transition was already confirmed. It must not run again and
+> must not produce effects again.
+
+It does **not** promise the original result, the original state, or the original
+events. AD-3c establishes that none of those is recoverable from what a receipt
+holds.
+
+**What a caller must do with it.** Treat it as recovery of a partial execution,
+explicitly. If the workflow needs data to continue, it reads current state
+through an explicit query, or through a durable value the command itself
+recorded — never from a replay pretending to be history. The service
+operation's exact response belongs to `operation_reservations`; if the
+operation never completed, there is no honest way to conjure that response back
+out of per-aggregate receipts, and this design does not pretend otherwise.
+
+**If a handler genuinely requires the first attempt's exact result to continue**,
+that is a *new requirement*, not a gap to paper over. It would call for
+persisting a command-specific `AggregateReplayValue`. It must not be met by
+imposing `Serialize` on every state and event in the workspace, and it must
+never be met by quietly returning current state.
 
 Rebuilding a plain `CommandResult::Events` on a hit would be wrong in a way that
 is easy to miss: those events would be indistinguishable from freshly produced
@@ -278,7 +334,6 @@ stop.
 
 So a hit:
 
-- reconstructs the logical result from the durable range;
 - does **not** invoke `handle_command`;
 - does **not** persist events;
 - does **not** re-enter effect acceptance.

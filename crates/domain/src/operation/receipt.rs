@@ -23,17 +23,19 @@ use crate::operation::key::{OperationFingerprint, OperationKey};
 ///
 /// [`StoredServiceResponse`]: crate::operation::StoredServiceResponse
 ///
-/// # Why a range and not a copy
+/// # What this is, and what it is not
 ///
-/// The events are already durable, committed in the same unit of work as this
-/// record. Storing them again would duplicate the stream and force a
-/// `Serialize` bound onto every domain event in the workspace to record what
-/// the stream already holds. The resulting state is redundant for the same
-/// reason: a replay rebuilds it from those very events, and a stored copy is a
-/// second answer that can fall out of step with the first.
+/// It is **evidence that a transition was confirmed** — enough to know the
+/// command must not run again, and enough to audit which slice of the stream it
+/// produced.
 ///
-/// What cannot be recovered from the stream alone is *which* slice of it this
-/// command produced. That is all this type carries.
+/// It is **not** material for rebuilding the original result. A version range
+/// does not survive stream compaction; the load API infers versions from
+/// positions, so it cannot prove a range is gap-free; there is no way to stop a
+/// replay at a chosen version to recover the state as it then was; and
+/// [`AggregateOutcome::NoEvents`] on a fresh aggregate refers to a state that
+/// lives in no event at all. A receipt guarantees the transition does not
+/// repeat. It does not reproduce the answer the aggregate once gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateOutcome {
     /// The command appended this inclusive version range.
