@@ -21,8 +21,9 @@
 
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::reservation::StoredResponse;
-use ego_domain::operation::{OperationFingerprint, OperationKey, OperationReceipt};
+use ego_domain::operation::{
+    AggregateOutcome, OperationFingerprint, OperationKey, OperationReceipt,
+};
 use ego_domain::persistence::{EventStore, PersistenceError, StoredEvent};
 
 /// Asserts that an [`EventStore`] implementation honours the parts of the
@@ -430,7 +431,7 @@ where
         Some(receipt_tenant.clone()),
         receipt_key.clone(),
         OperationFingerprint::new("fingerprint-a"),
-        StoredResponse::new(b"the recorded outcome".to_vec()),
+        AggregateOutcome::NoEvents,
     );
 
     assert_eq!(
@@ -500,9 +501,10 @@ where
         "the receipt must round-trip the fingerprint it was confirmed with"
     );
     assert_eq!(
-        found.response().as_bytes(),
-        b"the recorded outcome",
-        "the receipt must round-trip the response a matching retry will replay"
+        found.outcome(),
+        &AggregateOutcome::NoEvents,
+        "a success that appended nothing must round-trip as NoEvents: it is the \
+         only encoding of an empty range, and it is the case the receipt exists for"
     );
 
     // The same request arriving twice is an idempotent success, not a conflict.
@@ -529,9 +531,9 @@ where
         .expect("a lookup after an idempotent re-confirmation must succeed")
         .expect("the receipt must still be there");
     assert_eq!(
-        after_repeat.response().as_bytes(),
-        b"the recorded outcome",
-        "an idempotent re-confirmation must leave the stored response as it was"
+        after_repeat.outcome(),
+        &AggregateOutcome::NoEvents,
+        "an idempotent re-confirmation must leave the recorded outcome as it was"
     );
 
     // A different request reusing the operation key is refused, not answered
@@ -546,7 +548,7 @@ where
         Some(receipt_tenant),
         receipt_key.clone(),
         OperationFingerprint::new("fingerprint-b"),
-        StoredResponse::new(b"a different outcome".to_vec()),
+        AggregateOutcome::events(1, 3).expect("an inclusive ascending range must be valid"),
     );
     let refused = conflicting.confirm_receipt(&other_fingerprint).await;
     assert!(
@@ -563,8 +565,9 @@ where
         .expect("a lookup after a refused confirmation must succeed")
         .expect("the original receipt must still be there");
     assert_eq!(
-        unchanged.response().as_bytes(),
-        b"the recorded outcome",
-        "a refused confirmation must leave the stored response untouched"
+        unchanged.outcome(),
+        &AggregateOutcome::NoEvents,
+        "a refused confirmation must leave the recorded outcome untouched — not \
+         the range the rejected request carried"
     );
 }

@@ -50,7 +50,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use ego_domain::operation::{
     OperationFingerprint, OperationKey, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredResponse,
+    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::Clock;
 
@@ -325,7 +325,10 @@ where
             other => panic!("expected Fresh, got {other:?}"),
         };
         store
-            .complete(&fence, StoredResponse::new(b"welcome-email-sent".to_vec()))
+            .complete(
+                &fence,
+                StoredServiceResponse::new(b"welcome-email-sent".to_vec()),
+            )
             .await
             .unwrap();
 
@@ -370,7 +373,7 @@ where
         let (stale_fence, current_fence) = reserve_then_take_over(&store, &clock, "op-5").await;
 
         let stale_result = store
-            .complete(&stale_fence, StoredResponse::new(b"stale".to_vec()))
+            .complete(&stale_fence, StoredServiceResponse::new(b"stale".to_vec()))
             .await;
         assert_eq!(
             stale_result,
@@ -381,7 +384,10 @@ where
         // Prove the stale attempt did not modify the reservation: the current
         // (post-takeover) owner can still legitimately complete it.
         let current_result = store
-            .complete(&current_fence, StoredResponse::new(b"current".to_vec()))
+            .complete(
+                &current_fence,
+                StoredServiceResponse::new(b"current".to_vec()),
+            )
             .await;
         assert!(
             current_result.is_ok(),
@@ -571,7 +577,7 @@ where
         clock.advance(Duration::seconds(30));
 
         let result = store
-            .complete(&fence, StoredResponse::new(b"late".to_vec()))
+            .complete(&fence, StoredServiceResponse::new(b"late".to_vec()))
             .await;
         assert_eq!(
             Err(ReservationError::StaleOwner),
@@ -682,7 +688,7 @@ where
             other => panic!("setup: expected Fresh for {key}, got {other:?}"),
         };
         store
-            .complete(&fence, StoredResponse::new(response.to_vec()))
+            .complete(&fence, StoredServiceResponse::new(response.to_vec()))
             .await
             .unwrap();
     }

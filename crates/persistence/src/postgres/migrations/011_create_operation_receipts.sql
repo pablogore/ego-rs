@@ -38,6 +38,23 @@
 -- conflict — the retry is refused instead of silently overwriting a receipt, or
 -- silently replaying someone else's result.
 --
+-- WHAT IS RECORDED, AND WHAT IS NOT
+--
+-- Not the service operation's response. A service operation may command several
+-- aggregates and compose its answer from all of them; that composed answer
+-- belongs to operation_reservations, written after the handler returns. This
+-- table records only the durable transition of ONE aggregate.
+--
+-- And not a copy of that transition either. The events are already durable, in
+-- this very transaction, so the outcome records which inclusive slice of the
+-- stream the command produced rather than the events themselves. Three columns
+-- rather than an opaque blob, so the constraint below can be enforced by the
+-- database instead of trusted from every writer.
+--
+-- `no_events` is the only encoding of an empty range, which is why its two
+-- version columns are NULL rather than an empty interval: two representations
+-- of "nothing happened" is one too many.
+--
 -- RETENTION
 --
 -- Receipts are permanently retained under a lifecycle distinct from `events`.
@@ -51,8 +68,21 @@ CREATE TABLE IF NOT EXISTS operation_receipts (
     aggregate_id   VARCHAR(255) NOT NULL,
     operation_key  VARCHAR(255) NOT NULL,
     fingerprint    VARCHAR(255) NOT NULL,
-    response       BYTEA        NOT NULL,
-    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    outcome_kind   VARCHAR(16)  NOT NULL,
+    version_from   BIGINT,
+    version_to     BIGINT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT operation_receipts_outcome_kind_known
+        CHECK (outcome_kind IN ('events', 'no_events')),
+    CONSTRAINT operation_receipts_outcome_is_consistent
+        CHECK (
+            (outcome_kind = 'no_events'
+                AND version_from IS NULL AND version_to IS NULL)
+         OR (outcome_kind = 'events'
+                AND version_from IS NOT NULL AND version_to IS NOT NULL
+                AND version_to >= version_from)
+        )
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_receipts_identity_tenant

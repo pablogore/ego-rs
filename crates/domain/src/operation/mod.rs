@@ -23,8 +23,8 @@ pub mod reservation;
 pub mod receipt;
 
 pub use key::{OperationFingerprint, OperationKey, OperationKeyError};
-pub use receipt::OperationReceipt;
+pub use receipt::{AggregateOutcome, AggregateOutcomeError, OperationReceipt};
 pub use reservation::{
     FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredResponse,
+    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };

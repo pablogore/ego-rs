@@ -9,8 +9,9 @@ use sqlx::PgPool;
 
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::reservation::StoredResponse;
-use ego_domain::operation::{OperationFingerprint, OperationKey, OperationReceipt};
+use ego_domain::operation::{
+    AggregateOutcome, OperationFingerprint, OperationKey, OperationReceipt,
+};
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 
 use crate::postgres::resolve_tenant;
@@ -322,22 +323,47 @@ where
         // tenant-partitioned query here uses it: plain equality never matches SQL
         // NULL, so the systemwide partition would silently report every lookup as
         // a miss and re-run operations that already completed.
-        let row: Option<(Option<String>, String, Vec<u8>)> = sqlx::query_as(
-            r#"SELECT tenant_id, fingerprint, response FROM operation_receipts
+        let row: Option<(Option<String>, String, String, Option<i64>, Option<i64>)> =
+            sqlx::query_as(
+                r#"SELECT tenant_id, fingerprint, outcome_kind, version_from, version_to
+               FROM operation_receipts
                WHERE aggregate_type = $1 AND aggregate_id = $2
                  AND tenant_id IS NOT DISTINCT FROM $3
                  AND operation_key = $4"#,
-        )
-        .bind(aggregate_type)
-        .bind(aggregate_id)
-        .bind(&tenant)
-        .bind(operation_key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| PersistenceError::Internal(format!("failed to read receipt: {e}")))?;
+            )
+            .bind(aggregate_type)
+            .bind(aggregate_id)
+            .bind(&tenant)
+            .bind(operation_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PersistenceError::Internal(format!("failed to read receipt: {e}")))?;
 
-        let Some((stored_tenant, fingerprint, response)) = row else {
+        let Some((stored_tenant, fingerprint, kind, version_from, version_to)) = row else {
             return Ok(None);
+        };
+
+        // The CHECK constraint makes these shapes unreachable from a conforming
+        // writer. They are still mapped to an error rather than unwrapped: a
+        // receipt this adapter cannot read must never be reported as absent,
+        // because absence means "run the command", and running a command whose
+        // record is merely unreadable duplicates exactly what the receipt exists
+        // to prevent.
+        let outcome = match (kind.as_str(), version_from, version_to) {
+            ("no_events", None, None) => AggregateOutcome::NoEvents,
+            ("events", Some(from), Some(to)) => {
+                AggregateOutcome::events(from, to).map_err(|e| {
+                    PersistenceError::Internal(format!(
+                        "a stored receipt carries an invalid event range: {e:?}"
+                    ))
+                })?
+            }
+            _ => {
+                return Err(PersistenceError::Internal(format!(
+                    "a stored receipt carries an outcome this adapter cannot read: \
+                     kind {kind:?}, range {version_from:?}..={version_to:?}"
+                )))
+            }
         };
 
         let tenant = match stored_tenant {
@@ -358,7 +384,7 @@ where
             tenant,
             key,
             OperationFingerprint::new(fingerprint),
-            StoredResponse::new(response),
+            outcome,
         )))
     }
 
@@ -526,10 +552,19 @@ where
         // statement until it resolves. That wait is correct: the answer to
         // "does this identity exist?" is not knowable until the other
         // transaction commits or rolls back.
+        let (kind, version_from, version_to) = match receipt.outcome() {
+            AggregateOutcome::NoEvents => ("no_events", None, None),
+            AggregateOutcome::Events {
+                version_from,
+                version_to,
+            } => ("events", Some(*version_from), Some(*version_to)),
+        };
+
         let inserted = sqlx::query(
             r#"INSERT INTO operation_receipts
-                   (tenant_id, aggregate_type, aggregate_id, operation_key, fingerprint, response)
-               VALUES ($1, $2, $3, $4, $5, $6)
+                   (tenant_id, aggregate_type, aggregate_id, operation_key, fingerprint,
+                    outcome_kind, version_from, version_to)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(&tenant)
@@ -537,7 +572,9 @@ where
         .bind(receipt.aggregate_id())
         .bind(key)
         .bind(receipt.fingerprint().as_str())
-        .bind(receipt.response().as_bytes())
+        .bind(kind)
+        .bind(version_from)
+        .bind(version_to)
         .execute(&mut *self.tx)
         .await
         .map_err(|e| PersistenceError::Internal(format!("failed to write receipt: {e}")))?;
