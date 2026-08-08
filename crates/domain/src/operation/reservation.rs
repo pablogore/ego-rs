@@ -94,6 +94,26 @@ pub trait OperationReservationStore: Send + Sync {
         cutoff: DateTime<Utc>,
         batch: usize,
     ) -> Result<u64, ReservationError>;
+
+    /// Reports whether the backing store is reachable right now.
+    ///
+    /// Read-only and cheap. An implementation MUST NOT create, mutate, purge
+    /// or observe any reservation: this runs on every readiness probe, and a
+    /// health check that writes would make the act of asking change the thing
+    /// being asked about. It answers exactly one question — can this store be
+    /// talked to — and nothing about any particular operation.
+    ///
+    /// An error means "not reachable", whatever the cause. The variant is
+    /// [`ReservationError::Backend`] in practice; the port does not narrow it,
+    /// because an implementation's failure modes are its own.
+    ///
+    /// **No default implementation, deliberately.** A default returning `Ok`
+    /// would make every store that forgot to write this one report itself
+    /// reachable forever — a readiness probe that can only ever say yes is
+    /// worse than none, because it is indistinguishable from a working one
+    /// until the outage. The compiler refusing an incomplete `impl` is the
+    /// cheapest place to catch that.
+    async fn probe(&self) -> Result<(), ReservationError>;
 }
 
 /// The deterministic identity of one reservation: the `CanonicalTenant` it is
