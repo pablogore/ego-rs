@@ -71,12 +71,20 @@ in-process, which is exactly why it needs somewhere else to live.
 
 ## Where they go
 
-**A separate integration crate/workspace, outside this one**, so that infrastructure
-dependencies never enter the workspace the constitution governs. It is not built
-yet. Nothing here should be reconstructed inside `ego-rs` itself.
+**Outside the root Cargo workspace, inside this repository, at `integration-tests/`**
+— an independent Cargo workspace that is not a member of the root one. Infrastructure
+dependencies therefore never enter the workspace the constitution governs, while the
+invariants stay versioned alongside the code they cover.
 
-Until it exists, every property in the tables below is **unverified**. That is a
-real, accepted, temporary loss — not a claim that the in-process suites cover it.
+`cargo test --workspace` keeps running with no Docker and never compiles or runs that
+directory; the suite is invoked explicitly with
+`cargo test --manifest-path integration-tests/Cargo.toml`. Nothing here may be
+reconstructed inside the **root workspace** — that is what re-breaks the constitution.
+Nothing here belongs in another repository either.
+
+It is not built yet. Until it exists, every property in the tables below is
+**unverified**. That is a real, accepted, temporary loss — not a claim that the
+in-process suites cover it.
 
 ## Scope of the removal
 
