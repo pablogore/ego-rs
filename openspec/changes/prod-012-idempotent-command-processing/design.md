@@ -537,6 +537,62 @@ execution. When it expires, another owner can take over — while the original m
 still be running. Until renewal/heartbeat exists, a lease shorter than a
 legitimate operation is a correctness problem, not a tuning preference.
 
+### AD-3j — What crosses the boundary: `ReservationRejection`, and nothing wider
+
+**Decision**: the runtime method returns
+
+```rust
+async fn reserve_idempotent_operation(..)
+    -> Result<ReservationDecision, ReservationRejection>
+```
+
+and `#[idempotent]` requires, at compile time, `UserError: From<ReservationRejection>`.
+
+**Why not `ServiceError`.** It is already there and it has a `Conflict`
+variant, but it is wide: requiring `From<ServiceError>` would oblige every
+marked operation's error type to absorb variants a reservation can never
+produce. The obligation an API imposes should be the set of failures it can
+actually cause, not the set that happens to be convenient to reuse.
+
+**Why not letting the macro construct the user's error directly.** That removes
+the `From` bound at the cost of putting outcome interpretation back into
+generated code — one copy per operation, none of them the source of truth. AD-3g
+already rejected that.
+
+**Consequence discovered while writing this down: the success side needs two
+shapes, not one.** `Succeeded` is neither a permit nor a rejection — it replays a
+stored response *without executing*. A bare `Result<ReservationPermit, _>` has
+nowhere to put it. So the `Ok` side is a decision:
+
+```
+ReservationDecision::Proceed(permit)   // Fresh, TakenOver
+ReservationDecision::Replay(response)  // Succeeded
+```
+
+**`ReservationRejection` carries exactly the four blocking cases**, kept
+distinguishable rather than flattened to a string, because they call for
+different responses and different operator action:
+
+| Case | Meaning |
+|---|---|
+| `SelfInProgress` | this runtime already holds a valid lease for this key |
+| `OtherInProgress` | another owner holds it |
+| `FingerprintConflict` | same key, different request — permanent |
+| `StoreUnavailable` | the reservation store itself failed |
+
+Reducing them to text at this boundary would force the application layer to
+parse prose to decide between "retry shortly" and "never retry".
+
+**Ownership stays split three ways**, which is the point of the whole shape: the
+store reports outcomes, the runtime decides what each one means for dispatch,
+and the application's error type decides how it is presented. None of the three
+does another's job.
+
+**A `trybuild` case must prove the bound is enforced**, failing with a precise
+message when a marked operation's error type does not implement
+`From<ReservationRejection>` — otherwise the requirement exists only in this
+document.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.

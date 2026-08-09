@@ -468,6 +468,17 @@ unchanged, which is the point of stopping here.
       `OwnedInProgress`, `OtherInProgress` and `TakenOver` cannot be exercised
       deterministically — the branching test would depend on wall time, which is
       what A4 generalised the clock out of auth to avoid.
+      **Boundary types fixed by AD-3j.** The runtime method returns
+      `Result<ReservationDecision, ReservationRejection>`, and `#[idempotent]`
+      requires `UserError: From<ReservationRejection>` at compile time — a
+      `trybuild` case must prove that bound is enforced with a precise message,
+      or the requirement lives only in the design doc. The `Ok` side has two
+      shapes because `Succeeded` is a replay, neither permit nor rejection:
+      `Proceed(permit)` for Fresh/TakenOver, `Replay(response)` for Succeeded.
+      `ReservationRejection` carries four distinguishable cases —
+      `SelfInProgress`, `OtherInProgress`, `FingerprintConflict`,
+      `StoreUnavailable` — not flattened to a string, because "retry shortly"
+      and "never retry" must not require parsing prose to tell apart.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
