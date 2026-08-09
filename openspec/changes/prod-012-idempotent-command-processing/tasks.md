@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 79 complete and 37 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 81 complete and 35 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -366,30 +366,20 @@ unchanged, which is the point of stopping here.
       both directions — marked reports `true`, unmarked still reports `false` —
       so neither a dead flag nor a default-everything-idempotent regression can
       pass unnoticed.
-- [ ] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
-      **PARTIAL — the seam is fixed, the behaviour is not proven. Do not tick
-      this box until B6.4's behavioural test is green.** The insertion point now
-      exists in `crates/service-sdk-macros/src/lib.rs` as a named slot that
-      emits nothing, placed after `#authorize_guard` and `#enforce_tenant_block`
-      and before `on_request`. Both guards fail with `?`, so a denied
-      authorization or an unresolvable tenant has already returned before
-      anything spliced there could run — the ordering is enforced by control
-      flow rather than by convention.
-      What that settles is topology and nothing else. A test over the generated
-      shape cannot show that the reservation runs, that it runs once, or that it
-      receives the final key and fingerprint; a slot that expands to nothing
-      satisfies every such assertion. Recording it as complete on that basis
-      would be exactly the false coverage this change keeps finding elsewhere.
-      The seam deliberately emits nothing: a placeholder `reserve` call without a
-      key, a fingerprint or outcome handling would change production behaviour
-      before the contract governing it exists, and would have to be replaced
-      rather than extended.
-      **Blocking behavioural criteria, owned by B6.4:** authorization denied ->
-      `reserve` called 0 times; tenant rejected -> 0 times; both guards passing ->
-      exactly 1; `reserve` receives the definitive key and fingerprint; the
-      operation does not run when the reservation refuses. A mutation moving the
-      slot above either guard must kill a test by observed calls, never by a
-      list comparison.
+- [x] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
+      The blocking behavioural criteria this box was held open for are now green
+      in `crates/service-sdk/tests/idempotent_dispatch.rs`, and every one of them
+      is stated as an observed count rather than as a shape: authorization denied
+      -> `reserve` called 0 times; tenant rejected -> 0 times; both guards passing
+      -> exactly 1; the definitive key, canonical tenant and fingerprint are read
+      back off the request the store actually received; a refused reservation
+      leaves the handler body at 0 calls.
+      **The mutation that closes it.** Reverting `idempotency_slot` to
+      `quote! {}` — the empty seam this box previously described — fails 8 of the
+      17 tests, each by an observed count or a returned value, none by a list
+      comparison. The 9 that survive are the guard-ordering ones (which pass
+      trivially when nothing reserves at all) and the pure fingerprint unit
+      tests, which is why they are not the evidence and the other 8 are.
 - [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
       `ServiceContext::operation_key()` and threads that exact value into the
       `CommandContext` the service hands to the entity. Test asserts the key
@@ -423,7 +413,29 @@ unchanged, which is the point of stopping here.
         the test** — otherwise it proves the bridge exists rather than that it works.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
-- [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
+- [x] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
+      **Done.** Slot 3 emits one `?`-terminated call to
+      `RuntimeInner::reserve_idempotent_operation`; the store access and the
+      six-way branching stayed in `ReservationConfig::reserve` (AD-3g). The
+      fingerprint is a SHA-256 digest of a tagged, length-prefixed canonical
+      encoding of the typed arguments, built in `operation_fingerprint` rather
+      than borrowed from `serde_json`'s map ordering — that ordering is not a
+      stable property of this workspace, because `preserve_order` is an additive
+      feature any crate in the graph can switch on, and a `HashMap` argument
+      field would then hash in random iteration order. The digest is also what
+      keeps the value inside `fingerprint VARCHAR(255)` for any payload size.
+      `#[idempotent]` gained a third public obligation — every fingerprinted
+      argument must be `Serialize` — with its own isolated `compile_fail`
+      fixture, so no one of the three can be dropped and stay green.
+      **Two things this task forced, recorded as AD-3j amendment 2:** a sixth
+      rejection, `RequestNotFingerprintable`, because serialising a user type is
+      fallible and the alternative was running a marked operation unreserved;
+      and `Option<ReservationDecision>` on the success side, so "this runtime
+      does not reserve" cannot be confused with a `Proceed` that carries a fence.
+      **Not covered here, and stated so it is not mistaken for covered:** the
+      keyless request. Slot 3 reserves only when the context carries a key; the
+      missing-key policy stays with `resolve_operation_key`, and the exposure of
+      a transport that never calls it closes in B6.5/B6.6.
       **Fingerprint contract fixed by AD-3f — read it before writing the
       canonicalisation.** The fingerprint is computed here, in slot 3, over the
       operation's already-deserialised typed arguments: not raw transport bytes,

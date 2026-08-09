@@ -3,6 +3,29 @@ error[E0277]: the trait bound `UnconvertibleError: From<ReservationRejection>` i
    |
 45 |     ) -> Result<PlainReceipt, UnconvertibleError>;
    |                               ^^^^^^^^^^^^^^^^^^ the trait `From<ReservationRejection>` is not implemented for `UnconvertibleError`
+
+error[E0277]: `?` couldn't convert the error to `UnconvertibleError`
+  --> tests/compile_fail/idempotent_error_without_from.rs:37:29
+   |
+37 | #[service(version = "1.0.0")]
+   | ----------------------------^
+   | |                           |
+   | |                           the trait `From<ReservationRejection>` is not implemented for `UnconvertibleError`
+   | this has type `Result<_, UnconvertibleError>`
+   |
+note: `UnconvertibleError` needs to implement `From<ReservationRejection>`
+  --> tests/compile_fail/idempotent_error_without_from.rs:23:1
+   |
+23 | pub struct UnconvertibleError(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `UnconvertibleError: From<ReservationRejection>` is not satisfied
+  --> tests/compile_fail/idempotent_error_without_from.rs:45:31
+   |
+45 |     ) -> Result<PlainReceipt, UnconvertibleError>;
+   |                               ^^^^^^^^^^^^^^^^^^ the trait `From<ReservationRejection>` is not implemented for `UnconvertibleError`
    |
 note: required by a bound in `assert_from`
   --> tests/compile_fail/idempotent_error_without_from.rs:37:1

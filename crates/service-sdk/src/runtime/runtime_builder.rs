@@ -20,9 +20,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::runtime::error::RuntimeInfraError;
-use crate::runtime::idempotency::ReservationConfig;
+use crate::runtime::idempotency::{ReservationConfig, ReservationDecision, ReservationRejection};
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::{OperationFingerprint, OperationKey};
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -595,38 +596,69 @@ impl RuntimeInner {
         Ok(())
     }
 
-    /// The registered reservation store, if this runtime has one.
-    ///
-    /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it lives
-    /// inside this crate; a public accessor would invite reaching around the
-    /// `#[idempotent]` seam to reserve operations by hand, which is the one path the
-    /// enforcement mode cannot police.
-    ///
-    /// Returns `None` only under
-    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility):
-    /// the builder refuses to produce an enforcing runtime without one, so a caller
-    /// that finds `None` here knows enforcement is off rather than that a
-    /// registration was missed.
-    /// `#[expect]` rather than `#[allow]` on purpose: the attribute becomes an error
-    /// the moment a production caller appears, so it cannot outlive its reason.
-    ///
     /// The reservation capability, if this deployment configured one.
+    ///
+    /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it
+    /// lives inside this crate; a public accessor would invite reaching around
+    /// the `#[idempotent]` seam to reserve operations by hand, which is the one
+    /// path the enforcement mode cannot police.
     ///
     /// `None` under
     /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility),
     /// which is the mode a deployment declares when it has not adopted
     /// enforcement. It cannot be `None` under the enforcing variant: the builder
-    /// refuses to produce a runtime in that state.
+    /// refuses to produce a runtime in that state, so a caller that finds `None`
+    /// here knows enforcement is off rather than that a registration was missed.
     ///
     /// The store is reached only through here, never handed out. AD-3g keeps the
     /// reservation and its outcome branching inside this crate so there is one
     /// implementation to test rather than one copy per generated operation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the reservation method, next slice")
-    )]
     pub(crate) fn reservation(&self) -> Option<&ReservationConfig> {
         self.reservation.as_ref()
+    }
+
+    /// Reserves one `#[idempotent]` operation before it is dispatched.
+    ///
+    /// The single public entry point generated slot-3 code calls (AD-3g). The
+    /// store access and the six-way outcome interpretation stay behind it, so
+    /// changing how an outcome is translated is not a breaking change for every
+    /// generated caller. `tenant`, `key` and `fingerprint` arrive already
+    /// definitive — canonicalisation and fingerprinting belong to the generated
+    /// code under AD-3f, and nothing is re-derived here.
+    ///
+    /// # The three answers, and why `Option` rather than a third decision
+    ///
+    /// `None` means **this runtime does not reserve at all** — no
+    /// [`ReservationConfig`] was registered, which the builder permits only
+    /// under
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility).
+    /// That is not the same statement as
+    /// [`ReservationDecision::Proceed`](crate::runtime::ReservationDecision::Proceed),
+    /// even though both continue: `Proceed` carries a permit, and therefore a
+    /// fence that a later completion must present. A deployment that never
+    /// reserved has no fence to present and must not have one invented for it.
+    /// Folding the two into a single "continue" would make a permit-less
+    /// completion representable, which is exactly the shape
+    /// [`ReservationDecision`](crate::runtime::ReservationDecision) is split to
+    /// prevent.
+    ///
+    /// # What this method deliberately does not decide
+    ///
+    /// Whether a *keyless* request may proceed. That is the missing-key policy,
+    /// and it has one owner —
+    /// [`resolve_operation_key`](crate::idempotency::resolve_operation_key) at
+    /// the transport edge — so two adapters cannot disagree about it. Slot 3
+    /// calls this method only when the context carries a key.
+    pub async fn reserve_idempotent_operation(
+        &self,
+        tenant: Option<TenantId>,
+        key: OperationKey,
+        fingerprint: OperationFingerprint,
+    ) -> Result<Option<ReservationDecision>, ReservationRejection> {
+        match self.reservation() {
+            None => Ok(None),
+            Some(config) => config.reserve(tenant, key, fingerprint).await.map(Some),
+        }
     }
 
     /// Mints a cross-tenant permit authorizing access to `destination`

@@ -21,6 +21,16 @@ use ego_service_sdk_macros::service;
 #[derive(Debug)]
 pub struct DescriptorError(String);
 
+/// `#[idempotent]` requires it: a refused reservation is returned as the
+/// operation's own error, converted by `From` (AD-3g/AD-3j). This fixture
+/// predates that bound — it was written when the marker was inert, and it is
+/// the operation's obligation now, not an accommodation for the test.
+impl From<ego_service_sdk::runtime::ReservationRejection> for DescriptorError {
+    fn from(r: ego_service_sdk::runtime::ReservationRejection) -> Self {
+        DescriptorError(r.to_string())
+    }
+}
+
 impl ServiceErrorTrait for DescriptorError {
     fn code(&self) -> &str {
         "DESCRIPTOR_ERROR"

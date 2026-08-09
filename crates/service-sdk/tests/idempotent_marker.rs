@@ -34,4 +34,8 @@ fn idempotent_marker_compile_fail() {
     // Error that cannot absorb a refused reservation. Its output satisfies both
     // serde bounds so the failure can only be the `From` obligation.
     t.compile_fail("tests/compile_fail/idempotent_error_without_from.rs");
+    // Argument with no canonical form, so no fingerprint can be computed over
+    // it. Its output and error satisfy their obligations so the failure can
+    // only be the input one.
+    t.compile_fail("tests/compile_fail/idempotent_input_not_fingerprintable.rs");
 }

@@ -594,6 +594,41 @@ message when a marked operation's error type does not implement
 `From<ReservationRejection>` — otherwise the requirement exists only in this
 document.
 
+#### AD-3j amendment 2 — a sixth case, and `Option` on the success side
+
+Two things this decision could not have known were forced by implementing the
+slot, and both are recorded here rather than left as code nobody agreed to.
+
+**A sixth rejection: `RequestNotFingerprintable`.** AD-3f puts the fingerprint in
+generated code, over the typed arguments, computed through `serde`. Serialising
+an arbitrary user type is *fallible* — a hand-written `Serialize` that calls
+`Error::custom`, or an `f64` holding `NaN`. When it fails there is no
+fingerprint, so there is nothing to reserve under, and the five existing cases
+all state something untrue about it: `StoreUnavailable` says the store failed
+when it was never reached and invites a retry that cannot help;
+`FingerprintConflict` says two fingerprints were computed and differed when none
+was computed at all. The only alternative to a sixth case was proceeding
+unreserved, which runs a marked operation with no idempotency whatever — the one
+outcome the marker exists to prevent. It is permanent for the caller and points
+at a defect in an argument type, which is a third kind of operator action again.
+
+**The success side is `Option<ReservationDecision>`.** A runtime that registered
+no reservation store — legal only under `Compatibility` — must dispatch
+normally. That is not `Proceed`: `Proceed` carries a permit, and therefore a
+fence a later completion must present. A deployment that never reserved has no
+fence, and folding the two together would make a permit-less completion
+representable, which is the exact shape `ReservationDecision` was split to
+prevent. `None` says "this runtime does not reserve" and says nothing else.
+
+**What this amendment deliberately does not decide: the keyless request.** Slot 3
+reserves only when the context carries an `OperationKey`. Whether a *missing* key
+is admitted is the missing-key policy, and it already has exactly one owner —
+`resolve_operation_key`, at the transport edge — so that two adapters cannot
+disagree about it. Deciding it a second time inside the slot would create the
+second definition that module exists to prevent. The residual exposure is a
+transport that never calls it; B6.5/B6.6 close that for HTTP, and any future
+adapter closes it by using the same shared function.
+
 ### AD-3k — One codec owns both sides of the stored response
 
 **Decision**: the stored response has **one** codec, owning `encode` and

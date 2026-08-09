@@ -1,0 +1,52 @@
+error[E0277]: the trait bound `OpaqueRequest: serde::Serialize` is not satisfied
+  --> tests/compile_fail/idempotent_input_not_fingerprintable.rs:52:1
+   |
+52 | #[service(version = "1.0.0")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Serialize` is not implemented for `OpaqueRequest`
+   |
+   = note: for local types consider adding `#[derive(serde::Serialize)]` to your `OpaqueRequest` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Serialize`:
+             &'a T
+             &'a mut T
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+             (T0, T1, T2, T3, T4)
+           and $N others
+   = note: required for `&OpaqueRequest` to implement `Serialize`
+   = note: 1 redundant requirement hidden
+   = note: required for `(&OpaqueRequest,)` to implement `Serialize`
+note: required by a bound in `operation_fingerprint`
+  --> src/runtime/idempotency.rs
+   |
+   | pub fn operation_fingerprint<T: serde::Serialize>(
+   |                                 ^^^^^^^^^^^^^^^^ required by this bound in `operation_fingerprint`
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `OpaqueRequest: serde::Serialize` is not satisfied
+  --> tests/compile_fail/idempotent_input_not_fingerprintable.rs:59:18
+   |
+59 |         request: OpaqueRequest,
+   |                  ^^^^^^^^^^^^^ the trait `Serialize` is not implemented for `OpaqueRequest`
+   |
+   = note: for local types consider adding `#[derive(serde::Serialize)]` to your `OpaqueRequest` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Serialize`:
+             &'a T
+             &'a mut T
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+             (T0, T1, T2, T3, T4)
+           and $N others
+note: required by a bound in `assert_fingerprintable`
+  --> tests/compile_fail/idempotent_input_not_fingerprintable.rs:52:1
+   |
+52 | #[service(version = "1.0.0")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_fingerprintable`
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

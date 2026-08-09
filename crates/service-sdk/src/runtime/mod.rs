@@ -12,6 +12,7 @@ pub use builder::{Runtime, RuntimeBuilder, RuntimeResolver};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
 pub use error::RuntimeInfraError;
 pub use idempotency::{
+    decode_stored_response, encode_stored_response, operation_fingerprint,
     IdempotencyEnforcementMode, ReservationConfig, ReservationConfigError, ReservationDecision,
     ReservationPermit, ReservationRejection, StoredResponseError,
 };

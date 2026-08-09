@@ -1,0 +1,801 @@
+//! Behavioural coverage of the `#[idempotent]` slot — PROD-012 B6.4.
+//!
+//! These tests exist because a structural one cannot close this unit. A slot
+//! that expands to nothing satisfies every assertion about generated shape or
+//! ordering, so everything here is stated in terms of what was *observed*:
+//! how many times the store's `reserve` ran, how many times the handler body
+//! ran, and what the store was handed. Moving the slot above a guard, or
+//! emptying it, has to kill a test by an observed count.
+
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, Weak,
+};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{DateTime, TimeZone, Utc};
+use ego_domain::context::TenantId;
+use ego_domain::operation::{
+    FencingToken, Lease, OperationFingerprint, OperationId, OperationKey,
+    OperationReservationStore, OwnerFence, OwnerId, ReservationError, ReservationOutcome,
+    ReserveRequest, StoredServiceResponse,
+};
+use ego_domain::time::Clock;
+use ego_security_sdk::{
+    authorization::{AccessRequest, AuthorizationDecision, AuthorizationProvider},
+    context::SecurityContext,
+    error::SecurityError,
+    principal::{Principal, PrincipalKind, SubjectId},
+};
+use ego_service_sdk::{
+    context::ServiceContext,
+    error::category::ErrorCategory,
+    error::ServiceErrorTrait,
+    interceptor::InterceptorChain,
+    runtime::{
+        operation_fingerprint, ReservationRejection, Runtime, RuntimeBuilder, RuntimeInner,
+        TenantEnforcementMode,
+    },
+};
+#[allow(unused_imports)]
+use ego_service_sdk_macros::{authorize, idempotent, operation, service, tenant_scoped};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// The service under test
+// ---------------------------------------------------------------------------
+
+/// The operation's semantic input. Two fields, declared in an order that is
+/// deliberately *not* alphabetical, so a canonicalisation that leaked struct
+/// declaration order would still be stable while one that leaked map iteration
+/// order would not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChargeRequest {
+    pub reference: String,
+    pub amount_cents: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChargeReceipt {
+    pub confirmation: String,
+}
+
+/// Keeps the two refusal families apart so a test can assert *which* one came
+/// back. Collapsing them to a string would let a test pass on the right error
+/// for the wrong reason.
+#[derive(Debug, PartialEq)]
+pub enum BillingError {
+    Security(String),
+    Refused(ReservationRejection),
+}
+
+impl From<SecurityError> for BillingError {
+    fn from(e: SecurityError) -> Self {
+        BillingError::Security(e.to_string())
+    }
+}
+
+impl From<ReservationRejection> for BillingError {
+    fn from(r: ReservationRejection) -> Self {
+        BillingError::Refused(r)
+    }
+}
+
+impl ServiceErrorTrait for BillingError {
+    fn code(&self) -> &str {
+        "BILLING_ERROR"
+    }
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Business
+    }
+    fn message(&self) -> String {
+        format!("{self:?}")
+    }
+}
+
+#[service(version = "1.0.0")]
+pub trait BillingService {
+    /// Fully guarded: authorization, then tenant scoping, then the reservation.
+    /// The one operation that can show a guard failure leaves `reserve`
+    /// untouched.
+    #[operation]
+    #[authorize(context = ctx, permission = "billing:charge")]
+    #[tenant_scoped]
+    #[idempotent]
+    async fn charge(
+        &self,
+        ctx: ServiceContext,
+        request: ChargeRequest,
+    ) -> Result<ChargeReceipt, BillingError>;
+
+    /// Reservation only. Carries the outcome matrix without dragging a
+    /// security fixture through every case.
+    #[operation]
+    #[idempotent]
+    async fn settle(
+        &self,
+        ctx: ServiceContext,
+        request: ChargeRequest,
+    ) -> Result<ChargeReceipt, BillingError>;
+}
+
+/// Counts how many times a handler body actually ran. Every "did not execute"
+/// assertion in this file reads this counter.
+struct CountingBilling {
+    charge_calls: Arc<AtomicUsize>,
+    settle_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl BillingService for CountingBilling {
+    async fn charge(
+        &self,
+        _ctx: ServiceContext,
+        request: ChargeRequest,
+    ) -> Result<ChargeReceipt, BillingError> {
+        self.charge_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(ChargeReceipt {
+            confirmation: format!("charged:{}", request.reference),
+        })
+    }
+
+    async fn settle(
+        &self,
+        _ctx: ServiceContext,
+        request: ChargeRequest,
+    ) -> Result<ChargeReceipt, BillingError> {
+        self.settle_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(ChargeReceipt {
+            confirmation: format!("settled:{}", request.reference),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+struct FrozenClock;
+impl Clock for FrozenClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_000, 0).single().expect("valid instant")
+    }
+}
+
+/// Answers `reserve` from a script and records every request it saw.
+///
+/// The recorded requests are the evidence for "the definitive key and
+/// fingerprint reached the store" — asserting on a value the test computed
+/// itself would prove nothing about what the generated code sent.
+struct SpyStore {
+    script: Mutex<Vec<Result<ReservationOutcome, ReservationError>>>,
+    seen: Mutex<Vec<ReserveRequest>>,
+}
+
+impl SpyStore {
+    fn scripted(answers: Vec<Result<ReservationOutcome, ReservationError>>) -> Arc<Self> {
+        Arc::new(Self {
+            // Popped from the back, so the script reads in call order.
+            script: Mutex::new(answers.into_iter().rev().collect()),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reserve_calls(&self) -> usize {
+        self.seen.lock().expect("not poisoned").len()
+    }
+
+    fn first_request(&self) -> ReserveRequest {
+        self.seen
+            .lock()
+            .expect("not poisoned")
+            .first()
+            .cloned()
+            .expect("reserve was called at least once")
+    }
+}
+
+#[async_trait]
+impl OperationReservationStore for SpyStore {
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        self.seen.lock().expect("not poisoned").push(req);
+        self.script
+            .lock()
+            .expect("not poisoned")
+            .pop()
+            .expect("the script covers every reserve this test makes")
+    }
+    async fn renew(&self, _f: &OwnerFence, _u: DateTime<Utc>) -> Result<(), ReservationError> {
+        panic!("slot 3 only reserves; completion lands in B6.8");
+    }
+    async fn complete(
+        &self,
+        _f: &OwnerFence,
+        _r: StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        panic!("slot 3 only reserves; completion lands in B6.8");
+    }
+    async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+        panic!("slot 3 only reserves; completion lands in B6.8");
+    }
+    async fn purge_completed_before(
+        &self,
+        _c: DateTime<Utc>,
+        _b: usize,
+    ) -> Result<u64, ReservationError> {
+        panic!("slot 3 only reserves");
+    }
+    async fn probe(&self) -> Result<(), ReservationError> {
+        Ok(())
+    }
+}
+
+struct AllowProvider;
+#[async_trait]
+impl AuthorizationProvider for AllowProvider {
+    async fn authorize(
+        &self,
+        _p: &Principal,
+        _r: &AccessRequest,
+        _c: &SecurityContext,
+    ) -> Result<AuthorizationDecision, SecurityError> {
+        Ok(AuthorizationDecision::Allow)
+    }
+}
+
+struct DenyProvider;
+#[async_trait]
+impl AuthorizationProvider for DenyProvider {
+    async fn authorize(
+        &self,
+        _p: &Principal,
+        _r: &AccessRequest,
+        _c: &SecurityContext,
+    ) -> Result<AuthorizationDecision, SecurityError> {
+        Ok(AuthorizationDecision::Deny {
+            reason: "denied-for-test".to_string(),
+        })
+    }
+}
+
+struct StubAuthn;
+impl ego_security_sdk::authentication::AuthenticationProvider for StubAuthn {
+    fn authenticate(
+        &self,
+        _c: &ego_security_sdk::credential::Credential,
+    ) -> Result<SecurityContext, ego_security_sdk::AuthenticationError> {
+        unimplemented!("not used here");
+    }
+}
+
+const OWNER: &str = "owner-under-test";
+const LEASE: Duration = Duration::from_secs(30);
+
+fn lease_until() -> DateTime<Utc> {
+    Utc.timestamp_opt(1_030, 0).single().expect("valid instant")
+}
+
+/// A runtime that reserves, under the fail-closed default enforcement mode —
+/// the mode a real deployment runs. The store's presence is what makes that
+/// mode buildable.
+fn runtime_with(store: Arc<SpyStore>, authz: Option<Arc<dyn AuthorizationProvider>>) -> Runtime {
+    let mut builder = RuntimeBuilder::new()
+        .with_operation_reservation_store(store)
+        .with_reservation_clock(Arc::new(FrozenClock))
+        .with_reservation_owner_id(OwnerId::new(OWNER))
+        .with_reservation_lease_duration(LEASE)
+        .with_tenant_enforcement_mode(TenantEnforcementMode::AuthenticatedOnly);
+    if let Some(authz) = authz {
+        builder = builder.with_security(Arc::new(StubAuthn), authz);
+    }
+    builder.build()
+}
+
+/// The proxy plus the two counters its inner service increments.
+fn proxy(
+    rt: &Runtime,
+) -> (
+    BillingServiceRef,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Weak<RuntimeInner>,
+) {
+    let charge_calls = Arc::new(AtomicUsize::new(0));
+    let settle_calls = Arc::new(AtomicUsize::new(0));
+    let inner: Arc<dyn BillingService> = Arc::new(CountingBilling {
+        charge_calls: charge_calls.clone(),
+        settle_calls: settle_calls.clone(),
+    });
+    let weak = Arc::downgrade(rt.inner());
+    let proxy = BillingServiceRef::new(inner, Arc::new(InterceptorChain::new()), weak.clone());
+    (proxy, charge_calls, settle_calls, weak)
+}
+
+fn key() -> OperationKey {
+    OperationKey::parse("op-under-test").expect("a non-empty key parses")
+}
+
+fn request() -> ChargeRequest {
+    ChargeRequest {
+        reference: "ref-1".to_string(),
+        amount_cents: 4_200,
+    }
+}
+
+/// An authenticated context whose principal carries a tenant, so
+/// `#[tenant_scoped]` resolves rather than failing closed.
+fn authenticated_ctx() -> ServiceContext {
+    let principal = Principal::new(
+        PrincipalKind::User,
+        SubjectId::new("user:test").expect("valid subject"),
+    )
+    .with_tenant_id(TenantId::new("acme").expect("valid tenant"));
+    ServiceContext::new()
+        .with_security(Arc::new(SecurityContext::empty(principal)))
+        .with_operation_key(key())
+}
+
+fn fresh_lease() -> Lease {
+    Lease {
+        operation_id: OperationId::new(None, key()),
+        owner_id: OwnerId::new(OWNER),
+        fencing_token: FencingToken::initial(),
+        lease_until: lease_until(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The guards run first, and a failing one leaves the store untouched
+// ---------------------------------------------------------------------------
+
+/// A reservation taken for a call that is about to be refused is a reservation
+/// nobody releases: the key stays leased until it expires, and the caller's
+/// legitimate retry is refused as self-contention. This is the assertion a
+/// mutation moving slot 3 above `#[authorize]` has to fail.
+#[tokio::test]
+async fn a_denied_authorization_never_reaches_the_store() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), Some(Arc::new(DenyProvider)));
+    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+
+    let result = proxy.charge(authenticated_ctx(), request()).await;
+
+    assert!(matches!(result, Err(BillingError::Security(_))));
+    assert_eq!(store.reserve_calls(), 0, "authorization runs before slot 3");
+    assert_eq!(charge_calls.load(Ordering::Relaxed), 0);
+}
+
+/// Same property for slot 2. The context here is unauthenticated, so
+/// `enforce_tenant` fails closed under `AuthenticatedOnly` — and it must fail
+/// before anything is reserved, because a reservation namespaced by a tenant
+/// that could not be resolved has no namespace at all.
+#[tokio::test]
+async fn a_rejected_tenant_never_reaches_the_store() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
+    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+
+    // Authenticated (so `#[authorize]` passes) but with no tenant claim, which
+    // is exactly what the resolver refuses to substitute a hint for.
+    let principal = Principal::new(
+        PrincipalKind::User,
+        SubjectId::new("user:test").expect("valid subject"),
+    );
+    let ctx = ServiceContext::new()
+        .with_security(Arc::new(SecurityContext::empty(principal)))
+        .with_operation_key(key());
+
+    let result = proxy.charge(ctx, request()).await;
+
+    assert!(matches!(result, Err(BillingError::Security(_))));
+    assert_eq!(
+        store.reserve_calls(),
+        0,
+        "tenant scoping runs before slot 3"
+    );
+    assert_eq!(charge_calls.load(Ordering::Relaxed), 0);
+}
+
+/// Both guards passing reserves exactly once — not zero (an empty slot) and not
+/// twice (a reservation duplicated per guard).
+#[tokio::test]
+async fn both_guards_passing_reserves_exactly_once() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
+    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+
+    let result = proxy.charge(authenticated_ctx(), request()).await;
+
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(store.reserve_calls(), 1);
+    assert_eq!(charge_calls.load(Ordering::Relaxed), 1);
+}
+
+// ---------------------------------------------------------------------------
+// What the store is handed
+// ---------------------------------------------------------------------------
+
+/// The key is the one carried from ingress, never regenerated; the tenant is
+/// the resolved canonical one, never the raw hint; the lease comes from the
+/// configured clock. A test computing the fingerprint the same way the
+/// production code does would be circular, so the fingerprint's own properties
+/// are asserted separately below — here it is only pinned to be non-empty and
+/// stable across an identical retry.
+#[tokio::test]
+async fn the_definitive_key_tenant_and_fingerprint_reach_the_store() {
+    let store = SpyStore::scripted(vec![
+        Ok(ReservationOutcome::Fresh(fresh_lease())),
+        Ok(ReservationOutcome::Fresh(fresh_lease())),
+    ]);
+    let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
+    let (proxy, _, _, _rt_weak) = proxy(&rt);
+
+    // A caller-supplied tenant hint that disagrees with nothing, present only
+    // to show the reservation is not namespaced by it.
+    let ctx = authenticated_ctx().with_tenant_id("acme");
+    proxy
+        .charge(ctx.clone(), request())
+        .await
+        .expect("the reservation is fresh");
+
+    let seen = store.first_request();
+    assert_eq!(seen.operation_key, key(), "the ingress key, unmodified");
+    assert_eq!(
+        seen.tenant,
+        Some(TenantId::new("acme").expect("valid tenant")),
+        "the namespace is the resolved canonical tenant"
+    );
+    assert_eq!(seen.owner_id, OwnerId::new(OWNER));
+    assert_eq!(
+        seen.lease_until,
+        lease_until(),
+        "lease_until is the configured clock plus the configured lease"
+    );
+
+    // An identical retry must present the identical fingerprint, or a legitimate
+    // retry would be refused as a permanent conflict.
+    proxy
+        .charge(ctx, request())
+        .await
+        .expect("the reservation is fresh");
+    let all = store.seen.lock().expect("not poisoned").clone();
+    assert_eq!(all[0].fingerprint, all[1].fingerprint);
+}
+
+/// AD-3f, stated as the property that matters: the fingerprint follows the
+/// typed values, not the syntax that produced them.
+#[test]
+fn the_fingerprint_follows_the_typed_values_not_their_syntax() {
+    let one: ChargeRequest =
+        serde_json::from_str(r#"{"reference":"ref-1","amount_cents":4200}"#).expect("valid");
+    // The same values, in a different key order, with whitespace.
+    let two: ChargeRequest =
+        serde_json::from_str("{\n  \"amount_cents\" : 4200 ,\n  \"reference\" : \"ref-1\"\n}")
+            .expect("valid");
+
+    assert_eq!(
+        operation_fingerprint(&(&one,)).expect("serialisable"),
+        operation_fingerprint(&(&two,)).expect("serialisable"),
+        "two syntactically different requests that deserialise to the same \
+         typed values must reserve under the same fingerprint — otherwise a \
+         legitimate retry is refused as a permanent conflict"
+    );
+
+    let different = ChargeRequest {
+        amount_cents: 4_201,
+        ..one.clone()
+    };
+    assert_ne!(
+        operation_fingerprint(&(&one,)).expect("serialisable"),
+        operation_fingerprint(&(&different,)).expect("serialisable"),
+        "two different typed values must not share a fingerprint, or a \
+         different request would silently replay another's answer"
+    );
+}
+
+/// Length prefixing, checked where naive concatenation fails: `["ab"]` and
+/// `["a","b"]` flatten to the same bytes without it, and two genuinely
+/// different requests would deduplicate against each other.
+#[test]
+fn adjacent_arguments_cannot_be_reassociated_into_the_same_fingerprint() {
+    let split = operation_fingerprint(&(&"a", &"b")).expect("serialisable");
+    let joined = operation_fingerprint(&(&"ab", &"")).expect("serialisable");
+    assert_ne!(split, joined);
+}
+
+// ---------------------------------------------------------------------------
+// The three dispatch outcomes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn proceed_executes_the_operation_exactly_once() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    let out = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("a fresh reservation proceeds");
+
+    assert_eq!(out.confirmation, "settled:ref-1");
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.reserve_calls(), 1);
+}
+
+/// A takeover proceeds too. It is a separate case from `Fresh` because it is
+/// the one where somebody else's lease expired — if it stopped dispatch, an
+/// operation whose owner died would be unrecoverable.
+#[tokio::test]
+async fn a_takeover_also_executes_the_operation() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::TakenOver(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("a takeover proceeds");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+}
+
+/// The point of the whole change: the second arrival of an operation that
+/// already completed answers with what the first produced and runs nothing.
+#[tokio::test]
+async fn replay_returns_the_stored_output_without_executing() {
+    let stored_output = ChargeReceipt {
+        confirmation: "settled-on-the-first-attempt".to_string(),
+    };
+    let stored = ego_service_sdk::runtime::encode_stored_response(&stored_output).expect("encodes");
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Succeeded(stored))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    let out = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("a completed reservation replays");
+
+    assert_eq!(
+        out, stored_output,
+        "the replay must be the recorded answer, not a fresh execution's"
+    );
+    assert_eq!(
+        settle_calls.load(Ordering::Relaxed),
+        0,
+        "a replay that re-runs the handler produces a second set of effects, \
+         which is the exact bug this change exists to close"
+    );
+}
+
+/// A stored response this build cannot read is refused, not guessed at, and
+/// still does not execute — re-running would be the one thing worse than
+/// failing, because the operation already happened.
+#[tokio::test]
+async fn an_undecodable_stored_response_refuses_without_executing() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Succeeded(
+        StoredServiceResponse::new(b"not an envelope this build writes".to_vec()),
+    ))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    let result = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        BillingError::Refused(ReservationRejection::StoredResponseIncompatible)
+    );
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Every refusal stops dispatch, and arrives as itself
+// ---------------------------------------------------------------------------
+
+/// The four store-answerable refusals, each asserted by identity rather than by
+/// "some error": they call for different caller and operator action, and a test
+/// that only checked `is_err()` would pass with all four collapsed into one.
+#[tokio::test]
+async fn every_refusal_stops_dispatch_and_arrives_as_itself() {
+    let cases: Vec<(
+        Result<ReservationOutcome, ReservationError>,
+        ReservationRejection,
+    )> = vec![
+        (
+            Ok(ReservationOutcome::OwnedInProgress(fresh_lease())),
+            ReservationRejection::SelfInProgress,
+        ),
+        (
+            Ok(ReservationOutcome::OtherInProgress),
+            ReservationRejection::OtherInProgress,
+        ),
+        (
+            Ok(ReservationOutcome::Conflict),
+            ReservationRejection::FingerprintConflict,
+        ),
+        (
+            Err(ReservationError::Backend("down".to_string())),
+            ReservationRejection::StoreUnavailable,
+        ),
+    ];
+
+    for (answer, expected) in cases {
+        let store = SpyStore::scripted(vec![answer]);
+        let rt = runtime_with(store.clone(), None);
+        let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+        let result = proxy
+            .settle(ServiceContext::new().with_operation_key(key()), request())
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            BillingError::Refused(expected.clone()),
+            "a refused reservation must arrive as the case it is"
+        );
+        assert_eq!(
+            settle_calls.load(Ordering::Relaxed),
+            0,
+            "{expected:?} must not execute the operation"
+        );
+    }
+}
+
+/// A dropped runtime is the store being unreachable. It must refuse rather than
+/// fall through to an unreserved execution — the fail-open branch is the one
+/// that silently disables the guarantee.
+#[tokio::test]
+async fn a_dropped_runtime_refuses_rather_than_running_unreserved() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    drop(rt);
+
+    let result = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        BillingError::Refused(ReservationRejection::StoreUnavailable)
+    );
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(store.reserve_calls(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The two ways a marked operation legitimately does not reserve
+// ---------------------------------------------------------------------------
+
+/// A runtime that registered no reservation store dispatches normally. That is
+/// what `Compatibility` means, and the assertion that matters is that it
+/// reaches the handler rather than failing on a capability it never claimed.
+#[tokio::test]
+async fn a_runtime_without_reservations_dispatches_normally() {
+    let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("no reservation capability means no reservation");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+}
+
+/// A context with no key does not reserve. The missing-key policy has exactly
+/// one owner — `resolve_operation_key`, at the transport edge — and deciding it
+/// a second time here would give two places the power to disagree about it.
+#[tokio::test]
+async fn a_context_without_a_key_does_not_reserve() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new(), request())
+        .await
+        .expect("no key, no reservation");
+
+    assert_eq!(store.reserve_calls(), 0);
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+}
+
+/// An unmarked operation is untouched by any of this. Without it, a slot that
+/// fired for every operation would still pass every test above.
+#[tokio::test]
+async fn an_unmarked_operation_never_reserves() {
+    #[service(version = "1.0.0")]
+    pub trait PlainService {
+        #[operation]
+        async fn look(&self, ctx: ServiceContext, id: String) -> Result<String, BillingError>;
+    }
+
+    struct Plain;
+    #[async_trait]
+    impl PlainService for Plain {
+        async fn look(&self, _ctx: ServiceContext, id: String) -> Result<String, BillingError> {
+            Ok(id)
+        }
+    }
+
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), None);
+    let inner: Arc<dyn PlainService> = Arc::new(Plain);
+    let proxy = PlainServiceRef::new(
+        inner,
+        Arc::new(InterceptorChain::new()),
+        Arc::downgrade(rt.inner()),
+    );
+
+    let out = proxy
+        .look(
+            ServiceContext::new().with_operation_key(key()),
+            "x".to_string(),
+        )
+        .await
+        .expect("an unmarked operation dispatches");
+
+    assert_eq!(out, "x");
+    assert_eq!(
+        store.reserve_calls(),
+        0,
+        "only #[idempotent] operations reserve"
+    );
+}
+
+/// The fingerprint covers the arguments and nothing else. Two attempts that
+/// differ only in context metadata — a different correlation id — must produce
+/// the same fingerprint, or every retry would look like a different request.
+#[tokio::test]
+async fn context_metadata_does_not_enter_the_fingerprint() {
+    let store = SpyStore::scripted(vec![
+        Ok(ReservationOutcome::Fresh(fresh_lease())),
+        Ok(ReservationOutcome::Fresh(fresh_lease())),
+    ]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, _, _rt_weak) = proxy(&rt);
+
+    for correlation in ["attempt-1", "attempt-2"] {
+        proxy
+            .settle(
+                ServiceContext::new()
+                    .with_operation_key(key())
+                    .with_correlation_id(correlation),
+                request(),
+            )
+            .await
+            .expect("fresh");
+    }
+
+    let all = store.seen.lock().expect("not poisoned").clone();
+    assert_eq!(
+        all[0].fingerprint, all[1].fingerprint,
+        "correlation id describes the attempt, not the request"
+    );
+}
+
+/// The fingerprint is bounded. `operation_reservations.fingerprint` is
+/// `VARCHAR(255)`, so a fingerprint that grew with the payload would insert
+/// fine in tests and fail in production on the first large request.
+#[test]
+fn the_fingerprint_is_bounded_regardless_of_payload_size() {
+    let big = ChargeRequest {
+        reference: "x".repeat(100_000),
+        amount_cents: 1,
+    };
+    let fingerprint: OperationFingerprint = operation_fingerprint(&(&big,)).expect("serialisable");
+    assert_eq!(
+        fingerprint.to_string().len(),
+        64,
+        "a SHA-256 digest rendered as hex, independent of the input's size"
+    );
+}

@@ -500,34 +500,53 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
-                // Slot 3 (PROD-012 B6.3) — the seam the reservation call will occupy,
-                // fixed here and deliberately emitting nothing yet.
+                // Slot 3 (PROD-012) — the reservation, and everything it needs.
                 //
-                // Its position is the decision this task makes: after
-                // `#authorize_guard` and `#enforce_tenant_block`, before
-                // `on_request` and the inner call. That ordering is not a
-                // convention the next author has to remember — both guards fail
-                // with `?`, so a denied authorization or an unresolvable tenant
-                // has already returned from this function before anything spliced
-                // here could run. Placing the slot above either guard would let a
-                // reservation be taken for a call that is about to be refused.
+                // Its position: after `#authorize_guard` and
+                // `#enforce_tenant_block`, before `on_request` and the inner
+                // call. That ordering is not a convention the next author has to
+                // remember — both guards fail with `?`, so a denied
+                // authorization or an unresolvable tenant has already returned
+                // from this function before anything here could run. Placing the
+                // slot above either guard would let a reservation be taken for a
+                // call that is about to be refused, and the same `?` at the slot
+                // itself means a refused reservation returns before `on_request`
+                // and before the handler.
                 //
-                // **What is NOT settled by fixing this seam:** nothing here proves
-                // the reservation actually runs, or that it runs only once, or
-                // that it receives the final key and fingerprint. A test over the
-                // generated shape can only show topology. The behavioural proof —
-                // denied authorization leaves `reserve` uncalled, a rejected
-                // tenant leaves it uncalled, passing guards call it exactly once —
-                // belongs to B6.4 and is a blocking criterion there. B6.3 stays
-                // open until that test is green, precisely so an empty seam is
-                // never mistaken for an enforced one.
-                //
-                // It emits nothing on purpose. A placeholder `reserve` call
-                // without a key, a fingerprint, or outcome handling would change
-                // production behaviour before the contract that governs it exists,
-                // and would have to be replaced rather than extended.
-                // The two public obligations `#[idempotent]` imposes, asserted
-                // at type-check time and generating no code — the same
+                // Topology alone does not prove that, which is why this is
+                // covered by tests that count observed `reserve` and handler
+                // calls rather than by inspecting the generated shape: a slot
+                // that expanded to nothing would satisfy every structural
+                // assertion.
+                let idempotent_out_ty = match &method.sig.output {
+                    syn::ReturnType::Type(_, ty) => result_ok_type(ty).cloned(),
+                    _ => None,
+                };
+                let idempotent_err_ty = match &method.sig.output {
+                    syn::ReturnType::Type(_, ty) => result_error_type(ty).cloned(),
+                    _ => None,
+                };
+
+                // The parameters the fingerprint covers: every typed argument
+                // except the context (AD-3f). The context describes *this
+                // attempt* — key, owner, trace, correlation — and folding any of
+                // it in would give every retry a different fingerprint, which is
+                // the exact failure the fingerprint exists to prevent.
+                let fingerprint_args: Vec<&proc_macro2::TokenStream> = arg_names
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != ctx_param_idx)
+                    .map(|(_, name)| name)
+                    .collect();
+                let fingerprint_arg_types: Vec<&proc_macro2::TokenStream> = arg_types
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != ctx_param_idx)
+                    .map(|(_, ty)| ty)
+                    .collect();
+
+                // The public obligations `#[idempotent]` imposes, asserted at
+                // type-check time and generating no code — the same
                 // const-closure pattern `#[authorize]` and `#[tenant_scoped]`
                 // use.
                 //
@@ -536,19 +555,10 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 // for either reason, and whichever bound was silently dropped
                 // would keep the harness green.
                 let idempotency_bounds = if has_idempotent {
-                    let out_ty = match &method.sig.output {
-                        syn::ReturnType::Type(_, ty) => result_ok_type(ty).cloned(),
-                        _ => None,
-                    };
-                    let err_ty = match &method.sig.output {
-                        syn::ReturnType::Type(_, ty) => result_error_type(ty).cloned(),
-                        _ => None,
-                    };
-
                     // A replay answers with bytes the runtime stored, so the
                     // output must survive the round trip in both directions
                     // (AD-3k).
-                    let output_bound = out_ty.map(|ty| quote! {
+                    let output_bound = idempotent_out_ty.as_ref().map(|ty| quote! {
                         const _: fn() = || {
                             fn assert_codec<T: serde::Serialize + serde::de::DeserializeOwned>() {}
                             assert_codec::<#ty>();
@@ -558,19 +568,121 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     // A refused reservation is returned as the operation's own
                     // error, converted by `From` — the macro never interprets an
                     // outcome (AD-3g).
-                    let error_bound = err_ty.map(|ty| quote! {
+                    let error_bound = idempotent_err_ty.as_ref().map(|ty| quote! {
                         const _: fn() = || {
                             fn assert_from<E: From<ego_service_sdk::runtime::ReservationRejection>>() {}
                             assert_from::<#ty>();
                         };
                     });
 
-                    quote! { #output_bound #error_bound }
+                    // Every fingerprinted argument must have a canonical form.
+                    // Asserted per-parameter rather than over the tuple so the
+                    // error names the offending argument's own type instead of
+                    // an anonymous tuple the author never wrote.
+                    let input_bounds = fingerprint_arg_types.iter().map(|ty| {
+                        quote! {
+                            const _: fn() = || {
+                                fn assert_fingerprintable<T: serde::Serialize>() {}
+                                assert_fingerprintable::<#ty>();
+                            };
+                        }
+                    });
+
+                    quote! { #output_bound #error_bound #(#input_bounds)* }
                 } else {
                     quote! {}
                 };
 
-                let idempotency_slot = quote! {};
+                // Slot 3 proper. One `?`-terminated call to a public runtime
+                // method (AD-3g): the store access and the six-way outcome
+                // interpretation live in `service-sdk`, so there is one
+                // implementation to test rather than one copy per generated
+                // operation, and changing a translation is not a breaking change
+                // for every caller.
+                let idempotency_slot = if has_idempotent {
+                    let (Some(out_ty), Some(err_ty)) =
+                        (idempotent_out_ty.as_ref(), idempotent_err_ty.as_ref())
+                    else {
+                        let err = syn::Error::new(
+                            method.sig.output.span(),
+                            "#[idempotent] requires the method return type to be written as `Result<_, E>` \
+                             directly (type aliases are not supported in proc-macro context; \
+                             expand the alias inline, e.g. `Result<MyResponse, MyError>`)",
+                        );
+                        return TokenStream::from(err.to_compile_error());
+                    };
+
+                    // The reservation is keyed off the context, so there has to
+                    // be one. Caught here with a message naming the real cause,
+                    // rather than letting `.operation_key()` fail against the
+                    // phantom ctx token the parameterless path invents.
+                    if ctx_param_idx.is_none() {
+                        let err = syn::Error::new_spanned(
+                            &method.sig.ident,
+                            "#[idempotent] requires a ServiceContext parameter — the operation key \
+                             and the canonical tenant a reservation needs are both carried on it",
+                        );
+                        return TokenStream::from(err.to_compile_error());
+                    }
+
+                    quote! {
+                        // Bound before the reservation so the permit outlives it:
+                        // B6.8's epilogue completes under the fence it carries.
+                        let __ego_reservation: Option<ego_service_sdk::runtime::ReservationDecision> = {
+                            // A dropped runtime is the store being unreachable,
+                            // not a licence to run unreserved.
+                            let __ego_rt = self.runtime.upgrade().ok_or_else(|| {
+                                <#err_ty as From<ego_service_sdk::runtime::ReservationRejection>>::from(
+                                    ego_service_sdk::runtime::ReservationRejection::StoreUnavailable
+                                )
+                            })?;
+
+                            // No key means the missing-key policy already ran and
+                            // admitted this request — that policy has exactly one
+                            // owner, `resolve_operation_key` at the transport
+                            // edge, and re-deciding it here would give two places
+                            // the power to disagree about it.
+                            match #ctx_param.operation_key().cloned() {
+                                None => None,
+                                Some(__ego_key) => {
+                                    // AD-3f: over the typed arguments, before
+                                    // `on_request` and before the handler.
+                                    let __ego_fingerprint =
+                                        ego_service_sdk::runtime::operation_fingerprint(
+                                            &( #( & #fingerprint_args , )* )
+                                        )?;
+                                    // The uniqueness namespace is the resolved
+                                    // canonical tenant, never the raw client
+                                    // hint — an attacker-supplied hint must not
+                                    // choose which namespace a key lands in.
+                                    let __ego_tenant = #ctx_param
+                                        .canonical_tenant()
+                                        .and_then(|__t| __t.tenant_id().cloned());
+                                    __ego_rt
+                                        .reserve_idempotent_operation(
+                                            __ego_tenant,
+                                            __ego_key,
+                                            __ego_fingerprint,
+                                        )
+                                        .await?
+                                }
+                            }
+                        };
+
+                        // The identical request already completed. Answer with
+                        // what it produced and run nothing: no `on_request`, no
+                        // handler, no second set of effects.
+                        if let Some(ego_service_sdk::runtime::ReservationDecision::Replay(__ego_stored)) =
+                            &__ego_reservation
+                        {
+                            let __ego_replayed: #out_ty =
+                                ego_service_sdk::runtime::decode_stored_response(__ego_stored)?;
+                            return Ok(__ego_replayed);
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
 
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#sig_params),*) #return_type {

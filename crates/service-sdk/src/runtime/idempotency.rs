@@ -92,10 +92,6 @@ mod tests {
 /// reservations disabled, or a complete and valid configuration. There are
 /// deliberately no `Option` fields inside.
 #[derive(Clone)]
-// Read through the accessors below, which the tests exercise and which the
-// reservation method lands on in the next slice. The annotation is scoped to
-// this struct and must be removed then — an `expect` that outlives its reason
-// stops being a note and becomes a claim nobody rechecks.
 pub struct ReservationConfig {
     store: Arc<dyn OperationReservationStore>,
     clock: Arc<dyn Clock>,
@@ -115,15 +111,6 @@ pub enum ReservationConfigError {
     ZeroLease,
 }
 
-// The accessors are exercised by the builder's tests; nothing in a release
-// build reads them until the reservation method lands in the next slice. Scoped
-// to this impl and to non-test builds, and it must be removed then — an
-// `expect` that outlives its reason stops being a note and becomes a claim
-// nobody rechecks.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the reservation method, next slice")
-)]
 impl ReservationConfig {
     /// Builds a configuration, or refuses to.
     ///
@@ -156,11 +143,29 @@ impl ReservationConfig {
     }
 
     /// The durable reservation store.
+    ///
+    /// Read by the builder's own tests, which assert what `build()` wired.
+    /// [`ReservationConfig::reserve`] reads the field directly, so nothing in a
+    /// release build goes through here — and it stays `expect` rather than
+    /// `allow` so the day a production caller appears, the attribute becomes an
+    /// error instead of a stale note.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "asserted by the builder's wiring tests")
+    )]
     pub(crate) fn store(&self) -> &Arc<dyn OperationReservationStore> {
         &self.store
     }
 
     /// The identity this runtime instance reserves under.
+    ///
+    /// Read by the builder's tests, which assert that two runtimes never share
+    /// an owner. See [`ReservationConfig::store`] for why the attribute is
+    /// scoped this way.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "asserted by the builder's wiring tests")
+    )]
     pub(crate) fn owner_id(&self) -> &OwnerId {
         &self.owner_id
     }
@@ -253,15 +258,157 @@ pub enum ReservationRejection {
     /// caller cannot choose between them if the type does not say which.
     #[error("the operation completed, but its stored response could not be decoded")]
     StoredResponseIncompatible,
+    /// The request's typed arguments could not be reduced to a canonical form,
+    /// so no fingerprint exists to reserve under.
+    ///
+    /// The store is never reached in this case — this happens strictly before
+    /// the reservation, which is why it cannot be `StoreUnavailable`, and why
+    /// retrying is pointless where retrying that one is right. It is not
+    /// `FingerprintConflict` either: a conflict means two fingerprints were
+    /// computed and differed, and here none was computed at all.
+    ///
+    /// **Reachable only through a `Serialize` implementation that fails.** The
+    /// derived implementations do not; a hand-written one that calls
+    /// `serde::ser::Error::custom`, or a `f64` holding `NaN` under a
+    /// self-describing format, does. That makes this a defect in an argument
+    /// type rather than a condition of the request, and it is kept
+    /// distinguishable so an operator is not sent looking for a store outage.
+    ///
+    /// Refusing here is the fail-closed answer: proceeding unreserved would run
+    /// a marked operation with no idempotency at all, which is the one outcome
+    /// the marker exists to prevent.
+    #[error("the request's arguments could not be reduced to a canonical fingerprint")]
+    RequestNotFingerprintable,
 }
 
-// Reached from the slot-3 preamble the macro emits, which is not wired yet.
-// Removed the moment that call lands — an `expect` outliving its reason stops
-// being a note and becomes a claim nobody rechecks.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called from the slot-3 preamble, not yet emitted")
-)]
+/// The digest of an operation's canonical semantic input (AD-3f).
+///
+/// # What this covers, and what it must not
+///
+/// `value` is the operation's already-deserialised typed arguments and nothing
+/// else. It is the caller's job — the generated slot-3 code — to exclude the
+/// context: `operation_key`, owner, lease, trace and correlation ids describe
+/// *this attempt*, not *this request*, and folding any of them in would make
+/// every retry look like a different request, which is the precise failure this
+/// whole mechanism exists to avoid.
+///
+/// # Why the canonical form is built here rather than by `serde_json`
+///
+/// Serialising to a JSON string and hashing that would make the fingerprint
+/// depend on `serde_json`'s map ordering, which is not a stable property of this
+/// workspace: `serde_json`'s `preserve_order` feature is additive, so any crate
+/// anywhere in the dependency graph enabling it silently swaps the `BTreeMap`
+/// backing for an insertion-ordered one. Struct fields would still hash
+/// deterministically, but a `HashMap` argument field would start hashing in
+/// random iteration order — two identical retries producing two fingerprints,
+/// each looking like a different request. That is a silent, remote-controlled
+/// correctness change, so the ordering is established here instead of borrowed.
+///
+/// The encoding is tagged and length-prefixed for the same reason
+/// `EffectFingerprint` is: without it, `["ab"]` and `["a", "b"]` reduce to the
+/// same bytes, and two genuinely different requests would deduplicate against
+/// each other.
+pub fn operation_fingerprint<T: serde::Serialize>(
+    value: &T,
+) -> Result<OperationFingerprint, ReservationRejection> {
+    use sha2::{Digest, Sha256};
+
+    let canonical =
+        serde_json::to_value(value).map_err(|_| ReservationRejection::RequestNotFingerprintable)?;
+
+    let mut hasher = Sha256::new();
+    absorb_canonical(&canonical, &mut hasher);
+    let digest = hasher.finalize();
+
+    Ok(OperationFingerprint::new(
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    ))
+}
+
+/// Feeds one value into the digest in a form that depends on its structure and
+/// nothing else.
+///
+/// Object keys are sorted here rather than trusted to arrive sorted. Every arm
+/// writes a distinct tag first, so a string can never reduce to the same bytes
+/// as a one-element array holding it.
+fn absorb_canonical(value: &serde_json::Value, hasher: &mut impl sha2::Digest) {
+    fn absorb_bytes(bytes: &[u8], hasher: &mut impl sha2::Digest) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    match value {
+        serde_json::Value::Null => hasher.update([0u8]),
+        serde_json::Value::Bool(b) => {
+            hasher.update([1u8]);
+            hasher.update([u8::from(*b)]);
+        }
+        // The rendered number, not the in-memory representation: `serde_json`
+        // already normalises integers and floats to one textual form each, and
+        // an integer and a float that happen to be numerically equal are
+        // different typed values, so they are meant to differ here.
+        serde_json::Value::Number(n) => {
+            hasher.update([2u8]);
+            absorb_bytes(n.to_string().as_bytes(), hasher);
+        }
+        serde_json::Value::String(s) => {
+            hasher.update([3u8]);
+            absorb_bytes(s.as_bytes(), hasher);
+        }
+        serde_json::Value::Array(items) => {
+            hasher.update([4u8]);
+            hasher.update((items.len() as u64).to_be_bytes());
+            for item in items {
+                absorb_canonical(item, hasher);
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            hasher.update([5u8]);
+            hasher.update((entries.len() as u64).to_be_bytes());
+            let mut keys: Vec<&String> = entries.keys().collect();
+            keys.sort_unstable();
+            for key in keys {
+                absorb_bytes(key.as_bytes(), hasher);
+                absorb_canonical(&entries[key], hasher);
+            }
+        }
+    }
+}
+
+/// Encodes a completed operation's output for storage.
+///
+/// The writer half of the pair [`decode_stored_response`] reads. Both are
+/// exported together on purpose: the format has exactly one owner (AD-3k), and
+/// a caller that could only decode would have to hand-roll the envelope to
+/// produce a stored response — which is the parallel serialisation the single
+/// codec exists to prevent, and it would not fail at compile time.
+///
+/// B6.8's epilogue is its first production caller; today the replay tests are.
+pub fn encode_stored_response<T: serde::Serialize>(
+    value: &T,
+) -> Result<StoredServiceResponse, StoredResponseError> {
+    StoredResponseCodec::encode(value)
+}
+
+/// Decodes a replayed response into the operation's own output type.
+///
+/// Exists so generated code never interprets a codec failure (AD-3g). Every
+/// [`StoredResponseError`] collapses to one rejection on purpose: the
+/// distinction between "written under an unknown envelope" and "malformed"
+/// tells an *operator* which action to take and is preserved in the codec's own
+/// error, but it offers the *caller* no different course — both mean this
+/// completed operation cannot answer, permanently, until somebody intervenes
+/// (AD-3k).
+pub fn decode_stored_response<T: serde::de::DeserializeOwned>(
+    stored: &StoredServiceResponse,
+) -> Result<T, ReservationRejection> {
+    StoredResponseCodec::decode(stored)
+        .map_err(|_| ReservationRejection::StoredResponseIncompatible)
+}
+
 impl ReservationConfig {
     /// Reserves one operation, and decides what dispatch may do with the answer.
     ///
@@ -552,9 +699,6 @@ mod reserve_mapping_tests {
 /// from the side with less information, and a mismatch would not fail at
 /// compile time — it would fail on the first real retry in production,
 /// answering a completed operation with nonsense (AD-3k).
-// Both directions are reached from generated code that does not exist yet: the
-// replay path in the slot-3 preamble and the epilogue's `complete` in B6.8.
-// Removed when the first of those lands.
 pub struct StoredResponseCodec;
 
 /// The envelope tag written beside every payload.
@@ -592,10 +736,6 @@ pub enum StoredResponseError {
     Malformed,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reached from the replay path and B6.8's epilogue")
-)]
 impl StoredResponseCodec {
     /// Encodes an operation's output for storage.
     pub(crate) fn encode<T: serde::Serialize>(
