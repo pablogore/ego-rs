@@ -457,10 +457,14 @@ unchanged, which is the point of stopping here.
       token, not by re-entering. The runtime's branching test must cover all six.
       **Runtime state this needs first — AD-3i.** `ReserveRequest` demands an
       `owner_id` and a `lease_until` that `RuntimeInner` does not hold. Add
-      `reservation_clock` (`Arc<dyn Clock>`, injectable, real by default),
-      `reservation_owner_id` (UUID minted once in `build()`, unique per instance,
-      injectable for tests) and `reservation_lease_duration` (configurable,
-      strictly positive, default 30s). Without an injectable clock and owner,
+      a single `Option<ReservationConfig>` holding the store, an `Arc<dyn Clock>`
+      (injectable, real by default), an `OwnerId` (UUID minted once in `build()`,
+      unique per instance, injectable for tests) and a `lease_duration`
+      (configurable, strictly positive, default 30s). **No `Option` inside the
+      struct**: two representable states, not sixteen. It also keeps
+      `new_with_logger` at eleven positional parameters instead of sixteen, where
+      transposing two `Option<Arc<dyn …>>` arguments compiles and fails at
+      runtime. Seven constructor call sites, not the 71 that `build` has. Without an injectable clock and owner,
       `OwnedInProgress`, `OtherInProgress` and `TakenOver` cannot be exercised
       deterministically — the branching test would depend on wall time, which is
       what A4 generalised the clock out of auth to avoid.

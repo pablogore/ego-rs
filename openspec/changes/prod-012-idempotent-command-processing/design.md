@@ -472,14 +472,34 @@ reporting. Both block.
 externally observable behaviour under failure, so each is decided here rather
 than by whatever the implementation happens to do.
 
-```
-RuntimeInner {
-    reservation_store,
-    reservation_clock,
-    reservation_owner_id,
-    reservation_lease_duration,
+The four travel together as one value, not as four fields:
+
+```rust
+pub struct ReservationConfig {
+    store: Arc<dyn OperationReservationStore>,
+    clock: Arc<dyn Clock>,
+    owner_id: OwnerId,
+    lease_duration: Duration,
 }
+
+RuntimeInner { reservation: Option<ReservationConfig>, .. }
 ```
+
+**No `Option` inside the struct — the optionality lives outside it.** That
+leaves exactly two representable states: reservations disabled, or a complete
+and valid configuration. Four independent fields would allow sixteen
+combinations, thirteen of them incoherent — a store with no clock cannot compute
+a `lease_until`, an owner with no store means nothing. The type refuses them
+instead of the runtime checking for them.
+
+It also gives `lease_duration > 0` a single place to be validated, at
+construction, rather than in `build()` where a later caller could bypass it.
+
+The grouping is not cosmetic. `RuntimeInner::new_with_logger` already takes 13
+positional parameters, several of them `Option<Arc<dyn …>>`; adding three more
+would make sixteen, where transposing two arguments compiles cleanly and fails
+at runtime. Folding the existing `idempotency_reservation_store` in brings it to
+eleven.
 
 ```
 .with_reservation_clock(clock)
