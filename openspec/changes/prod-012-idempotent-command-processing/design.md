@@ -465,6 +465,58 @@ recovery. They differ in what they *mean*, not in what dispatch does with them �
 and collapsing them in the enum would destroy information the runtime should be
 reporting. Both block.
 
+### AD-3i — What the runtime needs before it can reserve anything
+
+**Decision**: `ReserveRequest` demands an `owner_id` and a `lease_until` that
+`RuntimeInner` does not currently hold. Three pieces are added, each with
+externally observable behaviour under failure, so each is decided here rather
+than by whatever the implementation happens to do.
+
+```
+RuntimeInner {
+    reservation_store,
+    reservation_clock,
+    reservation_owner_id,
+    reservation_lease_duration,
+}
+```
+
+```
+.with_reservation_clock(clock)
+.with_reservation_owner_id(owner_id)      // for tests; normally left to build()
+.with_reservation_lease_duration(duration)
+```
+
+**`OwnerId` — a UUID minted once in `build()`, unique per runtime instance.**
+Stable for that instance's whole life, different after a restart. A retry inside
+the same runtime therefore observes `OwnedInProgress`; another replica, or the
+same process after a restart, observes `OtherInProgress` until the lease expires
+and then `TakenOver`.
+
+Uniqueness per instance must be guaranteed. Note what sharing an owner would
+*not* do: it would not let two replicas unblock each other, because AD-3h blocks
+`OwnedInProgress` too. What it would destroy is the variant's diagnostic
+meaning — self-contention and external contention would become
+indistinguishable — and it would compromise lease renewal, which must only ever
+renew a lease this instance actually holds.
+
+Injecting the owner is supported because `OwnedInProgress`, `OtherInProgress`
+and `TakenOver` cannot otherwise be exercised deterministically. Production
+should neither share it across instances nor persist it across restarts.
+
+**`Clock` — `Arc<dyn Clock>`, injectable, real clock by default.** `lease_until`
+is computed from that clock and nothing else, so expiry is testable without wall
+time. This is exactly what A4 generalised the clock out of auth for.
+
+**Lease duration — configurable, validated as strictly greater than zero,
+default 30 seconds.** The default is an operational policy, not a guarantee.
+
+**Operational contract, stated because the lease alone does not prevent
+overlap:** the configured lease must exceed the maximum expected duration of an
+execution. When it expires, another owner can take over — while the original may
+still be running. Until renewal/heartbeat exists, a lease shorter than a
+legitimate operation is a correctness problem, not a tuning preference.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.
