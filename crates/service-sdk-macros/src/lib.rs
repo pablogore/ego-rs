@@ -500,11 +500,40 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
+                // Slot 3 (PROD-012 B6.3) — the seam the reservation call will occupy,
+                // fixed here and deliberately emitting nothing yet.
+                //
+                // Its position is the decision this task makes: after
+                // `#authorize_guard` and `#enforce_tenant_block`, before
+                // `on_request` and the inner call. That ordering is not a
+                // convention the next author has to remember — both guards fail
+                // with `?`, so a denied authorization or an unresolvable tenant
+                // has already returned from this function before anything spliced
+                // here could run. Placing the slot above either guard would let a
+                // reservation be taken for a call that is about to be refused.
+                //
+                // **What is NOT settled by fixing this seam:** nothing here proves
+                // the reservation actually runs, or that it runs only once, or
+                // that it receives the final key and fingerprint. A test over the
+                // generated shape can only show topology. The behavioural proof —
+                // denied authorization leaves `reserve` uncalled, a rejected
+                // tenant leaves it uncalled, passing guards call it exactly once —
+                // belongs to B6.4 and is a blocking criterion there. B6.3 stays
+                // open until that test is green, precisely so an empty seam is
+                // never mistaken for an enforced one.
+                //
+                // It emits nothing on purpose. A placeholder `reserve` call
+                // without a key, a fingerprint, or outcome handling would change
+                // production behaviour before the contract that governs it exists,
+                // and would have to be replaced rather than extended.
+                let idempotency_slot = quote! {};
+
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#sig_params),*) #return_type {
                         #operation_name_binding
                         #authorize_guard
                         #enforce_tenant_block
+                        #idempotency_slot
                         let inner_ref = self.inner.clone();
                         let chain_ref = self.chain.clone();
                         let _ = chain_ref.on_request(&#ctx_param).await;

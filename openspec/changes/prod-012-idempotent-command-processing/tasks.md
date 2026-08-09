@@ -367,6 +367,29 @@ unchanged, which is the point of stopping here.
       so neither a dead flag nor a default-everything-idempotent regression can
       pass unnoticed.
 - [ ] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
+      **PARTIAL — the seam is fixed, the behaviour is not proven. Do not tick
+      this box until B6.4's behavioural test is green.** The insertion point now
+      exists in `crates/service-sdk-macros/src/lib.rs` as a named slot that
+      emits nothing, placed after `#authorize_guard` and `#enforce_tenant_block`
+      and before `on_request`. Both guards fail with `?`, so a denied
+      authorization or an unresolvable tenant has already returned before
+      anything spliced there could run — the ordering is enforced by control
+      flow rather than by convention.
+      What that settles is topology and nothing else. A test over the generated
+      shape cannot show that the reservation runs, that it runs once, or that it
+      receives the final key and fingerprint; a slot that expands to nothing
+      satisfies every such assertion. Recording it as complete on that basis
+      would be exactly the false coverage this change keeps finding elsewhere.
+      The seam deliberately emits nothing: a placeholder `reserve` call without a
+      key, a fingerprint or outcome handling would change production behaviour
+      before the contract governing it exists, and would have to be replaced
+      rather than extended.
+      **Blocking behavioural criteria, owned by B6.4:** authorization denied ->
+      `reserve` called 0 times; tenant rejected -> 0 times; both guards passing ->
+      exactly 1; `reserve` receives the definitive key and fingerprint; the
+      operation does not run when the reservation refuses. A mutation moving the
+      slot above either guard must kill a test by observed calls, never by a
+      list comparison.
 - [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
       `ServiceContext::operation_key()` and threads that exact value into the
       `CommandContext` the service hands to the entity. Test asserts the key
