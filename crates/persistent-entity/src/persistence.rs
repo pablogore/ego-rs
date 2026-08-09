@@ -359,6 +359,75 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         Ok(new_version as u64)
     }
 
+    /// Persists a batch of events **and** the receipt recording that the
+    /// operation ran, as one transaction.
+    ///
+    /// `events` may be empty. A success that produced nothing still writes a
+    /// receipt, and still writes it through a real unit of work: that case has
+    /// no event in the stream to carry its completion, so without the receipt it
+    /// is indistinguishable from a command that never ran.
+    ///
+    /// # Why this is separate from [`persist_events`](Self::persist_events)
+    ///
+    /// `persist_events` uses the direct append path, which owns and commits its
+    /// own transaction — nothing can be made to land atomically *with* it. A
+    /// receipt written afterwards could survive a rollback of the events it
+    /// describes, or be lost while they survive; either way the store would
+    /// disagree with itself about whether the operation happened.
+    ///
+    /// The two paths are kept apart rather than merged because a command with no
+    /// idempotency identity has no receipt to write, and must keep the behaviour
+    /// it has today. Routing it through a unit of work would change which store
+    /// method it depends on for no benefit.
+    ///
+    /// # Ordering
+    ///
+    /// Append, then confirm, then commit — once. A commit placed before the
+    /// confirmation would make the events durable while the receipt is still
+    /// staged, which is the split this method exists to prevent. A confirmation
+    /// error aborts before the commit, so neither becomes visible.
+    pub async fn persist_events_with_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        version: u64,
+        events: &[E],
+        receipt: &OperationReceipt,
+    ) -> Result<u64, String> {
+        let stored: Vec<StoredEvent<E>> = events
+            .iter()
+            .cloned()
+            .map(StoredEvent::without_correlation)
+            .collect();
+
+        let mut uow = self.event_store.begin().await.map_err(|e| e.to_string())?;
+
+        let new_version = if stored.is_empty() {
+            version as i64
+        } else {
+            uow.append(
+                aggregate_type,
+                aggregate_id,
+                tenant_id,
+                version as i64,
+                stored,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        };
+
+        // Before the commit, deliberately. Dropping `uow` on this error path is
+        // the rollback: nothing staged above becomes visible.
+        uow.confirm_receipt(receipt)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        uow.commit().await.map_err(|e| e.to_string())?;
+
+        Ok(new_version as u64)
+    }
+
     /// Looks up the receipt for one operation against one aggregate.
     ///
     /// A minimal delegation to [`EventStore::find_receipt`], and deliberately
