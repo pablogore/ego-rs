@@ -28,6 +28,10 @@ const MIGRATION_009_ADD_OPERATION_KEY: &str =
 const MIGRATION_010_CREATE_OPERATION_RESERVATIONS: &str =
     include_str!("migrations/010_create_operation_reservations.sql");
 
+/// Migration SQL for the durable operation-receipt table.
+const MIGRATION_011_CREATE_OPERATION_RECEIPTS: &str =
+    include_str!("migrations/011_create_operation_receipts.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -68,6 +72,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "010_create_operation_reservations",
             MIGRATION_010_CREATE_OPERATION_RESERVATIONS,
+        ),
+        (
+            "011_create_operation_receipts",
+            MIGRATION_011_CREATE_OPERATION_RECEIPTS,
         ),
     ]
 }

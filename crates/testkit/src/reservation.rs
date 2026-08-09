@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ego_domain::operation::{
     FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredResponse,
+    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::Clock;
 
@@ -60,7 +60,7 @@ enum RecordState {
     },
     /// The operation completed; `response` is available for replay.
     Completed {
-        response: StoredResponse,
+        response: StoredServiceResponse,
         completed_at: DateTime<Utc>,
     },
 }
@@ -233,7 +233,7 @@ impl OperationReservationStore for InMemoryOperationReservationStore {
     async fn complete(
         &self,
         fence: &OwnerFence,
-        response: StoredResponse,
+        response: StoredServiceResponse,
     ) -> Result<(), ReservationError> {
         let mut records = self
             .records

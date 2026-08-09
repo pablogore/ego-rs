@@ -131,7 +131,9 @@ impl HealthContributor for OperationReservationStoreHealthContributor {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use ego_domain::operation::{OwnerFence, ReservationOutcome, ReserveRequest, StoredResponse};
+    use ego_domain::operation::{
+        OwnerFence, ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A store whose `probe` answers with a fixed outcome and counts the
@@ -176,7 +178,7 @@ mod tests {
         async fn complete(
             &self,
             _fence: &OwnerFence,
-            _response: StoredResponse,
+            _response: StoredServiceResponse,
         ) -> Result<(), ReservationError> {
             panic!("a readiness probe must never complete a reservation");
         }

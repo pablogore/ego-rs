@@ -6,6 +6,7 @@ use crate::command_context::CommandContext;
 use crate::effect_acceptor::EffectAcceptanceError;
 use crate::error::EntityError;
 use async_trait::async_trait;
+use ego_domain::operation::AggregateOutcome;
 use ego_domain::ExternalEffectDescription;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -24,6 +25,34 @@ pub enum CommandResult<E, S> {
     NoEvents {
         /// The state returned by the command.
         state: S,
+    },
+    /// The command was **not executed**: a receipt showed this exact operation
+    /// already completed against this aggregate.
+    ///
+    /// # What this asserts, and what it deliberately does not
+    ///
+    /// It asserts exactly one thing: *this aggregate's transition was already
+    /// confirmed; it must not run again and must not produce effects again.*
+    ///
+    /// It carries **no state and no events**, and that is a decision rather than
+    /// an omission. A receipt records that a transition happened; it cannot
+    /// reproduce the answer the aggregate once gave. Returning the aggregate's
+    /// *current* state here would look helpful and break idempotency silently:
+    /// if this operation left the aggregate at version 10 and later commands
+    /// took it to 14, one operation key would produce two different logical
+    /// results.
+    ///
+    /// # For callers
+    ///
+    /// Treat this as recovery of a partially executed operation. Do not persist,
+    /// publish, or accept effects from it. If the workflow needs data to
+    /// continue, read current state explicitly — and do not present that reading
+    /// as the command's historical answer. If it cannot continue safely, fail
+    /// explicitly rather than re-running the command.
+    Replayed {
+        /// Durable evidence of the confirmed transition: an event range, or
+        /// `NoEvents` for a success that appended nothing.
+        outcome: AggregateOutcome,
     },
     /// Command's events committed successfully, but at least one described
     /// external effect could not be durably-enough accepted (AD-9).
@@ -150,6 +179,7 @@ mod tests {
             causation_id: None,
             metadata: std::collections::HashMap::new(),
             operation_key: None,
+            fingerprint: None,
         }
     }
 

@@ -70,7 +70,7 @@ pub trait OperationReservationStore: Send + Sync {
     async fn complete(
         &self,
         fence: &OwnerFence,
-        response: StoredResponse,
+        response: StoredServiceResponse,
     ) -> Result<(), ReservationError>;
 
     /// Abandons the reservation, freeing its key for a future, unrelated
@@ -220,9 +220,9 @@ impl FencingToken {
 /// later replay with the identical key and fingerprint can return it without
 /// re-executing the operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredResponse(Vec<u8>);
+pub struct StoredServiceResponse(Vec<u8>);
 
-impl StoredResponse {
+impl StoredServiceResponse {
     /// Wraps a precomputed response payload.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
@@ -307,7 +307,7 @@ pub enum ReservationOutcome {
     OtherInProgress,
     /// The reservation already completed with the identical fingerprint —
     /// safe to return the stored response without re-executing.
-    Succeeded(StoredResponse),
+    Succeeded(StoredServiceResponse),
     /// The reservation exists under the same key but a *different*
     /// fingerprint — a permanent conflict, never a silent dedupe.
     Conflict,
@@ -435,12 +435,12 @@ mod tests {
     #[test]
     fn stored_response_equality_is_by_content() {
         assert_eq!(
-            StoredResponse::new(b"ok".to_vec()),
-            StoredResponse::new(b"ok".to_vec())
+            StoredServiceResponse::new(b"ok".to_vec()),
+            StoredServiceResponse::new(b"ok".to_vec())
         );
         assert_ne!(
-            StoredResponse::new(b"ok".to_vec()),
-            StoredResponse::new(b"no".to_vec())
+            StoredServiceResponse::new(b"ok".to_vec()),
+            StoredServiceResponse::new(b"no".to_vec())
         );
     }
 

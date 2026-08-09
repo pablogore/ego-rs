@@ -211,6 +211,61 @@ where
             }
         };
 
+        // Idempotency gate, before dispatch and before anything is persisted.
+        //
+        // Both halves of the identity must be present. `operation_key` says
+        // which operation this is; `fingerprint` says which *request* it came
+        // from, and without it a retry cannot be told apart from a different
+        // command reusing the key. A command carrying neither takes the
+        // pre-existing path untouched and pays for no lookup.
+        if let (Some(key), Some(fingerprint)) = (&context.operation_key, &context.fingerprint) {
+            let found = self
+                .persistence
+                .find_receipt(
+                    self.entity_id.aggregate_type(),
+                    &self.entity_id.entity_id,
+                    Some(&self.entity_id.tenant_id),
+                    key.as_str(),
+                )
+                .await;
+
+            match found {
+                // A lookup that failed is not a miss. A miss means "run the
+                // command", so falling through to the handler here would
+                // re-execute an operation that may already have completed —
+                // the exact duplicate the receipt exists to prevent.
+                Err(e) => {
+                    let _ = reply.send(Err(crate::error::EntityError::PersistenceError(format!(
+                        "could not read the operation receipt: {e}"
+                    ))));
+                    return;
+                }
+                Ok(Some(receipt)) if receipt.fingerprint() == fingerprint => {
+                    // The same request, arriving again. Nothing runs, nothing
+                    // is written, and no effect is accepted a second time. The
+                    // outcome travels as durable evidence, never as a rebuilt
+                    // result: see `CommandResult::Replayed`.
+                    let result: CommandResult<E, S> = CommandResult::Replayed {
+                        outcome: receipt.outcome().clone(),
+                    };
+                    let boxed: CommandErasedResult = Box::new(result);
+                    let _ = reply.send(Ok(boxed));
+                    return;
+                }
+                Ok(Some(_)) => {
+                    // A different request reusing an operation key. Refused
+                    // permanently, and `handle_command` is never reached:
+                    // executing it would let one caller's key drive another
+                    // caller's command.
+                    let _ = reply.send(Err(crate::error::EntityError::OperationConflict {
+                        operation_key: key.as_str().to_string(),
+                    }));
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+
         let handler_result = self
             .entity_handler
             .handle_command(&command, &current_state, &context)

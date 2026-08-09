@@ -53,7 +53,7 @@ use sqlx::{PgPool, Row};
 use ego_domain::context::TenantId;
 use ego_domain::operation::{
     FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, ReservationError,
-    ReservationOutcome, ReserveRequest, StoredResponse,
+    ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::Clock;
 use std::sync::Arc;
@@ -267,7 +267,9 @@ impl OperationReservationStore for PostgresOperationReservationStore {
                         .to_string(),
                 )
             })?;
-            return Ok(ReservationOutcome::Succeeded(StoredResponse::new(response)));
+            return Ok(ReservationOutcome::Succeeded(StoredServiceResponse::new(
+                response,
+            )));
         }
 
         let now = self.clock.now();
@@ -392,7 +394,7 @@ impl OperationReservationStore for PostgresOperationReservationStore {
     async fn complete(
         &self,
         fence: &OwnerFence,
-        response: StoredResponse,
+        response: StoredServiceResponse,
     ) -> Result<(), ReservationError> {
         let bytes = response.as_bytes().to_vec();
         self.mutate_owned(fence, move |tenant, key, token, now| {

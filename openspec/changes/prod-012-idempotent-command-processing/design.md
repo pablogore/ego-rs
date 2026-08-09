@@ -167,6 +167,181 @@ authoritative lookup index, the metadata is the correlation breadcrumb CORE-030
 will consume. Uniqueness on `(tenant_id, aggregate_type, aggregate_id,
 operation_key)` uses the AD-1 partial-index pair.
 
+### AD-3b — Two recorded answers, two scopes, two owners
+
+**Decision**: an operation records **two** different things, in two tables, under
+two different owners. They were conflated in an earlier revision of this
+document, which is what made the commit boundary look contradictory.
+
+| Register | Scope | Content | Owner |
+|---|---|---|---|
+| `operation_receipts` | one aggregate | `AggregateOutcome` — the durable result of the transition addressed at that aggregate | the actor, inside the same unit of work as its events |
+| `operation_reservations` | the whole service operation | `StoredServiceResponse` — the final response, possibly composed from several aggregates | slot 3, via `complete()`, after the handler returns |
+
+`RegisterUserImpl::register` is the case that proves they cannot be one thing:
+it commands `tenant_organization`, then the user aggregate, and only then
+composes `RegisterOutput`. The service response does not exist inside any single
+actor turn, and it depends on more than one. So no serialiser sent into the
+actor can produce it, and no single unit of work can contain it.
+
+**The atomicity that is claimed is local, and only local:**
+
+```
+one aggregate's events + that aggregate's receipt   = one unit of work   ✔
+several aggregates' events + the service response   = one transaction    ✘ never claimed
+```
+
+A multi-aggregate operation is not distributed-atomic and does not pretend to
+be. The receipt stops each aggregate's transition from repeating; the
+reservation stops the whole operation from repeating once it completed.
+
+**Naming is part of the decision.** `AggregateOutcome` and
+`StoredServiceResponse` are deliberately unmistakable for one another. The two
+may share a byte representation; they share neither semantics nor ownership, and
+a name that blurs that is how the two scopes were merged in the first place.
+
+### AD-3c — What an `AggregateOutcome` contains
+
+**Decision**: the receipt records **evidence that a transition was confirmed**.
+It is not, and must not be presented as, material sufficient to rebuild the
+original `CommandResult`.
+
+An earlier revision of this section claimed it was. That claim was wrong, and it
+was wrong in four independent ways, each verified against the code rather than
+argued:
+
+1. **A version range does not survive compaction.** `EventStore::load` returns
+   the physical stream and the logical version is `index + stream_version_offset`
+   (`persistence.rs:299-324`). A snapshot that compacts the stream moves what a
+   given `version_from` addresses.
+2. **Continuity cannot be verified through this API.** `load` returns
+   `Vec<StoredEvent<E>>` with no versions attached — the version is *inferred*
+   from the index, so enumeration always yields a contiguous sequence whether or
+   not the table has a gap. A real gap is undetectable from here.
+3. **The state at `version_to` cannot be rebuilt.** `apply_events` moves forward
+   from the current state, and no API stops replay at a chosen version.
+4. **`NoEvents` cannot identify its moment, and adding a version does not fix
+   it.** On a fresh aggregate the observed version is `0`, and the state at
+   version `0` lives in no event at all — it is the entity's initial state,
+   which only the implementation knows. That is precisely the case the receipt
+   was introduced for.
+
+```rust
+enum AggregateOutcome {
+    /// The inclusive version range this command appended.
+    Events { version_from: EventVersion, version_to: EventVersion },
+    /// A success that appended nothing — the case the receipt exists for.
+    NoEvents,
+}
+```
+
+**Also rejected: returning the aggregate's *current* state as the replayed
+result.** It would avoid reconstruction entirely and break idempotency
+silently. If `K` left the aggregate at version 10 and later commands took it to
+14, a retry of `K` answering with version 14 makes one operation key produce two
+different logical results. A completed operation hides this behind the
+reservation; a **partially failed multi-aggregate** operation does not — and
+that is exactly when the receipt is consulted.
+
+**Rejected: serialising `CommandResult<E, S>`.** Its `new_state` is redundant —
+on a hit the original events are already committed, so the actor's current state
+*is* `new_state`, and storing a copy stores something that can fall out of step
+with the source that rebuilds it. Its `events` are redundant for the same
+reason, and copying them would additionally impose a `Serialize` bound on every
+domain event in the workspace to record what the stream already holds.
+
+What is genuinely unrecoverable is only which variant occurred and which slice
+of the stream it produced. Two integers and a discriminant encode that, with no
+application type in the encoding — which is what makes it stable across releases.
+
+**Range conventions, stated rather than inferred:**
+
+- `version_from` and `version_to` are **inclusive**.
+- `version_from <= version_to` always holds.
+- `NoEvents` is the *only* representation of an empty range. An empty `Events`
+  range is not a valid encoding, so the two can never both describe nothing.
+- If the recorded range cannot be recovered **in full**, the hit fails as an
+  internal error. It must never degrade into re-executing the command: the
+  receipt says the transition already happened, and running it again because its
+  record is unreadable would duplicate exactly what the receipt exists to
+  prevent.
+
+### AD-3d — `EffectsAcceptanceFailed` is not a confirmable outcome
+
+**Decision**: `CommandResult::EffectsAcceptanceFailed` is never recorded in a
+receipt.
+
+It describes a **post-commit incident of one execution**, not the durable result
+of the command. The commit already succeeded and was never rolled back — that is
+why the variant exists instead of an `Err`. Recording it would require reopening
+a transaction after the unit of work closed, which is precisely the split B5
+exists to prevent, and would merge the two scopes AD-3b just separated.
+
+The sequence is therefore:
+
+1. the unit of work commits events + `AggregateOutcome::Events`, atomically;
+2. effect acceptance is attempted **after** that commit;
+3. if it fails, *this* execution returns `EffectsAcceptanceFailed`;
+4. the receipt is not modified and no second transaction is opened;
+5. a retry with the same key and fingerprint returns the durable outcome;
+6. the retry does **not** reproduce `EffectsAcceptanceFailed` and does **not**
+   re-attempt acceptance.
+
+**Deliberate consequence, stated so it is not discovered as a bug:** a retry
+loses the warning. That is accepted. Recovering a failed effect belongs to the
+effect delivery and observability mechanism — outbox, its own retry,
+reconciliation — and never to re-executing a command whose events are already
+durable.
+
+### AD-3e — A receipt hit replays; it does not re-run the pipeline
+
+**Decision**: a hit returns an explicit control result that carries **no state
+and no reconstructed history**:
+
+```rust
+CommandResult::Replayed { outcome: AggregateOutcome }
+```
+
+It asserts exactly one thing, and deliberately nothing more:
+
+> This aggregate's transition was already confirmed. It must not run again and
+> must not produce effects again.
+
+It does **not** promise the original result, the original state, or the original
+events. AD-3c establishes that none of those is recoverable from what a receipt
+holds.
+
+**What a caller must do with it.** Treat it as recovery of a partial execution,
+explicitly. If the workflow needs data to continue, it reads current state
+through an explicit query, or through a durable value the command itself
+recorded — never from a replay pretending to be history. The service
+operation's exact response belongs to `operation_reservations`; if the
+operation never completed, there is no honest way to conjure that response back
+out of per-aggregate receipts, and this design does not pretend otherwise.
+
+**If a handler genuinely requires the first attempt's exact result to continue**,
+that is a *new requirement*, not a gap to paper over. It would call for
+persisting a command-specific `AggregateReplayValue`. It must not be met by
+imposing `Serialize` on every state and event in the workspace, and it must
+never be met by quietly returning current state.
+
+Rebuilding a plain `CommandResult::Events` on a hit would be wrong in a way that
+is easy to miss: those events would be indistinguishable from freshly produced
+ones, and would feed post-commit effect acceptance a second time — dispatching
+side effects the first execution already dispatched. The receipt would then have
+prevented the state transition while permitting the duplicate it was there to
+stop.
+
+So a hit:
+
+- does **not** invoke `handle_command`;
+- does **not** persist events;
+- does **not** re-enter effect acceptance.
+
+The route must be visible in the type, not left to a caller's discipline —
+either an internal `ReplayedEvents` variant or equivalent internal metadata that
+translates to what the caller expects while bypassing the post-commit pipeline.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.

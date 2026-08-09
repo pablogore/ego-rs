@@ -19,8 +19,12 @@ pub mod key;
 /// fencing, and reservation outcomes.
 pub mod reservation;
 
+/// `OperationReceipt` — the durable record that one operation already completed.
+pub mod receipt;
+
 pub use key::{OperationFingerprint, OperationKey, OperationKeyError};
+pub use receipt::{AggregateOutcome, AggregateOutcomeError, OperationReceipt};
 pub use reservation::{
     FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredResponse,
+    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };

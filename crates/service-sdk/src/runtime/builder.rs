@@ -1216,7 +1216,7 @@ mod tests {
         async fn complete(
             &self,
             _fence: &ego_domain::operation::OwnerFence,
-            _response: ego_domain::operation::StoredResponse,
+            _response: ego_domain::operation::StoredServiceResponse,
         ) -> Result<(), ego_domain::operation::ReservationError> {
             Err(ego_domain::operation::ReservationError::Backend(
                 "registration-only stub".to_string(),
@@ -1303,7 +1303,7 @@ mod tests {
         async fn complete(
             &self,
             _fence: &ego_domain::operation::OwnerFence,
-            _response: ego_domain::operation::StoredResponse,
+            _response: ego_domain::operation::StoredServiceResponse,
         ) -> Result<(), ego_domain::operation::ReservationError> {
             panic!("a readiness probe must never complete a reservation");
         }

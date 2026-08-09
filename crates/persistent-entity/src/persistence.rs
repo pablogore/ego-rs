@@ -13,6 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
+use ego_domain::operation::OperationReceipt;
 use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{
     EventStore, EventStoreUnitOfWork, PersistenceError, Snapshot, StoredEvent,
@@ -90,6 +91,22 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for NoopEvent
             _phantom: PhantomData,
         }))
     }
+
+    /// Always `None`, and that is the honest answer rather than a limitation.
+    ///
+    /// This facade retains nothing, so no operation has ever completed *here*.
+    /// Reporting a miss is what keeps the no-op store from pretending: a caller
+    /// that confirms a receipt and then looks it up sees it absent, which is
+    /// exactly what "discarded" means made observable.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        Ok(None)
+    }
 }
 
 /// The [`NoopEventStore`]'s unit of work. Accepts appends, reports the versions
@@ -111,6 +128,24 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         events: Vec<StoredEvent<E>>,
     ) -> Result<i64, PersistenceError> {
         Ok(expected_version + events.len() as i64)
+    }
+
+    /// Accepts the receipt and discards it, exactly as this unit of work
+    /// discards appends.
+    ///
+    /// It answers `Ok` rather than erroring so a caller running without a
+    /// configured store is not broken by the very method that records success —
+    /// the same reason `append` answers `Ok`. It is **not** a durability claim,
+    /// and nothing here is retained: [`NoopEventStore::find_receipt`] reports
+    /// every lookup as a miss, so a caller can observe the discard rather than
+    /// having to trust this comment. Any caller that needs the receipt to
+    /// survive must configure a real store; this facade exists for the callers
+    /// that do not.
+    async fn confirm_receipt(
+        &mut self,
+        _receipt: &OperationReceipt,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
     }
 
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
@@ -324,6 +359,26 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         Ok(new_version as u64)
     }
 
+    /// Looks up the receipt for one operation against one aggregate.
+    ///
+    /// A minimal delegation to [`EventStore::find_receipt`], and deliberately
+    /// nothing more. It does not expose the store, and it has no fallback: a
+    /// read error is returned as an error, never softened into "no receipt".
+    /// "No receipt" means *run the command*, so a facade that swallowed a read
+    /// failure would re-execute an operation that already completed — the exact
+    /// duplicate the receipt exists to prevent.
+    pub async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        self.event_store
+            .find_receipt(aggregate_type, aggregate_id, tenant_id, operation_key)
+            .await
+    }
+
     /// Stores a snapshot.
     pub async fn store_snapshot(
         &self,
@@ -368,6 +423,63 @@ pub struct StoredEventRow<E> {
 /// store expresses in SQL with `IS NOT DISTINCT FROM`.
 type StreamKey = (String, String, Option<String>);
 
+/// The logical identity of a receipt: aggregate scope plus operation key.
+///
+/// Four components, not two — the same operation key against two different
+/// aggregates is two operations.
+type ReceiptKey = (String, String, Option<String>, String);
+
+/// Everything a committed unit of work makes visible, behind **one** lock.
+///
+/// Streams and receipts share a lock rather than holding one each, because
+/// `commit` must publish as a single step. A reader that could see the events
+/// without the receipt would find no evidence the operation ran, and would be
+/// free to run it again. Two locks taken in sequence leave exactly that window
+/// open between them. The durable store inherits this from its transaction;
+/// here it has to be constructed, and the way to make it impossible to get wrong
+/// is to leave a reader nothing to acquire halfway.
+struct Committed<E> {
+    streams: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+    receipts: HashMap<ReceiptKey, OperationReceipt>,
+}
+
+impl<E> Default for Committed<E> {
+    fn default() -> Self {
+        Self {
+            streams: HashMap::new(),
+            receipts: HashMap::new(),
+        }
+    }
+}
+
+/// Builds the lookup key for a receipt.
+fn receipt_key(receipt: &OperationReceipt) -> ReceiptKey {
+    (
+        receipt.aggregate_type().to_string(),
+        receipt.aggregate_id().to_string(),
+        receipt.tenant().map(|t| t.as_str().to_string()),
+        receipt.operation_key().as_str().to_string(),
+    )
+}
+
+/// Refuses a receipt that would replace an existing one under a different
+/// fingerprint. A matching fingerprint is an ordinary, idempotent retry.
+fn reconcile_receipt(
+    existing: Option<&OperationReceipt>,
+    incoming: &OperationReceipt,
+) -> Result<(), PersistenceError> {
+    match existing {
+        Some(found) if found.fingerprint() != incoming.fingerprint() => {
+            Err(PersistenceError::Conflict {
+                aggregate_id: format!("{}-{}", incoming.aggregate_type(), incoming.aggregate_id()),
+                expected: 0,
+                actual: 0,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The key for a declared version offset: `(aggregate_type, aggregate_id)`.
 ///
 /// Deliberately narrower than [`StreamKey`]. `with_version_offset` takes no tenant
@@ -405,7 +517,7 @@ pub struct InMemoryEventStore<E> {
     /// unusable for everyone sharing it. Its guard is never held across an
     /// `.await` — only for the duration of a map operation — so it never needs to
     /// be `Send`.
-    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    state: Arc<Mutex<Committed<E>>>,
     /// Per-stream version offset — simulates events already covered by a snapshot.
     version_offsets: HashMap<OffsetKey, i64>,
 }
@@ -414,7 +526,7 @@ impl<E> InMemoryEventStore<E> {
     /// Creates an empty in-memory event store.
     pub fn new() -> Self {
         InMemoryEventStore {
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(Committed::default())),
             version_offsets: HashMap::new(),
         }
     }
@@ -452,7 +564,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         let offset_key = (aggregate_type.to_string(), aggregate_id.to_string());
         let offset = self.version_offsets.get(&offset_key).copied().unwrap_or(0);
         let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
-        let mut streams = self.streams.lock();
+        let mut state = self.state.lock();
+        let streams = &mut state.streams;
         let stream = streams.entry(key).or_default();
 
         let current_version = stream.len() as i64 + offset;
@@ -487,7 +600,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     ) -> Result<Vec<StoredEvent<E>>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
         let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
-        match self.streams.lock().get(&key) {
+        match self.state.lock().streams.get(&key) {
             Some(events) => Ok(events.clone()),
             None => Err(PersistenceError::NotFound {
                 aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
@@ -501,8 +614,9 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
         let mut ids: Vec<(String, String)> = self
-            .streams
+            .state
             .lock()
+            .streams
             .keys()
             .filter(|(_, _, t)| *t == tenant)
             .map(|(atype, aid, _)| (atype.clone(), aid.clone()))
@@ -511,9 +625,27 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         Ok(ids)
     }
 
+    async fn find_receipt(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        tenant_id: Option<&str>,
+        operation_key: &str,
+    ) -> Result<Option<OperationReceipt>, PersistenceError> {
+        let tenant = resolve_tenant(tenant_id)?;
+        let key = (
+            aggregate_type.to_string(),
+            aggregate_id.to_string(),
+            tenant,
+            operation_key.to_string(),
+        );
+        Ok(self.state.lock().receipts.get(&key).cloned())
+    }
+
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
         Ok(Box::new(StagingUnitOfWork {
-            streams: Arc::clone(&self.streams),
+            state: Arc::clone(&self.state),
+            staged_receipts: HashMap::new(),
             // Cloned rather than shared, and exact: offsets are declared through
             // `with_version_offset`, a builder that consumes `self`, so they are
             // fixed before the store can be used and cannot change while a unit
@@ -592,9 +724,13 @@ impl Snapshot for InMemorySnapshotStore {
 /// append the direct path accepts, on the same stream, with the same argument —
 /// so the version here is `offset + committed + staged`.
 struct StagingUnitOfWork<E> {
-    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    state: Arc<Mutex<Committed<E>>>,
     version_offsets: HashMap<OffsetKey, i64>,
     staged: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+    /// Receipts confirmed here but not yet published. Staged, never written
+    /// through, so dropping this unit of work discards them exactly as it
+    /// discards appends.
+    staged_receipts: HashMap<ReceiptKey, OperationReceipt>,
 }
 
 #[async_trait]
@@ -614,7 +750,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
 
         let offset = self.version_offsets.get(&offset_key).copied().unwrap_or(0);
-        let committed = self.streams.lock().get(&key).map_or(0, Vec::len) as i64;
+        let committed = self.state.lock().streams.get(&key).map_or(0, Vec::len) as i64;
         let staged = self.staged.get(&key).map_or(0, Vec::len) as i64;
         let current = offset + committed + staged;
 
@@ -631,10 +767,29 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         Ok(current + count)
     }
 
+    async fn confirm_receipt(
+        &mut self,
+        receipt: &OperationReceipt,
+    ) -> Result<(), PersistenceError> {
+        let key = receipt_key(receipt);
+        reconcile_receipt(self.state.lock().receipts.get(&key), receipt)?;
+        reconcile_receipt(self.staged_receipts.get(&key), receipt)?;
+        self.staged_receipts.insert(key, receipt.clone());
+        Ok(())
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
-        let mut streams = self.streams.lock();
+        // One acquisition, both maps, then release. An earlier version took the
+        // two locks in sequence and released the first before taking the second,
+        // leaving a window where another task could observe the events without
+        // the receipt saying they already happened — and act on it by running the
+        // operation again.
+        let mut state = self.state.lock();
         for (key, events) in self.staged {
-            streams.entry(key).or_default().extend(events);
+            state.streams.entry(key).or_default().extend(events);
+        }
+        for (key, receipt) in self.staged_receipts {
+            state.receipts.insert(key, receipt);
         }
         Ok(())
     }
