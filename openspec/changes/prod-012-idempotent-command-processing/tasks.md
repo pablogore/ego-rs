@@ -479,6 +479,19 @@ unchanged, which is the point of stopping here.
       `SelfInProgress`, `OtherInProgress`, `FingerprintConflict`,
       `StoreUnavailable` — not flattened to a string, because "retry shortly"
       and "never retry" must not require parsing prose to tell apart.
+      **The replay path is blocked on AD-3k and must not be half-wired.**
+      `Replay` promises a typed `UserOutput`; the stored response is bytes. One
+      codec owns `encode` and `decode`, JSON with an explicit envelope tag, and
+      B6.8's epilogue must use that same codec rather than a parallel
+      serialisation — the reader lives here and the writer lives there, so
+      defining either alone fixes the format from the side with less
+      information, and a mismatch fails on the first real retry in production
+      rather than at compile time. `#[idempotent]` gains a second public bound,
+      `UserOutput: Serialize + DeserializeOwned`. AD-3j is amended: a fifth
+      rejection, `StoredResponseIncompatible`, because an undecodable stored
+      response is neither `StoreUnavailable` (the store answered correctly) nor
+      `FingerprintConflict` (the request is the one that succeeded). Permanent
+      for the caller, recoverable by an operator.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).

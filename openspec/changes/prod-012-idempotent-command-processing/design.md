@@ -569,7 +569,8 @@ ReservationDecision::Proceed(permit)   // Fresh, TakenOver
 ReservationDecision::Replay(response)  // Succeeded
 ```
 
-**`ReservationRejection` carries exactly the four blocking cases**, kept
+**`ReservationRejection` carries the blocking cases** — four here, five after
+AD-3k adds `StoredResponseIncompatible` — kept
 distinguishable rather than flattened to a string, because they call for
 different responses and different operator action:
 
@@ -592,6 +593,54 @@ does another's job.
 message when a marked operation's error type does not implement
 `From<ReservationRejection>` — otherwise the requirement exists only in this
 document.
+
+### AD-3k — One codec owns both sides of the stored response
+
+**Decision**: the stored response has **one** codec, owning `encode` and
+`decode` together. Neither side may be defined without the other.
+
+**Why this had to be decided before writing either.** `Replay` promises a typed
+`UserOutput`; `StoredServiceResponse` is bytes. The reader lives in the
+reservation slot (this unit) and the writer lives in the slot-3 epilogue (B6.8).
+Implementing the reader first would fix the format from the side with the least
+information — and a mismatch would not fail at compile time. It would fail on
+the first real retry in production, returning nonsense or an error for an
+operation that genuinely completed.
+
+**The shape:**
+
+| Concern | Decision |
+|---|---|
+| Ownership | one codec type, `encode(&UserOutput) -> StoredServiceResponse` and `decode(&StoredServiceResponse) -> Result<UserOutput, _>` |
+| Format | JSON via `serde_json`, already a workspace dependency and readable by an operator inspecting a stuck reservation |
+| Versioning | an explicit envelope tag written by `encode` and checked by `decode`; a bare payload cannot be told apart from a payload of a different shape |
+| Public bound | `UserOutput: Serialize + DeserializeOwned`, imposed by `#[idempotent]` alongside `From<ReservationRejection>` |
+| Incompatibility | envelope tag mismatch, or a decode failure |
+| B6.8 | uses **this** codec, never a parallel serialisation |
+
+**AD-3j is amended: there are five rejections, not four.** A stored response
+that cannot be decoded is a state the current type cannot represent, and
+squeezing it into an existing case would misinform the caller in both available
+directions:
+
+```
+ReservationRejection::StoredResponseIncompatible
+```
+
+It is **not** `StoreUnavailable` — the store answered, correctly and promptly;
+what it returned is unreadable. Nor is it `FingerprintConflict` — the request is
+the same one that succeeded; only our ability to read its answer changed.
+
+**Permanence: permanent for the caller, recoverable by an operator.** Retrying
+the identical request re-reads the identical bytes and fails identically, so a
+client retry loop is pointless and must not be encouraged. It is not permanent
+in the sense a fingerprint conflict is: purging that reservation, or deploying
+the version that can decode it, restores the operation. The distinction belongs
+in the type because "retry" and "escalate" are different actions.
+
+**Round-trip and incompatibility must both be tested**, the second by decoding a
+response written under a different envelope tag — the case a deployment
+straddling two versions produces, and the one nobody discovers by reasoning.
 
 ### AD-4 — The shared extraction contract (D9)
 
