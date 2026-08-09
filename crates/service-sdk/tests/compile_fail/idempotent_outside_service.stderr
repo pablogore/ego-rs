@@ -1,0 +1,7 @@
+error: #[idempotent] can only be used on methods inside a #[service] trait
+  --> tests/compile_fail/idempotent_outside_service.rs:11:1
+   |
+11 | #[idempotent]
+   | ^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `idempotent` (in Nightly builds, run with -Z macro-backtrace for more info)

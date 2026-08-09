@@ -1,5 +1,6 @@
 //! Proc-macro attributes for the Service SDK: `#[service]`, `#[operation]`,
-//! `#[authorize]`, and `#[tenant_scoped]` (CORE-008A).
+//! `#[authorize]`, `#[tenant_scoped]` (CORE-008A) and `#[idempotent]`
+//! (PROD-012).
 
 mod authorize;
 
@@ -12,6 +13,7 @@ enum SdkAttr {
     Operation,
     Authorize,
     TenantScoped,
+    Idempotent,
 }
 
 impl SdkAttr {
@@ -22,6 +24,8 @@ impl SdkAttr {
             Some(Self::Authorize)
         } else if attr.path().is_ident("tenant_scoped") {
             Some(Self::TenantScoped)
+        } else if attr.path().is_ident("idempotent") {
+            Some(Self::Idempotent)
         } else {
             None
         }
@@ -174,6 +178,12 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 .attrs
                 .iter()
                 .any(|a| SdkAttr::detect(a) == Some(SdkAttr::Operation));
+
+            let has_idempotent = method
+                .attrs
+                .iter()
+                .any(|a| SdkAttr::detect(a) == Some(SdkAttr::Idempotent));
+
             if has_operation {
                 let method_name = &method.sig.ident;
 
@@ -245,7 +255,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         errors: #error_types_ts,
                         description: None,
                         metadata: std::collections::HashMap::new(),
-                        idempotent: false,
+                        idempotent: #has_idempotent,
                         mutating: true,
                     }
                 });
@@ -532,6 +542,17 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     );
                     return TokenStream::from(err.to_compile_error());
                 }
+                // Same reasoning for #[idempotent], and the stakes are higher: the
+                // reservation slot this marker enables runs only in the generated
+                // operation path, so on a method outside it the annotation records
+                // an idempotency promise nothing reserves, replays or refuses.
+                if has_idempotent {
+                    let err = syn::Error::new_spanned(
+                        &method.sig.ident,
+                        "#[idempotent] requires #[operation] on the same method",
+                    );
+                    return TokenStream::from(err.to_compile_error());
+                }
                 output_items.push(item.clone());
             }
         } else {
@@ -809,6 +830,24 @@ pub fn authorize(_args: TokenStream, _input: TokenStream) -> TokenStream {
     let err = syn::Error::new(
         Span::call_site(),
         "#[authorize] can only be used on methods inside a #[service] trait",
+    );
+    TokenStream::from(err.to_compile_error())
+}
+
+/// Idempotency marker for `#[service]` operations (PROD-012) — rejected at
+/// compile time when used outside `#[service]`.
+///
+/// Mirrors `#[authorize]` and `#[tenant_scoped]` rather than `#[operation]`, and
+/// the reason is sharper here than for either: a marker that silently did
+/// nothing when misapplied would leave an operation that everyone believes is
+/// idempotent, with nothing reserving, replaying or refusing its retries. A
+/// forgotten marker is a bug; a marker that looks present and is inert is a bug
+/// nobody goes looking for.
+#[proc_macro_attribute]
+pub fn idempotent(_args: TokenStream, _input: TokenStream) -> TokenStream {
+    let err = syn::Error::new(
+        Span::call_site(),
+        "#[idempotent] can only be used on methods inside a #[service] trait",
     );
     TokenStream::from(err.to_compile_error())
 }

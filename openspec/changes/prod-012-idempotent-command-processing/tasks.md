@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 77 complete and 39 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 79 complete and 37 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -354,8 +354,18 @@ unchanged, which is the point of stopping here.
 
 ### Phase B6: `#[idempotent]` Marker + Slot-3 Wiring — Closes the Live Bug (needs B1, B2, B3, B5)
 
-- [ ] B6.1 RED: `crates/service-sdk-macros/src/tests.rs` — `#[idempotent]` outside `#[service]` is a compile error; `#[idempotent]` without `#[operation]` is a compile error (mirrors the existing check at `lib.rs:528`).
-- [ ] B6.2 GREEN: add the inert `#[idempotent]` marker attribute in `crates/service-sdk-macros/src/lib.rs`, read by the `#[service]` generator alongside `#[authorize]` (`lib.rs:808`) and `#[tenant_scoped]` (`lib.rs:824`).
+- [x] B6.1 RED: `crates/service-sdk-macros/src/tests.rs` — `#[idempotent]` outside `#[service]` is a compile error; `#[idempotent]` without `#[operation]` is a compile error (mirrors the existing check at `lib.rs:528`).
+- [x] B6.2 GREEN: add the inert `#[idempotent]` marker attribute in `crates/service-sdk-macros/src/lib.rs`, read by the `#[service]` generator alongside `#[authorize]` (`lib.rs:808`) and `#[tenant_scoped]` (`lib.rs:824`).
+      **Found while implementing, and part of this task rather than a follow-up:**
+      `OperationDescriptor::idempotent` already existed and was emitted as a
+      literal `false` for every operation the generator produced. The field is
+      serialised and exposed through `ServiceContract`, so leaving it hardcoded
+      would have made the new marker exist syntactically while remaining
+      invisible to every consumer of the contract. It is now populated from the
+      marker, with `crates/service-sdk/tests/idempotent_descriptor.rs` covering
+      both directions — marked reports `true`, unmarked still reports `false` —
+      so neither a dead flag nor a default-everything-idempotent regression can
+      pass unnoticed.
 - [ ] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
 - [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
       `ServiceContext::operation_key()` and threads that exact value into the
