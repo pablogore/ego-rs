@@ -16,6 +16,32 @@ type StreamKey = (String, String, Option<String>);
 /// would let one aggregate's completion suppress another's work.
 type ReceiptKey = (String, String, Option<String>, String);
 
+/// Everything a committed unit of work makes visible, behind **one** lock.
+///
+/// Streams and receipts live together rather than in two maps with two mutexes,
+/// and that is the whole point. `commit` must publish as a single step: a reader
+/// that could see the events without the receipt would find no evidence the
+/// operation ran and would be free to run it again — the exact duplicate the
+/// receipt exists to prevent. Two locks taken in sequence leave precisely that
+/// window open between them, however briefly.
+///
+/// The durable store gets this from its transaction. Here it has to be built,
+/// and the cheapest way to make it impossible to get wrong is to give a reader
+/// nothing to acquire halfway.
+struct Committed<E> {
+    streams: HashMap<StreamKey, Vec<StoredEvent<E>>>,
+    receipts: HashMap<ReceiptKey, OperationReceipt>,
+}
+
+impl<E> Default for Committed<E> {
+    fn default() -> Self {
+        Self {
+            streams: HashMap::new(),
+            receipts: HashMap::new(),
+        }
+    }
+}
+
 /// Refuses a receipt that would replace an existing one carrying a different
 /// fingerprint, and reports whether the write is redundant.
 ///
@@ -61,18 +87,16 @@ fn receipt_key(receipt: &OperationReceipt) -> ReceiptKey {
 /// ever held for the duration of a map operation — never across an `.await` — so
 /// its guard never needs to be `Send`.
 pub struct InMemoryEventStore<E> {
-    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
-    /// Committed receipts, shared with every unit of work this store hands out
-    /// for the same reason the streams are: a unit of work publishes into the
-    /// same store after the borrow that created it has ended.
-    receipts: Arc<Mutex<HashMap<ReceiptKey, OperationReceipt>>>,
+    /// Shared with every unit of work this store hands out, because a unit of
+    /// work publishes into the same store after the borrow that created it has
+    /// ended.
+    state: Arc<Mutex<Committed<E>>>,
 }
 
 impl<E> InMemoryEventStore<E> {
     pub fn new() -> Self {
         InMemoryEventStore {
-            streams: Arc::new(Mutex::new(HashMap::new())),
-            receipts: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(Committed::default())),
         }
     }
 }
@@ -100,8 +124,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
             tenant.clone(),
         );
 
-        let mut streams = lock(&self.streams);
-        let stream = streams.entry(key).or_default();
+        let mut state = lock(&self.state);
+        let stream = state.streams.entry(key).or_default();
         let current = stream.len() as i64;
 
         if current != expected_version {
@@ -126,7 +150,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         let tenant = resolve_tenant(tenant_id)?;
         let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
 
-        match lock(&self.streams).get(&key) {
+        match lock(&self.state).streams.get(&key) {
             Some(events) => Ok(events.clone()),
             None => Err(PersistenceError::NotFound {
                 aggregate_id: format!("{aggregate_type}-{aggregate_id}"),
@@ -139,7 +163,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
         tenant_id: Option<&str>,
     ) -> Result<Vec<(String, String)>, PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
-        let mut ids: Vec<(String, String)> = lock(&self.streams)
+        let mut ids: Vec<(String, String)> = lock(&self.state)
+            .streams
             .keys()
             .filter(|(_, _, t)| *t == tenant)
             .map(|(atype, aid, _)| (atype.clone(), aid.clone()))
@@ -150,9 +175,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
 
     async fn begin(&self) -> Result<Box<dyn EventStoreUnitOfWork<E>>, PersistenceError> {
         Ok(Box::new(InMemoryEventStoreUnitOfWork {
-            streams: Arc::clone(&self.streams),
+            state: Arc::clone(&self.state),
             staged: HashMap::new(),
-            receipts: Arc::clone(&self.receipts),
             staged_receipts: HashMap::new(),
         }))
     }
@@ -171,7 +195,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
             tenant,
             operation_key.to_string(),
         );
-        Ok(lock(&self.receipts).get(&key).cloned())
+        Ok(lock(&self.state).receipts.get(&key).cloned())
     }
 }
 
@@ -188,9 +212,8 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStore<E> for InMemoryE
 /// disagree with the durable one about a case the shared conformance harness
 /// covers.
 struct InMemoryEventStoreUnitOfWork<E> {
-    streams: Arc<Mutex<HashMap<StreamKey, Vec<StoredEvent<E>>>>>,
+    state: Arc<Mutex<Committed<E>>>,
     staged: HashMap<StreamKey, Vec<StoredEvent<E>>>,
-    receipts: Arc<Mutex<HashMap<ReceiptKey, OperationReceipt>>>,
     /// Receipts confirmed here but not yet published. Staged rather than written
     /// through, so dropping this unit of work discards them exactly as it
     /// discards appends — the receipt shares the events' fate or it is not a
@@ -213,7 +236,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         let tenant = resolve_tenant(tenant_id)?;
         let key = (aggregate_type.to_string(), aggregate_id.to_string(), tenant);
 
-        let committed = lock(&self.streams).get(&key).map_or(0, Vec::len) as i64;
+        let committed = lock(&self.state).streams.get(&key).map_or(0, Vec::len) as i64;
         let staged = self.staged.get(&key).map_or(0, Vec::len) as i64;
         let current = committed + staged;
 
@@ -235,25 +258,24 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> EventStoreUnitOfWork<E>
         receipt: &OperationReceipt,
     ) -> Result<(), PersistenceError> {
         let key = receipt_key(receipt);
-        reconcile(lock(&self.receipts).get(&key), receipt)?;
+        reconcile(lock(&self.state).receipts.get(&key), receipt)?;
         reconcile(self.staged_receipts.get(&key), receipt)?;
         self.staged_receipts.insert(key, receipt.clone());
         Ok(())
     }
 
     async fn commit(self: Box<Self>) -> Result<(), PersistenceError> {
-        // Both maps are published under their own locks, taken one at a time and
-        // never across an await, so a caller committing on one thread cannot
-        // deadlock against a reader on another.
-        let mut streams = lock(&self.streams);
+        // One acquisition, both maps, then release. An earlier version took the
+        // two locks in sequence and released the first before taking the second,
+        // which left a window where another task could observe the events
+        // without the receipt that says they already happened — and act on it by
+        // running the operation again.
+        let mut state = lock(&self.state);
         for (key, events) in self.staged {
-            streams.entry(key).or_default().extend(events);
+            state.streams.entry(key).or_default().extend(events);
         }
-        drop(streams);
-
-        let mut receipts = lock(&self.receipts);
         for (key, receipt) in self.staged_receipts {
-            receipts.insert(key, receipt);
+            state.receipts.insert(key, receipt);
         }
         Ok(())
     }
