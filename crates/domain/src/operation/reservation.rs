@@ -299,8 +299,28 @@ pub enum ReservationOutcome {
     /// A prior reservation's lease had expired; this attempt atomically took
     /// it over with a strictly greater fencing token.
     TakenOver(Lease),
-    /// This exact owner already holds this reservation's still-valid lease —
-    /// legitimately the same caller recovering from a crash or retrying.
+    /// This exact owner already holds this reservation's still-valid lease.
+    ///
+    /// **Observing the same owner is not permission to proceed.** Fencing
+    /// proves *ownership*; it does not prove *exclusion between two executions
+    /// of the same owner*. This outcome cannot tell a legitimate recovery apart
+    /// from a concurrent retry, or from the earlier execution still running and
+    /// merely slow — and re-entering an operation that died midway is unsafe
+    /// once it may already have reached an external effect. The receipt written
+    /// in the aggregate's unit of work protects work that was *confirmed*; it
+    /// does not make half-finished work safe to repeat.
+    ///
+    /// Recovery happens by waiting instead: while the lease holds nobody
+    /// re-executes, and once it expires `reserve` answers
+    /// [`TakenOver`](ReservationOutcome::TakenOver) with a strictly greater
+    /// fencing token, so the new execution is protected from the previous
+    /// owner.
+    ///
+    /// The variant is kept distinct from
+    /// [`OtherInProgress`](ReservationOutcome::OtherInProgress) because
+    /// self-contention and external contention are worth telling apart for
+    /// metrics, diagnostics, lease renewal, and any future explicit recovery —
+    /// not because they dispatch differently. Both block.
     OwnedInProgress(Lease),
     /// A different owner holds this reservation's still-valid lease. The
     /// caller MUST NOT proceed and MUST NOT treat this as success.

@@ -447,6 +447,14 @@ unchanged, which is the point of stopping here.
       `expect(dead_code, reason = "called by #[idempotent] dispatch, landing in
       B6")` describes a call that AD-3g means will never happen. It stays
       `pub(crate)`.
+      **Six outcomes, not five — see AD-3h.** `ReservationOutcome` has
+      `Fresh`, `TakenOver`, `OwnedInProgress`, `OtherInProgress`, `Succeeded` and
+      `Conflict`. Only the first two continue. `OwnedInProgress` blocks like
+      `OtherInProgress`: fencing proves ownership, not exclusion between two
+      executions of the same owner, so it cannot tell a legitimate recovery from
+      a concurrent retry or from the previous execution still running. Recovery
+      happens by waiting for the lease to expire and taking over with a greater
+      token, not by re-entering. The runtime's branching test must cover all six.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).

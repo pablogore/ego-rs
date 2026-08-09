@@ -426,6 +426,45 @@ blocking outcome returns before `on_request` and before the handler — the same
 control-flow property B6.3 fixed for the guards, rather than a rule the next
 author has to remember.
 
+### AD-3h — Six reservation outcomes, and only two of them dispatch
+
+**Decision**: `ReservationOutcome` has **six** variants, not the five this
+document and `tasks.md` previously described. Two of them continue; four stop.
+
+| Outcome | Dispatch |
+|---|---|
+| `Fresh(lease)` | continue |
+| `TakenOver(lease)` | continue, under the new fencing token |
+| `OwnedInProgress(lease)` | **stop** — operation-in-progress response |
+| `OtherInProgress` | **stop** — contention response |
+| `Succeeded(response)` | replay the stored response, unexecuted |
+| `Conflict` | refuse: same key, different fingerprint |
+
+**The decision that needed making: `OwnedInProgress` does not continue.**
+
+It is tempting, because the variant exists precisely to say "this is the same
+caller". But **fencing proves ownership, not exclusion between two executions of
+the same owner.** Observing the same owner cannot distinguish a legitimate
+recovery from a concurrent retry, or from the previous execution still running
+and merely slow. Keeping the same fencing token does not separate them either.
+
+Nor does B5's receipt make it safe. That gate protects work that was
+**confirmed**; an operation that died midway may already have reached an
+external effect, and nothing durable records that. Re-entering it is exactly the
+duplicate the whole capability exists to prevent.
+
+**Recovery therefore happens by waiting, not by re-entering.** While the lease
+holds, nobody re-executes. Once it expires, `reserve` answers `TakenOver` with a
+strictly greater fencing token and the new execution is protected from the
+previous owner. If the earlier work had been confirmed, B5 returns its receipt
+rather than repeating it.
+
+**`OwnedInProgress` stays.** Self-contention and external contention are worth
+telling apart for metrics, diagnostics, lease renewal and any future explicit
+recovery. They differ in what they *mean*, not in what dispatch does with them —
+and collapsing them in the enum would destroy information the runtime should be
+reporting. Both block.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.
@@ -737,7 +776,7 @@ HTTP request (Idempotency-Key: K)
   │                Fresh / TakenOver ⇒ continue
   │                Succeeded         ⇒ return stored response; handler never runs
   │                Conflict          ⇒ permanent conflict
-  │                *InProgress       ⇒ contention response
+  │                *InProgress       ⇒ blocked (see AD-3h: owned and other both stop)
   │     on_request → handler body
   │
   ├─ EntityRuntime → EntityActor::execute_command(CommandContext{ operation_key: K })
