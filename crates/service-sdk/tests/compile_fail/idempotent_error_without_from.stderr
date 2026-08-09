@@ -1,0 +1,12 @@
+error[E0277]: the trait bound `UnconvertibleError: From<ReservationRejection>` is not satisfied
+  --> tests/compile_fail/idempotent_error_without_from.rs:45:31
+   |
+45 |     ) -> Result<PlainReceipt, UnconvertibleError>;
+   |                               ^^^^^^^^^^^^^^^^^^ the trait `From<ReservationRejection>` is not implemented for `UnconvertibleError`
+   |
+note: required by a bound in `assert_from`
+  --> tests/compile_fail/idempotent_error_without_from.rs:37:1
+   |
+37 | #[service(version = "1.0.0")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_from`
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

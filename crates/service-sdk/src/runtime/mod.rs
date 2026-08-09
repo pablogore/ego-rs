@@ -11,7 +11,10 @@ mod tenant;
 pub use builder::{Runtime, RuntimeBuilder, RuntimeResolver};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
 pub use error::RuntimeInfraError;
-pub use idempotency::IdempotencyEnforcementMode;
+pub use idempotency::{
+    IdempotencyEnforcementMode, ReservationConfig, ReservationConfigError, ReservationDecision,
+    ReservationPermit, ReservationRejection, StoredResponseError,
+};
 pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{HasServiceTag, Resolvable, ResolvableContainer};

@@ -526,6 +526,50 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 // without a key, a fingerprint, or outcome handling would change
                 // production behaviour before the contract that governs it exists,
                 // and would have to be replaced rather than extended.
+                // The two public obligations `#[idempotent]` imposes, asserted
+                // at type-check time and generating no code — the same
+                // const-closure pattern `#[authorize]` and `#[tenant_scoped]`
+                // use.
+                //
+                // They are separate assertions on purpose. Folded into one, a
+                // fixture proving the requirement is enforced could be failing
+                // for either reason, and whichever bound was silently dropped
+                // would keep the harness green.
+                let idempotency_bounds = if has_idempotent {
+                    let out_ty = match &method.sig.output {
+                        syn::ReturnType::Type(_, ty) => result_ok_type(ty).cloned(),
+                        _ => None,
+                    };
+                    let err_ty = match &method.sig.output {
+                        syn::ReturnType::Type(_, ty) => result_error_type(ty).cloned(),
+                        _ => None,
+                    };
+
+                    // A replay answers with bytes the runtime stored, so the
+                    // output must survive the round trip in both directions
+                    // (AD-3k).
+                    let output_bound = out_ty.map(|ty| quote! {
+                        const _: fn() = || {
+                            fn assert_codec<T: serde::Serialize + serde::de::DeserializeOwned>() {}
+                            assert_codec::<#ty>();
+                        };
+                    });
+
+                    // A refused reservation is returned as the operation's own
+                    // error, converted by `From` — the macro never interprets an
+                    // outcome (AD-3g).
+                    let error_bound = err_ty.map(|ty| quote! {
+                        const _: fn() = || {
+                            fn assert_from<E: From<ego_service_sdk::runtime::ReservationRejection>>() {}
+                            assert_from::<#ty>();
+                        };
+                    });
+
+                    quote! { #output_bound #error_bound }
+                } else {
+                    quote! {}
+                };
+
                 let idempotency_slot = quote! {};
 
                 forwarding_methods.push(quote! {
@@ -533,6 +577,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         #operation_name_binding
                         #authorize_guard
                         #enforce_tenant_block
+                        #idempotency_bounds
                         #idempotency_slot
                         let inner_ref = self.inner.clone();
                         let chain_ref = self.chain.clone();
@@ -828,6 +873,26 @@ fn result_error_type(ty: &syn::Type) -> Option<&syn::Type> {
                         if let syn::GenericArgument::Type(err_ty) = &args.args[1] {
                             return Some(err_ty);
                         }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `T` of a `Result<T, E>` return type.
+///
+/// Needed because `#[idempotent]` must require `Serialize + DeserializeOwned`
+/// of the output: a replayed reservation answers with a stored response, and
+/// without both halves the runtime could write an answer it cannot read back.
+fn result_ok_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Result" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first() {
+                        return Some(ok_ty);
                     }
                 }
             }
