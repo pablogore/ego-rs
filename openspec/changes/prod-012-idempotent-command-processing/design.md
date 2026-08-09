@@ -383,6 +383,49 @@ fingerprint; two different typed values produce different fingerprints. That is
 what makes a retry recognisable across transports without making it recognisable
 across *different* requests.
 
+### AD-3g — The reservation lives in the runtime; the macro only places the call
+
+**Decision**: slot 3 emits a single `?`-terminated call to a **public runtime
+method**. The reservation and every outcome branch live in `service-sdk`, not in
+generated code.
+
+```
+macro    → is the operation marked; canonicalise the typed arguments; compute
+           the fingerprint (AD-3f); place the call in slot 3
+runtime  → reach the store, call reserve(...), interpret Fresh / TakenOver /
+           Succeeded / Conflict / InProgress, return a dispatch-oriented result
+handler  → reached only when that result authorises continuing
+```
+
+**Rejected: emitting the store access and the branching inline.** The five-way
+outcome interpretation is real logic, and in the macro it becomes text expanded
+into every operation of every service — one copy per operation, none of them the
+source of truth, and none directly testable except through a fixture service.
+In the runtime it is tested exhaustively where it lives.
+
+It also mirrors `enforce_tenant`, which is `pub` for exactly this reason, and it
+follows the rule already fixed for the context bridge: shared dispatch
+behaviour belongs to the path every transport shares.
+
+**Two boundaries this decision draws, both deliberate:**
+
+- **The method exposes a capability, not infrastructure.** It must not return
+  the store's own outcome type. A dispatch-oriented result — a permit, or an
+  error the operation returns — keeps *how each outcome is translated* private,
+  so changing that translation is not a breaking change for every generated
+  caller. `operation_reservation_store()` stays `pub(crate)`; its
+  `expect(dead_code, reason = "called by #[idempotent] dispatch, landing in B6")`
+  annotation is made obsolete by this decision and must be updated when B6.4
+  lands, not left describing a call that will never happen.
+- **The runtime does not serialise arguments or decide what the fingerprint
+  covers.** That is the generated code's job under AD-3f. The runtime receives
+  the tenant, the key and the fingerprint already definitive.
+
+**The structural guarantee is preserved.** A single `?` at the slot means any
+blocking outcome returns before `on_request` and before the handler — the same
+control-flow property B6.3 fixed for the guards, rather than a rule the next
+author has to remember.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.

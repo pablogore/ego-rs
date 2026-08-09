@@ -434,6 +434,19 @@ unchanged, which is the point of stopping here.
       look like a different request. The property to test: two syntactically
       different requests that deserialise to the same typed values produce the
       same fingerprint, and two different typed values produce different ones.
+      **Shape fixed by AD-3g.** Slot 3 emits one `?`-terminated call to a public
+      runtime method; the store access and the five-way outcome branching live in
+      `service-sdk`, not in generated code — one source of truth, testable where
+      it lives, mirroring `enforce_tenant`. The method must expose a
+      dispatch-oriented result rather than the store's own outcome type, so how
+      each outcome is translated stays private. The runtime receives tenant, key
+      and fingerprint already definitive; canonicalisation and fingerprinting
+      belong to the generated code under AD-3f.
+      While implementing, update the now-obsolete annotation on
+      `RuntimeInner::operation_reservation_store` — its
+      `expect(dead_code, reason = "called by #[idempotent] dispatch, landing in
+      B6")` describes a call that AD-3g means will never happen. It stays
+      `pub(crate)`.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
