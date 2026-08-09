@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::runtime::error::RuntimeInfraError;
+use crate::runtime::idempotency::ReservationConfig;
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::OperationReservationStore;
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -285,7 +285,7 @@ pub struct RuntimeInner {
     /// Read only through [`RuntimeInner::operation_reservation_store`], which is
     /// what keeps this field from being reported unused — the accessor carries the
     /// awaiting-its-consumer marker, not the field.
-    idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+    reservation: Option<ReservationConfig>,
     /// Observability sink for macro-guard security denials (CORE-012A AD-2).
     /// `None` by default — behaviorally identical to `NoopObservability`
     /// discarding events, keeping `ego-service-sdk` free of an
@@ -381,7 +381,7 @@ impl RuntimeInner {
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
-        idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+        reservation: Option<ReservationConfig>,
         observability: Option<Arc<dyn Observability>>,
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
@@ -396,7 +396,7 @@ impl RuntimeInner {
             teardown,
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
-            idempotency_reservation_store,
+            reservation,
             observability,
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
@@ -610,16 +610,23 @@ impl RuntimeInner {
     /// `#[expect]` rather than `#[allow]` on purpose: the attribute becomes an error
     /// the moment a production caller appears, so it cannot outlive its reason.
     ///
-    /// Gated on `not(test)` because the tests below do call it — an unconditional
-    /// expectation would be unfulfilled in the test build and fail there instead.
+    /// The reservation capability, if this deployment configured one.
+    ///
+    /// `None` under
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility),
+    /// which is the mode a deployment declares when it has not adopted
+    /// enforcement. It cannot be `None` under the enforcing variant: the builder
+    /// refuses to produce a runtime in that state.
+    ///
+    /// The store is reached only through here, never handed out. AD-3g keeps the
+    /// reservation and its outcome branching inside this crate so there is one
+    /// implementation to test rather than one copy per generated operation.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "called by #[idempotent] dispatch, landing in B6")
+        expect(dead_code, reason = "consumed by the reservation method, next slice")
     )]
-    pub(crate) fn operation_reservation_store(
-        &self,
-    ) -> Option<&Arc<dyn OperationReservationStore>> {
-        self.idempotency_reservation_store.as_ref()
+    pub(crate) fn reservation(&self) -> Option<&ReservationConfig> {
+        self.reservation.as_ref()
     }
 
     /// Mints a cross-tenant permit authorizing access to `destination`

@@ -3,6 +3,12 @@
 //! [`IdempotencyEnforcementMode`] governs whether a missing client-supplied
 //! `OperationKey` is rejected or, temporarily and explicitly, admitted.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use ego_domain::operation::{OperationReservationStore, OwnerId};
+use ego_domain::time::Clock;
+
 /// Runtime-configured idempotency enforcement policy.
 ///
 /// Mirrors [`crate::runtime::TenantEnforcementMode`]'s shape and posture
@@ -62,5 +68,101 @@ mod tests {
             IdempotencyEnforcementMode::Compatibility,
             IdempotencyEnforcementMode::default()
         );
+    }
+}
+
+/// Everything the runtime needs to reserve an operation, as one value.
+///
+/// # Why these four travel together
+///
+/// They are not four independent settings. A store with no clock cannot compute
+/// a `lease_until`; an owner with no store means nothing; a lease length without
+/// a clock is unusable. Kept as separate optional fields they would admit
+/// sixteen combinations, thirteen of them incoherent, and every use site would
+/// have to check for the ones that are not.
+///
+/// The optionality lives **outside** this struct — a runtime holds
+/// `Option<ReservationConfig>`, so exactly two states are representable:
+/// reservations disabled, or a complete and valid configuration. There are
+/// deliberately no `Option` fields inside.
+#[derive(Clone)]
+// Read through the accessors below, which the tests exercise and which the
+// reservation method lands on in the next slice. The annotation is scoped to
+// this struct and must be removed then — an `expect` that outlives its reason
+// stops being a note and becomes a claim nobody rechecks.
+pub struct ReservationConfig {
+    store: Arc<dyn OperationReservationStore>,
+    clock: Arc<dyn Clock>,
+    owner_id: OwnerId,
+    lease_duration: Duration,
+}
+
+/// Why a [`ReservationConfig`] could not be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReservationConfigError {
+    /// The lease length was zero.
+    ///
+    /// A zero lease expires the instant it is taken, so every attempt would see
+    /// the previous one as expired and take it over — the reservation would
+    /// exclude nobody while appearing to work.
+    #[error("the reservation lease duration must be greater than zero")]
+    ZeroLease,
+}
+
+// The accessors are exercised by the builder's tests; nothing in a release
+// build reads them until the reservation method lands in the next slice. Scoped
+// to this impl and to non-test builds, and it must be removed then — an
+// `expect` that outlives its reason stops being a note and becomes a claim
+// nobody rechecks.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the reservation method, next slice")
+)]
+impl ReservationConfig {
+    /// Builds a configuration, or refuses to.
+    ///
+    /// Validating here rather than in `build()` means there is one place a
+    /// zero lease can be rejected, and no way for a later caller to assemble an
+    /// unvalidated one.
+    ///
+    /// # Operational contract
+    ///
+    /// `lease_duration` must exceed the longest a legitimate execution can
+    /// take. When a lease expires another owner may take the reservation over
+    /// **while the original is still running** — until renewal exists, a lease
+    /// shorter than a real operation permits overlap, which is a correctness
+    /// problem rather than a tuning preference.
+    pub fn new(
+        store: Arc<dyn OperationReservationStore>,
+        clock: Arc<dyn Clock>,
+        owner_id: OwnerId,
+        lease_duration: Duration,
+    ) -> Result<Self, ReservationConfigError> {
+        if lease_duration.is_zero() {
+            return Err(ReservationConfigError::ZeroLease);
+        }
+        Ok(Self {
+            store,
+            clock,
+            owner_id,
+            lease_duration,
+        })
+    }
+
+    /// The durable reservation store.
+    pub(crate) fn store(&self) -> &Arc<dyn OperationReservationStore> {
+        &self.store
+    }
+
+    /// The identity this runtime instance reserves under.
+    pub(crate) fn owner_id(&self) -> &OwnerId {
+        &self.owner_id
+    }
+
+    /// The lease expiry a fresh reservation or takeover would establish,
+    /// computed from the configured clock and nothing else — which is what
+    /// makes expiry testable without wall time.
+    pub(crate) fn lease_until(&self) -> chrono::DateTime<chrono::Utc> {
+        self.clock.now() + self.lease_duration
     }
 }
