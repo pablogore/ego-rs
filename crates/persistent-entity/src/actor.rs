@@ -6,7 +6,9 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::{AggregateOutcome, OperationReceipt};
 use tokio::sync::watch;
 
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
@@ -271,8 +273,47 @@ where
             .handle_command(&command, &current_state, &context)
             .await;
 
+        // Both halves, or no receipt at all: a command with no idempotency
+        // identity keeps exactly the path it had before this existed, and pays
+        // for no unit of work it does not need.
+        let identity = match (&context.operation_key, &context.fingerprint) {
+            (Some(key), Some(fingerprint)) => Some((key.clone(), fingerprint.clone())),
+            _ => None,
+        };
+
         match handler_result {
             Ok(events) if events.is_empty() => {
+                // A success that emitted nothing has no event in the stream to
+                // carry its completion, so without a receipt it is
+                // indistinguishable from a command that never ran. This is the
+                // case the receipt exists for, which is why it opens a real unit
+                // of work to write one rather than returning early.
+                if let Some((key, fingerprint)) = identity {
+                    let receipt = OperationReceipt::new(
+                        self.entity_id.aggregate_type(),
+                        &self.entity_id.entity_id,
+                        TenantId::new(&self.entity_id.tenant_id).ok(),
+                        key,
+                        fingerprint,
+                        AggregateOutcome::NoEvents,
+                    );
+                    if let Err(e) = self
+                        .persistence
+                        .persist_events_with_receipt(
+                            self.entity_id.aggregate_type(),
+                            &self.entity_id.entity_id,
+                            Some(&self.entity_id.tenant_id),
+                            self.version,
+                            &[],
+                            &receipt,
+                        )
+                        .await
+                    {
+                        let _ = reply.send(Err(crate::error::EntityError::PersistenceError(e)));
+                        return;
+                    }
+                }
+
                 let result: CommandResult<E, S> = CommandResult::NoEvents {
                     state: current_state,
                 };
@@ -280,16 +321,55 @@ where
                 let _ = reply.send(Ok(boxed));
             }
             Ok(events) => {
-                let persist_result = self
-                    .persistence
-                    .persist_events(
-                        self.entity_id.aggregate_type(),
-                        &self.entity_id.entity_id,
-                        Some(&self.entity_id.tenant_id),
-                        self.version,
-                        &events,
-                    )
-                    .await;
+                let persist_result = match identity {
+                    // Events and receipt in one unit of work, one commit. A
+                    // receipt written after a separate append could survive a
+                    // rollback of the events it describes, or be lost while they
+                    // survive.
+                    Some((key, fingerprint)) => {
+                        let outcome = match AggregateOutcome::events(
+                            self.version as i64 + 1,
+                            self.version as i64 + events.len() as i64,
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(e) => {
+                                let _ = reply.send(Err(crate::error::EntityError::Internal(
+                                    format!("the appended version range is not encodable: {e:?}"),
+                                )));
+                                return;
+                            }
+                        };
+                        let receipt = OperationReceipt::new(
+                            self.entity_id.aggregate_type(),
+                            &self.entity_id.entity_id,
+                            TenantId::new(&self.entity_id.tenant_id).ok(),
+                            key,
+                            fingerprint,
+                            outcome,
+                        );
+                        self.persistence
+                            .persist_events_with_receipt(
+                                self.entity_id.aggregate_type(),
+                                &self.entity_id.entity_id,
+                                Some(&self.entity_id.tenant_id),
+                                self.version,
+                                &events,
+                                &receipt,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.persistence
+                            .persist_events(
+                                self.entity_id.aggregate_type(),
+                                &self.entity_id.entity_id,
+                                Some(&self.entity_id.tenant_id),
+                                self.version,
+                                &events,
+                            )
+                            .await
+                    }
+                };
 
                 match persist_result {
                     Ok(new_version) => {

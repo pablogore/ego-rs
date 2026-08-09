@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 75 complete and 41 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 77 complete and 39 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -337,8 +337,18 @@ unchanged, which is the point of stopping here.
 - [x] B5.3 GREEN: implement `confirm_receipt` on `EventStoreUnitOfWork` for both implementors, joining the same transaction as `append`.
 - [x] B5.4 RED **(reframed by AD-3b/AD-3e)**: `crates/persistent-entity` test — the actor consults the receipt before dispatch, keyed on `(operation_key, fingerprint)` taken from `CommandContext` and never recomputed. A matching fingerprint replays without invoking `handle_command`; a mismatched one returns a permanent conflict without invoking `handle_command`. The replay must be observably a **replay**: the test asserts that post-commit effect acceptance is not re-entered, since a hit that rebuilt an ordinary `CommandResult::Events` would dispatch side effects the first execution already dispatched — the receipt would then prevent the state transition while permitting the duplicate it exists to stop (persistent-entity spec scenarios).
 - [x] B5.5 GREEN **(reframed by AD-3c/AD-3e)**: add receipt-consultation gating in `crates/persistent-entity/src/actor.rs` before the `handle_command` call at line ~214, via `EventStore::find_receipt`. Return `CommandResult::Replayed { outcome }` — a public variant carrying the `AggregateOutcome` and **no state**, per the corrected AD-3c/AD-3e. It reconstructs neither the original result nor the original state: AD-3c records why neither is recoverable. Update every exhaustive match in the workspace explicitly, never with a `_` that could hide semantics, and give `RegisterUserImpl` concrete behaviour for it rather than letting current state stand in implicitly. A receipt that cannot be read is an internal error and never a re-execution; gap detection inside a range is **not** promised, because `EventStore::load` infers versions from positions and cannot prove it.
-- [ ] B5.6 RED **(reframed by AD-3c)**: zero-event branch test — `actor.rs:220`'s `CommandResult::NoEvents` path now opens a **real** unit of work to confirm `AggregateOutcome::NoEvents`, appending nothing (today it opens none — verified constraint 1). `NoEvents` is the only valid encoding of an empty range, so the test must also reject an `Events` range that describes nothing.
-- [ ] B5.7 GREEN **(reframed by AD-3c)**: change the zero-event branch to `begin()` → `confirm_receipt(AggregateOutcome::NoEvents)` → `commit()`, with no `append`. The `Ok(events)` branch must move off `persistence.persist_events(...)`, which owns and closes its own transaction, onto the same `begin()` → `append` → `confirm_receipt` → `commit()` sequence — otherwise the receipt cannot share the events' transaction, which is the whole point of B5. A command carrying no `operation_key` keeps the existing path and pays for no extra transaction.
+- [x] B5.6 RED **(reframed by AD-3c)**: zero-event branch test — `actor.rs:220`'s `CommandResult::NoEvents` path now opens a **real** unit of work to confirm `AggregateOutcome::NoEvents`, appending nothing (today it opens none — verified constraint 1). `NoEvents` is the only valid encoding of an empty range, so the test must also reject an `Events` range that describes nothing.
+- [x] B5.7 GREEN **(reframed by AD-3c)**: change the zero-event branch to `begin()` → `confirm_receipt(AggregateOutcome::NoEvents)` → `commit()`, with no `append`. The `Ok(events)` branch must move off `persistence.persist_events(...)`, which owns and closes its own transaction, onto the same `begin()` → `append` → `confirm_receipt` → `commit()` sequence — otherwise the receipt cannot share the events' transaction, which is the whole point of B5. A command carrying no `operation_key` keeps the existing path and pays for no extra transaction.
+      **Ordering is a static guarantee, not a tested one.** Four mutations were
+      run against this slice and each died on observable behaviour: swallowing a
+      confirmation error, omitting the confirmation on the `NoEvents` branch, and
+      confirming in a second unit of work after the first committed (that one
+      kills four tests). The fifth — committing *before* confirming, on the same
+      unit of work — could not be written: `commit(self: Box<Self>)` consumes it,
+      so the attempt fails to compile with `error[E0382]: borrow of moved value`.
+      Recorded here as a guarantee the type system already provides rather than a
+      mutation that was skipped, so a later change to `commit`'s receiver is
+      understood to be removing a check, not tidying a signature.
 - [x] B5.7a **(debt created by AD-3b, on already-merged code)**: `OperationReceipt` currently stores `ego_domain::operation::reservation::StoredResponse` — literally the reservation's type, imported across the two scopes AD-3b separates. Replace it with `AggregateOutcome`, rename the reservation's own to `StoredServiceResponse`, and rename migration `011`'s `response` column accordingly. This touches `crates/domain/src/operation/receipt.rs`, `011_create_operation_receipts.sql`, the Postgres adapter and the shared conformance harness — landed in `febeaaa`/`d5cd752` before the two scopes were distinguished. The two may share a byte representation; they share neither semantics nor ownership, and the shared name is how the scopes were merged in the first place.
 - [ ] B5.8 Update A3.4/A3.5's schema-index assertion to include the `operation_receipts` pair now that it exists.
 
