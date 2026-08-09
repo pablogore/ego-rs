@@ -439,10 +439,18 @@ async fn a_command_without_the_identity_keeps_the_direct_path() {
 async fn nothing_is_visible_after(fail_at: FailAt, expected_tail: &[&str]) {
     let trace: Trace = Arc::new(Mutex::new(Vec::new()));
     let handled = Arc::new(AtomicUsize::new(0));
-    let store = RecordingStore::new(Arc::clone(&trace), fail_at);
-    let probe: Arc<InMemoryEventStore<TestEvent>> = Arc::new(InMemoryEventStore::new());
-    let _ = &probe; // the assertions below read through the runtime's own store
-    let runtime = runtime_over(store);
+
+    // The store is held here, not handed away, so the assertions below read the
+    // very store the runtime writes through. An earlier version of this test
+    // created a second, unrelated `InMemoryEventStore` and claimed in a comment
+    // to be reading the runtime's — which made the whole rollback check
+    // vacuous.
+    let store = Arc::new(RecordingStore::new(Arc::clone(&trace), fail_at));
+    let runtime = EntityRuntimeBuilder::<TestEvent>::new()
+        .passivation_timeout(Duration::from_secs(3600))
+        .snapshot_strategy(Arc::new(NoSnapshot))
+        .with_event_store(Arc::clone(&store) as Arc<dyn EventStore<TestEvent> + Send + Sync>)
+        .build();
 
     let outcome = send(
         &runtime,
@@ -458,22 +466,29 @@ async fn nothing_is_visible_after(fail_at: FailAt, expected_tail: &[&str]) {
         "the sequence must stop at the failing step: nothing after it may run"
     );
 
-    // The decisive check is visibility, not the counters above: a later command
-    // must find no receipt, and must therefore run the handler again — which is
-    // correct precisely because nothing was ever made durable.
-    let retry_handled = Arc::new(AtomicUsize::new(0));
-    let retried = send(
-        &runtime,
-        Recorded::emitting(Arc::clone(&retry_handled), 2),
-        context(Some(KEY), Some(FP)),
-    )
-    .await;
-    let _ = retried;
+    // Both halves of the rollback, read directly from the store the runtime
+    // used. Asserting only the receipt's absence would pass against an
+    // implementation that made the events durable and lost the receipt — the
+    // retry would find no receipt, re-execute, and look correct while the
+    // aggregate had silently advanced.
+    let events = store
+        .load(ENTITY_TYPE, ENTITY_ID, Some("default"))
+        .await
+        .unwrap_or_default();
+    assert!(
+        events.is_empty(),
+        "a failed step must leave no event durable, and {} were found",
+        events.len()
+    );
+
+    let key = OperationKey::parse(KEY).expect("a non-empty key parses");
     assert_eq!(
-        retry_handled.load(Ordering::SeqCst),
-        1,
-        "no receipt may have survived the failure: a retry must re-execute, \
-         because nothing durable was written"
+        store
+            .find_receipt(ENTITY_TYPE, ENTITY_ID, Some("default"), key.as_str())
+            .await
+            .expect("a receipt lookup must not fail"),
+        None,
+        "a failed step must leave no receipt durable either"
     );
 }
 
