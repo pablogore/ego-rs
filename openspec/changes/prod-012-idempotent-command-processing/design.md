@@ -342,6 +342,47 @@ The route must be visible in the type, not left to a caller's discipline —
 either an internal `ReplayedEvents` variant or equivalent internal metadata that
 translates to what the caller expects while bypassing the post-commit pipeline.
 
+### AD-3f — Where the fingerprint is computed, and what "canonical" means
+
+**Decision**: the fingerprint is computed **in slot 3, over the operation's
+already-deserialised typed arguments**, before `on_request` and before the
+handler.
+
+The order is therefore:
+
+```
+deserialise → authorize → tenant → canonicalise the typed input → fingerprint
+           → reserve → on_request → handler
+```
+
+**Why this needed deciding rather than defaulting.** "Canonical input" was
+ambiguous between two readings that fail in opposite directions. Computed over
+raw transport bytes, two requests that differ only in JSON key order or
+whitespace produce different fingerprints, and a legitimate retry is refused as
+a *permanent* conflict — worse than having no idempotency, because it rejects
+valid work irreversibly. Computed after the handler's own normalisation, the
+fingerprint cannot exist before the work it is meant to guard.
+
+**What canonical means here, stated so it is not re-litigated:**
+
+- **Not** raw transport bytes. Not JSON, not HTTP, not field order, whitespace,
+  or original formatting.
+- The canonical form of the **typed parameters**, as deserialised.
+- The operation's **semantic input only**.
+- **Excluding** `operation_key`, owner, lease, trace and correlation ids, and
+  every other piece of context metadata. Those describe *this attempt*, not
+  *this request*; folding them in would make every retry a different request.
+- The handler's internal transformations do not participate. **The handler does
+  not retroactively define the command's idempotent identity.** A normalisation
+  that genuinely changes semantic identity must happen before slot 3, or be made
+  an explicit part of the generated canonicalisation.
+
+**The property this buys, and the one B6.4 must test:** two syntactically
+different requests that deserialise to the same typed values produce the same
+fingerprint; two different typed values produce different fingerprints. That is
+what makes a retry recognisable across transports without making it recognisable
+across *different* requests.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.

@@ -424,6 +424,16 @@ unchanged, which is the point of stopping here.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
 - [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
+      **Fingerprint contract fixed by AD-3f — read it before writing the
+      canonicalisation.** The fingerprint is computed here, in slot 3, over the
+      operation's already-deserialised typed arguments: not raw transport bytes,
+      not JSON shape or field order, and not after the handler's own
+      transformations. It covers the semantic input only and excludes
+      `operation_key`, owner, lease, trace and correlation ids — those describe
+      the attempt, not the request, and folding them in would make every retry
+      look like a different request. The property to test: two syntactically
+      different requests that deserialise to the same typed values produce the
+      same fingerprint, and two different typed values produce different ones.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
