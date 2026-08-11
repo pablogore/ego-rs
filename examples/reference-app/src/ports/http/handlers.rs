@@ -7,6 +7,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use ego_service_sdk::context::ServiceContext;
+use ego_service_sdk::runtime::ReservationRejection;
 use ego_transport::{AppState, AuthenticatedContext, TraceContextExtractor, TransportError};
 use kitlogger_log_domain::Severity;
 
@@ -36,6 +37,24 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
     match err {
         RegisterUserError::Security(e) => e.into(),
         RegisterUserError::EntityWrite(_) => TransportError::Internal,
+        // The three refusals a client can reason about all say "this key is
+        // taken, by this request or another" — 409, which is the one status a
+        // caller can act on without reading prose.
+        RegisterUserError::Refused(
+            ReservationRejection::SelfInProgress
+            | ReservationRejection::OtherInProgress
+            | ReservationRejection::FingerprintConflict,
+        ) => TransportError::Conflict,
+        // The store could not answer. 503 rather than 500: the request is
+        // well-formed and may well succeed later, and a caller that stops
+        // retrying on 500 would give up on something transient.
+        RegisterUserError::Refused(ReservationRejection::StoreUnavailable) => {
+            TransportError::ServiceUnavailable
+        }
+        // The operation already completed and its answer cannot be read back,
+        // or the request could not be fingerprinted at all. Retrying either one
+        // reproduces it exactly, so 500 is honest: an operator has to act.
+        RegisterUserError::Refused(_) => TransportError::Internal,
     }
 }
 
