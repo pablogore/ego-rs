@@ -17,19 +17,23 @@
 //! defensively, and a caller that transfers one and forgets the other silently
 //! disables the guarantee for that aggregate while looking like it enabled it.
 //!
-//! Carried as this type, that state does not exist — and it takes both halves of
-//! the encapsulation to keep it that way. [`OperationIdentity::new`] requires
-//! both values, **and** the fields are private so a struct literal cannot supply
-//! them independently and route around it. Those are two separate properties
-//! with two separate compile-fail fixtures
-//! (`operation_identity_half_constructed.rs` and
-//! `operation_identity_fields_public.rs`), because making the fields public
-//! would leave the constructor's arity untouched and a fixture that only
-//! checked the arity would never notice.
+//! Carried as this type, that state does not exist: [`OperationIdentity::new`]
+//! requires both values, and a struct literal would have to name both fields
+//! too, so an identity is always complete. That is guarded by the compile-fail
+//! fixture `operation_identity_half_constructed.rs`.
+//!
+//! The fields are private for a **different** reason, guarded separately by
+//! `operation_identity_fields_public.rs`. Public fields would not admit a half
+//! identity — a literal still supplies both. They would admit two other things:
+//! construction that escapes `new`, so any invariant it later acquires becomes
+//! skippable, and independent mutation afterwards. That second one is the sharper
+//! risk: assigning `key` alone leaves a *different* request's fingerprint
+//! attached, and the gate would then compare a real fingerprint against the wrong
+//! operation and answer with confidence. A missing half at least makes the gate
+//! stand down.
 //!
 //! Reading a half is fine, and supported: see [`OperationIdentity::key`] and
-//! [`OperationIdentity::fingerprint`]. The guarantee is about what can be
-//! **built**, not about what can be looked at.
+//! [`OperationIdentity::fingerprint`]. What is mediated is writing, not looking.
 
 use crate::operation::{OperationFingerprint, OperationKey};
 

@@ -6,17 +6,20 @@
 // reusing the key. So a key without a fingerprint is not a partial identity —
 // it is an identity the gate must ignore entirely.
 //
-// Together with `operation_identity_fields_public.rs`, this replaces two runtime
-// tests that asserted the gate stayed inactive for a half identity
-// (`a_command_with_only_an_operation_key_takes_the_previous_path` and
-// `a_command_with_only_a_fingerprint_takes_the_previous_path`). Those defended
-// the state at runtime; making it unconstructible is strictly stronger.
+// This replaces two runtime tests that asserted the gate stayed inactive for a
+// half identity (`a_command_with_only_an_operation_key_takes_the_previous_path`
+// and `a_command_with_only_a_fingerprint_takes_the_previous_path`). Those
+// defended the state at runtime; making it unconstructible is strictly stronger.
 //
 // **What this file covers, precisely: the constructor's arity.** It proves `new`
-// cannot be called with one argument. It says nothing about field visibility —
-// `new(key)` would keep failing on arity even if `key` and `fingerprint` became
-// public, so this fixture alone cannot detect that. Field privacy is the sibling
-// fixture's job, and the guarantee needs both.
+// cannot be called with one argument. Together with Rust's own rule that a
+// struct literal must name every field, that is the whole of the completeness
+// guarantee — this fixture does not need a companion to establish it.
+//
+// It says nothing about field visibility, and does not need to: `new(key)` would
+// keep failing on arity even if `key` and `fingerprint` became public. Privacy is
+// a separate property protecting separate things — constructor mediation and
+// controlled mutation — and `operation_identity_fields_public.rs` covers it.
 //
 // If this file starts compiling successfully, `new` gained a one-argument form,
 // and a service body can once again build an identity carrying the key alone,

@@ -1,7 +1,7 @@
 error[E0061]: this function takes 2 arguments but 1 argument was supplied
-  --> tests/compile_fail/operation_identity_half_constructed.rs:27:21
+  --> tests/compile_fail/operation_identity_half_constructed.rs:30:21
    |
-27 |     let _identity = ego_domain::operation::OperationIdentity::new(key);
+30 |     let _identity = ego_domain::operation::OperationIdentity::new(key);
    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----- argument #2 of type `OperationFingerprint` is missing
    |
 note: associated function defined here
@@ -11,5 +11,5 @@ note: associated function defined here
    |            ^^^
 help: provide the argument
    |
-27 |     let _identity = ego_domain::operation::OperationIdentity::new(key, /* OperationFingerprint */);
+30 |     let _identity = ego_domain::operation::OperationIdentity::new(key, /* OperationFingerprint */);
    |                                                                      ++++++++++++++++++++++++++++
