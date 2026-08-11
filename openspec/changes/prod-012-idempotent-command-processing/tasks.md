@@ -207,8 +207,12 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 > flow from the transport edge to the actor, because nothing reads
 > `ServiceContext::operation_key()` to construct the `CommandContext` a service
 > passes down. That bridge is a genuine gap in this task list rather than in the
-> code, and it is recorded as B6.4a below — the generated slot-3 code is where it
-> belongs, since that is the point which already reads the resolved key.
+> code, and it is recorded as B6.4a below. This note originally said the bridge
+> belonged in generated slot-3 code, since that was then the only point which had
+> read the resolved key. The reservation boundary changed that: the runtime now
+> stamps the accepted key and fingerprint onto `ServiceContext`, so the service
+> body reads an already-authorised identity and transfers it into each
+> `CommandContext` it creates. See B6.4a for the split.
 >
 > What B1 does deliver: the key has a type, one shared definition of validity and
 > of the missing-key policy, one HTTP adapter conforming to that contract, and
@@ -381,16 +385,42 @@ unchanged, which is the point of stopping here.
       trivially when nothing reserves at all), the pure fingerprint unit tests,
       and the two "legitimately did not reserve" cases — which is why they are
       not the evidence and the other 9 are.
-- [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
-      `ServiceContext::operation_key()` and threads that exact value into the
-      `CommandContext` the service hands to the entity. Test asserts the key
-      resolved at the transport edge is what `handle_command` observes, with no
-      regeneration in between. **This closes the gap B1 left open**: B1 made both
-      contexts able to hold the key and proved traversal from the command envelope
-      onward, but nothing joined the two halves.
+- [ ] B6.4a GREEN: bridge the service and aggregate contexts — after a successful
+      reservation, the service body reads the definitive `OperationKey` and
+      `OperationFingerprint` from `ServiceContext` and threads those exact values
+      into every `CommandContext` it creates. **The generated slot does not
+      construct aggregate contexts and must not recompute or independently
+      propagate the identity.**
+      **This closes the gap B1 left open**: B1 made both contexts able to hold the
+      key and proved traversal from the command envelope onward, but nothing
+      joined the two halves.
+      **Where the responsibility now sits**, fixed by the reservation boundary that
+      landed with the slot. An earlier revision of this box put the bridge in
+      generated slot-3 code, which was correct only while the slot was the sole
+      place that had read the resolved key. It is not any more, and the split is:
+      - slot 3 computes the fingerprint over the typed arguments (AD-3f);
+      - the runtime reserves, and stamps the accepted key and fingerprint onto
+        `ServiceContext` — only after the store accepts;
+      - the service body reads that already-authorised identity back;
+      - the service body transfers it into each `CommandContext` it creates;
+      - the receipt gate consumes exactly those values.
+      The slot cannot do the transfer: it does not know how many aggregates a
+      service body will touch, or when. Putting it back there would mean the macro
+      constructing aggregate contexts on the body's behalf.
       **The bridge must not live in a transport adapter.** It belongs to the dispatch
       path every transport shares, so each adapter decides only how to *extract* the
       key while everything from `ServiceContext` inward is one identical path.
+      **The criteria, each stated as something observed rather than present:**
+      - multi-aggregate: every `CommandContext` receives the *same* key and
+        fingerprint, and both match what the store was actually handed — asserted
+        against the store's recorded request, not against a value the test computed;
+      - the fingerprint is never recomputed downstream; the only value that reaches
+        an aggregate is the one the reservation stamped;
+      - `Replay` and every rejection construct **zero** `CommandContext` — the body
+        does not run, so nothing downstream is reached at all;
+      - a dispatch that legitimately did not reserve (no key, or no reservation
+        store) leaves both values absent and does not activate the receipt gate;
+      - the transfer is killed by mutation, per the scenario's own criterion below.
       **BLOCKING ACCEPTANCE CRITERION — the multi-aggregate recovery scenario.**
       Promoted here from B5, and deliberately not left as a generic follow-up: it
       is the scenario that justifies the whole receipt layer, and it cannot run
@@ -401,7 +431,8 @@ unchanged, which is the point of stopping here.
       `CommandContext::new(..)` for both entities with no key and no fingerprint
       (`application.rs:250`, `:287`), so the gate never fires there. Wiring that by
       hand would have tested a transient integration different from the specified
-      architecture: `ServiceContext` slot 3 → each entity's `CommandContext` →
+      architecture: slot 3 → the reservation's stamp on `ServiceContext` → the
+      service body → each entity's `CommandContext` →
       the receipt gate. The scenario:
       - one service `operation_key`, with the per-aggregate identity derived from it;
       - an existing receipt for `tenant_organization`, a miss for `user`;
@@ -410,8 +441,11 @@ unchanged, which is the point of stopping here.
       - the workflow continues to the user step;
       - the user handler runs **exactly once** and confirms its own receipt;
       - `RegisterOutput` completes without presenting current state as a historical result;
-      - **a mutation dropping the propagation into either `CommandContext` must kill
-        the test** — otherwise it proves the bridge exists rather than that it works.
+      - **a mutation dropping the transfer into either `CommandContext` must kill
+        the test — and the *second* aggregate is the one that matters.** The first
+        is what a partial implementation gets right by accident; only the second
+        proves the transfer is systematic rather than a single wired-up call site.
+        Without this, the test proves the bridge exists rather than that it works.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
 - [x] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
