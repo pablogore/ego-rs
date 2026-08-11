@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 81 complete and 35 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 82 complete and 34 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -385,7 +385,7 @@ unchanged, which is the point of stopping here.
       trivially when nothing reserves at all), the pure fingerprint unit tests,
       and the two "legitimately did not reserve" cases — which is why they are
       not the evidence and the other 9 are.
-- [ ] B6.4a GREEN: bridge the service and aggregate contexts — after a successful
+- [x] B6.4a GREEN: bridge the service and aggregate contexts — after a successful
       reservation, the service body reads the definitive `OperationKey` and
       `OperationFingerprint` from `ServiceContext` and threads those exact values
       into every `CommandContext` it creates. **The generated slot does not
@@ -448,6 +448,29 @@ unchanged, which is the point of stopping here.
         Without this, the test proves the bridge exists rather than that it works.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
+      **Done.** The identity travels as one indivisible value:
+      `ego_domain::operation::OperationIdentity` pairs the key with the
+      fingerprint, `CommandContext` carries one `Option<OperationIdentity>` in
+      place of the two fields it had, and `ServiceContext::operation_identity()`
+      answers `Some` only when a reservation actually stamped one. The two
+      defensive `(Some(key), Some(fingerprint))` pairings the actor used to do at
+      each read site are gone — the type made them unnecessary, which is the
+      evidence it named a real concept rather than adding one.
+      Two runtime tests that asserted the gate ignored a half identity were
+      replaced by a compile-fail fixture: the state is no longer expressible,
+      which is stronger than checking it is tolerated.
+      `RegisterUser::register` is now `#[idempotent]`, which is what makes any of
+      this observable end to end, and its error type gained
+      `Refused(ReservationRejection)` split by who can act — 409 for contention
+      and a conflicting fingerprint, 503 for an unreachable store, 500 for the
+      two that reproduce identically on retry.
+      `build_runtime` keeps its `Compatibility` declaration and registers no
+      store; the scenario wires its own, which is not the app claiming adoption.
+      **Both mutations run.** Dropping the transfer into the organization fails
+      the scenario on its receipt lookup (0 vs 1); dropping it into the user
+      fails on the user's. The second is the one that matters.
+      Verified: fmt, integration guard, `clippy -D warnings` and
+      `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1597 tests.
 - [x] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
       **Done.** Slot 3 emits one `?`-terminated call to
       `RuntimeInner::reserve_idempotent_operation`; the store access and the
