@@ -15,6 +15,9 @@
 /// `OperationKey` / `OperationFingerprint` — validated operation identity.
 pub mod key;
 
+/// `OperationIdentity` — the two halves above, carried as one indivisible value.
+pub mod identity;
+
 /// `OperationReservationStore` port and its supporting types — lease,
 /// fencing, and reservation outcomes.
 pub mod reservation;
@@ -22,6 +25,7 @@ pub mod reservation;
 /// `OperationReceipt` — the durable record that one operation already completed.
 pub mod receipt;
 
+pub use identity::OperationIdentity;
 pub use key::{OperationFingerprint, OperationKey, OperationKeyError};
 pub use receipt::{AggregateOutcome, AggregateOutcomeError, OperationReceipt};
 pub use reservation::{

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_domain::operation::{
-    AggregateOutcome, OperationFingerprint, OperationKey, OperationReceipt,
+    AggregateOutcome, OperationFingerprint, OperationIdentity, OperationKey, OperationReceipt,
 };
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -266,11 +266,13 @@ impl PersistentEntity for Recorded {
     }
 }
 
-fn context(key: Option<&str>, fingerprint: Option<&str>) -> CommandContext {
-    let mut ctx = CommandContext::new(ENTITY_TYPE.to_string());
-    ctx.operation_key = key.map(|k| OperationKey::parse(k).expect("a non-empty key parses"));
-    ctx.fingerprint = fingerprint.map(OperationFingerprint::new);
-    ctx
+fn context(identity: Option<(&str, &str)>) -> CommandContext {
+    CommandContext::new(ENTITY_TYPE.to_string()).carrying(identity.map(|(key, fingerprint)| {
+        OperationIdentity::new(
+            OperationKey::parse(key).expect("a non-empty key parses"),
+            OperationFingerprint::new(fingerprint),
+        )
+    }))
 }
 
 /// One runtime over one store, so two commands in a row hit the same state —
@@ -307,7 +309,7 @@ async fn events_are_written_with_their_receipt_and_a_retry_replays() {
     let first = send(
         &runtime,
         Recorded::emitting(Arc::clone(&handled), 2),
-        context(Some(KEY), Some(FP)),
+        context(Some((KEY, FP))),
     )
     .await
     .expect("a first execution must succeed");
@@ -335,7 +337,7 @@ async fn events_are_written_with_their_receipt_and_a_retry_replays() {
             emits: 2,
             forbidden: true,
         },
-        context(Some(KEY), Some(FP)),
+        context(Some((KEY, FP))),
     )
     .await
     .expect("a retry must succeed as a replay");
@@ -365,7 +367,7 @@ async fn a_zero_event_success_is_written_through_a_real_unit_of_work_and_replays
     let first = send(
         &runtime,
         Recorded::emitting(Arc::clone(&handled), 0),
-        context(Some(KEY), Some(FP)),
+        context(Some((KEY, FP))),
     )
     .await
     .expect("a zero-event success must succeed");
@@ -385,7 +387,7 @@ async fn a_zero_event_success_is_written_through_a_real_unit_of_work_and_replays
             emits: 0,
             forbidden: true,
         },
-        context(Some(KEY), Some(FP)),
+        context(Some((KEY, FP))),
     )
     .await
     .expect("a retry must succeed as a replay");
@@ -419,7 +421,7 @@ async fn a_command_without_the_identity_keeps_the_direct_path() {
     send(
         &runtime,
         Recorded::emitting(Arc::clone(&handled), 1),
-        context(None, None),
+        context(None),
     )
     .await
     .expect("a non-idempotent command must still succeed");
@@ -455,7 +457,7 @@ async fn nothing_is_visible_after(fail_at: FailAt, expected_tail: &[&str]) {
     let outcome = send(
         &runtime,
         Recorded::emitting(Arc::clone(&handled), 2),
-        context(Some(KEY), Some(FP)),
+        context(Some((KEY, FP))),
     )
     .await;
     assert!(outcome.is_err(), "a failing step must surface as an error");

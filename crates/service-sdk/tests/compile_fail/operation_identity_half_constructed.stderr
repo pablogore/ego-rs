@@ -1,0 +1,15 @@
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+  --> tests/compile_fail/operation_identity_half_constructed.rs:22:21
+   |
+22 |     let _identity = ego_domain::operation::OperationIdentity::new(key);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----- argument #2 of type `OperationFingerprint` is missing
+   |
+note: associated function defined here
+  --> $WORKSPACE/crates/domain/src/operation/identity.rs
+   |
+   |     pub fn new(key: OperationKey, fingerprint: OperationFingerprint) -> Self {
+   |            ^^^
+help: provide the argument
+   |
+22 |     let _identity = ego_domain::operation::OperationIdentity::new(key, /* OperationFingerprint */);
+   |                                                                      ++++++++++++++++++++++++++++

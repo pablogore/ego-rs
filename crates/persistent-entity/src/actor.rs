@@ -215,12 +215,12 @@ where
 
         // Idempotency gate, before dispatch and before anything is persisted.
         //
-        // Both halves of the identity must be present. `operation_key` says
-        // which operation this is; `fingerprint` says which *request* it came
-        // from, and without it a retry cannot be told apart from a different
-        // command reusing the key. A command carrying neither takes the
-        // pre-existing path untouched and pays for no lookup.
-        if let (Some(key), Some(fingerprint)) = (&context.operation_key, &context.fingerprint) {
+        // A command carrying no identity takes the pre-existing path untouched
+        // and pays for no lookup. There is no third case: `OperationIdentity`
+        // carries the key and the fingerprint together, so "which operation"
+        // without "which request" is not a state this can be handed.
+        if let Some(identity) = &context.identity {
+            let (key, fingerprint) = (identity.key(), identity.fingerprint());
             let found = self
                 .persistence
                 .find_receipt(
@@ -273,13 +273,12 @@ where
             .handle_command(&command, &current_state, &context)
             .await;
 
-        // Both halves, or no receipt at all: a command with no idempotency
-        // identity keeps exactly the path it had before this existed, and pays
-        // for no unit of work it does not need.
-        let identity = match (&context.operation_key, &context.fingerprint) {
-            (Some(key), Some(fingerprint)) => Some((key.clone(), fingerprint.clone())),
-            _ => None,
-        };
+        // A command with no idempotency identity keeps exactly the path it had
+        // before this existed, and pays for no unit of work it does not need.
+        let identity = context
+            .identity
+            .as_ref()
+            .map(|i| (i.key().clone(), i.fingerprint().clone()));
 
         match handler_result {
             Ok(events) if events.is_empty() => {
@@ -1150,14 +1149,16 @@ mod tests {
         );
     }
 
-    // --- CommandContext carries the operation key through to the actor ---
+    // --- CommandContext carries the operation identity through to the actor ---
 
-    /// Records the exact `operation_key` `handle_command` was called with,
+    /// Records the exact `OperationIdentity` `handle_command` was called with,
     /// so a test can compare it against the value set at the boundary rather
-    /// than merely proving the field exists on `CommandContext`.
+    /// than merely proving the field exists on `CommandContext`. Recording the
+    /// whole identity rather than the key alone is what makes "the key arrived
+    /// but the fingerprint did not" a failure rather than an unobserved gap.
     #[derive(Debug)]
     struct RecordingContextHandler {
-        seen_operation_key: Arc<std::sync::Mutex<Option<ego_domain::operation::OperationKey>>>,
+        seen_identity: Arc<std::sync::Mutex<Option<ego_domain::operation::OperationIdentity>>>,
     }
 
     #[async_trait]
@@ -1176,7 +1177,7 @@ mod tests {
             _state: &TestState,
             context: &CommandContext,
         ) -> Result<Vec<TestEvent>, crate::error::EntityError> {
-            *self.seen_operation_key.lock().unwrap() = context.operation_key.clone();
+            *self.seen_identity.lock().unwrap() = context.identity.clone();
             Ok(vec![])
         }
 
@@ -1198,8 +1199,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_context_operation_key_reaches_the_actor_unchanged() {
-        use ego_domain::operation::OperationKey;
+    async fn command_context_operation_identity_reaches_the_actor_unchanged() {
+        use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
 
         let seen = Arc::new(std::sync::Mutex::new(None));
         let (event_sender, _rx) = event_bus_channel();
@@ -1221,16 +1222,18 @@ mod tests {
             effect_acceptor: None,
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(RecordingContextHandler {
-                seen_operation_key: seen.clone(),
+                seen_identity: seen.clone(),
             }),
             event_sender,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         };
 
-        let key = OperationKey::parse("op-carriage-1").unwrap();
-        let mut context = ctx();
-        context.operation_key = Some(key.clone());
+        let identity = OperationIdentity::new(
+            OperationKey::parse("op-carriage-1").unwrap(),
+            OperationFingerprint::new("c".repeat(64)),
+        );
+        let context = ctx().carrying(Some(identity.clone()));
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let envelope = ActorEnvelope {
@@ -1249,16 +1252,20 @@ mod tests {
 
         assert_eq!(
             seen.lock().unwrap().clone(),
-            Some(key),
-            "handle_command must observe the identical OperationKey set at the boundary, \
-             not a regenerated, normalised, or reconstructed one"
+            Some(identity),
+            "handle_command must observe the identical OperationIdentity set at the \
+             boundary — both halves, and neither regenerated, normalised, nor \
+             reconstructed on the way"
         );
     }
 
     #[tokio::test]
-    async fn command_context_with_no_operation_key_reaches_the_actor_as_none() {
+    async fn command_context_with_no_operation_identity_reaches_the_actor_as_none() {
         let seen = Arc::new(std::sync::Mutex::new(Some(
-            ego_domain::operation::OperationKey::parse("sentinel").unwrap(),
+            ego_domain::operation::OperationIdentity::new(
+                ego_domain::operation::OperationKey::parse("sentinel").unwrap(),
+                ego_domain::operation::OperationFingerprint::new("s".repeat(64)),
+            ),
         )));
         let (event_sender, _rx) = event_bus_channel();
         let registry = Arc::new(EntityRegistry::new());
@@ -1279,7 +1286,7 @@ mod tests {
             effect_acceptor: None,
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(RecordingContextHandler {
-                seen_operation_key: seen.clone(),
+                seen_identity: seen.clone(),
             }),
             event_sender,
             signal: ManualSignal::new(),
@@ -1304,7 +1311,7 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().clone(),
             None,
-            "an absent operation key must reach the actor as None, not a stale prior value"
+            "an absent operation identity must reach the actor as None, not a stale prior value"
         );
     }
 }

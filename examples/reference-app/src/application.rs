@@ -247,7 +247,15 @@ impl RegisterUser for RegisterUserImpl {
                     org_id: input.tenant_id.clone(),
                     name: input.org_name.clone(),
                 },
-                CommandContext::new("tenant_organization".to_string()),
+                // The identity the reservation accepted, carried down unchanged.
+                // Both aggregates in this workflow get the same one, because
+                // they are two steps of one business operation — that is what
+                // lets the second step be recovered after the first already
+                // completed. Read, never recomputed: deriving it again here
+                // could differ from what the reservation used and turn a
+                // legitimate retry into a permanent conflict.
+                CommandContext::new("tenant_organization".to_string())
+                    .carrying(ctx.operation_identity()),
             )
             .await?;
         match &org_result {
@@ -284,7 +292,11 @@ impl RegisterUser for RegisterUserImpl {
                     email: input.email.clone(),
                     tenant_id: input.tenant_id.clone(),
                 },
-                CommandContext::new("user".to_string()),
+                // The same identity the org step above was given. Handing this
+                // step a different one — or none — would make the two steps
+                // belong to different operations, and a retry after a partial
+                // failure would re-run this one instead of recovering it.
+                CommandContext::new("user".to_string()).carrying(ctx.operation_identity()),
             )
             .await;
 

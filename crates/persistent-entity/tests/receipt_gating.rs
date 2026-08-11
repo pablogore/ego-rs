@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use ego_domain::context::TenantId;
 use ego_domain::operation::{
-    AggregateOutcome, OperationFingerprint, OperationKey, OperationReceipt,
+    AggregateOutcome, OperationFingerprint, OperationIdentity, OperationKey, OperationReceipt,
 };
 use ego_domain::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
 use persistent_entity::builder::EntityRuntimeBuilder;
@@ -238,12 +238,19 @@ fn receipt(fingerprint: &str, outcome: AggregateOutcome) -> OperationReceipt {
     )
 }
 
-/// A context carrying whichever halves of the idempotency identity a case needs.
-fn context(key: Option<&str>, fingerprint: Option<&str>) -> CommandContext {
-    let mut ctx = CommandContext::new(ENTITY_TYPE.to_string());
-    ctx.operation_key = key.map(|k| OperationKey::parse(k).expect("a non-empty key parses"));
-    ctx.fingerprint = fingerprint.map(OperationFingerprint::new);
-    ctx
+/// A context carrying an operation identity, or none at all.
+///
+/// There is no third case. A key without a fingerprint, or the reverse, is not
+/// constructible — see the compile-fail fixture
+/// `operation_identity_half_constructed.rs`, which replaced the two runtime
+/// tests that used to assert the gate ignored those halves.
+fn context(identity: Option<(&str, &str)>) -> CommandContext {
+    CommandContext::new(ENTITY_TYPE.to_string()).carrying(identity.map(|(key, fingerprint)| {
+        OperationIdentity::new(
+            OperationKey::parse(key).expect("a non-empty key parses"),
+            OperationFingerprint::new(fingerprint),
+        )
+    }))
 }
 
 /// Drives one command through a real actor over the scripted store.
@@ -282,7 +289,7 @@ async fn a_command_with_neither_key_nor_fingerprint_takes_the_previous_path() {
     let result = send(
         GateStore::new(calls.clone()),
         GatedEntity::counting(handled.clone()),
-        context(None, None),
+        context(None),
     )
     .await
     .expect("a non-idempotent command must still succeed");
@@ -296,49 +303,6 @@ async fn a_command_with_neither_key_nor_fingerprint_takes_the_previous_path() {
     );
 }
 
-#[tokio::test]
-async fn a_command_with_only_an_operation_key_takes_the_previous_path() {
-    let calls = Arc::new(Calls::default());
-    let handled = Arc::new(AtomicUsize::new(0));
-
-    send(
-        GateStore::new(calls.clone()),
-        GatedEntity::counting(handled.clone()),
-        context(Some(KEY), None),
-    )
-    .await
-    .expect("a command with half an identity must still succeed");
-
-    assert_eq!(
-        calls.lookups(),
-        0,
-        "a key without a fingerprint cannot distinguish a retry from a different \
-         request reusing the key, so it must not be treated as idempotent"
-    );
-    assert_eq!(handled.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn a_command_with_only_a_fingerprint_takes_the_previous_path() {
-    let calls = Arc::new(Calls::default());
-    let handled = Arc::new(AtomicUsize::new(0));
-
-    send(
-        GateStore::new(calls.clone()),
-        GatedEntity::counting(handled.clone()),
-        context(None, Some("fp-a")),
-    )
-    .await
-    .expect("a command with half an identity must still succeed");
-
-    assert_eq!(
-        calls.lookups(),
-        0,
-        "a fingerprint alone identifies no operation"
-    );
-    assert_eq!(handled.load(Ordering::SeqCst), 1);
-}
-
 // --- Miss: the ordinary first execution ------------------------------------
 
 #[tokio::test]
@@ -349,7 +313,7 @@ async fn a_miss_runs_the_command_exactly_once() {
     let result = send(
         GateStore::new(calls.clone()),
         GatedEntity::counting(handled.clone()),
-        context(Some(KEY), Some("fp-a")),
+        context(Some((KEY, "fp-a"))),
     )
     .await
     .expect("a first execution must succeed");
@@ -372,7 +336,7 @@ async fn a_hit_on_a_no_events_receipt_replays_without_dispatching() {
     let result = send(
         GateStore::new(calls.clone()).with_receipt(receipt("fp-a", AggregateOutcome::NoEvents)),
         GatedEntity::forbidden(),
-        context(Some(KEY), Some("fp-a")),
+        context(Some((KEY, "fp-a"))),
     )
     .await
     .expect("a replay is a success, not an error");
@@ -399,7 +363,7 @@ async fn a_hit_on_an_events_receipt_replays_without_dispatching() {
     let result = send(
         GateStore::new(calls.clone()).with_receipt(receipt("fp-a", stored.clone())),
         GatedEntity::forbidden(),
-        context(Some(KEY), Some("fp-a")),
+        context(Some((KEY, "fp-a"))),
     )
     .await
     .expect("a replay is a success, not an error");
@@ -426,7 +390,7 @@ async fn a_conflicting_fingerprint_is_a_permanent_operation_conflict() {
     let error = send(
         GateStore::new(calls.clone()).with_receipt(receipt("fp-a", AggregateOutcome::NoEvents)),
         GatedEntity::forbidden(),
-        context(Some(KEY), Some("fp-b")),
+        context(Some((KEY, "fp-b"))),
     )
     .await
     .expect_err("a different request reusing an operation key must be refused");
@@ -470,7 +434,7 @@ async fn a_failed_lookup_is_reported_and_never_falls_through_to_the_handler() {
     let error = send(
         GateStore::new(calls.clone()).failing_lookup(),
         GatedEntity::forbidden(),
-        context(Some(KEY), Some("fp-a")),
+        context(Some((KEY, "fp-a"))),
     )
     .await
     .expect_err("an unreadable receipt table must surface as an error");
