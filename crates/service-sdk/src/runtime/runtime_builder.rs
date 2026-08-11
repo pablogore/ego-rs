@@ -23,7 +23,7 @@ use crate::runtime::error::RuntimeInfraError;
 use crate::runtime::idempotency::{ReservationConfig, ReservationDecision, ReservationRejection};
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::{OperationFingerprint, OperationKey};
+use ego_domain::operation::OperationFingerprint;
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -626,39 +626,75 @@ impl RuntimeInner {
     /// definitive — canonicalisation and fingerprinting belong to the generated
     /// code under AD-3f, and nothing is re-derived here.
     ///
+    /// # Why it takes the context by `&mut`
+    ///
+    /// Mirroring [`RuntimeInner::enforce_tenant`], and for the same reason. Two
+    /// of the three values a reservation needs are *already definitive on the
+    /// context* — the `OperationKey` carried from ingress and the canonical
+    /// tenant `enforce_tenant` resolved — so reading them here rather than
+    /// re-passing them keeps one reading of each, instead of one copy expanded
+    /// into every generated operation. Only `fingerprint` is passed, because
+    /// only it is the generated code's to compute (AD-3f).
+    ///
+    /// The `&mut` also lets this method **stamp the fingerprint onto the
+    /// context**, which is what makes the whole chain work: a service body
+    /// downstream threads that exact value into each aggregate's
+    /// `CommandContext`, so the per-aggregate receipt gate compares against the
+    /// same request identity the reservation used. Stamping here rather than
+    /// exposing a public setter means a fingerprint on a context is evidence
+    /// that this method ran, not that somebody assigned a field.
+    ///
+    /// The namespace is the **canonical** tenant, never
+    /// [`ServiceContext::tenant_hint`] — a caller-supplied hint must not choose
+    /// which namespace its key lands in.
+    ///
     /// # The three answers, and why `Option` rather than a third decision
     ///
-    /// `None` means **this runtime does not reserve at all** — no
+    /// `None` means **this runtime did not reserve** — either no
     /// [`ReservationConfig`] was registered, which the builder permits only
     /// under
-    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility).
-    /// That is not the same statement as
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility),
+    /// or the context carries no key. That is not the same statement as
     /// [`ReservationDecision::Proceed`](crate::runtime::ReservationDecision::Proceed),
     /// even though both continue: `Proceed` carries a permit, and therefore a
-    /// fence that a later completion must present. A deployment that never
+    /// fence that a later completion must present. A dispatch that never
     /// reserved has no fence to present and must not have one invented for it.
     /// Folding the two into a single "continue" would make a permit-less
     /// completion representable, which is exactly the shape
     /// [`ReservationDecision`](crate::runtime::ReservationDecision) is split to
-    /// prevent.
+    /// prevent. Nothing is stamped in that case either, so the receipt gate
+    /// downstream stays inactive rather than gating on a request identity that
+    /// reserved nothing.
     ///
     /// # What this method deliberately does not decide
     ///
-    /// Whether a *keyless* request may proceed. That is the missing-key policy,
-    /// and it has one owner —
-    /// [`resolve_operation_key`](crate::idempotency::resolve_operation_key) at
-    /// the transport edge — so two adapters cannot disagree about it. Slot 3
-    /// calls this method only when the context carries a key.
+    /// Whether a *keyless* request may proceed. It returns `Ok(None)` and
+    /// dispatch continues. That is the missing-key policy, and it has one owner
+    /// — [`resolve_operation_key`](crate::idempotency::resolve_operation_key) at
+    /// the transport edge — so two adapters cannot disagree about it. Deciding
+    /// it a second time here would create the second definition that module
+    /// exists to prevent.
     pub async fn reserve_idempotent_operation(
         &self,
-        tenant: Option<TenantId>,
-        key: OperationKey,
+        ctx: &mut ServiceContext,
         fingerprint: OperationFingerprint,
     ) -> Result<Option<ReservationDecision>, ReservationRejection> {
-        match self.reservation() {
-            None => Ok(None),
-            Some(config) => config.reserve(tenant, key, fingerprint).await.map(Some),
-        }
+        let (Some(config), Some(key)) = (self.reservation(), ctx.operation_key().cloned()) else {
+            return Ok(None);
+        };
+
+        let tenant = ctx
+            .canonical_tenant()
+            .and_then(|resolved| resolved.tenant_id().cloned());
+
+        let decision = config.reserve(tenant, key, fingerprint.clone()).await?;
+
+        // Stamped only after the store accepted it. A fingerprint left on a
+        // context whose reservation was refused would be carried into an
+        // aggregate's `CommandContext` by a body that never ran — and would sit
+        // in a receipt describing work no reservation ever authorised.
+        ctx.set_operation_fingerprint(fingerprint);
+        Ok(Some(decision))
     }
 
     /// Mints a cross-tenant permit authorizing access to `destination`

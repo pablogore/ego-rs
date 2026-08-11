@@ -324,11 +324,15 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                 // on_response/on_error) observes it — so the TracingInterceptor names the
                 // request-boundary span after the operation. The context param is owned, so
                 // consuming `with_operation_name` and rebinding is free; the rebinding is
-                // `mut` only for #[tenant_scoped] operations, which take `&mut ctx_param`
-                // for `enforce_tenant` (a `mut` on any other operation would be unused).
-                // Skipped for the parameterless phantom-ctx case (no real context to stamp).
+                // `mut` only for operations that hand the rebinding out mutably:
+                // #[tenant_scoped] for `enforce_tenant`, and #[idempotent] for
+                // `reserve_idempotent_operation`, which stamps the fingerprint the
+                // reservation was taken under so the service body can thread it into each
+                // aggregate's CommandContext. A `mut` on any other operation would be
+                // unused. Skipped for the parameterless phantom-ctx case (no real context
+                // to stamp).
                 let operation_name_binding = if ctx_param_idx.is_some() {
-                    if has_tenant_scoped {
+                    if has_tenant_scoped || has_idempotent {
                         quote! { let mut #ctx_param = #ctx_param.with_operation_name(stringify!(#method_name)); }
                     } else {
                         quote! { let #ctx_param = #ctx_param.with_operation_name(stringify!(#method_name)); }
@@ -637,36 +641,20 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                                 )
                             })?;
 
-                            // No key means the missing-key policy already ran and
-                            // admitted this request — that policy has exactly one
-                            // owner, `resolve_operation_key` at the transport
-                            // edge, and re-deciding it here would give two places
-                            // the power to disagree about it.
-                            match #ctx_param.operation_key().cloned() {
-                                None => None,
-                                Some(__ego_key) => {
-                                    // AD-3f: over the typed arguments, before
-                                    // `on_request` and before the handler.
-                                    let __ego_fingerprint =
-                                        ego_service_sdk::runtime::operation_fingerprint(
-                                            &( #( & #fingerprint_args , )* )
-                                        )?;
-                                    // The uniqueness namespace is the resolved
-                                    // canonical tenant, never the raw client
-                                    // hint — an attacker-supplied hint must not
-                                    // choose which namespace a key lands in.
-                                    let __ego_tenant = #ctx_param
-                                        .canonical_tenant()
-                                        .and_then(|__t| __t.tenant_id().cloned());
-                                    __ego_rt
-                                        .reserve_idempotent_operation(
-                                            __ego_tenant,
-                                            __ego_key,
-                                            __ego_fingerprint,
-                                        )
-                                        .await?
-                                }
-                            }
+                            // The one thing generated code owns here (AD-3f):
+                            // *which* values the fingerprint covers. The typed
+                            // arguments, and never the context — the key, owner,
+                            // lease, trace and correlation ids describe this
+                            // attempt, not this request. The key, the canonical
+                            // tenant and the stamping are the runtime's, read
+                            // once there instead of copied into every operation.
+                            let __ego_fingerprint =
+                                ego_service_sdk::runtime::operation_fingerprint(
+                                    &( #( & #fingerprint_args , )* )
+                                )?;
+                            __ego_rt
+                                .reserve_idempotent_operation(&mut #ctx_param, __ego_fingerprint)
+                                .await?
                         };
 
                         // The identical request already completed. Answer with

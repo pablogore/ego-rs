@@ -9,7 +9,7 @@
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, Weak,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -34,8 +34,7 @@ use ego_service_sdk::{
     error::ServiceErrorTrait,
     interceptor::InterceptorChain,
     runtime::{
-        operation_fingerprint, ReservationRejection, Runtime, RuntimeBuilder, RuntimeInner,
-        TenantEnforcementMode,
+        operation_fingerprint, ReservationRejection, Runtime, RuntimeBuilder, TenantEnforcementMode,
     },
 };
 #[allow(unused_imports)]
@@ -122,18 +121,40 @@ pub trait BillingService {
 
 /// Counts how many times a handler body actually ran. Every "did not execute"
 /// assertion in this file reads this counter.
+///
+/// It also records the request identity the body *observed on its context* —
+/// which is what a real service body would thread into each aggregate's
+/// `CommandContext`. Reading it here rather than trusting the field to exist is
+/// the difference between proving the bridge works and proving it compiles.
+#[derive(Default)]
+struct ObservedIdentity {
+    key: Option<OperationKey>,
+    fingerprint: Option<OperationFingerprint>,
+}
+
 struct CountingBilling {
     charge_calls: Arc<AtomicUsize>,
     settle_calls: Arc<AtomicUsize>,
+    observed: Arc<Mutex<ObservedIdentity>>,
+}
+
+impl CountingBilling {
+    fn observe(&self, ctx: &ServiceContext) {
+        *self.observed.lock().expect("not poisoned") = ObservedIdentity {
+            key: ctx.operation_key().cloned(),
+            fingerprint: ctx.operation_fingerprint().cloned(),
+        };
+    }
 }
 
 #[async_trait]
 impl BillingService for CountingBilling {
     async fn charge(
         &self,
-        _ctx: ServiceContext,
+        ctx: ServiceContext,
         request: ChargeRequest,
     ) -> Result<ChargeReceipt, BillingError> {
+        self.observe(&ctx);
         self.charge_calls.fetch_add(1, Ordering::Relaxed);
         Ok(ChargeReceipt {
             confirmation: format!("charged:{}", request.reference),
@@ -142,9 +163,10 @@ impl BillingService for CountingBilling {
 
     async fn settle(
         &self,
-        _ctx: ServiceContext,
+        ctx: ServiceContext,
         request: ChargeRequest,
     ) -> Result<ChargeReceipt, BillingError> {
+        self.observe(&ctx);
         self.settle_calls.fetch_add(1, Ordering::Relaxed);
         Ok(ChargeReceipt {
             confirmation: format!("settled:{}", request.reference),
@@ -292,24 +314,30 @@ fn runtime_with(store: Arc<SpyStore>, authz: Option<Arc<dyn AuthorizationProvide
     builder.build()
 }
 
-/// The proxy plus the two counters its inner service increments.
+/// The proxy, the two counters its inner service increments, and the request
+/// identity the last handler body read off its own context.
 fn proxy(
     rt: &Runtime,
 ) -> (
     BillingServiceRef,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
-    Weak<RuntimeInner>,
+    Arc<Mutex<ObservedIdentity>>,
 ) {
     let charge_calls = Arc::new(AtomicUsize::new(0));
     let settle_calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(Mutex::new(ObservedIdentity::default()));
     let inner: Arc<dyn BillingService> = Arc::new(CountingBilling {
         charge_calls: charge_calls.clone(),
         settle_calls: settle_calls.clone(),
+        observed: observed.clone(),
     });
-    let weak = Arc::downgrade(rt.inner());
-    let proxy = BillingServiceRef::new(inner, Arc::new(InterceptorChain::new()), weak.clone());
-    (proxy, charge_calls, settle_calls, weak)
+    let proxy = BillingServiceRef::new(
+        inner,
+        Arc::new(InterceptorChain::new()),
+        Arc::downgrade(rt.inner()),
+    );
+    (proxy, charge_calls, settle_calls, observed)
 }
 
 fn key() -> OperationKey {
@@ -357,7 +385,7 @@ fn fresh_lease() -> Lease {
 async fn a_denied_authorization_never_reaches_the_store() {
     let store = SpyStore::scripted(vec![]);
     let rt = runtime_with(store.clone(), Some(Arc::new(DenyProvider)));
-    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+    let (proxy, charge_calls, _, _observed) = proxy(&rt);
 
     let result = proxy.charge(authenticated_ctx(), request()).await;
 
@@ -374,7 +402,7 @@ async fn a_denied_authorization_never_reaches_the_store() {
 async fn a_rejected_tenant_never_reaches_the_store() {
     let store = SpyStore::scripted(vec![]);
     let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
-    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+    let (proxy, charge_calls, _, _observed) = proxy(&rt);
 
     // Authenticated (so `#[authorize]` passes) but with no tenant claim, which
     // is exactly what the resolver refuses to substitute a hint for.
@@ -403,7 +431,7 @@ async fn a_rejected_tenant_never_reaches_the_store() {
 async fn both_guards_passing_reserves_exactly_once() {
     let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
     let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
-    let (proxy, charge_calls, _, _rt_weak) = proxy(&rt);
+    let (proxy, charge_calls, _, _observed) = proxy(&rt);
 
     let result = proxy.charge(authenticated_ctx(), request()).await;
 
@@ -429,7 +457,7 @@ async fn the_definitive_key_tenant_and_fingerprint_reach_the_store() {
         Ok(ReservationOutcome::Fresh(fresh_lease())),
     ]);
     let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
-    let (proxy, _, _, _rt_weak) = proxy(&rt);
+    let (proxy, _, _, _observed) = proxy(&rt);
 
     // A caller-supplied tenant hint that disagrees with nothing, present only
     // to show the reservation is not namespaced by it.
@@ -461,6 +489,63 @@ async fn the_definitive_key_tenant_and_fingerprint_reach_the_store() {
         .expect("the reservation is fresh");
     let all = store.seen.lock().expect("not poisoned").clone();
     assert_eq!(all[0].fingerprint, all[1].fingerprint);
+}
+
+/// The other half of the bridge. Handing the store a fingerprint is only half
+/// the job: the body has to be able to read *that same* fingerprint back off its
+/// context, because that is the value it threads into each aggregate's
+/// `CommandContext` for the per-aggregate receipt gate. Comparing it against
+/// what the store actually saw — rather than against a value this test computed
+/// — is what makes the assertion about the bridge and not about the algorithm.
+#[tokio::test]
+async fn the_body_reads_back_the_identity_the_store_was_handed() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), Some(Arc::new(AllowProvider)));
+    let (proxy, _, _, observed) = proxy(&rt);
+
+    proxy
+        .charge(authenticated_ctx(), request())
+        .await
+        .expect("the reservation is fresh");
+
+    let seen = store.first_request();
+    let observed = observed.lock().expect("not poisoned");
+    assert_eq!(
+        observed.key.as_ref(),
+        Some(&seen.operation_key),
+        "the body must see the same key the reservation was taken under"
+    );
+    assert_eq!(
+        observed.fingerprint.as_ref(),
+        Some(&seen.fingerprint),
+        "a body that cannot read the reservation's fingerprint cannot hand it \
+         to an aggregate, and the receipt gate downstream has nothing to \
+         compare against"
+    );
+}
+
+/// The negative control for the stamp. An operation that legitimately did not
+/// reserve must leave the fingerprint unset rather than carrying one that no
+/// reservation stands behind — a receipt gate downstream would otherwise gate on
+/// a request identity that nothing authorised.
+#[tokio::test]
+async fn a_dispatch_that_did_not_reserve_stamps_no_fingerprint() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, observed) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new(), request())
+        .await
+        .expect("no key, no reservation");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.reserve_calls(), 0);
+    assert_eq!(
+        observed.lock().expect("not poisoned").fingerprint,
+        None,
+        "nothing reserved, so nothing may claim it did"
+    );
 }
 
 /// AD-3f, stated as the property that matters: the fingerprint follows the
@@ -512,7 +597,7 @@ fn adjacent_arguments_cannot_be_reassociated_into_the_same_fingerprint() {
 async fn proceed_executes_the_operation_exactly_once() {
     let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let out = proxy
         .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -531,7 +616,7 @@ async fn proceed_executes_the_operation_exactly_once() {
 async fn a_takeover_also_executes_the_operation() {
     let store = SpyStore::scripted(vec![Ok(ReservationOutcome::TakenOver(fresh_lease()))]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
         .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -551,7 +636,7 @@ async fn replay_returns_the_stored_output_without_executing() {
     let stored = ego_service_sdk::runtime::encode_stored_response(&stored_output).expect("encodes");
     let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Succeeded(stored))]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let out = proxy
         .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -579,7 +664,7 @@ async fn an_undecodable_stored_response_refuses_without_executing() {
         StoredServiceResponse::new(b"not an envelope this build writes".to_vec()),
     ))]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let result = proxy
         .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -626,7 +711,7 @@ async fn every_refusal_stops_dispatch_and_arrives_as_itself() {
     for (answer, expected) in cases {
         let store = SpyStore::scripted(vec![answer]);
         let rt = runtime_with(store.clone(), None);
-        let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+        let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
         let result = proxy
             .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -652,7 +737,7 @@ async fn every_refusal_stops_dispatch_and_arrives_as_itself() {
 async fn a_dropped_runtime_refuses_rather_than_running_unreserved() {
     let store = SpyStore::scripted(vec![]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
     drop(rt);
 
     let result = proxy
@@ -681,7 +766,7 @@ async fn a_runtime_without_reservations_dispatches_normally() {
             ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
         )
         .build();
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
         .settle(ServiceContext::new().with_operation_key(key()), request())
@@ -698,7 +783,7 @@ async fn a_runtime_without_reservations_dispatches_normally() {
 async fn a_context_without_a_key_does_not_reserve() {
     let store = SpyStore::scripted(vec![]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, settle_calls, _rt_weak) = proxy(&rt);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
         .settle(ServiceContext::new(), request())
@@ -762,7 +847,7 @@ async fn context_metadata_does_not_enter_the_fingerprint() {
         Ok(ReservationOutcome::Fresh(fresh_lease())),
     ]);
     let rt = runtime_with(store.clone(), None);
-    let (proxy, _, _, _rt_weak) = proxy(&rt);
+    let (proxy, _, _, _observed) = proxy(&rt);
 
     for correlation in ["attempt-1", "attempt-2"] {
         proxy
