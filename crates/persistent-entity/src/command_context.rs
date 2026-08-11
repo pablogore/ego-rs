@@ -3,7 +3,7 @@
 //! This module provides context information that is available during command processing,
 //! including metadata about the command execution environment.
 
-use ego_domain::operation::{OperationFingerprint, OperationKey};
+use ego_domain::operation::OperationIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -31,18 +31,44 @@ pub struct CommandContext {
     /// Additional metadata for the command.
     pub metadata: HashMap<String, String>,
 
-    /// The caller-supplied operation key carried from the service boundary,
-    /// set once at ingress and passed through unchanged to
-    /// `EntityActor::execute_command` and the `handle_command` call it
-    /// makes — never regenerated, normalised, or reconstructed along the
-    /// way.
-    pub operation_key: Option<OperationKey>,
-
-    /// The fingerprint of the request this command came from — **exactly** the
-    /// one the idempotency slot passed to `OperationReservationStore::reserve`.
+    /// The identity of the operation this command belongs to — which operation,
+    /// and which request it came from — carried unchanged from the reservation
+    /// that accepted it.
     ///
-    /// Part of the public contract, and additive: it carries data, never
-    /// behaviour. Two rules make it trustworthy.
+    /// # ⚠ Breaking change — this field replaced two others
+    ///
+    /// It is **not** additive. It took the place of two public fields,
+    /// `operation_key: Option<OperationKey>` and
+    /// `fingerprint: Option<OperationFingerprint>`, which no longer exist.
+    ///
+    /// - **Source break.** Code reading or assigning either field must move to
+    ///   `identity` — read through [`OperationIdentity::key`] and
+    ///   [`OperationIdentity::fingerprint`], and write through
+    ///   [`CommandContext::carrying`]. A struct literal listing the old two
+    ///   fields no longer compiles.
+    /// - **Serialised-shape break.** `CommandContext` derives `Serialize` and
+    ///   `Deserialize`, so the two former top-level keys are now one nested
+    ///   object. Nothing in this workspace persists a `CommandContext` — the
+    ///   only round-trip is a unit test in `command_envelope.rs` — so there is
+    ///   no stored data to migrate here. Any *external* holder of a serialised
+    ///   `CommandContext` or `CommandEnvelope` does have to migrate, and this is
+    ///   the notice for it.
+    ///
+    /// The break is deliberate, and it is the whole point: it is what removes
+    /// the half identity from the type system rather than merely discouraging
+    /// it. See the first rule below.
+    ///
+    /// # Why it can be trusted
+    ///
+    /// It carries data, never behaviour. Three rules make it trustworthy.
+    ///
+    /// **The two halves are one value.** A key without a fingerprint would not
+    /// be a partial identity, it would be an identity the receipt gate must
+    /// ignore: with only the key, a retry cannot be told apart from a different
+    /// command reusing that key. [`OperationIdentity`] makes that state
+    /// unconstructible, so a service body cannot transfer one half and silently
+    /// leave the guarantee off for this aggregate while appearing to switch it
+    /// on.
     ///
     /// **The actor never recomputes it.** A fingerprint derived a second time
     /// from a re-serialised request can differ from the first for reasons that
@@ -52,9 +78,9 @@ pub struct CommandContext {
     /// recovered.
     ///
     /// **`None` keeps the non-idempotent path.** A command that arrived without
-    /// idempotency enforcement has no fingerprint to record, and inventing one
+    /// idempotency enforcement has no identity to record, and inventing one
     /// would manufacture an identity the caller never asked for.
-    pub fingerprint: Option<OperationFingerprint>,
+    pub identity: Option<OperationIdentity>,
 }
 
 impl CommandContext {
@@ -73,8 +99,22 @@ impl CommandContext {
             expected_version: None,
             causation_id: None,
             metadata: HashMap::new(),
-            operation_key: None,
-            fingerprint: None,
+            identity: None,
         }
+    }
+
+    /// Carries an operation identity into this context, returning it.
+    ///
+    /// `None` is a legitimate argument and means this command belongs to no
+    /// reserved operation — a dispatch that never reserved has no identity to
+    /// hand down, and the receipt gate stays inactive rather than gating on one
+    /// that nothing authorised.
+    ///
+    /// Written as one call per aggregate so a service body's transfer is a
+    /// single act that either happened or did not, rather than two assignments
+    /// one of which can be forgotten.
+    pub fn carrying(mut self, identity: Option<OperationIdentity>) -> Self {
+        self.identity = identity;
+        self
     }
 }

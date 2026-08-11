@@ -262,7 +262,6 @@ pub fn create_test_context() -> CommandContext {
         expected_version: None,
         causation_id: None,
         metadata: HashMap::new(),
-        operation_key: None,
-        fingerprint: None,
+        identity: None,
     }
 }

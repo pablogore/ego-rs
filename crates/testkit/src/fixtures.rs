@@ -1,7 +1,10 @@
 //! Service test fixture (CORE-022 Phase 8, design.md AD-9, AD-10).
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use ego_domain::operation::{OperationReservationStore, OwnerId};
+use ego_domain::time::Clock;
 use ego_domain::Observability;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
@@ -185,6 +188,41 @@ impl FixtureBuilder {
     /// Overrides the test configuration (default: empty `TestConfig`).
     pub fn config(mut self, config: TestConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Registers an operation reservation store, so `#[idempotent]` operations
+    /// on this fixture actually reserve.
+    ///
+    /// Without it the fixture stays in `Compatibility` — a marked operation
+    /// dispatches normally, nothing is reserved, and no operation identity is
+    /// stamped onto the `ServiceContext`. That default is deliberate: a fixture
+    /// that reserved by accident would make every existing test pay for a
+    /// capability it never asked for.
+    ///
+    /// Registering a store is also what makes the enforcing mode buildable, so
+    /// this switches the fixture to it — a runtime that can reserve should be
+    /// held to the promise it can now keep.
+    ///
+    /// The owner id, clock and lease come from the same builder production uses,
+    /// so a test that reserves exercises the production path rather than a
+    /// parallel one.
+    pub fn with_operation_reservation_store(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+        clock: Arc<dyn Clock>,
+        owner_id: OwnerId,
+        lease: Duration,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(clock)
+            .with_reservation_owner_id(owner_id)
+            .with_reservation_lease_duration(lease)
+            .with_idempotency_enforcement_mode(
+                ego_service_sdk::runtime::IdempotencyEnforcementMode::MandatoryKey,
+            );
         self
     }
 

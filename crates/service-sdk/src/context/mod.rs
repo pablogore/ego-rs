@@ -8,7 +8,7 @@ use kitlogger::KITLogger;
 use tokio_util::sync::CancellationToken;
 
 use ego_domain::context::TenantId;
-use ego_domain::operation::{OperationFingerprint, OperationKey};
+use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
 use ego_domain::TraceContext;
 
 use crate::runtime::{CanonicalTenant, CrossTenantGrant, CrossTenantPermit};
@@ -533,6 +533,32 @@ impl ServiceContext {
         self.operation_fingerprint.as_ref()
     }
 
+    /// Returns the identity of the operation this request was reserved under —
+    /// which operation, and which request — or `None` when it was never
+    /// reserved.
+    ///
+    /// This is what a service body hands to every `CommandContext` it creates,
+    /// so a per-aggregate receipt gate compares against the same request
+    /// identity the reservation used. Pass the whole value: transferring the key
+    /// and forgetting the fingerprint would leave the gate with nothing to
+    /// compare against, and [`OperationIdentity`] exists so that state cannot be
+    /// expressed.
+    ///
+    /// `Some` requires **both** halves, which is precisely the condition
+    /// [`RuntimeInner::reserve_idempotent_operation`](crate::runtime::RuntimeInner::reserve_idempotent_operation)
+    /// establishes: it stamps the fingerprint only after the store accepted a
+    /// reservation taken under the key already on this context. A context
+    /// carrying a key but no stamp was never reserved, and answering `Some`
+    /// there would hand an aggregate an identity nothing authorised.
+    pub fn operation_identity(&self) -> Option<OperationIdentity> {
+        match (&self.operation_key, &self.operation_fingerprint) {
+            (Some(key), Some(fingerprint)) => {
+                Some(OperationIdentity::new(key.clone(), fingerprint.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Stamps the fingerprint the reservation was taken under. The sole writer
     /// is `RuntimeInner::reserve_idempotent_operation`, which is also what hands
     /// the value to the store — so a fingerprint on a context is evidence that
@@ -730,6 +756,42 @@ mod tests {
     fn operation_fingerprint_is_none_until_a_reservation_stamps_it() {
         let ctx = ServiceContext::new();
         assert_eq!(ctx.operation_fingerprint(), None);
+    }
+
+    /// A key alone is not an identity. This is the case that matters: a context
+    /// carrying a key that no reservation accepted must not present one, or an
+    /// aggregate downstream would gate on a request identity nothing authorised.
+    #[test]
+    fn a_key_without_a_stamped_fingerprint_yields_no_identity() {
+        use ego_domain::operation::OperationKey;
+
+        let ctx =
+            ServiceContext::new().with_operation_key(OperationKey::parse("op-identity-a").unwrap());
+
+        assert!(ctx.operation_key().is_some());
+        assert_eq!(
+            ctx.operation_identity(),
+            None,
+            "the key arrived at ingress; nothing reserved under it"
+        );
+    }
+
+    /// Once the reservation stamps, both halves travel together and match the
+    /// values the context carries individually — the pair is a view of them, not
+    /// a second copy that could drift.
+    #[test]
+    fn a_stamped_context_yields_the_identity_it_carries() {
+        use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
+
+        let key = OperationKey::parse("op-identity-b").unwrap();
+        let fingerprint = OperationFingerprint::new("e".repeat(64));
+        let mut ctx = ServiceContext::new().with_operation_key(key.clone());
+        ctx.set_operation_fingerprint(fingerprint.clone());
+
+        assert_eq!(
+            ctx.operation_identity(),
+            Some(OperationIdentity::new(key, fingerprint))
+        );
     }
 
     /// The stamp carries the value through untouched and disturbs nothing else
