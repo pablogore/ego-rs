@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 77 complete and 39 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 81 complete and 35 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -207,8 +207,12 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 > flow from the transport edge to the actor, because nothing reads
 > `ServiceContext::operation_key()` to construct the `CommandContext` a service
 > passes down. That bridge is a genuine gap in this task list rather than in the
-> code, and it is recorded as B6.4a below — the generated slot-3 code is where it
-> belongs, since that is the point which already reads the resolved key.
+> code, and it is recorded as B6.4a below. This note originally said the bridge
+> belonged in generated slot-3 code, since that was then the only point which had
+> read the resolved key. The reservation boundary changed that: the runtime now
+> stamps the accepted key and fingerprint onto `ServiceContext`, so the service
+> body reads an already-authorised identity and transfers it into each
+> `CommandContext` it creates. See B6.4a for the split.
 >
 > What B1 does deliver: the key has a type, one shared definition of validity and
 > of the missing-key policy, one HTTP adapter conforming to that contract, and
@@ -354,19 +358,69 @@ unchanged, which is the point of stopping here.
 
 ### Phase B6: `#[idempotent]` Marker + Slot-3 Wiring — Closes the Live Bug (needs B1, B2, B3, B5)
 
-- [ ] B6.1 RED: `crates/service-sdk-macros/src/tests.rs` — `#[idempotent]` outside `#[service]` is a compile error; `#[idempotent]` without `#[operation]` is a compile error (mirrors the existing check at `lib.rs:528`).
-- [ ] B6.2 GREEN: add the inert `#[idempotent]` marker attribute in `crates/service-sdk-macros/src/lib.rs`, read by the `#[service]` generator alongside `#[authorize]` (`lib.rs:808`) and `#[tenant_scoped]` (`lib.rs:824`).
-- [ ] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
-- [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
-      `ServiceContext::operation_key()` and threads that exact value into the
-      `CommandContext` the service hands to the entity. Test asserts the key
-      resolved at the transport edge is what `handle_command` observes, with no
-      regeneration in between. **This closes the gap B1 left open**: B1 made both
-      contexts able to hold the key and proved traversal from the command envelope
-      onward, but nothing joined the two halves.
+- [x] B6.1 RED: `crates/service-sdk-macros/src/tests.rs` — `#[idempotent]` outside `#[service]` is a compile error; `#[idempotent]` without `#[operation]` is a compile error (mirrors the existing check at `lib.rs:528`).
+- [x] B6.2 GREEN: add the inert `#[idempotent]` marker attribute in `crates/service-sdk-macros/src/lib.rs`, read by the `#[service]` generator alongside `#[authorize]` (`lib.rs:808`) and `#[tenant_scoped]` (`lib.rs:824`).
+      **Found while implementing, and part of this task rather than a follow-up:**
+      `OperationDescriptor::idempotent` already existed and was emitted as a
+      literal `false` for every operation the generator produced. The field is
+      serialised and exposed through `ServiceContract`, so leaving it hardcoded
+      would have made the new marker exist syntactically while remaining
+      invisible to every consumer of the contract. It is now populated from the
+      marker, with `crates/service-sdk/tests/idempotent_descriptor.rs` covering
+      both directions — marked reports `true`, unmarked still reports `false` —
+      so neither a dead flag nor a default-everything-idempotent regression can
+      pass unnoticed.
+- [x] B6.3 RED: macro-expansion test asserting generated slot ordering — slot 1 `#[authorize]`, slot 2 `#[tenant_scoped]` (`enforce_tenant`), slot 3 the new reservation call — and that slot 3 never runs before a passing guard (design.md AD-5, spec scenario "Reservation happens after authorization and tenant scoping").
+      The blocking behavioural criteria this box was held open for are now green
+      in `crates/service-sdk/tests/idempotent_dispatch.rs`, and every one of them
+      is stated as an observed count rather than as a shape: authorization denied
+      -> `reserve` called 0 times; tenant rejected -> 0 times; both guards passing
+      -> exactly 1; the definitive key, canonical tenant and fingerprint are read
+      back off the request the store actually received; a refused reservation
+      leaves the handler body at 0 calls.
+      **The mutation that closes it.** Reverting `idempotency_slot` to
+      `quote! {}` — the empty seam this box previously described — fails 9 of the
+      19 tests, each by an observed count or a returned value, none by a list
+      comparison. The 10 that survive are the guard-ordering ones (which pass
+      trivially when nothing reserves at all), the pure fingerprint unit tests,
+      and the two "legitimately did not reserve" cases — which is why they are
+      not the evidence and the other 9 are.
+- [ ] B6.4a GREEN: bridge the service and aggregate contexts — after a successful
+      reservation, the service body reads the definitive `OperationKey` and
+      `OperationFingerprint` from `ServiceContext` and threads those exact values
+      into every `CommandContext` it creates. **The generated slot does not
+      construct aggregate contexts and must not recompute or independently
+      propagate the identity.**
+      **This closes the gap B1 left open**: B1 made both contexts able to hold the
+      key and proved traversal from the command envelope onward, but nothing
+      joined the two halves.
+      **Where the responsibility now sits**, fixed by the reservation boundary that
+      landed with the slot. An earlier revision of this box put the bridge in
+      generated slot-3 code, which was correct only while the slot was the sole
+      place that had read the resolved key. It is not any more, and the split is:
+      - slot 3 computes the fingerprint over the typed arguments (AD-3f);
+      - the runtime reserves, and stamps the accepted key and fingerprint onto
+        `ServiceContext` — only after the store accepts;
+      - the service body reads that already-authorised identity back;
+      - the service body transfers it into each `CommandContext` it creates;
+      - the receipt gate consumes exactly those values.
+      The slot cannot do the transfer: it does not know how many aggregates a
+      service body will touch, or when. Putting it back there would mean the macro
+      constructing aggregate contexts on the body's behalf.
       **The bridge must not live in a transport adapter.** It belongs to the dispatch
       path every transport shares, so each adapter decides only how to *extract* the
       key while everything from `ServiceContext` inward is one identical path.
+      **The criteria, each stated as something observed rather than present:**
+      - multi-aggregate: every `CommandContext` receives the *same* key and
+        fingerprint, and both match what the store was actually handed — asserted
+        against the store's recorded request, not against a value the test computed;
+      - the fingerprint is never recomputed downstream; the only value that reaches
+        an aggregate is the one the reservation stamped;
+      - `Replay` and every rejection construct **zero** `CommandContext` — the body
+        does not run, so nothing downstream is reached at all;
+      - a dispatch that legitimately did not reserve (no key, or no reservation
+        store) leaves both values absent and does not activate the receipt gate;
+      - the transfer is killed by mutation, per the scenario's own criterion below.
       **BLOCKING ACCEPTANCE CRITERION — the multi-aggregate recovery scenario.**
       Promoted here from B5, and deliberately not left as a generic follow-up: it
       is the scenario that justifies the whole receipt layer, and it cannot run
@@ -377,7 +431,8 @@ unchanged, which is the point of stopping here.
       `CommandContext::new(..)` for both entities with no key and no fingerprint
       (`application.rs:250`, `:287`), so the gate never fires there. Wiring that by
       hand would have tested a transient integration different from the specified
-      architecture: `ServiceContext` slot 3 → each entity's `CommandContext` →
+      architecture: slot 3 → the reservation's stamp on `ServiceContext` → the
+      service body → each entity's `CommandContext` →
       the receipt gate. The scenario:
       - one service `operation_key`, with the per-aggregate identity derived from it;
       - an existing receipt for `tenant_organization`, a miss for `user`;
@@ -386,11 +441,104 @@ unchanged, which is the point of stopping here.
       - the workflow continues to the user step;
       - the user handler runs **exactly once** and confirms its own receipt;
       - `RegisterOutput` completes without presenting current state as a historical result;
-      - **a mutation dropping the propagation into either `CommandContext` must kill
-        the test** — otherwise it proves the bridge exists rather than that it works.
+      - **a mutation dropping the transfer into either `CommandContext` must kill
+        the test — and the *second* aggregate is the one that matters.** The first
+        is what a partial implementation gets right by accident; only the second
+        proves the transfer is systematic rather than a single wired-up call site.
+        Without this, the test proves the bridge exists rather than that it works.
       Implementing it inside the axum layer would make the actor's idempotency
       accidentally HTTP-shaped, and the second adapter would then need its own copy.
-- [ ] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
+- [x] B6.4 GREEN: emit slot-3 codegen: `store.reserve(CanonicalTenant, OperationKey, fingerprint, owner, lease_until)`; branch on `Fresh`/`TakenOver` → continue, `Succeeded` → return stored response without invoking the handler, `Conflict` → permanent conflict, `*InProgress` → contention response.
+      **Done.** Slot 3 emits one `?`-terminated call to
+      `RuntimeInner::reserve_idempotent_operation`; the store access and the
+      six-way branching stayed in `ReservationConfig::reserve` (AD-3g). The
+      fingerprint is a SHA-256 digest of a tagged, length-prefixed canonical
+      encoding of the typed arguments, built in `operation_fingerprint` rather
+      than borrowed from `serde_json`'s map ordering — that ordering is not a
+      stable property of this workspace, because `preserve_order` is an additive
+      feature any crate in the graph can switch on, and a `HashMap` argument
+      field would then hash in random iteration order. The digest is also what
+      keeps the value inside `fingerprint VARCHAR(255)` for any payload size.
+      `#[idempotent]` gained a third public obligation — every fingerprinted
+      argument must be `Serialize` — with its own isolated `compile_fail`
+      fixture, so no one of the three can be dropped and stay green.
+      **Two things this task forced, recorded as AD-3j amendment 2:** a sixth
+      rejection, `RequestNotFingerprintable`, because serialising a user type is
+      fallible and the alternative was running a marked operation unreserved;
+      and `Option<ReservationDecision>` on the success side, so "this runtime
+      does not reserve" cannot be confused with a `Proceed` that carries a fence.
+      **Not covered here, and stated so it is not mistaken for covered:** the
+      keyless request. Slot 3 reserves only when the context carries a key; the
+      missing-key policy stays with `resolve_operation_key`, and the exposure of
+      a transport that never calls it closes in B6.5/B6.6.
+      **Fingerprint contract fixed by AD-3f — read it before writing the
+      canonicalisation.** The fingerprint is computed here, in slot 3, over the
+      operation's already-deserialised typed arguments: not raw transport bytes,
+      not JSON shape or field order, and not after the handler's own
+      transformations. It covers the semantic input only and excludes
+      `operation_key`, owner, lease, trace and correlation ids — those describe
+      the attempt, not the request, and folding them in would make every retry
+      look like a different request. The property to test: two syntactically
+      different requests that deserialise to the same typed values produce the
+      same fingerprint, and two different typed values produce different ones.
+      **Shape fixed by AD-3g.** Slot 3 emits one `?`-terminated call to a public
+      runtime method; the store access and the six-way outcome branching live in
+      `service-sdk`, not in generated code — one source of truth, testable where
+      it lives, mirroring `enforce_tenant`. The method must expose a
+      dispatch-oriented result rather than the store's own outcome type, so how
+      each outcome is translated stays private. The runtime receives tenant, key
+      and fingerprint already definitive; canonicalisation and fingerprinting
+      belong to the generated code under AD-3f.
+      While implementing, update the now-obsolete annotation on
+      `RuntimeInner::operation_reservation_store` — its
+      `expect(dead_code, reason = "called by #[idempotent] dispatch, landing in
+      B6")` describes a call that AD-3g means will never happen. It stays
+      `pub(crate)`.
+      **Six outcomes, not five — see AD-3h.** `ReservationOutcome` has
+      `Fresh`, `TakenOver`, `OwnedInProgress`, `OtherInProgress`, `Succeeded` and
+      `Conflict`. Only the first two continue. `OwnedInProgress` blocks like
+      `OtherInProgress`: fencing proves ownership, not exclusion between two
+      executions of the same owner, so it cannot tell a legitimate recovery from
+      a concurrent retry or from the previous execution still running. Recovery
+      happens by waiting for the lease to expire and taking over with a greater
+      token, not by re-entering. The runtime's branching test must cover all six.
+      **Runtime state this needs first — AD-3i.** `ReserveRequest` demands an
+      `owner_id` and a `lease_until` that `RuntimeInner` does not hold. Add
+      a single `Option<ReservationConfig>` holding the store, an `Arc<dyn Clock>`
+      (injectable, real by default), an `OwnerId` (UUID minted once in `build()`,
+      unique per instance, injectable for tests) and a `lease_duration`
+      (configurable, strictly positive, default 30s). **No `Option` inside the
+      struct**: two representable states, not sixteen. It also keeps
+      `new_with_logger` at eleven positional parameters instead of sixteen, where
+      transposing two `Option<Arc<dyn …>>` arguments compiles and fails at
+      runtime. Seven constructor call sites, not the 71 that `build` has. Without an injectable clock and owner,
+      `OwnedInProgress`, `OtherInProgress` and `TakenOver` cannot be exercised
+      deterministically — the branching test would depend on wall time, which is
+      what A4 generalised the clock out of auth to avoid.
+      **Boundary types fixed by AD-3j.** The runtime method returns
+      `Result<ReservationDecision, ReservationRejection>`, and `#[idempotent]`
+      requires `UserError: From<ReservationRejection>` at compile time — a
+      `trybuild` case must prove that bound is enforced with a precise message,
+      or the requirement lives only in the design doc. The `Ok` side has two
+      shapes because `Succeeded` is a replay, neither permit nor rejection:
+      `Proceed(permit)` for Fresh/TakenOver, `Replay(response)` for Succeeded.
+      `ReservationRejection` carries four distinguishable cases —
+      `SelfInProgress`, `OtherInProgress`, `FingerprintConflict`,
+      `StoreUnavailable` — not flattened to a string, because "retry shortly"
+      and "never retry" must not require parsing prose to tell apart.
+      **The replay path is blocked on AD-3k and must not be half-wired.**
+      `Replay` promises a typed `UserOutput`; the stored response is bytes. One
+      codec owns `encode` and `decode`, JSON with an explicit envelope tag, and
+      B6.8's epilogue must use that same codec rather than a parallel
+      serialisation — the reader lives here and the writer lives there, so
+      defining either alone fixes the format from the side with less
+      information, and a mismatch fails on the first real retry in production
+      rather than at compile time. `#[idempotent]` gains a second public bound,
+      `UserOutput: Serialize + DeserializeOwned`. AD-3j is amended: a fifth
+      rejection, `StoredResponseIncompatible`, because an undecodable stored
+      response is neither `StoreUnavailable` (the store answered correctly) nor
+      `FingerprintConflict` (the request is the one that succeeded). Permanent
+      for the caller, recoverable by an operator.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).

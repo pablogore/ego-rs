@@ -106,6 +106,19 @@ pub struct RuntimeBuilder {
     idempotency_enforcement_mode: IdempotencyEnforcementMode,
     /// The single registered reservation store, if any.
     idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+    /// Clock the reservation lease is computed from. `None` means the real one.
+    /// Injectable so lease expiry is testable without wall time (AD-3i).
+    reservation_clock: Option<Arc<dyn ego_domain::time::Clock>>,
+    /// Identity this runtime reserves under. `None` means `build()` mints one.
+    /// Injectable only so `OwnedInProgress`, `OtherInProgress` and `TakenOver`
+    /// can be exercised deterministically; production must neither share it
+    /// across instances nor persist it across restarts (AD-3i).
+    reservation_owner_id: Option<ego_domain::operation::OwnerId>,
+    /// How long a reservation's lease holds. Must exceed the longest a
+    /// legitimate execution can take: when it expires another owner may take
+    /// over *while the original is still running*, so until renewal exists a
+    /// short lease permits overlap (AD-3i).
+    reservation_lease_duration: std::time::Duration,
     /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
     /// Read only by `try_build()`; has no effect on `build()` (AD-3).
     validators: Vec<ValidatorEntry>,
@@ -197,6 +210,9 @@ impl RuntimeBuilder {
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             idempotency_enforcement_mode: IdempotencyEnforcementMode::default(),
             idempotency_reservation_store: None,
+            reservation_clock: None,
+            reservation_owner_id: None,
+            reservation_lease_duration: std::time::Duration::from_secs(30),
             validators: Vec::new(),
             observability: None,
             tracer: None,
@@ -398,6 +414,52 @@ impl RuntimeBuilder {
         store: Arc<dyn OperationReservationStore>,
     ) -> Self {
         self.idempotency_reservation_store = Some(store);
+        self
+    }
+
+    /// Overrides the clock the reservation lease is computed from.
+    ///
+    /// Defaults to the real system clock. It is injectable because lease expiry
+    /// is otherwise only observable by waiting: `TakenOver` needs an expired
+    /// lease, and a test that produces one by sleeping is a test that is slow
+    /// when it passes and flaky when the machine is loaded. This is the same
+    /// reason A4 generalised `Clock` out of auth.
+    pub fn with_reservation_clock(mut self, clock: Arc<dyn ego_domain::time::Clock>) -> Self {
+        self.reservation_clock = Some(clock);
+        self
+    }
+
+    /// Overrides the identity this runtime reserves under.
+    ///
+    /// Normally left alone: `build()` mints a fresh UUID per instance, which is
+    /// what makes a retry inside this runtime observable as `OwnedInProgress`
+    /// while another replica sees `OtherInProgress`.
+    ///
+    /// It exists because those two outcomes, and `TakenOver`, cannot otherwise
+    /// be exercised deterministically — a test needs to decide who owns what.
+    /// **Production should neither share an owner across instances nor persist
+    /// one across restarts.** Sharing would not let two replicas proceed
+    /// (AD-3h blocks `OwnedInProgress` as well), but it would erase the
+    /// difference between self-contention and external contention and would
+    /// break lease renewal, which must only renew a lease this instance holds.
+    pub fn with_reservation_owner_id(mut self, owner_id: ego_domain::operation::OwnerId) -> Self {
+        self.reservation_owner_id = Some(owner_id);
+        self
+    }
+
+    /// Sets how long a reservation's lease holds. Defaults to 30 seconds.
+    ///
+    /// **This must exceed the longest a legitimate execution can take.** When a
+    /// lease expires another owner may take the reservation over *while the
+    /// original is still running*, so until renewal exists a lease shorter than
+    /// a real operation permits overlap — a correctness problem, not a tuning
+    /// preference. The 30-second default is an operational policy, not a
+    /// guarantee that any particular operation fits inside it.
+    ///
+    /// Zero is rejected when the runtime is built: a lease that expires the
+    /// instant it is taken excludes nobody while appearing to work.
+    pub fn with_reservation_lease_duration(mut self, lease: std::time::Duration) -> Self {
+        self.reservation_lease_duration = lease;
         self
     }
 
@@ -702,6 +764,41 @@ impl RuntimeBuilder {
             HealthAggregationConfig::default(),
         ));
 
+        // AD-3i: the four pieces are assembled once, here, or not at all. A
+        // deployment without a store has no reservation capability rather than a
+        // half-configured one — which is why `RuntimeInner` holds
+        // `Option<ReservationConfig>` and the config itself has no optional
+        // fields.
+        let reservation = match self.idempotency_reservation_store.clone() {
+            None => None,
+            Some(store) => {
+                let clock = self
+                    .reservation_clock
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(ego_domain::time::SystemClock));
+                // Minted once, here, so every operation this runtime reserves
+                // carries the same identity and a restart carries a different
+                // one.
+                let owner = self.reservation_owner_id.clone().unwrap_or_else(|| {
+                    ego_domain::operation::OwnerId::new(uuid::Uuid::new_v4().to_string())
+                });
+                Some(
+                    crate::runtime::idempotency::ReservationConfig::new(
+                        store,
+                        clock,
+                        owner,
+                        self.reservation_lease_duration,
+                    )
+                    .expect(
+                        "the reservation lease duration must be greater than zero: a zero \
+                         lease expires the instant it is taken, so every attempt would see \
+                         the previous one as expired and take it over — the reservation \
+                         would exclude nobody while appearing to work",
+                    ),
+                )
+            }
+        };
+
         let runtime = Runtime {
             health_aggregator,
             inner: Arc::new(RuntimeInner::new_with_logger(
@@ -717,7 +814,7 @@ impl RuntimeBuilder {
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
-                self.idempotency_reservation_store,
+                reservation,
                 self.observability,
                 effect_acceptor_impl,
                 self.effect_drain_deadline,
@@ -1422,7 +1519,8 @@ mod tests {
 
         let retained = rt
             .inner()
-            .operation_reservation_store()
+            .reservation()
+            .map(|r| r.store())
             .expect("an enforcing runtime must retain the store it was given");
         assert!(
             Arc::ptr_eq(retained, &store),
@@ -1440,7 +1538,7 @@ mod tests {
         let rt = RuntimeBuilder::new()
             .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
             .build();
-        assert!(rt.inner().operation_reservation_store().is_none());
+        assert!(rt.inner().reservation().is_none());
     }
 
     /// Registering twice keeps the second, observed through the retained instance.
@@ -1461,7 +1559,8 @@ mod tests {
 
         let retained = rt
             .inner()
-            .operation_reservation_store()
+            .reservation()
+            .map(|r| r.store())
             .expect("a store was registered");
         assert!(
             Arc::ptr_eq(retained, &second),
@@ -1547,7 +1646,8 @@ mod tests {
         );
         let retained = rt
             .inner()
-            .operation_reservation_store()
+            .reservation()
+            .map(|r| r.store())
             .expect("an enforcing runtime retains its store");
         assert!(
             Arc::ptr_eq(retained, &registered),
@@ -3906,6 +4006,174 @@ mod tests {
             traced.shutdown_calls.load(Ordering::SeqCst),
             1,
             "with_traced must wire the same instance as the TracerLifecycle shut down on teardown"
+        );
+    }
+}
+
+/// PROD-012 AD-3i — the reservation configuration `build()` assembles.
+///
+/// These go through `RuntimeBuilder::build()` rather than calling
+/// `ReservationConfig::new` directly, on purpose. A test that constructed the
+/// config itself would keep passing if `build()` stopped threading the setters
+/// through — which is the failure that actually matters here, because the
+/// setters are the only way a deployment configures any of this.
+#[cfg(test)]
+mod reservation_config_tests {
+    use super::*;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ego_domain::operation::{
+        OwnerFence, OwnerId, ReservationError, ReservationOutcome, ReserveRequest,
+        StoredServiceResponse,
+    };
+    use ego_domain::time::Clock;
+    use std::time::Duration;
+
+    /// A clock that never moves, so lease arithmetic is checked rather than raced.
+    struct FrozenClock(DateTime<Utc>);
+
+    impl Clock for FrozenClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    /// Present only so a reservation can be configured; every method panics
+    /// because none of these tests dispatch an operation.
+    struct InertStore;
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for InertStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            panic!("these tests configure a reservation; they never take one");
+        }
+        async fn renew(
+            &self,
+            _fence: &OwnerFence,
+            _until: DateTime<Utc>,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never renew one");
+        }
+        async fn complete(
+            &self,
+            _fence: &OwnerFence,
+            _response: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never complete one");
+        }
+        async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never abandon one");
+        }
+        async fn purge_completed_before(
+            &self,
+            _cutoff: DateTime<Utc>,
+            _batch: usize,
+        ) -> Result<u64, ReservationError> {
+            panic!("these tests configure a reservation; they never purge");
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(secs, 0)
+            .single()
+            .expect("a valid instant")
+    }
+
+    fn runtime_with(lease: Duration, clock_at: i64, owner: Option<OwnerId>) -> Runtime {
+        let mut b = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_operation_reservation_store(Arc::new(InertStore))
+            .with_reservation_clock(Arc::new(FrozenClock(at(clock_at))))
+            .with_reservation_lease_duration(lease);
+        if let Some(owner) = owner {
+            b = b.with_reservation_owner_id(owner);
+        }
+        b.build()
+    }
+
+    /// One identity per runtime, stable for its whole life — which is what makes
+    /// a retry inside this runtime observable as `OwnedInProgress`.
+    #[test]
+    fn one_runtime_reports_the_same_owner_every_time() {
+        let rt = runtime_with(Duration::from_secs(30), 1_000, None);
+        let first = rt
+            .inner
+            .reservation()
+            .expect("configured")
+            .owner_id()
+            .clone();
+        let second = rt
+            .inner
+            .reservation()
+            .expect("configured")
+            .owner_id()
+            .clone();
+        assert_eq!(
+            first, second,
+            "an owner that changed between reads would make self-contention \
+             indistinguishable from external contention"
+        );
+    }
+
+    /// Two runtimes are two owners. Sharing one would erase the difference
+    /// between self-contention and external contention, and would break lease
+    /// renewal, which must only renew a lease this instance holds.
+    #[test]
+    fn two_runtimes_get_different_owners() {
+        let a = runtime_with(Duration::from_secs(30), 1_000, None);
+        let b = runtime_with(Duration::from_secs(30), 1_000, None);
+        assert_ne!(
+            a.inner.reservation().expect("configured").owner_id(),
+            b.inner.reservation().expect("configured").owner_id(),
+            "each runtime instance must mint its own reservation identity"
+        );
+    }
+
+    /// The injected owner survives `build()` intact — the property a test that
+    /// needs to decide who owns what depends on.
+    #[test]
+    fn an_injected_owner_is_kept_exactly() {
+        let owner = OwnerId::new("owner-under-test");
+        let rt = runtime_with(Duration::from_secs(30), 1_000, Some(owner.clone()));
+        assert_eq!(
+            rt.inner.reservation().expect("configured").owner_id(),
+            &owner
+        );
+    }
+
+    /// `lease_until` is `now + lease` read from the configured clock, so expiry
+    /// is checked by arithmetic rather than by waiting.
+    #[test]
+    fn the_lease_expiry_comes_from_the_injected_clock() {
+        let rt = runtime_with(Duration::from_secs(45), 1_000, None);
+        assert_eq!(
+            rt.inner.reservation().expect("configured").lease_until(),
+            at(1_045),
+            "a lease computed from the system clock instead would make expiry \
+             testable only by sleeping"
+        );
+    }
+
+    /// Zero is refused at construction, so no partially-valid configuration can
+    /// exist for a caller to hold.
+    #[test]
+    fn a_zero_lease_is_refused_rather_than_stored() {
+        let refused = crate::runtime::idempotency::ReservationConfig::new(
+            Arc::new(InertStore),
+            Arc::new(FrozenClock(at(0))),
+            OwnerId::new("owner"),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            refused.err(),
+            Some(crate::runtime::idempotency::ReservationConfigError::ZeroLease),
+            "a zero lease expires the instant it is taken: every attempt would \
+             see the previous one as expired and take it over"
         );
     }
 }

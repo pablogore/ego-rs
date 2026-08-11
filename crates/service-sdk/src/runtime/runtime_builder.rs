@@ -20,9 +20,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::runtime::error::RuntimeInfraError;
+use crate::runtime::idempotency::{ReservationConfig, ReservationDecision, ReservationRejection};
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
-use ego_domain::operation::OperationReservationStore;
+use ego_domain::operation::OperationFingerprint;
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -285,7 +286,7 @@ pub struct RuntimeInner {
     /// Read only through [`RuntimeInner::operation_reservation_store`], which is
     /// what keeps this field from being reported unused — the accessor carries the
     /// awaiting-its-consumer marker, not the field.
-    idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+    reservation: Option<ReservationConfig>,
     /// Observability sink for macro-guard security denials (CORE-012A AD-2).
     /// `None` by default — behaviorally identical to `NoopObservability`
     /// discarding events, keeping `ego-service-sdk` free of an
@@ -381,7 +382,7 @@ impl RuntimeInner {
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
-        idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+        reservation: Option<ReservationConfig>,
         observability: Option<Arc<dyn Observability>>,
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
@@ -396,7 +397,7 @@ impl RuntimeInner {
             teardown,
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
-            idempotency_reservation_store,
+            reservation,
             observability,
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
@@ -595,31 +596,105 @@ impl RuntimeInner {
         Ok(())
     }
 
-    /// The registered reservation store, if this runtime has one.
+    /// The reservation capability, if this deployment configured one.
     ///
-    /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it lives
-    /// inside this crate; a public accessor would invite reaching around the
-    /// `#[idempotent]` seam to reserve operations by hand, which is the one path the
-    /// enforcement mode cannot police.
+    /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it
+    /// lives inside this crate; a public accessor would invite reaching around
+    /// the `#[idempotent]` seam to reserve operations by hand, which is the one
+    /// path the enforcement mode cannot police.
     ///
-    /// Returns `None` only under
-    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility):
-    /// the builder refuses to produce an enforcing runtime without one, so a caller
-    /// that finds `None` here knows enforcement is off rather than that a
-    /// registration was missed.
-    /// `#[expect]` rather than `#[allow]` on purpose: the attribute becomes an error
-    /// the moment a production caller appears, so it cannot outlive its reason.
+    /// `None` under
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility),
+    /// which is the mode a deployment declares when it has not adopted
+    /// enforcement. It cannot be `None` under the enforcing variant: the builder
+    /// refuses to produce a runtime in that state, so a caller that finds `None`
+    /// here knows enforcement is off rather than that a registration was missed.
     ///
-    /// Gated on `not(test)` because the tests below do call it — an unconditional
-    /// expectation would be unfulfilled in the test build and fail there instead.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by #[idempotent] dispatch, landing in B6")
-    )]
-    pub(crate) fn operation_reservation_store(
+    /// The store is reached only through here, never handed out. AD-3g keeps the
+    /// reservation and its outcome branching inside this crate so there is one
+    /// implementation to test rather than one copy per generated operation.
+    pub(crate) fn reservation(&self) -> Option<&ReservationConfig> {
+        self.reservation.as_ref()
+    }
+
+    /// Reserves one `#[idempotent]` operation before it is dispatched.
+    ///
+    /// The single public entry point generated slot-3 code calls (AD-3g). The
+    /// store access and the six-way outcome interpretation stay behind it, so
+    /// changing how an outcome is translated is not a breaking change for every
+    /// generated caller. `tenant`, `key` and `fingerprint` arrive already
+    /// definitive — canonicalisation and fingerprinting belong to the generated
+    /// code under AD-3f, and nothing is re-derived here.
+    ///
+    /// # Why it takes the context by `&mut`
+    ///
+    /// Mirroring [`RuntimeInner::enforce_tenant`], and for the same reason. Two
+    /// of the three values a reservation needs are *already definitive on the
+    /// context* — the `OperationKey` carried from ingress and the canonical
+    /// tenant `enforce_tenant` resolved — so reading them here rather than
+    /// re-passing them keeps one reading of each, instead of one copy expanded
+    /// into every generated operation. Only `fingerprint` is passed, because
+    /// only it is the generated code's to compute (AD-3f).
+    ///
+    /// The `&mut` also lets this method **stamp the fingerprint onto the
+    /// context**, which is what makes the whole chain work: a service body
+    /// downstream threads that exact value into each aggregate's
+    /// `CommandContext`, so the per-aggregate receipt gate compares against the
+    /// same request identity the reservation used. Stamping here rather than
+    /// exposing a public setter means a fingerprint on a context is evidence
+    /// that this method ran, not that somebody assigned a field.
+    ///
+    /// The namespace is the **canonical** tenant, never
+    /// [`ServiceContext::tenant_hint`] — a caller-supplied hint must not choose
+    /// which namespace its key lands in.
+    ///
+    /// # The three answers, and why `Option` rather than a third decision
+    ///
+    /// `None` means **this runtime did not reserve** — either no
+    /// [`ReservationConfig`] was registered, which the builder permits only
+    /// under
+    /// [`IdempotencyEnforcementMode::Compatibility`](crate::runtime::IdempotencyEnforcementMode::Compatibility),
+    /// or the context carries no key. That is not the same statement as
+    /// [`ReservationDecision::Proceed`](crate::runtime::ReservationDecision::Proceed),
+    /// even though both continue: `Proceed` carries a permit, and therefore a
+    /// fence that a later completion must present. A dispatch that never
+    /// reserved has no fence to present and must not have one invented for it.
+    /// Folding the two into a single "continue" would make a permit-less
+    /// completion representable, which is exactly the shape
+    /// [`ReservationDecision`](crate::runtime::ReservationDecision) is split to
+    /// prevent. Nothing is stamped in that case either, so the receipt gate
+    /// downstream stays inactive rather than gating on a request identity that
+    /// reserved nothing.
+    ///
+    /// # What this method deliberately does not decide
+    ///
+    /// Whether a *keyless* request may proceed. It returns `Ok(None)` and
+    /// dispatch continues. That is the missing-key policy, and it has one owner
+    /// — [`resolve_operation_key`](crate::idempotency::resolve_operation_key) at
+    /// the transport edge — so two adapters cannot disagree about it. Deciding
+    /// it a second time here would create the second definition that module
+    /// exists to prevent.
+    pub async fn reserve_idempotent_operation(
         &self,
-    ) -> Option<&Arc<dyn OperationReservationStore>> {
-        self.idempotency_reservation_store.as_ref()
+        ctx: &mut ServiceContext,
+        fingerprint: OperationFingerprint,
+    ) -> Result<Option<ReservationDecision>, ReservationRejection> {
+        let (Some(config), Some(key)) = (self.reservation(), ctx.operation_key().cloned()) else {
+            return Ok(None);
+        };
+
+        let tenant = ctx
+            .canonical_tenant()
+            .and_then(|resolved| resolved.tenant_id().cloned());
+
+        let decision = config.reserve(tenant, key, fingerprint.clone()).await?;
+
+        // Stamped only after the store accepted it. A fingerprint left on a
+        // context whose reservation was refused would be carried into an
+        // aggregate's `CommandContext` by a body that never ran — and would sit
+        // in a receipt describing work no reservation ever authorised.
+        ctx.set_operation_fingerprint(fingerprint);
+        Ok(Some(decision))
     }
 
     /// Mints a cross-tenant permit authorizing access to `destination`

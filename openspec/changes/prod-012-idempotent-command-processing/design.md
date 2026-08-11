@@ -342,6 +342,342 @@ The route must be visible in the type, not left to a caller's discipline —
 either an internal `ReplayedEvents` variant or equivalent internal metadata that
 translates to what the caller expects while bypassing the post-commit pipeline.
 
+### AD-3f — Where the fingerprint is computed, and what "canonical" means
+
+**Decision**: the fingerprint is computed **in slot 3, over the operation's
+already-deserialised typed arguments**, before `on_request` and before the
+handler.
+
+The order is therefore:
+
+```
+deserialise → authorize → tenant → canonicalise the typed input → fingerprint
+           → reserve → on_request → handler
+```
+
+**Why this needed deciding rather than defaulting.** "Canonical input" was
+ambiguous between two readings that fail in opposite directions. Computed over
+raw transport bytes, two requests that differ only in JSON key order or
+whitespace produce different fingerprints, and a legitimate retry is refused as
+a *permanent* conflict — worse than having no idempotency, because it rejects
+valid work irreversibly. Computed after the handler's own normalisation, the
+fingerprint cannot exist before the work it is meant to guard.
+
+**What canonical means here, stated so it is not re-litigated:**
+
+- **Not** raw transport bytes. Not JSON, not HTTP, not field order, whitespace,
+  or original formatting.
+- The canonical form of the **typed parameters**, as deserialised.
+- The operation's **semantic input only**.
+- **Excluding** `operation_key`, owner, lease, trace and correlation ids, and
+  every other piece of context metadata. Those describe *this attempt*, not
+  *this request*; folding them in would make every retry a different request.
+- The handler's internal transformations do not participate. **The handler does
+  not retroactively define the command's idempotent identity.** A normalisation
+  that genuinely changes semantic identity must happen before slot 3, or be made
+  an explicit part of the generated canonicalisation.
+
+**The property this buys, and the one B6.4 must test:** two syntactically
+different requests that deserialise to the same typed values produce the same
+fingerprint; two different typed values produce different fingerprints. That is
+what makes a retry recognisable across transports without making it recognisable
+across *different* requests.
+
+### AD-3g — The reservation lives in the runtime; the macro only places the call
+
+**Decision**: slot 3 emits a single `?`-terminated call to a **public runtime
+method**. The reservation and every outcome branch live in `service-sdk`, not in
+generated code.
+
+```
+macro    → is the operation marked; canonicalise the typed arguments; compute
+           the fingerprint (AD-3f); place the call in slot 3
+runtime  → reach the store, call reserve(...), interpret Fresh / TakenOver /
+           OwnedInProgress / OtherInProgress / Succeeded / Conflict, return a
+           dispatch-oriented result
+handler  → reached only when that result authorises continuing
+```
+
+**Rejected: emitting the store access and the branching inline.** The six-way
+outcome interpretation is real logic, and in the macro it becomes text expanded
+into every operation of every service — one copy per operation, none of them the
+source of truth, and none directly testable except through a fixture service.
+In the runtime it is tested exhaustively where it lives.
+
+It also mirrors `enforce_tenant`, which is `pub` for exactly this reason, and it
+follows the rule already fixed for the context bridge: shared dispatch
+behaviour belongs to the path every transport shares.
+
+**Two boundaries this decision draws, both deliberate:**
+
+- **The method exposes a capability, not infrastructure.** It must not return
+  the store's own outcome type. A dispatch-oriented result — a permit, or an
+  error the operation returns — keeps *how each outcome is translated* private,
+  so changing that translation is not a breaking change for every generated
+  caller. `operation_reservation_store()` stays `pub(crate)`; its
+  `expect(dead_code, reason = "called by #[idempotent] dispatch, landing in B6")`
+  annotation is made obsolete by this decision and must be updated when B6.4
+  lands, not left describing a call that will never happen.
+- **The runtime does not serialise arguments or decide what the fingerprint
+  covers.** That is the generated code's job under AD-3f. The runtime receives
+  the tenant, the key and the fingerprint already definitive.
+
+**The structural guarantee is preserved.** A single `?` at the slot means any
+blocking outcome returns before `on_request` and before the handler — the same
+control-flow property B6.3 fixed for the guards, rather than a rule the next
+author has to remember.
+
+### AD-3h — Six reservation outcomes, and only two of them dispatch
+
+**Decision**: `ReservationOutcome` has **six** variants, not the five this
+document and `tasks.md` previously described. Two of them continue; four stop.
+
+| Outcome | Dispatch |
+|---|---|
+| `Fresh(lease)` | continue |
+| `TakenOver(lease)` | continue, under the new fencing token |
+| `OwnedInProgress(lease)` | **stop** — operation-in-progress response |
+| `OtherInProgress` | **stop** — contention response |
+| `Succeeded(response)` | replay the stored response, unexecuted |
+| `Conflict` | refuse: same key, different fingerprint |
+
+**The decision that needed making: `OwnedInProgress` does not continue.**
+
+It is tempting, because the variant exists precisely to say "this is the same
+caller". But **fencing proves ownership, not exclusion between two executions of
+the same owner.** Observing the same owner cannot distinguish a legitimate
+recovery from a concurrent retry, or from the previous execution still running
+and merely slow. Keeping the same fencing token does not separate them either.
+
+Nor does B5's receipt make it safe. That gate protects work that was
+**confirmed**; an operation that died midway may already have reached an
+external effect, and nothing durable records that. Re-entering it is exactly the
+duplicate the whole capability exists to prevent.
+
+**Recovery therefore happens by waiting, not by re-entering.** While the lease
+holds, nobody re-executes. Once it expires, `reserve` answers `TakenOver` with a
+strictly greater fencing token and the new execution is protected from the
+previous owner. If the earlier work had been confirmed, B5 returns its receipt
+rather than repeating it.
+
+**`OwnedInProgress` stays.** Self-contention and external contention are worth
+telling apart for metrics, diagnostics, lease renewal and any future explicit
+recovery. They differ in what they *mean*, not in what dispatch does with them —
+and collapsing them in the enum would destroy information the runtime should be
+reporting. Both block.
+
+### AD-3i — What the runtime needs before it can reserve anything
+
+**Decision**: `ReserveRequest` demands an `owner_id` and a `lease_until` that
+`RuntimeInner` does not currently hold. Three pieces are added, each with
+externally observable behaviour under failure, so each is decided here rather
+than by whatever the implementation happens to do.
+
+The four travel together as one value, not as four fields:
+
+```rust
+pub struct ReservationConfig {
+    store: Arc<dyn OperationReservationStore>,
+    clock: Arc<dyn Clock>,
+    owner_id: OwnerId,
+    lease_duration: Duration,
+}
+
+RuntimeInner { reservation: Option<ReservationConfig>, .. }
+```
+
+**No `Option` inside the struct — the optionality lives outside it.** That
+leaves exactly two representable states: reservations disabled, or a complete
+and valid configuration. Four independent fields would allow sixteen
+combinations, thirteen of them incoherent — a store with no clock cannot compute
+a `lease_until`, an owner with no store means nothing. The type refuses them
+instead of the runtime checking for them.
+
+It also gives `lease_duration > 0` a single place to be validated, at
+construction, rather than in `build()` where a later caller could bypass it.
+
+The grouping is not cosmetic. `RuntimeInner::new_with_logger` already takes 13
+positional parameters, several of them `Option<Arc<dyn …>>`; adding three more
+would make sixteen, where transposing two arguments compiles cleanly and fails
+at runtime. Folding the existing `idempotency_reservation_store` in brings it to
+eleven.
+
+```
+.with_reservation_clock(clock)
+.with_reservation_owner_id(owner_id)      // for tests; normally left to build()
+.with_reservation_lease_duration(duration)
+```
+
+**`OwnerId` — a UUID minted once in `build()`, unique per runtime instance.**
+Stable for that instance's whole life, different after a restart. A retry inside
+the same runtime therefore observes `OwnedInProgress`; another replica, or the
+same process after a restart, observes `OtherInProgress` until the lease expires
+and then `TakenOver`.
+
+Uniqueness per instance must be guaranteed. Note what sharing an owner would
+*not* do: it would not let two replicas unblock each other, because AD-3h blocks
+`OwnedInProgress` too. What it would destroy is the variant's diagnostic
+meaning — self-contention and external contention would become
+indistinguishable — and it would compromise lease renewal, which must only ever
+renew a lease this instance actually holds.
+
+Injecting the owner is supported because `OwnedInProgress`, `OtherInProgress`
+and `TakenOver` cannot otherwise be exercised deterministically. Production
+should neither share it across instances nor persist it across restarts.
+
+**`Clock` — `Arc<dyn Clock>`, injectable, real clock by default.** `lease_until`
+is computed from that clock and nothing else, so expiry is testable without wall
+time. This is exactly what A4 generalised the clock out of auth for.
+
+**Lease duration — configurable, validated as strictly greater than zero,
+default 30 seconds.** The default is an operational policy, not a guarantee.
+
+**Operational contract, stated because the lease alone does not prevent
+overlap:** the configured lease must exceed the maximum expected duration of an
+execution. When it expires, another owner can take over — while the original may
+still be running. Until renewal/heartbeat exists, a lease shorter than a
+legitimate operation is a correctness problem, not a tuning preference.
+
+### AD-3j — What crosses the boundary: `ReservationRejection`, and nothing wider
+
+**Decision**: the runtime method returns
+
+```rust
+async fn reserve_idempotent_operation(..)
+    -> Result<ReservationDecision, ReservationRejection>
+```
+
+and `#[idempotent]` requires, at compile time, `UserError: From<ReservationRejection>`.
+
+**Why not `ServiceError`.** It is already there and it has a `Conflict`
+variant, but it is wide: requiring `From<ServiceError>` would oblige every
+marked operation's error type to absorb variants a reservation can never
+produce. The obligation an API imposes should be the set of failures it can
+actually cause, not the set that happens to be convenient to reuse.
+
+**Why not letting the macro construct the user's error directly.** That removes
+the `From` bound at the cost of putting outcome interpretation back into
+generated code — one copy per operation, none of them the source of truth. AD-3g
+already rejected that.
+
+**Consequence discovered while writing this down: the success side needs two
+shapes, not one.** `Succeeded` is neither a permit nor a rejection — it replays a
+stored response *without executing*. A bare `Result<ReservationPermit, _>` has
+nowhere to put it. So the `Ok` side is a decision:
+
+```
+ReservationDecision::Proceed(permit)   // Fresh, TakenOver
+ReservationDecision::Replay(response)  // Succeeded
+```
+
+**`ReservationRejection` carries the blocking cases** — four here, five after
+AD-3k adds `StoredResponseIncompatible` — kept
+distinguishable rather than flattened to a string, because they call for
+different responses and different operator action:
+
+| Case | Meaning |
+|---|---|
+| `SelfInProgress` | this runtime already holds a valid lease for this key |
+| `OtherInProgress` | another owner holds it |
+| `FingerprintConflict` | same key, different request — permanent |
+| `StoreUnavailable` | the reservation store itself failed |
+
+Reducing them to text at this boundary would force the application layer to
+parse prose to decide between "retry shortly" and "never retry".
+
+**Ownership stays split three ways**, which is the point of the whole shape: the
+store reports outcomes, the runtime decides what each one means for dispatch,
+and the application's error type decides how it is presented. None of the three
+does another's job.
+
+**A `trybuild` case must prove the bound is enforced**, failing with a precise
+message when a marked operation's error type does not implement
+`From<ReservationRejection>` — otherwise the requirement exists only in this
+document.
+
+#### AD-3j amendment 2 — a sixth case, and `Option` on the success side
+
+Two things this decision could not have known were forced by implementing the
+slot, and both are recorded here rather than left as code nobody agreed to.
+
+**A sixth rejection: `RequestNotFingerprintable`.** AD-3f puts the fingerprint in
+generated code, over the typed arguments, computed through `serde`. Serialising
+an arbitrary user type is *fallible* — a hand-written `Serialize` that calls
+`Error::custom`, or an `f64` holding `NaN`. When it fails there is no
+fingerprint, so there is nothing to reserve under, and the five existing cases
+all state something untrue about it: `StoreUnavailable` says the store failed
+when it was never reached and invites a retry that cannot help;
+`FingerprintConflict` says two fingerprints were computed and differed when none
+was computed at all. The only alternative to a sixth case was proceeding
+unreserved, which runs a marked operation with no idempotency whatever — the one
+outcome the marker exists to prevent. It is permanent for the caller and points
+at a defect in an argument type, which is a third kind of operator action again.
+
+**The success side is `Option<ReservationDecision>`.** A runtime that registered
+no reservation store — legal only under `Compatibility` — must dispatch
+normally. That is not `Proceed`: `Proceed` carries a permit, and therefore a
+fence a later completion must present. A deployment that never reserved has no
+fence, and folding the two together would make a permit-less completion
+representable, which is the exact shape `ReservationDecision` was split to
+prevent. `None` says "this runtime does not reserve" and says nothing else.
+
+**What this amendment deliberately does not decide: the keyless request.** Slot 3
+reserves only when the context carries an `OperationKey`. Whether a *missing* key
+is admitted is the missing-key policy, and it already has exactly one owner —
+`resolve_operation_key`, at the transport edge — so that two adapters cannot
+disagree about it. Deciding it a second time inside the slot would create the
+second definition that module exists to prevent. The residual exposure is a
+transport that never calls it; B6.5/B6.6 close that for HTTP, and any future
+adapter closes it by using the same shared function.
+
+### AD-3k — One codec owns both sides of the stored response
+
+**Decision**: the stored response has **one** codec, owning `encode` and
+`decode` together. Neither side may be defined without the other.
+
+**Why this had to be decided before writing either.** `Replay` promises a typed
+`UserOutput`; `StoredServiceResponse` is bytes. The reader lives in the
+reservation slot (this unit) and the writer lives in the slot-3 epilogue (B6.8).
+Implementing the reader first would fix the format from the side with the least
+information — and a mismatch would not fail at compile time. It would fail on
+the first real retry in production, returning nonsense or an error for an
+operation that genuinely completed.
+
+**The shape:**
+
+| Concern | Decision |
+|---|---|
+| Ownership | one codec type, `encode(&UserOutput) -> StoredServiceResponse` and `decode(&StoredServiceResponse) -> Result<UserOutput, _>` |
+| Format | JSON via `serde_json`, already a workspace dependency and readable by an operator inspecting a stuck reservation |
+| Versioning | an explicit envelope tag written by `encode` and checked by `decode`; a bare payload cannot be told apart from a payload of a different shape |
+| Public bound | `UserOutput: Serialize + DeserializeOwned`, imposed by `#[idempotent]` alongside `From<ReservationRejection>` |
+| Incompatibility | envelope tag mismatch, or a decode failure |
+| B6.8 | uses **this** codec, never a parallel serialisation |
+
+**AD-3j is amended: there are five rejections, not four.** A stored response
+that cannot be decoded is a state the current type cannot represent, and
+squeezing it into an existing case would misinform the caller in both available
+directions:
+
+```
+ReservationRejection::StoredResponseIncompatible
+```
+
+It is **not** `StoreUnavailable` — the store answered, correctly and promptly;
+what it returned is unreadable. Nor is it `FingerprintConflict` — the request is
+the same one that succeeded; only our ability to read its answer changed.
+
+**Permanence: permanent for the caller, recoverable by an operator.** Retrying
+the identical request re-reads the identical bytes and fails identically, so a
+client retry loop is pointless and must not be encouraged. It is not permanent
+in the sense a fingerprint conflict is: purging that reservation, or deploying
+the version that can decode it, restores the operation. The distinction belongs
+in the type because "retry" and "escalate" are different actions.
+
+**Round-trip and incompatibility must both be tested**, the second by decoding a
+response written under a different envelope tag — the case a deployment
+straddling two versions produces, and the one nobody discovers by reasoning.
+
 ### AD-4 — The shared extraction contract (D9)
 
 **Decision**: `OperationKeyCarrier`, in `crates/service-sdk/src/idempotency/extraction.rs`.
@@ -653,7 +989,7 @@ HTTP request (Idempotency-Key: K)
   │                Fresh / TakenOver ⇒ continue
   │                Succeeded         ⇒ return stored response; handler never runs
   │                Conflict          ⇒ permanent conflict
-  │                *InProgress       ⇒ contention response
+  │                *InProgress       ⇒ blocked (see AD-3h: owned and other both stop)
   │     on_request → handler body
   │
   ├─ EntityRuntime → EntityActor::execute_command(CommandContext{ operation_key: K })
@@ -756,9 +1092,15 @@ pub enum ReservationOutcome { Fresh(Lease), TakenOver(Lease), OwnedInProgress(Le
 pub enum ReservationError { StaleOwner, Backend(String) }
 ```
 
-`ReservationOutcome` deliberately extends `DedupOutcome`'s five-way shape with
-`TakenOver`: takeover must be independently observable for AD-10 and for the
-recovery assertion in proposal §17.
+`ReservationOutcome` deliberately *reshapes* `DedupOutcome` rather than widening
+it — both are six-way, but not the same six. It adds `TakenOver`, which must be
+independently observable for AD-10 and for the recovery assertion in proposal
+§17, and pays for it by collapsing `OwnedSucceeded` and `OtherSucceeded` into a
+single `Succeeded(StoredServiceResponse)`. That collapse is not a shortcut: once
+an operation has completed, *whose* attempt completed it changes nothing a caller
+can act on — the stored response is the answer either way, and both map to the
+same `Replay`. Keeping them apart would have made the dispatch decision depend on
+a distinction dispatch never reads.
 
 ---
 

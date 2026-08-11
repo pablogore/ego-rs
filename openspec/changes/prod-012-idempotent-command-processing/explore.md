@@ -180,7 +180,7 @@ be deduped this way.
 
 ### (c) Reuse or extend `EffectDedupStore` — medium
 
-Real design precedent: `DedupOutcome`'s five-way shape is the right model.
+Real design precedent: `DedupOutcome`'s six-way shape is the right model.
 
 Breaks because: there are zero durable implementations today, so "reusing" it
 means building the first durable implementation — which is really (b) wearing a

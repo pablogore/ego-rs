@@ -23,10 +23,21 @@ ego-domain = { path = "../domain" }
 ego-runtime = { path = "../runtime" }
 persistent-entity = { path = "../persistent-entity" }
 
-[dev-dependencies]
-# Only the reservation-store test stub names `DateTime<Utc>`, which the port's
-# signature requires. The crate itself never touches chrono.
+# PROD-012 B6.4: the crate now names `DateTime<Utc>` itself. `ReserveRequest`
+# carries a `lease_until`, and the runtime computes it from the configured
+# clock, so this can no longer be a dev-only dependency — an earlier note here
+# said "the crate itself never touches chrono", which stopped being true when
+# reservations moved into the runtime.
 chrono = { version = "0.4", features = ["serde"] }
+# PROD-012 AD-3i: the runtime mints one OwnerId per instance in build(), so two
+# replicas never share a reservation identity.
+uuid = { version = "1", features = ["v4"] }
+# PROD-012 AD-3f: the operation fingerprint is a digest of the canonical form of
+# the typed arguments. The `fingerprint` column is VARCHAR(255), so the value
+# stored has to be bounded — the canonical bytes themselves are not.
+sha2 = "0.11.0"
+
+[dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
 # PROD-005 PR2: `#[tokio::test(start_paused = true)]` for deterministic
 # virtual-time health-aggregation timeout tests (feature unifies with the
