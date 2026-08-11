@@ -197,7 +197,7 @@ distinct in code.
 
 | Concept | Proposed | Rejected / rationale |
 |---|---|---|
-| Reservation outcome enum | `ReservationOutcome` | Reuses the proven five-way shape of `DedupOutcome` (`crates/runtime/src/effects/store.rs`) without reusing the type across a layer boundary |
+| Reservation outcome enum | `ReservationOutcome` | Reuses the proven six-way shape of `DedupOutcome` (`crates/runtime/src/effects/store.rs`) without reusing the type across a layer boundary |
 | Stale-fence rejection | `StaleOwner` (D6) | Named in the decisions; keep verbatim |
 | Durable record of the operation | `OperationReservation` | `IdempotencyRecord` — inherits the effect-layer vocabulary this change works to separate |
 | Per-aggregate applied marker | `OperationReceipt` | `AppliedKey` — loses the fingerprint half of the record (D5) |

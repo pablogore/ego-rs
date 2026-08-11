@@ -375,11 +375,12 @@ unchanged, which is the point of stopping here.
       back off the request the store actually received; a refused reservation
       leaves the handler body at 0 calls.
       **The mutation that closes it.** Reverting `idempotency_slot` to
-      `quote! {}` — the empty seam this box previously described — fails 8 of the
-      17 tests, each by an observed count or a returned value, none by a list
-      comparison. The 9 that survive are the guard-ordering ones (which pass
-      trivially when nothing reserves at all) and the pure fingerprint unit
-      tests, which is why they are not the evidence and the other 8 are.
+      `quote! {}` — the empty seam this box previously described — fails 9 of the
+      19 tests, each by an observed count or a returned value, none by a list
+      comparison. The 10 that survive are the guard-ordering ones (which pass
+      trivially when nothing reserves at all), the pure fingerprint unit tests,
+      and the two "legitimately did not reserve" cases — which is why they are
+      not the evidence and the other 9 are.
 - [ ] B6.4a GREEN: bridge the two contexts — generated slot-3 code reads
       `ServiceContext::operation_key()` and threads that exact value into the
       `CommandContext` the service hands to the entity. Test asserts the key
@@ -447,7 +448,7 @@ unchanged, which is the point of stopping here.
       different requests that deserialise to the same typed values produce the
       same fingerprint, and two different typed values produce different ones.
       **Shape fixed by AD-3g.** Slot 3 emits one `?`-terminated call to a public
-      runtime method; the store access and the five-way outcome branching live in
+      runtime method; the store access and the six-way outcome branching live in
       `service-sdk`, not in generated code — one source of truth, testable where
       it lives, mirroring `enforce_tenant`. The method must expose a
       dispatch-oriented result rather than the store's own outcome type, so how

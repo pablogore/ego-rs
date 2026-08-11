@@ -393,11 +393,12 @@ generated code.
 macro    → is the operation marked; canonicalise the typed arguments; compute
            the fingerprint (AD-3f); place the call in slot 3
 runtime  → reach the store, call reserve(...), interpret Fresh / TakenOver /
-           Succeeded / Conflict / InProgress, return a dispatch-oriented result
+           OwnedInProgress / OtherInProgress / Succeeded / Conflict, return a
+           dispatch-oriented result
 handler  → reached only when that result authorises continuing
 ```
 
-**Rejected: emitting the store access and the branching inline.** The five-way
+**Rejected: emitting the store access and the branching inline.** The six-way
 outcome interpretation is real logic, and in the macro it becomes text expanded
 into every operation of every service — one copy per operation, none of them the
 source of truth, and none directly testable except through a fixture service.
@@ -1091,9 +1092,15 @@ pub enum ReservationOutcome { Fresh(Lease), TakenOver(Lease), OwnedInProgress(Le
 pub enum ReservationError { StaleOwner, Backend(String) }
 ```
 
-`ReservationOutcome` deliberately extends `DedupOutcome`'s five-way shape with
-`TakenOver`: takeover must be independently observable for AD-10 and for the
-recovery assertion in proposal §17.
+`ReservationOutcome` deliberately *reshapes* `DedupOutcome` rather than widening
+it — both are six-way, but not the same six. It adds `TakenOver`, which must be
+independently observable for AD-10 and for the recovery assertion in proposal
+§17, and pays for it by collapsing `OwnedSucceeded` and `OtherSucceeded` into a
+single `Succeeded(StoredServiceResponse)`. That collapse is not a shortcut: once
+an operation has completed, *whose* attempt completed it changes nothing a caller
+can act on — the stored response is the answer either way, and both map to the
+same `Replay`. Keeping them apart would have made the dispatch decision depend on
+a distinction dispatch never reads.
 
 ---
 

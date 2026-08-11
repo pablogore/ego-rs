@@ -216,10 +216,10 @@ impl ReservationPermit {
 
 /// Why a marked operation was refused before it ran.
 ///
-/// The four cases stay distinguishable rather than collapsing into a message,
+/// The six cases stay distinguishable rather than collapsing into a message,
 /// because they call for different responses and different operator action —
-/// "retry shortly" and "never retry" must not require parsing prose to tell
-/// apart.
+/// "retry shortly", "never retry" and "an operator must intervene" must not
+/// require parsing prose to tell apart.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReservationRejection {
     /// This runtime already holds a valid lease for this key.
