@@ -1,0 +1,7 @@
+error[E0451]: fields `key` and `fingerprint` of struct `OperationIdentity` are private
+  --> tests/compile_fail/operation_identity_fields_public.rs:26:63
+   |
+26 |     let _literal = ego_domain::operation::OperationIdentity { key, fingerprint };
+   |                                                               ^^^  ^^^^^^^^^^^ private field
+   |                                                               |
+   |                                                               private field

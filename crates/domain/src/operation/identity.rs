@@ -17,8 +17,19 @@
 //! defensively, and a caller that transfers one and forgets the other silently
 //! disables the guarantee for that aggregate while looking like it enabled it.
 //!
-//! Carried as this type, that state does not exist. There is no constructor
-//! that takes one half.
+//! Carried as this type, that state does not exist — and it takes both halves of
+//! the encapsulation to keep it that way. [`OperationIdentity::new`] requires
+//! both values, **and** the fields are private so a struct literal cannot supply
+//! them independently and route around it. Those are two separate properties
+//! with two separate compile-fail fixtures
+//! (`operation_identity_half_constructed.rs` and
+//! `operation_identity_fields_public.rs`), because making the fields public
+//! would leave the constructor's arity untouched and a fixture that only
+//! checked the arity would never notice.
+//!
+//! Reading a half is fine, and supported: see [`OperationIdentity::key`] and
+//! [`OperationIdentity::fingerprint`]. The guarantee is about what can be
+//! **built**, not about what can be looked at.
 
 use crate::operation::{OperationFingerprint, OperationKey};
 

@@ -35,8 +35,32 @@ pub struct CommandContext {
     /// and which request it came from — carried unchanged from the reservation
     /// that accepted it.
     ///
-    /// Part of the public contract, and additive: it carries data, never
-    /// behaviour. Three rules make it trustworthy.
+    /// # ⚠ Breaking change — this field replaced two others
+    ///
+    /// It is **not** additive. It took the place of two public fields,
+    /// `operation_key: Option<OperationKey>` and
+    /// `fingerprint: Option<OperationFingerprint>`, which no longer exist.
+    ///
+    /// - **Source break.** Code reading or assigning either field must move to
+    ///   `identity` — read through [`OperationIdentity::key`] and
+    ///   [`OperationIdentity::fingerprint`], and write through
+    ///   [`CommandContext::carrying`]. A struct literal listing the old two
+    ///   fields no longer compiles.
+    /// - **Serialised-shape break.** `CommandContext` derives `Serialize` and
+    ///   `Deserialize`, so the two former top-level keys are now one nested
+    ///   object. Nothing in this workspace persists a `CommandContext` — the
+    ///   only round-trip is a unit test in `command_envelope.rs` — so there is
+    ///   no stored data to migrate here. Any *external* holder of a serialised
+    ///   `CommandContext` or `CommandEnvelope` does have to migrate, and this is
+    ///   the notice for it.
+    ///
+    /// The break is deliberate, and it is the whole point: it is what removes
+    /// the half identity from the type system rather than merely discouraging
+    /// it. See the first rule below.
+    ///
+    /// # Why it can be trusted
+    ///
+    /// It carries data, never behaviour. Three rules make it trustworthy.
     ///
     /// **The two halves are one value.** A key without a fingerprint would not
     /// be a partial identity, it would be an identity the receipt gate must
