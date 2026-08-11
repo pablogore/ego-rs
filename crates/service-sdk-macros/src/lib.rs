@@ -672,6 +672,36 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                     quote! {}
                 };
 
+                // The epilogue. One call to a public runtime method, same as the
+                // reservation itself (AD-3g): what a lost completion means is the
+                // runtime's to decide, not something re-decided in every
+                // generated operation.
+                //
+                // Only on `Ok`. A failed operation has no response to record, and
+                // recording one would tell the next identical arrival that the
+                // work is done. The reservation is left leased instead, so it
+                // expires and a retry can take it over.
+                let idempotency_epilogue = if has_idempotent {
+                    quote! {
+                        if let Ok(__ego_output) = &result {
+                            // A runtime dropped between dispatch and here cannot
+                            // record anything. The operation still succeeded, so
+                            // this is the same loss the runtime reports for a
+                            // failed store — not a reason to fail the caller.
+                            if let Some(__ego_rt) = self.runtime.upgrade() {
+                                __ego_rt
+                                    .complete_idempotent_operation(
+                                        __ego_reservation.as_ref(),
+                                        __ego_output,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
+
                 forwarding_methods.push(quote! {
                     async fn #method_name(&self, #(#sig_params),*) #return_type {
                         #operation_name_binding
@@ -683,6 +713,7 @@ fn expand_service_trait(input_trait: ItemTrait, service_args: ServiceArgs) -> To
                         let chain_ref = self.chain.clone();
                         let _ = chain_ref.on_request(&#ctx_param).await;
                         let result = inner_ref.#method_name(#(#inner_call_args),*).await;
+                        #idempotency_epilogue
                         match &result {
                             Ok(_) => { chain_ref.on_response(&#ctx_param).await.ok(); }
                             Err(e) => {

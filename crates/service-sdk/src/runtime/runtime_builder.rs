@@ -24,6 +24,7 @@ use crate::runtime::idempotency::{ReservationConfig, ReservationDecision, Reserv
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::operation::OperationFingerprint;
+use ego_domain::operation::ReservationError;
 use ego_domain::{Observability, SemanticEvent};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
@@ -176,6 +177,28 @@ fn dependency_not_found<T: 'static>(kind: DependencyKind) -> RuntimeError {
 }
 
 // ---------------------------------------------------------------------------
+/// Whether retrying the same operation could produce a different outcome.
+///
+/// Carried on every `idempotency.completion_lost` event because it is what
+/// separates "wait" from "fix", and an operator should not have to infer that
+/// from the reason tag. A transient loss costs one operation its replay
+/// shortcut; a permanent one means this operation can never reach `Succeeded`,
+/// so it will never replay until the code changes.
+#[derive(Clone, Copy)]
+enum Recurrence {
+    Transient,
+    Permanent,
+}
+
+impl Recurrence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Recurrence::Transient => "transient",
+            Recurrence::Permanent => "permanent",
+        }
+    }
+}
+
 // Security denial observability (CORE-012A)
 // ---------------------------------------------------------------------------
 
@@ -695,6 +718,151 @@ impl RuntimeInner {
         // in a receipt describing work no reservation ever authorised.
         ctx.set_operation_fingerprint(fingerprint);
         Ok(Some(decision))
+    }
+
+    /// Records the response of an operation that just completed, so the next
+    /// identical arrival replays it instead of running anything.
+    ///
+    /// The writer half of the pair
+    /// [`reserve_idempotent_operation`](RuntimeInner::reserve_idempotent_operation)
+    /// opens. Called by the `#[idempotent]` epilogue after the handler returned
+    /// `Ok`, under the fence the permit carries — so a lease taken over in the
+    /// meantime cannot have its result overwritten by the owner it replaced.
+    ///
+    /// # Why this returns nothing
+    ///
+    /// **A failed completion must not fail an operation that succeeded.** By the
+    /// time this runs the handler has returned `Ok` and every aggregate has
+    /// committed its events and its receipt. The work happened. Reporting an
+    /// error to the caller now would describe successful work as a failure, and
+    /// invite a retry of something that must not run twice.
+    ///
+    /// # Exactly what is lost, and for how long
+    ///
+    /// Not "the retry just re-runs the body". The reservation stays open, so
+    /// there is a window. In order:
+    ///
+    /// 1. **The durable work stays successful.** It was confirmed before this
+    ///    ran and nothing here revisits it.
+    /// 2. **The immediate replay is lost.** The reservation never reached
+    ///    `Succeeded`, so it has no stored response to answer with.
+    /// 3. **While the lease is still valid, retries are refused as in progress**
+    ///    — `SelfInProgress` or `OtherInProgress` per AD-3h. They do *not* reach
+    ///    the body. This is a real unavailability window, and it is as long as
+    ///    the configured lease.
+    /// 4. **Once the lease expires, a retry takes ownership** (`TakenOver`) and
+    ///    does reach the body.
+    /// 5. **The per-aggregate receipts then stop each durable step from
+    ///    happening twice** — every step already confirmed replays instead of
+    ///    re-running.
+    ///
+    /// So the guarantee holds, but the cost is not only "a slower retry": it is
+    /// a lease-long window in which an operation that in fact succeeded answers
+    /// its caller with contention.
+    ///
+    /// **Scope.** Step 5 protects what the receipt protocol covers — durable
+    /// aggregate writes and effects made idempotent through it. It says nothing
+    /// about an arbitrary external side effect a handler performs outside that
+    /// protocol; nothing here makes such an effect safe to repeat.
+    ///
+    /// That window and that scope limit are why the failure is reported rather
+    /// than swallowed: it is invisible to the caller by design, so it has to be
+    /// visible to an operator.
+    ///
+    /// # What each answer means, and how urgent it is
+    ///
+    /// - `None`, or `Replay` — nothing to record, and nothing is reported. A
+    ///   dispatch that never reserved has no fence to present, and a replay
+    ///   produced no new response; it returned one that was already stored.
+    /// - `StaleOwner` (`stale_owner`, transient) — another owner took the lease
+    ///   over and completed the operation. Its response stands and this one is
+    ///   **discarded**, which is correct rather than an error. But it is also a
+    ///   signal worth acting on: two owners ran the same operation concurrently,
+    ///   which usually means the lease is shorter than the work it covers.
+    /// - Store failure (`store_unavailable`, transient) — the ordinary
+    ///   contingency. The shortcut is lost for this operation; the next one is
+    ///   unaffected.
+    /// - Encoding failure (`not_encodable`, **permanent**) — not a contingency
+    ///   at all. The response type cannot be serialised, so it will fail the same
+    ///   way on every attempt: this operation can *never* reach `Succeeded` and
+    ///   will never replay until the code changes. Not failing the work that
+    ///   already happened is still right, but this one is a defect to fix, not an
+    ///   incident to wait out.
+    pub async fn complete_idempotent_operation<T: serde::Serialize>(
+        &self,
+        reservation: Option<&ReservationDecision>,
+        output: &T,
+    ) {
+        let Some(ReservationDecision::Proceed(permit)) = reservation else {
+            return;
+        };
+        let Some(config) = self.reservation() else {
+            return;
+        };
+
+        let stored = match crate::runtime::encode_stored_response(output) {
+            Ok(stored) => stored,
+            Err(rejection) => {
+                self.record_completion_lost(
+                    "not_encodable",
+                    Recurrence::Permanent,
+                    &rejection.to_string(),
+                );
+                return;
+            }
+        };
+
+        match config.store().complete(permit.fence(), stored).await {
+            Ok(()) => {}
+            Err(ReservationError::StaleOwner) => self.record_completion_lost(
+                "stale_owner",
+                Recurrence::Transient,
+                "another owner took the lease over and completed this operation; its \
+                 response stands and this one was discarded. Two owners ran the same \
+                 operation concurrently, which usually means the lease is shorter \
+                 than the work it covers",
+            ),
+            Err(e) => self.record_completion_lost(
+                "store_unavailable",
+                Recurrence::Transient,
+                &e.to_string(),
+            ),
+        }
+    }
+
+    /// Reports a completion that was lost, through the same sink and with the
+    /// same panic isolation as [`RuntimeInner::record_security_denial`].
+    ///
+    /// This exists because the failure is deliberately invisible to the caller —
+    /// see [`complete_idempotent_operation`](RuntimeInner::complete_idempotent_operation)
+    /// for why an operation that succeeded must not be reported as failed. A
+    /// consequence nobody is told about is a consequence nobody can act on, so
+    /// the one place it surfaces is here.
+    ///
+    /// `reason` is a fixed tag rather than prose so an operator can count these
+    /// without matching on a message; `recurrence` says whether waiting can help;
+    /// `detail` carries the specifics.
+    fn record_completion_lost(&self, reason: &'static str, recurrence: Recurrence, detail: &str) {
+        let Some(obs) = &self.observability else {
+            return;
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("reason".to_string(), reason.to_string());
+        metadata.insert("recurrence".to_string(), recurrence.as_str().to_string());
+        metadata.insert("detail".to_string(), detail.to_string());
+        let event = SemanticEvent::new(
+            "idempotency.completion_lost",
+            "",
+            "",
+            "Completed",
+            "",
+            metadata,
+        )
+        .expect("event_name is a fixed non-empty literal");
+        // Same reasoning as `record_security_denial`: a caller-supplied sink is
+        // untrusted, and a panicking one must not unwind through an operation
+        // that already succeeded.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obs.trace(event)));
     }
 
     /// Mints a cross-tenant permit authorizing access to `destination`
@@ -1634,6 +1802,63 @@ mod tests {
 
         // Must not panic; there is no sink to assert on, which is the point.
         rt.record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    /// The three losses are not equally actionable, and an operator must not
+    /// have to infer that from the reason tag. `not_encodable` will reproduce on
+    /// every attempt — that operation can never reach `Succeeded` — while the
+    /// other two cost one operation its shortcut. The distinction travels as
+    /// data, so it can be alerted on rather than read.
+    #[test]
+    fn a_lost_completion_reports_whether_waiting_could_help() {
+        use crate::test_support::RecordingObservability;
+
+        let obs = Arc::new(RecordingObservability::new());
+        let rt = RuntimeInner::for_test_with_observability(obs.clone());
+
+        rt.record_completion_lost("store_unavailable", Recurrence::Transient, "down");
+        rt.record_completion_lost("not_encodable", Recurrence::Permanent, "no serde impl");
+
+        let recorded: Vec<(String, String)> = obs
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e.metadata.get("reason").cloned().unwrap_or_default(),
+                    e.metadata.get("recurrence").cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            recorded,
+            vec![
+                ("store_unavailable".to_string(), "transient".to_string()),
+                ("not_encodable".to_string(), "permanent".to_string()),
+            ]
+        );
+    }
+
+    /// A runtime with no sink has nowhere to report this, and must still not
+    /// panic — the operation it belongs to already succeeded.
+    #[test]
+    fn a_lost_completion_is_a_silent_no_op_without_observability() {
+        let rt = RuntimeInner::for_test();
+
+        rt.record_completion_lost("store_unavailable", Recurrence::Transient, "down");
+    }
+
+    /// Same isolation as a security denial, and for a sharper reason: a panic
+    /// here would unwind through an operation that already committed its work.
+    #[test]
+    fn a_lost_completion_isolates_a_panicking_observability_sink() {
+        use crate::test_support::PanickingObservability;
+
+        let rt = RuntimeInner::for_test_with_observability(Arc::new(PanickingObservability));
+
+        rt.record_completion_lost("stale_owner", Recurrence::Transient, "taken over");
     }
 
     #[test]
