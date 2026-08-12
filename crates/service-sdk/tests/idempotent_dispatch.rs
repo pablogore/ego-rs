@@ -108,9 +108,21 @@ pub trait BillingService {
         request: ChargeRequest,
     ) -> Result<ChargeReceipt, BillingError>;
 
-    /// Reservation only. Carries the outcome matrix without dragging a
-    /// security fixture through every case.
+    /// Carries the outcome matrix without dragging an *authorization* fixture
+    /// through every case — no `#[authorize]`, so these tests build a runtime
+    /// with no authorization provider at all.
+    ///
+    /// It does carry `#[tenant_scoped]`, and that is no longer optional for
+    /// anything that reserves. A reservation is namespaced by the resolved tenant
+    /// scope, so an operation with nothing on its path to resolve one has no
+    /// namespace to reserve under and is refused
+    /// (`ReservationRejection::TenantUnresolved`). This operation was previously
+    /// declared without it and the cases below relied on an unresolved context
+    /// being silently filed in the shared tenant-less partition — which is exactly
+    /// the cross-tenant replay B7.8 found. So a security fixture is now
+    /// unavoidable here; only the authorization half is still avoided.
     #[operation]
+    #[tenant_scoped]
     #[idempotent]
     async fn settle(
         &self,
@@ -423,6 +435,22 @@ fn authenticated_ctx() -> ServiceContext {
         .with_operation_key(key())
 }
 
+/// Authenticated and tenant-carrying, but with **no operation key**.
+///
+/// For the cases whose subject is "this dispatch legitimately did not reserve".
+/// They need to reach the body, so they still have to satisfy the tenant guard
+/// that now runs ahead of the slot — the absence under test is the key's, not the
+/// scope's, and conflating the two would make those tests pass for the wrong
+/// reason.
+fn authenticated_keyless_ctx() -> ServiceContext {
+    let principal = Principal::new(
+        PrincipalKind::User,
+        SubjectId::new("user:test").expect("valid subject"),
+    )
+    .with_tenant_id(TenantId::new("acme").expect("valid tenant"));
+    ServiceContext::new().with_security(Arc::new(SecurityContext::empty(principal)))
+}
+
 fn fresh_lease() -> Lease {
     Lease {
         operation_id: OperationId::new(None, key()),
@@ -594,7 +622,7 @@ async fn a_dispatch_that_did_not_reserve_stamps_no_fingerprint() {
     let (proxy, _, settle_calls, observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new(), request())
+        .settle(authenticated_keyless_ctx(), request())
         .await
         .expect("no key, no reservation");
 
@@ -659,7 +687,7 @@ async fn proceed_executes_the_operation_exactly_once() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let out = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("a fresh reservation proceeds");
 
@@ -678,7 +706,7 @@ async fn a_takeover_also_executes_the_operation() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("a takeover proceeds");
 
@@ -698,7 +726,7 @@ async fn replay_returns_the_stored_output_without_executing() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let out = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("a completed reservation replays");
 
@@ -725,9 +753,7 @@ async fn an_undecodable_stored_response_refuses_without_executing() {
     let rt = runtime_with(store.clone(), None);
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
-    let result = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
-        .await;
+    let result = proxy.settle(authenticated_ctx(), request()).await;
 
     assert_eq!(
         result.unwrap_err(),
@@ -772,9 +798,7 @@ async fn every_refusal_stops_dispatch_and_arrives_as_itself() {
         let rt = runtime_with(store.clone(), None);
         let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
-        let result = proxy
-            .settle(ServiceContext::new().with_operation_key(key()), request())
-            .await;
+        let result = proxy.settle(authenticated_ctx(), request()).await;
 
         assert_eq!(
             result.unwrap_err(),
@@ -789,9 +813,25 @@ async fn every_refusal_stops_dispatch_and_arrives_as_itself() {
     }
 }
 
-/// A dropped runtime is the store being unreachable. It must refuse rather than
-/// fall through to an unreserved execution — the fail-open branch is the one
-/// that silently disables the guarantee.
+/// A dropped runtime must refuse rather than fall through to an unreserved
+/// execution — the fail-open branch is the one that silently disables the
+/// guarantee.
+///
+/// # Why this no longer names a variant
+///
+/// It used to assert `StoreUnavailable`, which held while `settle` reached the
+/// reservation slot as the first step needing the runtime. It now carries
+/// `#[tenant_scoped]`, and that guard needs the runtime too, so with the runtime
+/// gone the tenant guard is what notices — and reports a security failure. Both
+/// are refusals and neither executes anything.
+///
+/// Pinning the variant here would be pinning *guard ordering* under a name about
+/// fail-open behaviour, and guard ordering already has its own tests
+/// (`a_denied_authorization_never_reaches_the_store`,
+/// `a_rejected_tenant_never_reaches_the_store`). What this test owns is that a
+/// runtime that has gone away produces a refusal and **not** an execution, so
+/// that is what it asserts — with both counters, which are the assertions a
+/// fail-open regression actually has to get past.
 #[tokio::test]
 async fn a_dropped_runtime_refuses_rather_than_running_unreserved() {
     let store = SpyStore::scripted(vec![]);
@@ -799,15 +839,18 @@ async fn a_dropped_runtime_refuses_rather_than_running_unreserved() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
     drop(rt);
 
-    let result = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
-        .await;
+    let result = proxy.settle(authenticated_ctx(), request()).await;
 
-    assert_eq!(
-        result.unwrap_err(),
-        BillingError::Refused(ReservationRejection::StoreUnavailable)
+    assert!(
+        result.is_err(),
+        "a vanished runtime must never be answered by running the operation \
+         unreserved: got {result:?}"
     );
-    assert_eq!(settle_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        settle_calls.load(Ordering::Relaxed),
+        0,
+        "the body must not run when nothing could reserve it"
+    );
     assert_eq!(store.reserve_calls(), 0);
 }
 
@@ -828,7 +871,7 @@ async fn a_runtime_without_reservations_dispatches_normally() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("no reservation capability means no reservation");
 
@@ -845,7 +888,7 @@ async fn a_context_without_a_key_does_not_reserve() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new(), request())
+        .settle(authenticated_keyless_ctx(), request())
         .await
         .expect("no key, no reservation");
 
@@ -911,9 +954,7 @@ async fn context_metadata_does_not_enter_the_fingerprint() {
     for correlation in ["attempt-1", "attempt-2"] {
         proxy
             .settle(
-                ServiceContext::new()
-                    .with_operation_key(key())
-                    .with_correlation_id(correlation),
+                authenticated_ctx().with_correlation_id(correlation),
                 request(),
             )
             .await
@@ -959,7 +1000,7 @@ async fn a_completed_operation_records_its_response_under_the_permits_fence() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     let out = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("a fresh reservation proceeds");
 
@@ -996,9 +1037,7 @@ async fn a_failed_operation_records_nothing() {
     let rt = runtime_with(store.clone(), None);
     let (proxy, settle_calls) = failing_proxy(&rt);
 
-    let result = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
-        .await;
+    let result = proxy.settle(authenticated_ctx(), request()).await;
 
     assert!(result.is_err(), "the handler failed");
     assert_eq!(
@@ -1024,7 +1063,7 @@ async fn a_replay_records_nothing() {
     let (proxy, _, _, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("a completed reservation replays");
 
@@ -1038,9 +1077,7 @@ async fn a_refused_operation_records_nothing() {
     let rt = runtime_with(store.clone(), None);
     let (proxy, _, _, _observed) = proxy(&rt);
 
-    let result = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
-        .await;
+    let result = proxy.settle(authenticated_ctx(), request()).await;
 
     assert!(result.is_err());
     assert_eq!(store.complete_calls(), 0);
@@ -1056,7 +1093,7 @@ async fn a_dispatch_that_did_not_reserve_records_nothing() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new(), request())
+        .settle(authenticated_keyless_ctx(), request())
         .await
         .expect("no key, no reservation");
 
@@ -1080,13 +1117,10 @@ async fn a_stale_completion_does_not_fail_the_operation() {
     let rt = runtime_with(store.clone(), None);
     let (proxy, _, _, _observed) = proxy(&rt);
 
-    let out = proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
-        .await
-        .expect(
-            "another owner completed this operation first; ours is discarded, but \
+    let out = proxy.settle(authenticated_ctx(), request()).await.expect(
+        "another owner completed this operation first; ours is discarded, but \
              the work this call did still happened and its answer is still true",
-        );
+    );
 
     assert_eq!(out.confirmation, "settled:ref-1");
     assert_eq!(store.complete_calls(), 1, "it was attempted");
@@ -1103,7 +1137,7 @@ async fn an_unreachable_store_does_not_fail_a_completed_operation() {
     let (proxy, _, settle_calls, _observed) = proxy(&rt);
 
     proxy
-        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .settle(authenticated_ctx(), request())
         .await
         .expect("the operation succeeded; only its bookkeeping did not");
 

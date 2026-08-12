@@ -53,10 +53,30 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
         RegisterUserError::Refused(ReservationRejection::StoreUnavailable) => {
             TransportError::ServiceUnavailable
         }
-        // The operation already completed and its answer cannot be read back,
-        // or the request could not be fingerprinted at all. Both need someone to
-        // look: no amount of waiting or retrying is a justified recovery for
-        // either, so 500 is the honest answer.
+        // The three remaining cases, all needing someone to look rather than
+        // something to be retried: the operation completed but its answer cannot
+        // be read back; the request could not be fingerprinted at all; or no
+        // tenant scope was resolved before the reservation. No amount of waiting
+        // is a justified recovery for any of them, so 500 is the honest answer.
+        //
+        // **Named, not `_`.** This arm used to be a wildcard, and a wildcard here
+        // decides the status for every variant that does not exist yet: an eighth
+        // refusal would silently arrive as 500 without anyone choosing that. The
+        // three arms above and this one now cover the enum exhaustively, so adding
+        // a variant fails to compile until someone maps it — the same criterion
+        // the reservation outcome match already holds itself to. That is worth a
+        // compile error precisely because the wrong default is invisible: a 500 is
+        // never obviously incorrect from the outside.
+        //
+        // Measured rather than assumed: adding an eighth variant to
+        // `ReservationRejection` fails this build with E0004, naming the unmapped
+        // variant. Checked and reverted when this arm was written.
+        //
+        // `TenantUnresolved` is deliberately here and not a 4xx. It means an
+        // operation is marked idempotent while nothing on its path resolves a
+        // scope — a wiring fault in this service, not something the caller did or
+        // can fix. Reporting it as a client error would send the caller looking
+        // for a mistake in a request that is fine.
         //
         // Deliberately not "retrying reproduces it exactly". That holds for the
         // stored bytes, which do not change. It does not follow for a
@@ -66,7 +86,11 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
         // entirely. Same overstatement that was withdrawn from the epilogue's
         // docs — the status is chosen for the action it implies, not for a
         // prediction about recurrence.
-        RegisterUserError::Refused(_) => TransportError::Internal,
+        RegisterUserError::Refused(
+            ReservationRejection::StoredResponseIncompatible
+            | ReservationRejection::RequestNotFingerprintable
+            | ReservationRejection::TenantUnresolved,
+        ) => TransportError::Internal,
     }
 }
 
