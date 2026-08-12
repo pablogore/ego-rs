@@ -644,7 +644,52 @@ unchanged, which is the point of stopping here.
       Verified: fmt, integration guard, `clippy -D warnings` and
       `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1607 tests.
 - [ ] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
-- [ ] B6.10 GREEN: mark `RegisterUserImpl`'s handler(s) with `#[idempotent]`; verify B6.9 passes.
+      **A third property, observable only since B6.8: the second `POST` must be
+      answered by a replay, not by a second execution.** Until the epilogue
+      existed no reservation reached `Succeeded`, so a retry could only ever be
+      answered by re-entering the body — "one `UserRegistered`" and "one effect"
+      were both satisfiable with zero replay, because each aggregate's receipt
+      answered for its own step.
+      **Comparing the two response bodies does not establish this, and must not
+      be the evidence.** `RegisterOutput` is built by copying `input.user_id` and
+      `input.tenant_id` verbatim (`application.rs:357`), so two identical
+      requests produce byte-identical responses whether the body ran once, twice,
+      or not at all. That assertion cannot fail, which makes it worth nothing.
+      What must be observed instead:
+      - `RegisterUserImpl::register`'s body runs **exactly once** across both
+        requests — counted in the implementation, not inferred from the response;
+      - the store records **one** `complete()` after the first `POST`;
+      - the second `POST` reads `Succeeded` and issues **no** second `complete()`;
+      - and the replayed value is tied to the store rather than to the request:
+        either compare it against the bytes the store itself recorded, or have
+        the store return a marked response the handler could not have produced.
+      A test that asserts only "both responses are equal" has replaced one
+      un-failable box with another, which is the specific failure this note
+      exists to prevent.
+- [ ] B6.10 GREEN: prove the marker governs the **real HTTP path**, and verify
+      B6.9 passes.
+      **Restated, because its original work is already done.** This box used to
+      read "mark `RegisterUserImpl`'s handler(s) with `#[idempotent]`". That
+      happened in #280: B6.4a needed the marker for the reservation to stamp an
+      identity at all, so without it the multi-aggregate scenario had nothing to
+      observe. Leaving the box worded that way would invite someone to re-apply
+      an attribute that is already there and call the unit closed, which proves
+      nothing about the transport.
+      What remains is the part the marker alone never established: that a request
+      arriving over HTTP is governed by it. B6.9's e2e is the evidence — the
+      claim is not "the attribute is present" but "the second identical `POST`
+      reserved under the key the header carried, replayed rather than executed,
+      and produced no second effect". A mutation removing `#[idempotent]` from
+      `register` must break that e2e, or it demonstrates the transport reaches
+      the operation rather than that idempotency governs it.
+      **The store the e2e wires is the test's, not the app's.** `build_runtime`
+      declares `Compatibility` and registers no reservation store on purpose —
+      recorded at `examples/reference-app/src/lib.rs:286`, with a migration
+      behind it, because an in-memory store there "would make this look adopted
+      while giving no durability at all". The e2e must inject its own, the way
+      `register_user_multi_aggregate_recovery` does, and must not edit that
+      declaration. A test wiring a store is not the application claiming
+      adoption, and B6.9/B6.10 must not blur the two.
 - [ ] B6.11 RED: reference-app test enumerating every mutating operation and asserting each carries the `#[idempotent]` marker (design.md Risks — mitigates the marker-completeness residual gap).
 - [ ] B6.12 GREEN: add the enumeration/assertion helper and apply the marker to any operation the test finds missing it.
 
