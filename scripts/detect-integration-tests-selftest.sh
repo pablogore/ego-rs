@@ -176,7 +176,83 @@ else
     failures=1
 fi
 
-# --- 4. The tree is back as it was ----------------------------------------
+# --- 4. The dependency check, against real cargo output --------------------
+#
+# Check 4a asserts the carve-out DECLARES Testcontainers. Its two earlier
+# revisions were text searches that each passed for a reason that was not the
+# fact, so the interesting case here is the one text cannot distinguish: a
+# manifest that mentions the word without declaring anything.
+#
+# Driven through real `cargo metadata` on a throwaway crate rather than
+# synthetic JSON, because the whole point is that cargo — not this script —
+# decides what "declared" means.
+
+# 4a-i. The real carve-out declares it, so the check must accept.
+carve_metadata=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 \
+    --manifest-path "integration-tests/Cargo.toml" 2>/dev/null || true)
+if [ -z "$carve_metadata" ]; then
+    echo "FAIL[selftest]: could not read integration-tests/Cargo.toml through"
+    echo "  cargo, so the shipped dependency check is unverified on this tree."
+    failures=1
+elif printf '%s' "$carve_metadata" | "$GUARD" --eval-dependency >/dev/null 2>&1; then
+    echo "ok[selftest]: dependency check accepts the real carve-out manifest"
+else
+    echo "FAIL[selftest]: the real carve-out no longer declares Testcontainers,"
+    echo "  which is the only thing justifying its exclusion from checks 1 and 3."
+    failures=1
+fi
+
+# 4a-ii. A manifest that mentions the word ONLY in a comment must be rejected.
+#        This is the case a manifest-scoped grep could never tell apart.
+COMMENT_CRATE="$(mktemp -d)"
+mkdir -p "$COMMENT_CRATE/src"
+cat > "$COMMENT_CRATE/Cargo.toml" <<'COMMENT_EOF'
+[package]
+name = "mentions-but-does-not-declare"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+# testcontainers = "0.24"   <- commented out: mentioned, not declared
+serde = "1"
+COMMENT_EOF
+printf 'pub fn placeholder() {}\n' > "$COMMENT_CRATE/src/lib.rs"
+
+comment_metadata=$(cargo metadata --no-deps --format-version 1 \
+    --manifest-path "$COMMENT_CRATE/Cargo.toml" 2>/dev/null || true)
+if [ -z "$comment_metadata" ]; then
+    echo "FAIL[selftest]: could not read the throwaway crate through cargo, so"
+    echo "  the commented-out case was never exercised."
+    failures=1
+elif printf '%s' "$comment_metadata" | "$GUARD" --eval-dependency >/dev/null 2>&1; then
+    echo "FAIL[selftest]: the dependency check ACCEPTED a manifest whose only"
+    echo "  mention of testcontainers is a comment. A grep of the manifest"
+    echo "  cannot tell those apart; the resolved dependency list can."
+    failures=1
+else
+    echo "ok[selftest]: dependency check rejects a merely-mentioned dependency"
+fi
+rm -rf "$COMMENT_CRATE"
+
+# 4a-iii. Unusable metadata must be rejected, not read as satisfied.
+#         Same rule as 4b: a tool that could not answer has not said yes.
+if printf 'not json at all' | "$GUARD" --eval-dependency >/dev/null 2>&1; then
+    echo "FAIL[selftest]: the dependency check ACCEPTED unparseable metadata."
+    echo "  A failed cargo invocation would then be indistinguishable from a"
+    echo "  declared dependency."
+    failures=1
+else
+    echo "ok[selftest]: dependency check rejects unusable metadata"
+fi
+
+if printf '' | "$GUARD" --eval-dependency >/dev/null 2>&1; then
+    echo "FAIL[selftest]: the dependency check ACCEPTED empty metadata."
+    failures=1
+else
+    echo "ok[selftest]: dependency check rejects empty metadata"
+fi
+
+# --- 5. The tree is back as it was ----------------------------------------
 if [ -e "$PLANTED" ]; then
     echo "FAIL[selftest]: the planted file survived cleanup."
     failures=1

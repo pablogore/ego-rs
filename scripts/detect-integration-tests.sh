@@ -31,9 +31,11 @@ set -euo pipefail
 # infrastructure *is* would turn the carve-out into a blind spot: check 4
 # exists so the guard states a positive fact rather than merely stopping.
 #
-# Check 4 asserts two facts, and both are asked of a tool rather than of text:
-# the carve-out's own manifest depends on Testcontainers, and cargo does not
-# resolve it as a member of the root workspace.
+# Check 4 asserts two facts, and both are asked of cargo rather than of text:
+# the carve-out declares a dependency on Testcontainers (4a), and cargo does not
+# resolve it as a member of the root workspace (4b). Neither question has a
+# textual answer — a name can be absent from a members list that still globs the
+# path in, and a word can be present in a manifest that declares nothing.
 #
 # ---------------------------------------------------------------------------
 # A note on the pathspec, because this guard was silently dead
@@ -92,9 +94,56 @@ membership_violations() {
         done
 }
 
-# A seam for the self-test, not a user-facing mode. It evaluates stdin and exits
-# non-zero when a violation is present, so the self-test can assert both
-# directions without mutating the real workspace.
+# ---------------------------------------------------------------------------
+# The dependency evaluator
+# ---------------------------------------------------------------------------
+#
+# Reads `cargo metadata --no-deps` for the carve-out on stdin and answers one
+# question: does any package DECLARE a dependency on Testcontainers?
+#
+# `dependencies[].name` is cargo's resolved answer, so a commented-out line
+# cannot satisfy it. Measured on a throwaway crate whose manifest contained only
+# `# testcontainers = "0.24"`: the text matched, and cargo reported `['serde']`.
+#
+# Parsed with python3 rather than by grepping the JSON. The names we must not
+# confuse live in sibling positions — `packages[].name`, `targets[].name` — so a
+# flat text scan of this document would match the package's own name or a target
+# and answer a different question than the one asked. Hand-rolling that is how a
+# check ends up green for the wrong reason.
+#
+# Exit 0 = declared, 1 = not declared, 2 = metadata unusable. Every non-zero
+# outcome is a FAIL at the call site; "unusable" is never "fine".
+declares_infra_dependency() {
+    python3 -c '
+import json, sys
+
+try:
+    meta = json.load(sys.stdin)
+except Exception as exc:
+    print(f"metadata is not usable JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if not isinstance(meta, dict) or "packages" not in meta:
+    print("metadata has no packages array", file=sys.stderr)
+    sys.exit(2)
+
+names = sorted({
+    dep.get("name", "")
+    for pkg in meta.get("packages", [])
+    for dep in pkg.get("dependencies", [])
+})
+
+if any(n == "testcontainers" or n.startswith("testcontainers-") for n in names):
+    sys.exit(0)
+
+print("declared dependencies: " + (", ".join(names) or "(none)"), file=sys.stderr)
+sys.exit(1)
+'
+}
+
+# Seams for the self-test, not user-facing modes. Each evaluates stdin and exits
+# non-zero on a violation, so the self-test can assert both directions without
+# mutating the real workspace.
 if [ "${1:-}" = '--eval-membership' ]; then
     found=$(membership_violations "${2:-$ROOT}" "$CARVE_OUT")
     if [ -n "$found" ]; then
@@ -102,6 +151,11 @@ if [ "${1:-}" = '--eval-membership' ]; then
         exit 1
     fi
     exit 0
+fi
+
+if [ "${1:-}" = '--eval-dependency' ]; then
+    declares_infra_dependency
+    exit $?
 fi
 
 echo "--- [CC-R11/CC-R12] Scanning for forbidden infrastructure in tests..."
@@ -180,25 +234,41 @@ done
 # Skipped entirely when the carve-out does not exist, so this guard keeps
 # working on a tree where the infrastructure suite has not been scaffolded yet.
 if [ -d "$ROOT/$CARVE_OUT" ]; then
-    # 4a. The carve-out's own manifest must declare the infrastructure.
+    # 4a. The carve-out must DECLARE the infrastructure it is excused for.
     #
-    # Scoped to `Cargo.toml`, not to the directory. A directory-wide search is
-    # satisfied by the word appearing in any file at all, which proves only that
-    # something mentions Testcontainers — whereas the exclusion is justified by
-    # the suite *depending* on it, and a dependency lives in the manifest.
+    # Asked of cargo, not of the manifest text. Two earlier revisions of this
+    # check were text searches, and each was green for a reason that was not the
+    # fact:
     #
-    # Measured: with the dependency deleted from the manifest, the old
-    # directory-wide search stayed green on the strength of a `use
-    # testcontainers::...` line in a test file. So a carve-out could lose the
-    # declaration that justifies its exclusion while the guard reported it
-    # intact.
-    if ! git -C "$ROOT" grep -q 'testcontainers' -- "${CARVE_OUT}/Cargo.toml" 2>/dev/null; then
+    # - Directory-wide, it stayed green with the dependency deleted, on the
+    #   strength of a `use testcontainers::...` line in a test file.
+    # - Scoped to the manifest, it stayed green on a commented-out line. A
+    #   `# testcontainers = "0.24"` declares nothing; cargo reported `['serde']`
+    #   for a manifest that matched the grep.
+    #
+    # The exclusion is justified by the suite *depending* on the infrastructure,
+    # and only the resolved dependency list settles that.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "FAIL: python3 is required to read the carve-out's dependency graph."
+        echo "  This check refuses to fall back to a text search: that is the"
+        echo "  very substitution it exists to remove."
+        EXIT_CODE=1
+    elif ! carve_metadata=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 --offline \
+        --manifest-path "${CARVE_OUT}/Cargo.toml" 2>&1) &&
+        ! carve_metadata=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 \
+            --manifest-path "${CARVE_OUT}/Cargo.toml" 2>&1); then
+        echo "FAIL: could not read '${CARVE_OUT}/Cargo.toml' through cargo."
+        echo "  An unreadable manifest is an unverified one."
+        while IFS= read -r line; do echo "  $line"; done <<<"$carve_metadata"
+        EXIT_CODE=1
+    elif ! dependency_report=$(printf '%s' "$carve_metadata" | declares_infra_dependency 2>&1); then
         echo "FAIL: '${CARVE_OUT}/Cargo.toml' declares no Testcontainers dependency."
         echo "  The carve-out is excluded from checks 1 and 3 because that is"
         echo "  where infrastructure-backed tests are supposed to live. A"
         echo "  carve-out that does not depend on the infrastructure is an"
         echo "  exclusion protecting nothing — either the suite moved, or the"
         echo "  exclusion should go."
+        while IFS= read -r line; do echo "  $line"; done <<<"$dependency_report"
         EXIT_CODE=1
     fi
 
