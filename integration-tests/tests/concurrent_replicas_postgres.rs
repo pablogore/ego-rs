@@ -9,38 +9,59 @@
 //! → one `INSERT … ON CONFLICT DO NOTHING` against a real PostgreSQL, with real
 //! migrations.
 //!
-//! **Why in-process cannot show this.** Two genuinely concurrent inserts resolving
-//! to exactly one winner is a database outcome. The two runtimes here share no
-//! reservation state whatsoever — separate stores, separate pools, separate owner
-//! identities — so the only thing that can decide which of them may execute is the
-//! row. An in-memory store shared by two runtimes would decide it with a mutex,
-//! which is a different mechanism answering a different question.
+//! **Why in-process cannot show this.** Two concurrently released reservation
+//! attempts resolving to one durable winner is a database outcome. The two runtimes
+//! here share no reservation state whatsoever — separate stores, separate pools,
+//! separate owner identities — so the only thing that can decide which of them may
+//! execute is the row. An in-memory store shared by two runtimes would decide it
+//! with a mutex, which is a different mechanism answering a different question.
 //!
 //! # What the barriers are, and what they are not
 //!
 //! Two coordination points, both test scaffolding:
 //!
-//! 1. **Before `reserve()` delegates**, both replicas meet at a barrier, so their
-//!    `INSERT` statements are genuinely in flight together. Without it the race is
-//!    a hope about scheduling rather than an arrangement.
+//! 1. **Before `reserve()` delegates**, both replicas meet at a barrier, so both
+//!    reservation attempts are released together toward independent pools. Without
+//!    it, one request could be answered end to end before the other began, and the
+//!    contention would be a hope about scheduling rather than an arrangement.
 //! 2. **Inside the winner's body**, execution is held open until the test releases
 //!    it. That is what makes the loser's answer deterministic: while the winner is
 //!    parked, the row stays `in_progress`, so the loser is refused rather than
 //!    served a replay. Both are correct protocol outcomes; only one of them is a
 //!    stable thing to assert.
 //!
-//! Neither barrier decides anything. They fix *when* the two attempts happen and
-//! how long the winner holds its lease; **who** may execute is settled entirely by
-//! the row. The shared counters are observers for the same reason — they record
+//! Neither barrier decides anything. They fix *when* the two attempts are released
+//! and how long the winner holds its lease; **who** may execute is settled entirely
+//! by the row. The shared counters are observers for the same reason — they record
 //! what happened without participating in it.
+//!
+//! ## What this does not establish
+//!
+//! Worth stating, because a barrier invites the stronger reading: releasing both
+//! attempts together does **not** prove the two `INSERT` statements overlapped
+//! inside PostgreSQL. The runtime scheduler or either pool could still let one
+//! statement finish before the other starts, and nothing here observes SQL-level
+//! interleaving. The dropped-index mutation does not close that gap either — with
+//! no uniqueness, two rows appear whether the inserts overlapped or ran one after
+//! the other.
+//!
+//! What is established is the property the protocol actually promises: two
+//! independent runtimes given the opportunity to reserve at the same moment leave
+//! **one** row, run **one** body, and answer 201 and 409. Serialised or overlapped,
+//! exactly one may execute.
 //!
 //! # The control case
 //!
-//! A harness that serialised requests, or refused the second of any pair, would
-//! satisfy every assertion about the contended key while proving nothing. So the
-//! same wiring is run once more with two *different* keys, where both requests must
-//! be permitted and both bodies must run. The refusal above is only meaningful
-//! against that.
+//! A harness that refused the second request of any pair would satisfy every
+//! assertion about the contended key while proving nothing. So the same wiring is
+//! run once more with two *different* keys, where both requests must be permitted
+//! and both bodies must run.
+//!
+//! Its scope, precisely: it rules out **global refusal**, not serialisation. A
+//! harness that merely serialised the two requests would also permit two distinct
+//! keys and also answer 201/201, so this control cannot distinguish that case — and
+//! does not need to, since serialisation would not make the single-execution
+//! guarantee above any less true.
 //!
 //! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
@@ -169,7 +190,10 @@ struct CoordinatedStore {
 impl OperationReservationStore for CoordinatedStore {
     async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
         self.entered.fetch_add(1, Ordering::SeqCst);
-        // Both replicas leave here together, so the two INSERTs contend for real.
+        // Both attempts are released together, toward independent pools. This does
+        // not assert that the two INSERTs overlap inside PostgreSQL — nothing here
+        // observes that — only that neither request was answered before the other
+        // was allowed to start.
         self.start_line.wait().await;
         let outcome = self.inner.reserve(req).await;
         self.returned.fetch_add(1, Ordering::SeqCst);
@@ -496,8 +520,13 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
     // -----------------------------------------------------------------------
     //
     // Without this, every assertion above is also satisfied by a harness that
-    // serialises requests or refuses the second of any pair. Same wiring, same
-    // barrier, no gate — both bodies must run to completion.
+    // refuses the second request of any pair. Same wiring, same barrier, no gate —
+    // both bodies must run to completion.
+    //
+    // It does NOT rule out a harness that merely serialises: that would permit two
+    // distinct keys too, and answer 201/201 just the same. Scope stated rather than
+    // implied, and it costs nothing here — serialisation would not weaken the
+    // single-execution guarantee.
     let control_calls = Arc::new(AtomicUsize::new(0));
     let control_completes = Arc::new(AtomicUsize::new(0));
     let control_returned = Arc::new(AtomicUsize::new(0));
@@ -546,8 +575,8 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
         2,
-        "both bodies ran — the exclusion above is specific to the shared key, not \
-         a harness that serialises everything"
+        "both bodies ran — the exclusion above is specific to the shared key, not a \
+         harness that refuses whatever arrives second"
     );
     assert_eq!(control_completes.load(Ordering::SeqCst), 2);
     assert_eq!(rows_for(&observer, CONTROL_KEY_A).await, 1);
