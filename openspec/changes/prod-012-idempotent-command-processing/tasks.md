@@ -594,14 +594,28 @@ unchanged, which is the point of stopping here.
       Because the loss is invisible to the caller by design, it is emitted as an
       `idempotency.completion_lost` semantic event through the same
       `Observability` sink and panic isolation as `record_security_denial`. Each
-      carries a `reason` and a `recurrence`, because the three are not equally
-      actionable: `store_unavailable` is the ordinary transient contingency;
-      `stale_owner` is transient but worth acting on, since two owners ran the
-      same operation concurrently and the lease is probably shorter than the work
-      it covers; `not_encodable` is **permanent** — the response type cannot be
-      serialised, so that operation can never reach `Succeeded` and will never
-      replay until the code changes. `recurrence` travels as data so the
-      difference can be alerted on rather than read.
+      carries a `reason` and an `action`, because the three call for different
+      responses and an operator should not have to infer that from the tag. What
+      travels is the action, deliberately **not** a claim about whether the
+      failure would recur — that is not something this code can establish.
+      `store_unavailable` → `monitor_rate`: the ordinary contingency, where one
+      occurrence is noise and a rate is a problem.
+      `stale_owner` → `review_lease_duration`: this response was discarded
+      because the caller no longer held a current fence. That is all the contract
+      guarantees. It does **not** say another owner completed the operation —
+      another owner may have taken over and still be running, or already
+      completed, or the lease may simply have expired with no takeover at all,
+      and what the reservation looks like now is not knowable from this error.
+      Worth acting on regardless, because every path here means the lease elapsed
+      before the work did. The lease window described above also does not apply
+      as written to this case: the reservation is not necessarily still open
+      under this owner.
+      `not_encodable` → `investigate`: this *value* failed to serialise.
+      `T: Serialize` is satisfied at compile time, so this is not "the type
+      cannot be serialised" — a hand-written `Serialize` may fail on one value
+      and succeed on the next. It is a judgement that waiting will not fix it and
+      infrastructure retry is the wrong response, not a proof that the failure
+      recurs. Until someone looks, that operation does not reach `Succeeded`.
       **Where the chain is proven.** Each link lives in the layer that owns it:
       a failed completion leaving the handler's `Ok` intact, in this unit's
       `a_stale_completion_does_not_fail_the_operation` and
@@ -627,7 +641,7 @@ unchanged, which is the point of stopping here.
       they are negative controls and cannot detect an absent epilogue, which is
       why they are not the evidence.
       Verified: fmt, integration guard, `clippy -D warnings` and
-      `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1604 tests.
+      `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1607 tests.
 - [ ] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
 - [ ] B6.10 GREEN: mark `RegisterUserImpl`'s handler(s) with `#[idempotent]`; verify B6.9 passes.
 - [ ] B6.11 RED: reference-app test enumerating every mutating operation and asserting each carries the `#[idempotent]` marker (design.md Risks — mitigates the marker-completeness residual gap).

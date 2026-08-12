@@ -177,24 +177,33 @@ fn dependency_not_found<T: 'static>(kind: DependencyKind) -> RuntimeError {
 }
 
 // ---------------------------------------------------------------------------
-/// Whether retrying the same operation could produce a different outcome.
+/// What an operator should do about a lost completion.
 ///
-/// Carried on every `idempotency.completion_lost` event because it is what
-/// separates "wait" from "fix", and an operator should not have to infer that
-/// from the reason tag. A transient loss costs one operation its replay
-/// shortcut; a permanent one means this operation can never reach `Succeeded`,
-/// so it will never replay until the code changes.
+/// Carried on every `idempotency.completion_lost` event because the three
+/// causes are not equally actionable, and an operator should not have to infer
+/// that from the reason tag.
+///
+/// Deliberately an **action** rather than a claim about recurrence. Whether the
+/// same failure would happen again is not something this code can establish —
+/// a `Serialize` implementation may fail on one value and succeed on the next,
+/// and a stale fence says nothing about what the reservation looks like now.
+/// What can be stated is what is worth doing, so that is what travels.
 #[derive(Clone, Copy)]
-enum Recurrence {
-    Transient,
-    Permanent,
+enum OperatorAction {
+    /// Nothing per occurrence; the rate is the signal.
+    MonitorRate,
+    /// Compare the configured lease against how long the work actually takes.
+    ReviewLeaseDuration,
+    /// Someone has to look at this one. It will not clear itself.
+    Investigate,
 }
 
-impl Recurrence {
+impl OperatorAction {
     fn as_str(self) -> &'static str {
         match self {
-            Recurrence::Transient => "transient",
-            Recurrence::Permanent => "permanent",
+            OperatorAction::MonitorRate => "monitor_rate",
+            OperatorAction::ReviewLeaseDuration => "review_lease_duration",
+            OperatorAction::Investigate => "investigate",
         }
     }
 }
@@ -774,20 +783,35 @@ impl RuntimeInner {
     /// - `None`, or `Replay` — nothing to record, and nothing is reported. A
     ///   dispatch that never reserved has no fence to present, and a replay
     ///   produced no new response; it returned one that was already stored.
-    /// - `StaleOwner` (`stale_owner`, transient) — another owner took the lease
-    ///   over and completed the operation. Its response stands and this one is
-    ///   **discarded**, which is correct rather than an error. But it is also a
-    ///   signal worth acting on: two owners ran the same operation concurrently,
-    ///   which usually means the lease is shorter than the work it covers.
-    /// - Store failure (`store_unavailable`, transient) — the ordinary
+    /// - `StaleOwner` (`stale_owner`, `review_lease_duration`) — this response
+    ///   was **discarded** because the caller no longer held a current fence.
+    ///   That is all the contract guarantees: the fence triple no longer matched
+    ///   or the lease had lapsed, and this call did not modify the reservation.
+    ///
+    ///   It does **not** say another owner completed the operation. Any of these
+    ///   produces it: another owner took the lease over and is still running;
+    ///   another owner already completed it; or the lease simply expired with no
+    ///   takeover at all. **What the reservation looks like now is not knowable
+    ///   from this error** — reading it back is the only way to find out. Worth
+    ///   acting on either way, because every path here means the lease elapsed
+    ///   before the work did.
+    ///
+    ///   The window described above also does not apply as written to this case:
+    ///   the reservation is not necessarily still open under this owner. It may
+    ///   already be completed, or held by someone else.
+    /// - Store failure (`store_unavailable`, `monitor_rate`) — the ordinary
     ///   contingency. The shortcut is lost for this operation; the next one is
-    ///   unaffected.
-    /// - Encoding failure (`not_encodable`, **permanent**) — not a contingency
-    ///   at all. The response type cannot be serialised, so it will fail the same
-    ///   way on every attempt: this operation can *never* reach `Succeeded` and
-    ///   will never replay until the code changes. Not failing the work that
-    ///   already happened is still right, but this one is a defect to fix, not an
-    ///   incident to wait out.
+    ///   unaffected. One occurrence is noise, a rate is a problem.
+    /// - Encoding failure (`not_encodable`, `investigate`) — this *value* failed
+    ///   to serialise. Note what that does and does not say: `T: Serialize` is
+    ///   satisfied at compile time, so this is not "the type cannot be
+    ///   serialised" — a hand-written `Serialize` may fail on one value and
+    ///   succeed on the next, or depend on state outside the value entirely.
+    ///
+    ///   So this is not a proof that the failure recurs. It is a judgement that
+    ///   waiting will not fix it and infrastructure retry is the wrong response:
+    ///   somebody has to look. Until they do, this operation does not reach
+    ///   `Succeeded` and does not replay.
     pub async fn complete_idempotent_operation<T: serde::Serialize>(
         &self,
         reservation: Option<&ReservationDecision>,
@@ -805,7 +829,7 @@ impl RuntimeInner {
             Err(rejection) => {
                 self.record_completion_lost(
                     "not_encodable",
-                    Recurrence::Permanent,
+                    OperatorAction::Investigate,
                     &rejection.to_string(),
                 );
                 return;
@@ -816,15 +840,14 @@ impl RuntimeInner {
             Ok(()) => {}
             Err(ReservationError::StaleOwner) => self.record_completion_lost(
                 "stale_owner",
-                Recurrence::Transient,
-                "another owner took the lease over and completed this operation; its \
-                 response stands and this one was discarded. Two owners ran the same \
-                 operation concurrently, which usually means the lease is shorter \
-                 than the work it covers",
+                OperatorAction::ReviewLeaseDuration,
+                "this response was discarded because the caller no longer held a \
+                 current fence — the lease had lapsed or been taken over. What the \
+                 reservation looks like now is not knowable from this error",
             ),
             Err(e) => self.record_completion_lost(
                 "store_unavailable",
-                Recurrence::Transient,
+                OperatorAction::MonitorRate,
                 &e.to_string(),
             ),
         }
@@ -840,15 +863,15 @@ impl RuntimeInner {
     /// the one place it surfaces is here.
     ///
     /// `reason` is a fixed tag rather than prose so an operator can count these
-    /// without matching on a message; `recurrence` says whether waiting can help;
-    /// `detail` carries the specifics.
-    fn record_completion_lost(&self, reason: &'static str, recurrence: Recurrence, detail: &str) {
+    /// without matching on a message; `action` says what to do about it; `detail`
+    /// carries the specifics.
+    fn record_completion_lost(&self, reason: &'static str, action: OperatorAction, detail: &str) {
         let Some(obs) = &self.observability else {
             return;
         };
         let mut metadata = HashMap::new();
         metadata.insert("reason".to_string(), reason.to_string());
-        metadata.insert("recurrence".to_string(), recurrence.as_str().to_string());
+        metadata.insert("action".to_string(), action.as_str().to_string());
         metadata.insert("detail".to_string(), detail.to_string());
         let event = SemanticEvent::new(
             "idempotency.completion_lost",
@@ -1804,20 +1827,23 @@ mod tests {
         rt.record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
     }
 
-    /// The three losses are not equally actionable, and an operator must not
-    /// have to infer that from the reason tag. `not_encodable` will reproduce on
-    /// every attempt — that operation can never reach `Succeeded` — while the
-    /// other two cost one operation its shortcut. The distinction travels as
-    /// data, so it can be alerted on rather than read.
+    /// The three losses call for different responses, and an operator must not
+    /// have to infer that from the reason tag. What travels is the **action**,
+    /// not a claim about whether the failure would recur — that is not something
+    /// this code can establish.
     #[test]
-    fn a_lost_completion_reports_whether_waiting_could_help() {
+    fn a_lost_completion_reports_what_to_do_about_it() {
         use crate::test_support::RecordingObservability;
 
         let obs = Arc::new(RecordingObservability::new());
         let rt = RuntimeInner::for_test_with_observability(obs.clone());
 
-        rt.record_completion_lost("store_unavailable", Recurrence::Transient, "down");
-        rt.record_completion_lost("not_encodable", Recurrence::Permanent, "no serde impl");
+        rt.record_completion_lost("store_unavailable", OperatorAction::MonitorRate, "down");
+        rt.record_completion_lost(
+            "not_encodable",
+            OperatorAction::Investigate,
+            "this value did not serialise",
+        );
 
         let recorded: Vec<(String, String)> = obs
             .events
@@ -1827,7 +1853,7 @@ mod tests {
             .map(|e| {
                 (
                     e.metadata.get("reason").cloned().unwrap_or_default(),
-                    e.metadata.get("recurrence").cloned().unwrap_or_default(),
+                    e.metadata.get("action").cloned().unwrap_or_default(),
                 )
             })
             .collect();
@@ -1835,8 +1861,8 @@ mod tests {
         assert_eq!(
             recorded,
             vec![
-                ("store_unavailable".to_string(), "transient".to_string()),
-                ("not_encodable".to_string(), "permanent".to_string()),
+                ("store_unavailable".to_string(), "monitor_rate".to_string()),
+                ("not_encodable".to_string(), "investigate".to_string()),
             ]
         );
     }
@@ -1847,7 +1873,7 @@ mod tests {
     fn a_lost_completion_is_a_silent_no_op_without_observability() {
         let rt = RuntimeInner::for_test();
 
-        rt.record_completion_lost("store_unavailable", Recurrence::Transient, "down");
+        rt.record_completion_lost("store_unavailable", OperatorAction::MonitorRate, "down");
     }
 
     /// Same isolation as a security denial, and for a sharper reason: a panic
@@ -1858,7 +1884,11 @@ mod tests {
 
         let rt = RuntimeInner::for_test_with_observability(Arc::new(PanickingObservability));
 
-        rt.record_completion_lost("stale_owner", Recurrence::Transient, "taken over");
+        rt.record_completion_lost(
+            "stale_owner",
+            OperatorAction::ReviewLeaseDuration,
+            "stale fence",
+        );
     }
 
     #[test]
