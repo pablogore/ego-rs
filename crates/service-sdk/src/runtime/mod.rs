@@ -5,6 +5,7 @@ mod idempotency;
 mod logger;
 mod permit;
 mod resolvable;
+mod retention;
 mod runtime_builder;
 mod tenant;
 
@@ -19,6 +20,7 @@ pub use idempotency::{
 pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{HasServiceTag, Resolvable, ResolvableContainer};
+pub use retention::{RetentionPolicy, RetentionPolicyError};
 pub use runtime_builder::{DependencyKind, RuntimeError, RuntimeInner, SecurityDenialKind};
 pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
 // Crate-internal only (AD-014 Established Fact type) — `crate::context`
