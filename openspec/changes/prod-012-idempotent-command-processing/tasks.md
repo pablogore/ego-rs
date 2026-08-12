@@ -647,9 +647,15 @@ unchanged, which is the point of stopping here.
       A `Fresh` control runs the same wiring permitted — 1 reserve, 1 body,
       1 complete — so the zeros above are attributable to the refusal rather
       than to a fixture that rejects everything.
-      **`RequestNotFingerprintable` is deliberately absent.** It is raised before
-      the store is reached, when an operation's arguments fail to serialise, and
-      `RegisterInput` always does; it cannot be provoked through a store script.
+      **`RequestNotFingerprintable` is absent from the router-level file** — it is
+      raised before the store is reached, when an operation's arguments fail to
+      serialise, and `RegisterInput` always does, so no store script can provoke
+      it. Its translation is proven directly against the mapper instead, in
+      `handlers.rs`'s own unit test, which enumerates **all six** rejections
+      rather than only the unreachable one: a table with one entry proven
+      elsewhere and five assumed is how a mapping drifts. That test also pins
+      `StoredResponseIncompatible` → 500, the one row the router file and the
+      mapper both cover, so the two cannot disagree silently.
       **Three mutations bite:** mapping `FingerprintConflict` to 500 kills the
       table; mapping `StoreUnavailable` to 500 kills the 503; and letting the
       replay branch fall through to the handler kills the marked-value test —
@@ -661,8 +667,16 @@ unchanged, which is the point of stopping here.
       guaranteed by the split #279 introduced precisely to make a permit-less
       completion unrepresentable. The assertion stays as a regression tripwire
       against a future degradation of the type, not as primary evidence.
+      **Corrected during review:** the production comment grouping
+      `StoredResponseIncompatible` with `RequestNotFingerprintable` claimed
+      retrying either "reproduces it exactly". True of stored bytes, which do not
+      change; not true of a fingerprint failure, where `Serialize` is satisfied
+      at compile time and what failed is *this value* — a hand-written impl may
+      fail on one value and succeed on the next. Same overstatement withdrawn
+      from the epilogue's docs in #281. Both still map to 500, chosen for the
+      action they imply rather than for a prediction about recurrence.
       Verified: fmt, integration guard, `clippy -D warnings` and
-      `cargo test --workspace --no-fail-fast` all 0 — 118 targets, 1621 tests.
+      `cargo test --workspace --no-fail-fast` all 0 — 118 targets, 1622 tests.
 - [x] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
       **Done.** The epilogue is one call to a public runtime method, same shape
       as the reservation itself (AD-3g): `RuntimeInner::complete_idempotent_operation`

@@ -24,10 +24,17 @@
 //! landed in #280 with no HTTP-level test at all, so the whole table is closed
 //! here rather than leaving public branches uncovered in the same file.
 //!
-//! One rejection is deliberately absent: `RequestNotFingerprintable` cannot be
-//! provoked through a store script — it is raised before the store is reached,
-//! when an operation's arguments fail to serialise, and `RegisterInput` always
-//! does. Its mapping is covered where it lives, in the handler's own unit.
+//! One rejection is deliberately absent from *this* file:
+//! `RequestNotFingerprintable` cannot be provoked through a store script — it is
+//! raised before the store is reached, when an operation's arguments fail to
+//! serialise, and `RegisterInput` always does.
+//!
+//! Its HTTP translation is proven directly against the mapper instead, in
+//! `handlers.rs`'s own unit tests
+//! (`every_reservation_rejection_maps_to_the_status_its_caller_can_act_on`),
+//! which enumerates all six rejections rather than only the unreachable one —
+//! a table with one entry proven elsewhere and five assumed is how a mapping
+//! drifts.
 
 mod support;
 
