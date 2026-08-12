@@ -50,6 +50,30 @@ does not belong here.
 new *infrastructure* risk justifies it — never a logical variant. "There is a
 case we have not covered" is not a reason; that is what the fast suite is for.
 
+That exception has been used exactly once, and it is classified separately rather
+than counted as a fifth end-to-end scenario:
+
+```
+End-to-end scenarios ................. 3 / 4
+PostgreSQL concurrency invariants .... 1 / 1
+Total infrastructure tests ........... 4
+```
+
+The counts describe the tests that exist, not the ones planned. The first version
+of this block read `4 / 4` and `Total 5` while scenario 4 was still unwritten —
+a ledger that runs ahead of the tree is worse than none, because it retires the
+question it exists to keep open.
+
+The concurrency invariant is `tests/fencing_window_postgres.rs`, and it is
+deliberately **store-level** rather than end-to-end: the evidence it needs is
+precise control of a transaction holding a row lock, which HTTP cannot express.
+Its admission rests on the clause above and nothing looser — a distinct
+infrastructure risk, covered by none of the four, which two independent sources
+named as the highest-value guarantee with no test. See the entry below.
+
+This does not open a door to growth by variant. A sixth test needs its own new
+infrastructure risk, stated and measured the same way.
+
 The suite as a whole has a wall-clock budget, from issue #275: **≤5 minutes
 total, ≤1–2 minutes for any individual slice.** A run that exceeds it is not
 finished, even if every invariant is covered. Compilation and execution are
@@ -67,11 +91,34 @@ variant of another.
 | 1 | Two identical `POST /register` | One execution, a durably completed response, and a replay served from PostgreSQL | The stored response has to survive a real commit and be read back through a real query — a scripted store returns whatever it was handed | `tests/replay_from_postgres.rs` |
 | 2 | Same key, different payload | Permanent conflict, with no second execution, and the collided-with answer left intact | Reaching the fingerprint comparison at all depends on `(tenant_id, operation_key)` being genuinely unique. Without it the insert succeeds, a second row appears, and the conflict is never detected. The scenario runs under one tenant, so it loads the **tenant-scoped** partial index specifically | `tests/conflict_from_postgres.rs` |
 | 3 | Recovery after an expired lease | Takeover under real fencing, without repeating steps already confirmed | Lease expiry is a clock-versus-row-state race resolved by the database; the receipt that stops the repeat was committed by a previous transaction | `tests/takeover_fencing_postgres.rs` |
-| 4 | Two concurrent replicas | Exactly one obtains the permit; the other does not execute | Mutual exclusion between processes is what the `lease_until <= $N` guard exists for, and a single-process test cannot contend for it | not written |
+| 4 | Two concurrent replicas | Exactly one obtains the permit; the other is refused without executing | Two genuinely concurrent `INSERT … ON CONFLICT DO NOTHING` statements resolving to exactly one winner is a database outcome; two runtimes sharing no memory can only be coordinated by the row | not written |
 
-**Consumed: 3 of 4.** The Status column is the budget ledger — it lives here rather
-than in pull-request descriptions, which get buried. A row that gains a file
+**End-to-end consumed: 3 of 4.** The Status column is the ledger — it lives here
+rather than in pull-request descriptions, which get buried. A row that gains a file
 spends one of the four.
+
+Row 4's original justification said "mutual exclusion between processes … a
+single-process test cannot contend for it". That was overstated in two ways, and the
+row above is the corrected version. Two runtimes in one OS process that share no
+memory are coordinated solely by the row, which is the property that matters; and
+the `lease_until <= $N` guard is **not** what this scenario loads — traced: the
+loser's read finds `state = 'in_progress'` with `now` still before `lease_until` and
+returns `OtherInProgress` without ever evaluating the takeover `UPDATE`. That guard
+is the concurrency invariant's subject, not this row's.
+
+## The PostgreSQL concurrency invariant
+
+| Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
+|---|---|---|---|
+| Takeover blocked on a row lock | The takeover `UPDATE` re-checks `lease_until <= now` against the row it finally locks, not the row it read, so a lease renewed during the wait is not stolen | The window lives between two statements inside one `reserve()`. Forcing it open needs `SELECT … FOR UPDATE` held from outside while the contender blocks — not expressible over HTTP, and faking it would discard the only mechanism that makes it a test | `tests/fencing_window_postgres.rs` |
+
+Why it was admitted, with the evidence: `reservation.rs` stated in its own comment
+that this predicate was "currently unguarded by any test here", and this document's
+own rebuild note called it the highest-value missing guarantee, recording that
+neutralising the predicate left the conformance suite green. Re-measured on the
+rebuild — neutralising it now fails this test while `replay_from_postgres`,
+`conflict_from_postgres` and `takeover_fencing_postgres` all stay green. Named
+rather than counted, so the claim does not silently go stale when scenario 4 lands.
 
 Row 2's justification took two corrections, both found by checking it rather than
 trusting it:

@@ -283,13 +283,19 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             // inside the update means a caller that waited on the row lock is judged
             // against the row that exists, not the row it remembers.
             //
-            // This was proven by neutralising the predicate and watching a test that
-            // forced the read/write window open report a takeover of a lease renewed
-            // during the wait. That test needed a real transaction holding a real row
-            // lock and has been moved out of this workspace, so the predicate is
-            // currently unguarded by any test here — see
-            // `docs/integration-test-backlog.md`. It stays because the reasoning above
-            // holds, not because something still checks it.
+            // This is guarded, and by exactly one test:
+            // `integration-tests/tests/fencing_window_postgres.rs` forces the window
+            // open with `SELECT … FOR UPDATE`, renews the lease while the takeover
+            // blocks, and requires the refusal. Neutralising this predicate makes
+            // that test report a takeover of the renewed lease. Measured when it was
+            // written, with every other test in that suite green at the time — so it
+            // was then the only check. Stated as the observation it is rather than as
+            // a standing fact, which would quietly stop being true if something else
+            // later covered the same predicate.
+            //
+            // An earlier version of this comment said the predicate was unguarded
+            // because the original test had been moved out of the workspace. That was
+            // true then and is not now.
             //
             // `fencing_token = $N` is a compare-and-swap on the row version, and it
             // is **redundant given the predicate above**: every path that could
