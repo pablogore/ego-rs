@@ -36,7 +36,7 @@
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -48,21 +48,25 @@ use ego_domain::operation::{
     OperationReservationStore, OwnerFence, OwnerId, ReservationError, ReservationOutcome,
     ReserveRequest, StoredServiceResponse,
 };
+use ego_domain::read_side::store::ReadSideStore;
 use ego_domain::time::SystemClock;
+use ego_domain::{ExternalEffectDescription, TenantId};
 use ego_persistence::postgres::migrations;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::{
     encode_stored_response, IdempotencyEnforcementMode, RuntimeBuilder,
 };
-use ego_testkit::{ScriptedAuthorizationProvider, TestJwtBuilder};
+use ego_testkit::{RecordingExecutor, ScriptedAuthorizationProvider, TestJwtBuilder};
 use ego_transport::AppState;
 use persistent_entity::builder::EntityRuntimeBuilder;
+use persistent_entity::effect_acceptor::{EffectAcceptanceError, EffectAcceptor};
 use reference_app::application::{
     RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserImpl,
     RegisterUserTag,
 };
 use reference_app::ports::http::build_router;
+use reference_app::read_side::{ReadSideSink, SharedReadSideStore};
 use reference_app::{
     build_runtime, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
 };
@@ -156,6 +160,80 @@ impl OperationReservationStore for CountingStore {
     }
 }
 
+/// Records every effect handed to the real acceptor, and delegates.
+///
+/// `accept()` runs synchronously in the command's post-commit step, so a count
+/// taken here is settled before the HTTP response returns. That is why acceptance
+/// is the observation point and delivery is not: delivery goes through the deferred
+/// runner on its own reclaim tick, so "exactly one effect" could only be checked by
+/// waiting and then asserting nothing else arrived — an absence claim dressed up as
+/// a timeout.
+struct CountingAcceptor {
+    inner: Arc<dyn EffectAcceptor>,
+    accepted: Mutex<Vec<(String, String)>>,
+}
+
+impl CountingAcceptor {
+    fn wrapping(inner: Arc<dyn EffectAcceptor>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            accepted: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Every accepted effect as `(effect_type, idempotency_key)`, in order.
+    fn accepted(&self) -> Vec<(String, String)> {
+        self.accepted.lock().expect("not poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl EffectAcceptor for CountingAcceptor {
+    async fn accept(
+        &self,
+        tenant: &TenantId,
+        effects: Vec<ExternalEffectDescription>,
+    ) -> Result<(), EffectAcceptanceError> {
+        {
+            let mut seen = self.accepted.lock().expect("not poisoned");
+            for effect in &effects {
+                seen.push((
+                    effect.effect_type.clone(),
+                    effect.idempotency_key.as_str().to_string(),
+                ));
+            }
+        }
+        self.inner.accept(tenant, effects).await
+    }
+}
+
+/// Counts `UserRegistered` elements the write side published to the read side.
+///
+/// An observation independent of the effect count above. Both descend from the same
+/// commit — which is exactly right, since that is the causal claim — but neither
+/// stands in for the other: this one says the event was committed and published,
+/// the other says that commit produced one accepted effect. A single signal used
+/// for both would be one observation wearing two hats.
+///
+/// Reads through the `ReadSideStore` trait the store already implements, so nothing
+/// new is exposed for the test's benefit. Tags come from `known_tags()` because the
+/// tag helper is crate-private, and the filter on `event_type` matters: the
+/// registration publishes the organisation's event to the same store.
+async fn user_registered_count(store: &SharedReadSideStore, tenant: &str) -> usize {
+    let mut total = 0;
+    for tag in store.known_tags() {
+        let elements = store
+            .fetch(tenant, &tag, None, 1_000)
+            .await
+            .expect("the read-side store answers");
+        total += elements
+            .iter()
+            .filter(|element| element.event_type == "UserRegistered")
+            .count();
+    }
+    total
+}
+
 /// Mints a token the reference app's own authentication provider accepts.
 ///
 /// Duplicated from the reference app's `tests/support` module rather than
@@ -172,18 +250,34 @@ fn make_token(sub: &str, tenant_id: &str) -> String {
 
 /// The production router, over the durable store. Only two things are wrapped,
 /// and both only count.
-fn app(store: Arc<CountingStore>, calls: Arc<AtomicUsize>) -> Router {
+fn app(
+    store: Arc<CountingStore>,
+    calls: Arc<AtomicUsize>,
+    sink_store: SharedReadSideStore,
+    acceptor: Arc<dyn EffectAcceptor>,
+) -> Router {
     let BuiltRuntime {
         authn,
         read_side: read_side_handles,
         ..
     } = build_runtime(&AppConfig::default()).expect("build_runtime succeeds");
 
-    let real: Arc<dyn RegisterUser> = Arc::new(RegisterUserImpl::new(
-        Arc::new(EntityRuntimeBuilder::new().build()),
-        Arc::new(EntityRuntimeBuilder::new().build()),
-        None,
-    ));
+    // The user runtime carries the effect acceptor, so a committed
+    // `UserRegistered` has somewhere for its welcome-email effect to be accepted.
+    // Without one the command still commits, but reports
+    // `EffectsAcceptanceFailed` and the effect is never described to anyone.
+    let real: Arc<dyn RegisterUser> = Arc::new(
+        RegisterUserImpl::new(
+            Arc::new(EntityRuntimeBuilder::new().build()),
+            Arc::new(
+                EntityRuntimeBuilder::new()
+                    .with_effect_acceptor(acceptor)
+                    .build(),
+            ),
+            None,
+        )
+        .with_read_side_sink(ReadSideSink::new(sink_store)),
+    );
     let counted: Arc<dyn RegisterUser> = Arc::new(CountingRegister { inner: real, calls });
 
     let runtime = RuntimeBuilder::new()
@@ -289,8 +383,42 @@ async fn two_identical_posts_execute_once_and_the_second_is_served_from_postgres
     ));
     let calls = Arc::new(AtomicUsize::new(0));
 
+    // The two independent observation points, shared across both requests.
+    //
+    // The effects runtime is built once and kept alive for the whole test: it owns
+    // the real acceptor, and dropping it would tear that down between the two
+    // requests. The executor always succeeds because delivery is not what is being
+    // observed — acceptance is.
+    let effects_runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .register_effect_executor(
+            ["user.welcome_email"],
+            Arc::new(RecordingExecutor::always_succeeds()),
+        )
+        .expect("registering one executor succeeds")
+        .build();
+    // The acceptor only exists once the effect subsystem is started; before that
+    // `effect_acceptor()` is `None`.
+    effects_runtime
+        .start_effects()
+        .await
+        .expect("an executor was registered, so starting effects succeeds");
+    let acceptor = CountingAcceptor::wrapping(
+        effects_runtime
+            .effect_acceptor()
+            .expect("an executor was registered, so an acceptor exists")
+            .clone(),
+    );
+    let sink_store = SharedReadSideStore::new();
+
     // --- First POST ---------------------------------------------------------
-    let (status, first) = send(app(store.clone(), calls.clone())).await;
+    let (status, first) = send(app(
+        store.clone(),
+        calls.clone(),
+        sink_store.clone(),
+        acceptor.clone(),
+    ))
+    .await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
@@ -304,6 +432,23 @@ async fn two_identical_posts_execute_once_and_the_second_is_served_from_postgres
         store.completes.load(Ordering::SeqCst),
         1,
         "one execution records one answer"
+    );
+
+    // --- One event, and one effect accepted from it --------------------------
+    assert_eq!(
+        user_registered_count(&sink_store, "tenant-a").await,
+        1,
+        "the execution committed exactly one UserRegistered and published it to \
+         the read side"
+    );
+    assert_eq!(
+        acceptor.accepted(),
+        vec![(
+            "user.welcome_email".to_string(),
+            "welcome-email:user-1".to_string()
+        )],
+        "and that commit produced exactly one accepted welcome-email effect, keyed \
+         to the registered user"
     );
 
     // --- What the first request made durable --------------------------------
@@ -352,7 +497,13 @@ async fn two_identical_posts_execute_once_and_the_second_is_served_from_postgres
     );
 
     // --- Second, identical POST ---------------------------------------------
-    let (status, second) = send(app(store.clone(), calls.clone())).await;
+    let (status, second) = send(app(
+        store.clone(),
+        calls.clone(),
+        sink_store.clone(),
+        acceptor.clone(),
+    ))
+    .await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
@@ -380,6 +531,27 @@ async fn two_identical_posts_execute_once_and_the_second_is_served_from_postgres
         1,
         "no second completion was even attempted. A replay carries a stored \
          response and no permit, so there is no fence to complete under"
+    );
+
+    // --- Still one event and one effect --------------------------------------
+    //
+    // The two consequences a duplicate execution would have, each observed at its
+    // own boundary. A second `UserRegistered` is a second row in the read side; a
+    // second accepted effect is a second welcome email actually sent.
+    assert_eq!(
+        user_registered_count(&sink_store, "tenant-a").await,
+        1,
+        "still one UserRegistered after the replay — a second one would mean the \
+         retry re-committed, which is the duplicate this whole mechanism exists to \
+         prevent"
+    );
+    assert_eq!(
+        acceptor.accepted().len(),
+        1,
+        "still one accepted welcome-email effect. Counted at acceptance rather \
+         than delivery, so this is settled by the time the response returns and \
+         needs no waiting: got {:?}",
+        acceptor.accepted()
     );
 
     // --- and the row is untouched by the replay ------------------------------

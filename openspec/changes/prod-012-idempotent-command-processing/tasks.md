@@ -755,7 +755,7 @@ unchanged, which is the point of stopping here.
       why they are not the evidence.
       Verified: fmt, integration guard, `clippy -D warnings` and
       `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1607 tests.
-- [ ] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
+- [x] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
       **A third property, observable only since B6.8: the second `POST` must be
       answered by a replay, not by a second execution.** Until the epilogue
       existed no reservation reached `Succeeded`, so a retry could only ever be
@@ -778,7 +778,7 @@ unchanged, which is the point of stopping here.
       A test that asserts only "both responses are equal" has replaced one
       un-failable box with another, which is the specific failure this note
       exists to prevent.
-- [ ] B6.10 GREEN: prove the marker governs the **real HTTP path**, and verify
+- [x] B6.10 GREEN: prove the marker governs the **real HTTP path**, and verify
       B6.9 passes.
       **Restated, because its original work is already done.** This box used to
       read "mark `RegisterUserImpl`'s handler(s) with `#[idempotent]`". That
@@ -802,6 +802,11 @@ unchanged, which is the point of stopping here.
       `register_user_multi_aggregate_recovery` does, and must not edit that
       declaration. A test wiring a store is not the application claiming
       adoption, and B6.9/B6.10 must not blur the two.
+- **B6.9/B6.10 closing note.** Both boxes are satisfied by `integration-tests/tests/replay_from_postgres.rs`, not by the originally named `examples/reference-app/tests/e2e_register.rs`, which no longer exists — the scenario moved to where the replay is genuine instead of scripted.
+  **B6.9's two remaining observations, added as independent ones.** A recording `ReadSideSink` over a `SharedReadSideStore` counts exactly one `UserRegistered` published by the write side, read back through the `ReadSideStore` trait the store already implements (nothing new exposed; tags discovered via `known_tags()` because the tag helper is crate-private). A decorator over `EffectAcceptor` counts exactly one accepted `user.welcome_email` keyed `welcome-email:user-1`, delegating to the real acceptor. Both stay at one after the replay.
+  **Why acceptance and not delivery.** `accept()` runs synchronously in post-commit, so the count is settled before the response returns. Delivery goes through the deferred runner on its own reclaim tick, so counting there would mean waiting and then asserting nothing else arrived — an absence claim dressed as a timeout.
+  **Two observations, not one wearing two hats.** Both descend from the same commit, which is the causal claim itself, but neither substitutes for the other: one says the event was committed and published, the other says that commit produced one accepted effect.
+  **Measured.** With `#[idempotent]` removed from `register`, the scenario fails, and a probe past the reservation assertions recorded `bodies=2 events=2 effects=2` — both counts double, which is the duplicate the marker prevents. Marker restored, suite green.
 - [x] B6.11 RED: reference-app test enumerating every mutating operation and asserting each carries the `#[idempotent]` marker (design.md Risks — mitigates the marker-completeness residual gap). Landed as `examples/reference-app/tests/idempotent_marker_completeness.rs`.
 - [x] B6.12 GREEN: add the enumeration/assertion helper and apply the marker to any operation the test finds missing it. **No operation was missing it** — the application publishes one service trait with one operation, already marked. The value delivered is the guard against the next one, not a defect found today, and that is worth stating rather than reporting a fix that did not happen.
   **What the guard establishes, and where it stops.** The marker is read from the generated contract (`ServiceContract::operations()`), so it reflects what the macro produced rather than the presence of an attribute that may not have expanded. Operation-level completeness is compared against that contract in both directions, so a new operation on an existing trait fails until classified and a stale entry fails until removed. Trait-level completeness is only a **source-text tripwire**: nothing in the runtime enumerates registered services, so the test counts `#[service` declarations under `src/` and requires the count to match the inventory. That correlates with completeness instead of establishing it, and it is documented as such in the test rather than left to be discovered. Closing it properly needs a registration mechanism operations enrol themselves in — a larger change than recording the judgement.
