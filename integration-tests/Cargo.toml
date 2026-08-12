@@ -32,6 +32,9 @@ persistent-entity = { path = "../crates/persistent-entity" }
 reference-app = { path = "../examples/reference-app" }
 
 async-trait = "0.1"
+# Must match the reference app's and ego-transport's axum ("0.7"), or the Router
+# this suite builds would be a different type than the one they produce.
+axum = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

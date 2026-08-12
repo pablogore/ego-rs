@@ -62,12 +62,16 @@ fixing.
 Each one exercises the whole protocol; together they cover it. None of them is a
 variant of another.
 
-| # | Scenario | Guarantee it demonstrates | Why in-process cannot show it |
-|---|---|---|---|
-| 1 | Two identical `POST /register` | One execution, a durably completed response, and a replay served from PostgreSQL | The stored response has to survive a real commit and be read back through a real query — a scripted store returns whatever it was handed |
-| 2 | Same key, different payload | Permanent conflict, with no second execution | The fingerprint comparison is a real uniqueness constraint under a real transaction, not an `if` in a test double |
-| 3 | Recovery after an expired lease | Takeover under real fencing, without repeating steps already confirmed | Lease expiry is a clock-versus-row-state race resolved by the database; the receipt that stops the repeat was committed by a previous transaction |
-| 4 | Two concurrent replicas | Exactly one obtains the permit; the other does not execute | Mutual exclusion between processes is what the `lease_until <= $N` guard exists for, and a single-process test cannot contend for it |
+| # | Scenario | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|---|
+| 1 | Two identical `POST /register` | One execution, a durably completed response, and a replay served from PostgreSQL | The stored response has to survive a real commit and be read back through a real query — a scripted store returns whatever it was handed | `tests/replay_from_postgres.rs` |
+| 2 | Same key, different payload | Permanent conflict, with no second execution | The fingerprint comparison is a real uniqueness constraint under a real transaction, not an `if` in a test double | not written |
+| 3 | Recovery after an expired lease | Takeover under real fencing, without repeating steps already confirmed | Lease expiry is a clock-versus-row-state race resolved by the database; the receipt that stops the repeat was committed by a previous transaction | `tests/takeover_fencing_postgres.rs` |
+| 4 | Two concurrent replicas | Exactly one obtains the permit; the other does not execute | Mutual exclusion between processes is what the `lease_until <= $N` guard exists for, and a single-process test cannot contend for it | not written |
+
+**Consumed: 2 of 4.** The Status column is the budget ledger — it lives here rather
+than in pull-request descriptions, which get buried. A row that gains a file
+spends one of the four.
 
 Scenario 4 is the one issue #275 calls the highest-value invariant in the
 backlog: today it is guarded by nothing.
