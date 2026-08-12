@@ -464,12 +464,31 @@ impl OperationReservationStore for PostgresOperationReservationStore {
         // `ctid`. The subquery has no `ORDER BY`: selection within a batch is
         // deliberately outside the contract (AD-11), and adding one here would make
         // an ordering observable that a caller must not depend on.
+        //
+        // `FOR UPDATE SKIP LOCKED` is a **progress** guarantee, not a safety one,
+        // and the distinction is worth stating because it is easy to claim the
+        // stronger thing. Without it two workers still cannot remove the same row
+        // twice: the second `DELETE` blocks on the row lock, re-evaluates under READ
+        // COMMITTED, finds the row gone and removes zero. PostgreSQL provides that;
+        // this clause does not.
+        //
+        // What it provides is that a worker whose batch could be filled from
+        // unlocked rows fills it. Measured before it was added, with two of four
+        // eligible rows held by another transaction and a batch of two: the
+        // statement waited on a locked tuple until its timeout while two free
+        // eligible rows sat untouched — head-of-line blocking, not a deadlock.
+        // `integration-tests/tests/purge_progress_postgres.rs` is the guard, and
+        // removing this clause makes it fail on its deadline.
+        //
+        // Skipping is deferral, not exclusion: a row passed over stays eligible and
+        // a later call takes it, which that test also pins.
         let deleted = sqlx::query(
             r#"DELETE FROM operation_reservations
                WHERE ctid IN (
                    SELECT ctid FROM operation_reservations
                    WHERE state = 'completed' AND completed_at < $1
                    LIMIT $2
+                   FOR UPDATE SKIP LOCKED
                )"#,
         )
         .bind(cutoff)

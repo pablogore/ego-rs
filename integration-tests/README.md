@@ -55,8 +55,8 @@ than counted as a fifth end-to-end scenario:
 
 ```
 End-to-end scenarios ................. 4 / 4
-PostgreSQL concurrency invariants .... 1 / 1
-Total infrastructure tests ........... 5
+PostgreSQL concurrency invariants .... 2 / 2
+Total infrastructure tests ........... 6
 ```
 
 The counts describe the tests that exist, not the ones planned. An earlier version
@@ -115,6 +115,7 @@ is the concurrency invariant's subject, not this row's.
 
 | Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
 |---|---|---|---|
+| Purge behind a locked row | A worker whose batch could be filled from unlocked eligible rows fills it, instead of waiting behind rows another worker holds | Head-of-line blocking is visible only with a real transaction holding real row locks. Measured: without `SKIP LOCKED` the statement waits on a locked tuple while free eligible rows sit untouched | `tests/purge_progress_postgres.rs` |
 | Takeover blocked on a row lock | The takeover `UPDATE` re-checks `lease_until <= now` against the row it finally locks, not the row it read, so a lease renewed during the wait is not stolen | The window lives between two statements inside one `reserve()`. Forcing it open needs `SELECT … FOR UPDATE` held from outside while the contender blocks — not expressible over HTTP, and faking it would discard the only mechanism that makes it a test | `tests/fencing_window_postgres.rs` |
 
 Why it was admitted, with the evidence: `reservation.rs` stated in its own comment
