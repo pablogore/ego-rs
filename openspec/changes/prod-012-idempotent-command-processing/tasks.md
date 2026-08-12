@@ -602,8 +602,28 @@ unchanged, which is the point of stopping here.
       broke. Only an assertion on what the **service received** — the real router
       driven end to end against a recording `RegisterUser` — can tell a working
       transfer from a dropped one.
+      **The same separation applies to the mode, and had to be closed too.**
+      Review found the central claim — a missing key under `MandatoryKey` is
+      refused before the operation runs — proven only by calling
+      `from_request_parts` directly. That establishes the extractor's policy, not
+      the router's behaviour, and says nothing about whether the operation ran.
+      The router-level file is now parameterised by mode and covers it with three
+      observations, because a status code alone cannot distinguish "refused
+      before dispatch" from "refused after running": **400**, the service
+      recorder still `None`, and **zero** reservations — a refusal at the
+      boundary leaves no lease behind for a legitimate retry to contend with.
+      Its control uses the same enforcing runtime and the same store with a key
+      present, so the refusal is attributable to the missing header rather than
+      to an enforcing runtime rejecting everything. That control also observes
+      one `reserve` **and one `complete`**, which is B6.8's epilogue running
+      through the HTTP path: the header a client sent reaching the reservation,
+      the operation, and the completion that makes the next identical request
+      replayable.
+      Hardcoding `Compatibility` in the extractor now fails at the **router**
+      level, so one mutation demonstrates the whole chain rather than an isolated
+      component.
       Verified: fmt, integration guard, `clippy -D warnings` and
-      `cargo test --workspace --no-fail-fast` all 0 — 117 targets, 1616 tests.
+      `cargo test --workspace --no-fail-fast` all 0 — 117 targets, 1618 tests.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
 - [x] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
       **Done.** The epilogue is one call to a public runtime method, same shape

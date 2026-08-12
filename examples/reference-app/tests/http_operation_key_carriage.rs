@@ -12,13 +12,18 @@
 
 mod support;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use ego_domain::operation::OperationKey;
+use ego_domain::operation::{
+    FencingToken, Lease, OperationId, OperationKey, OperationReservationStore, OwnerId,
+    ReservationError, ReservationOutcome, ReserveRequest,
+};
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::{IdempotencyEnforcementMode, RuntimeBuilder};
 use ego_testkit::ScriptedAuthorizationProvider;
@@ -55,10 +60,79 @@ impl RegisterUser for KeyRecordingRegister {
     }
 }
 
+/// Counts every reservation attempt. A request refused at the boundary must
+/// never reach the runtime's reservation path either — asserting zero here is
+/// what distinguishes "rejected before dispatch" from "rejected somewhere after
+/// having already started the operation".
+#[derive(Default)]
+struct CountingReservations {
+    reserves: AtomicUsize,
+    completes: AtomicUsize,
+}
+
+#[async_trait]
+impl OperationReservationStore for CountingReservations {
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        self.reserves.fetch_add(1, Ordering::SeqCst);
+        // Permits the operation. A store that refused would make every
+        // dispatched request fail for a reason that has nothing to do with the
+        // header, and the zero-reserve assertion elsewhere would then pass even
+        // if the boundary had let the request through.
+        Ok(ReservationOutcome::Fresh(Lease {
+            operation_id: OperationId::new(req.tenant.clone(), req.operation_key.clone()),
+            owner_id: req.owner_id.clone(),
+            fencing_token: FencingToken::initial(),
+            lease_until: req.lease_until,
+        }))
+    }
+    async fn renew(
+        &self,
+        _f: &ego_domain::operation::OwnerFence,
+        _u: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ReservationError> {
+        unreachable!("nothing renews here")
+    }
+    /// Reached by B6.8's epilogue when an operation dispatched through this
+    /// router succeeds — which is the whole chain working, from the header the
+    /// client sent to the answer recorded for its replay.
+    async fn complete(
+        &self,
+        _f: &ego_domain::operation::OwnerFence,
+        _r: ego_domain::operation::StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        self.completes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn abandon(
+        &self,
+        _f: &ego_domain::operation::OwnerFence,
+    ) -> Result<(), ReservationError> {
+        unreachable!("nothing abandons here")
+    }
+    async fn purge_completed_before(
+        &self,
+        _c: chrono::DateTime<chrono::Utc>,
+        _b: usize,
+    ) -> Result<u64, ReservationError> {
+        unreachable!("nothing purges here")
+    }
+    async fn probe(&self) -> Result<(), ReservationError> {
+        Ok(())
+    }
+}
+
 /// A router identical to production's except that `RegisterUser` resolves to
 /// the recorder. The authentication provider is the real one `build_runtime`
 /// constructs, so the request still has to authenticate the way any other does.
-fn app_recording(seen: Arc<Mutex<Option<Option<OperationKey>>>>) -> Router {
+///
+/// `mode` is the runtime's, and the extractor reads it from there — which is
+/// why parameterising it here exercises the whole chain rather than the
+/// extractor alone.
+fn app_recording_under(
+    mode: IdempotencyEnforcementMode,
+    seen: Arc<Mutex<Option<Option<OperationKey>>>>,
+    reservations: Arc<CountingReservations>,
+) -> Router {
     let BuiltRuntime {
         authn,
         read_side: read_side_handles,
@@ -66,12 +140,18 @@ fn app_recording(seen: Arc<Mutex<Option<Option<OperationKey>>>>) -> Router {
     } = build_runtime(&AppConfig::default()).expect("build_runtime succeeds");
 
     let service: Arc<dyn RegisterUser> = Arc::new(KeyRecordingRegister { seen });
-    let runtime = RuntimeBuilder::new()
-        // The same declaration production makes, for the same reason: this
-        // reference app has no durable reservation store, and pretending
-        // otherwise here would be the adoption claim `build_runtime` refuses to
-        // make. What is under test is carriage, not enforcement.
-        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+    let mut builder = RuntimeBuilder::new().with_idempotency_enforcement_mode(mode);
+    if matches!(mode, IdempotencyEnforcementMode::MandatoryKey) {
+        // The builder refuses `MandatoryKey` with nowhere to reserve. Registering
+        // a store is what makes that mode *buildable* — it is not what makes the
+        // header required, which is why the store below expects to be called
+        // zero times.
+        builder = builder
+            .with_operation_reservation_store(reservations.clone())
+            .with_reservation_owner_id(OwnerId::new("under-test"))
+            .with_reservation_lease_duration(Duration::from_secs(30));
+    }
+    let runtime = builder
         .with_service::<RegisterUserTag>(service)
         .expect("registration succeeds")
         // `register` is guarded by `#[authorize]` and `#[tenant_scoped]`, so a
@@ -124,10 +204,14 @@ fn post(key: Option<&str>) -> Request<Body> {
 #[tokio::test]
 async fn the_clients_idempotency_key_reaches_the_operation() {
     let seen = Arc::new(Mutex::new(None));
-    let response = app_recording(seen.clone())
-        .oneshot(post(Some("op-from-the-wire")))
-        .await
-        .unwrap();
+    let response = app_recording_under(
+        IdempotencyEnforcementMode::Compatibility,
+        seen.clone(),
+        Arc::new(CountingReservations::default()),
+    )
+    .oneshot(post(Some("op-from-the-wire")))
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
@@ -151,10 +235,14 @@ async fn the_clients_idempotency_key_reaches_the_operation() {
 #[tokio::test]
 async fn a_request_without_the_header_reaches_the_operation_carrying_no_key() {
     let seen = Arc::new(Mutex::new(None));
-    let response = app_recording(seen.clone())
-        .oneshot(post(None))
-        .await
-        .unwrap();
+    let response = app_recording_under(
+        IdempotencyEnforcementMode::Compatibility,
+        seen.clone(),
+        Arc::new(CountingReservations::default()),
+    )
+    .oneshot(post(None))
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
@@ -176,14 +264,109 @@ async fn a_request_without_the_header_reaches_the_operation_carrying_no_key() {
 #[tokio::test]
 async fn an_unusable_key_is_refused_without_reaching_the_operation() {
     let seen = Arc::new(Mutex::new(None));
-    let response = app_recording(seen.clone())
-        .oneshot(post(Some("   ")))
-        .await
-        .unwrap();
+    let response = app_recording_under(
+        IdempotencyEnforcementMode::Compatibility,
+        seen.clone(),
+        Arc::new(CountingReservations::default()),
+    )
+    .oneshot(post(Some("   ")))
+    .await
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(
         seen.lock().expect("not poisoned").is_none(),
         "the operation must not have been invoked at all"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The promise B6.5 exists for, through the real router
+// ---------------------------------------------------------------------------
+
+/// **A deployment that requires an operation key does not dispatch a request
+/// without one.** This is B6.5's central claim, and until now it was only shown
+/// by calling the extractor directly — which proves the extractor's policy, not
+/// the router's behaviour, and says nothing about whether the operation ran.
+///
+/// That is the same gap that hid a dropped handler transfer: a component tested
+/// in isolation can be perfect while the chain it sits in does the wrong thing.
+///
+/// Three observations, because the status code alone is not enough. A 400
+/// returned *after* dispatching, or after reserving, would look identical from
+/// outside the process.
+#[tokio::test]
+async fn a_missing_key_is_refused_by_the_router_under_mandatory_key() {
+    let seen = Arc::new(Mutex::new(None));
+    let reservations = Arc::new(CountingReservations::default());
+
+    let response = app_recording_under(
+        IdempotencyEnforcementMode::MandatoryKey,
+        seen.clone(),
+        reservations.clone(),
+    )
+    .oneshot(post(None))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a runtime that requires a key must refuse a request that carries none"
+    );
+    assert!(
+        seen.lock().expect("not poisoned").is_none(),
+        "the operation must never have been invoked — this is the assertion that \
+         separates 'refused before dispatch' from 'refused after running'"
+    );
+    assert_eq!(
+        reservations.reserves.load(Ordering::SeqCst),
+        0,
+        "and nothing may have been reserved either: a refusal at the boundary \
+         leaves no lease behind for a legitimate retry to contend with"
+    );
+    assert_eq!(reservations.completes.load(Ordering::SeqCst), 0);
+}
+
+/// The control that keeps the case above from passing for the wrong reason: the
+/// *same* runtime, the *same* store, and a key that is present. It dispatches,
+/// carries the key, and does reach the reservation path — so the refusal above
+/// is attributable to the missing header rather than to the enforcing runtime
+/// rejecting everything.
+#[tokio::test]
+async fn the_same_mandatory_runtime_dispatches_a_request_that_carries_a_key() {
+    let seen = Arc::new(Mutex::new(None));
+    let reservations = Arc::new(CountingReservations::default());
+
+    let _response = app_recording_under(
+        IdempotencyEnforcementMode::MandatoryKey,
+        seen.clone(),
+        reservations.clone(),
+    )
+    .oneshot(post(Some("op-mandatory-ok")))
+    .await
+    .unwrap();
+
+    let observed = seen
+        .lock()
+        .expect("not poisoned")
+        .clone()
+        .expect("the operation was invoked");
+    assert_eq!(
+        observed.expect("carrying a key").as_str(),
+        "op-mandatory-ok",
+        "the enforcing runtime admits a well-formed key and passes it through"
+    );
+    assert_eq!(
+        reservations.reserves.load(Ordering::SeqCst),
+        1,
+        "and it reserves under it — which is what makes the zero above meaningful"
+    );
+    assert_eq!(
+        reservations.completes.load(Ordering::SeqCst),
+        1,
+        "and records the answer for a later replay: the header a client sent \
+         reaches the reservation, the operation, and the completion that makes \
+         the next identical request replayable — the whole chain, over HTTP"
     );
 }
