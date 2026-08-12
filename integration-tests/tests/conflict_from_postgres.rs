@@ -16,28 +16,48 @@
 //!
 //! What *is* infrastructure-only is the step before it. Reserving an operation is
 //! two statements — `INSERT … ON CONFLICT DO NOTHING`, then read the row back and
-//! compare — and the whole dance only reaches the comparison because
-//! `(tenant_id, operation_key)` is genuinely unique. That uniqueness is two
-//! partial indexes over complementary predicates (migration 010, needed because
-//! `NULLS NOT DISTINCT` postdates the declared PostgreSQL floor). If either index
-//! were missing or its predicate wrong, the second reservation would insert a
-//! **second row** rather than conflict, and the conflict would silently never be
-//! detected — while every in-process test kept passing.
+//! compare — and it only ever *reaches* the comparison because
+//! `(tenant_id, operation_key)` is genuinely unique. Without that uniqueness the
+//! insert succeeds, a **second row** appears, and the conflict is never detected
+//! while every in-process test keeps passing.
 //!
-//! Measured, by deleting both indexes from migration 010: the second request is
-//! admitted, a second row appears, the body runs again, and a valid-looking
-//! `201 {"user_id":"user-1","tenant_id":"tenant-a"}` comes back.
+//! # Which index this scenario actually loads
 //!
-//! **Two assertions catch that independently**, and both are kept on purpose. The
-//! status assertion fires first and is what a client would notice. The row count
-//! (`= 1`) was checked separately under the same mutation and also fails, at
-//! `2 != 1` — it is the one that names the *mechanism*, so a future change that
-//! produced a 409 for some other reason would still not satisfy it. Neither is
-//! redundant: the status describes the consequence, the row count describes why.
+//! The protocol needs uniqueness across **both** tenancy modes, and migration 010
+//! provides it as two partial indexes over complementary predicates — one
+//! `WHERE tenant_id IS NOT NULL`, one `WHERE tenant_id IS NULL` — because
+//! `NULLS NOT DISTINCT` postdates the declared PostgreSQL floor.
 //!
-//! Two further things only a real column can show: the fingerprint survives a
-//! round-trip through `VARCHAR(255)` and still compares unequal, and a refused
-//! request does not corrupt the completed reservation it collided with.
+//! This scenario runs entirely under `tenant-a`, so it loads exactly one of them:
+//! the tenant-scoped index. Measured, both directions:
+//!
+//! - Deleting **only** `ux_operation_reservations_identity_tenant`: the second
+//!   request is admitted, a second row appears, the body runs again, and a
+//!   valid-looking `201 {"user_id":"user-1","tenant_id":"tenant-a"}` comes back.
+//! - Deleting **only** `ux_operation_reservations_identity_systemwide`: this test
+//!   stays **green**. It never files a row with a null tenant, so that index is
+//!   not on its path.
+//!
+//! That second result is why the claim here is scoped rather than sweeping. This
+//! file guards the tenant-scoped predicate; the systemwide one is covered by the
+//! reservation store's own conformance tests, which exercise the null-tenant
+//! scope in-process.
+//!
+//! A null-tenant variant is deliberately **not** added. It would re-exercise the
+//! same mechanism through a different predicate, turning this end-to-end test into
+//! a matrix over an index's `WHERE` clause and spending container time to learn
+//! nothing new about the protocol. That is the fast suite's job.
+//!
+//! **Two assertions catch the tenant-scoped mutation independently**, and both are
+//! kept on purpose. The status assertion fires first and is what a client would
+//! notice. The row count (`= 1`) was checked separately under the same mutation
+//! and also fails, at `2 != 1` — it is the one that names the *mechanism*, so a
+//! future change that produced a 409 for some other reason would still not
+//! satisfy it. Neither is redundant: the status describes the consequence, the row
+//! count describes why.
+//!
+//! One further thing only a real database can show: a refused request does not
+//! corrupt the completed reservation it collided with.
 //!
 //! # What is deliberately not re-proven here
 //!
@@ -345,11 +365,20 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
 
     let (stored_fp, state, completed_at, stored_response) = stored_row(&pool).await;
     assert_eq!(state, "completed");
-    // The digest survived the column intact. `fingerprint` is `VARCHAR(255)` and
-    // a SHA-256 hex digest is 64 characters, so a truncating or re-encoding
-    // column would show up here as a short or non-hex value — and a truncated
-    // fingerprint compares equal to every other request truncated the same way,
-    // which would turn every conflict into a silent replay.
+    // The digest round-tripped as the same hex string it was written as.
+    //
+    // Not a truncation guard: PostgreSQL *rejects* an over-length value for
+    // `VARCHAR(n)` rather than silently shortening it — verified directly, a
+    // 16-character value into `VARCHAR(8)` raises `value too long for type
+    // character varying(8)`. An earlier version of this comment justified the
+    // check by silent truncation, which does not happen.
+    //
+    // What it does guard is representation. The comparison that produces a
+    // conflict is string equality against this column, so anything that changed
+    // the digest's form on the way through — case folding, padding, hex decoded
+    // to bytes and re-encoded some other way — would compare unequal to a
+    // freshly computed digest and turn every replay into a conflict, or the
+    // reverse. That failure is silent and only visible by reading the column.
     assert_eq!(
         stored_fp.len(),
         64,
@@ -392,6 +421,10 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
     // line standing between the mutation and a green run. It is kept because it
     // names the mechanism rather than the symptom: verified independently under
     // the dropped-index mutation, where it fails at 2 != 1.
+    //
+    // The index this loads is the tenant-scoped one — this scenario never files a
+    // row with a null tenant. See the module docs for the measurement, including
+    // the converse: deleting the systemwide index leaves this test green.
     assert_eq!(
         row_count(&pool).await,
         1,
