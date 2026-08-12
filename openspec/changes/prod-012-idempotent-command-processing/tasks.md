@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 85 complete and 31 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 86 complete and 30 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -624,7 +624,45 @@ unchanged, which is the point of stopping here.
       component.
       Verified: fmt, integration guard, `clippy -D warnings` and
       `cargo test --workspace --no-fail-fast` all 0 — 117 targets, 1618 tests.
-- [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
+- [x] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
+      **Done**, in `examples/reference-app/tests/http_replay_and_conflict.rs`,
+      driving the real router with a scripted reservation store.
+      **Response bodies are not the evidence, and must not be.** `RegisterOutput`
+      copies `input.user_id` and `input.tenant_id` verbatim, so two identical
+      requests produce byte-identical responses whether the body ran once, twice
+      or not at all — an assertion that cannot fail. Instead the store returns a
+      response **the handler could not have produced from this input**
+      (`user_id: "REPLAYED-FROM-THE-STORE"`), so its arrival over HTTP is proof
+      the answer came from the store rather than from a second execution.
+      **Scope widened deliberately.** B6.7 asks for replay versus conflict, but
+      the six-way refusal mapping landed in #280 with no HTTP-level test at all,
+      so the whole public table is closed here rather than leaving branches
+      uncovered in the same file. Every row asserts a status **and** three
+      counts — reserves, handler invocations, completions — because a status
+      alone cannot show whether the operation ran first:
+      replay → 201 with the marked value, 0 body, 0 complete;
+      `Conflict`, `OwnedInProgress`, `OtherInProgress` → 409;
+      `StoreUnavailable` → 503; `StoredResponseIncompatible` → 500; each with 1
+      reserve, 0 body, 0 complete.
+      A `Fresh` control runs the same wiring permitted — 1 reserve, 1 body,
+      1 complete — so the zeros above are attributable to the refusal rather
+      than to a fixture that rejects everything.
+      **`RequestNotFingerprintable` is deliberately absent.** It is raised before
+      the store is reached, when an operation's arguments fail to serialise, and
+      `RegisterInput` always does; it cannot be provoked through a store script.
+      **Three mutations bite:** mapping `FingerprintConflict` to 500 kills the
+      table; mapping `StoreUnavailable` to 500 kills the 503; and letting the
+      replay branch fall through to the handler kills the marked-value test —
+      returning the recomputed `user-1` instead, which is exactly what a
+      body-comparison assertion would have missed.
+      **A fourth was not fabricated.** "Complete on a replay" is not writable:
+      `ReservationDecision::Replay` carries a `StoredServiceResponse` and no
+      permit, so there is no `OwnerFence` to complete under. That zero is
+      guaranteed by the split #279 introduced precisely to make a permit-less
+      completion unrepresentable. The assertion stays as a regression tripwire
+      against a future degradation of the type, not as primary evidence.
+      Verified: fmt, integration guard, `clippy -D warnings` and
+      `cargo test --workspace --no-fail-fast` all 0 — 118 targets, 1621 tests.
 - [x] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
       **Done.** The epilogue is one call to a public runtime method, same shape
       as the reservation itself (AD-3g): `RuntimeInner::complete_idempotent_operation`
