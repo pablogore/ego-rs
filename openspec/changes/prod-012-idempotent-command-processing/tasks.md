@@ -644,13 +644,28 @@ unchanged, which is the point of stopping here.
       Verified: fmt, integration guard, `clippy -D warnings` and
       `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1607 tests.
 - [ ] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
-      **A third assertion, observable only since B6.8:** the second response is
-      the *reproduced* one, not a fresh execution's. Until the epilogue existed
-      no reservation reached `Succeeded`, so a retry could only ever be answered
-      by re-entering the body — "one `UserRegistered`" was satisfiable without
-      any replay at all. Now that a completed operation records its answer, the
-      second `POST` must return that recorded answer, and asserting it is what
-      separates *replayed* from *re-executed but idempotent*.
+      **A third property, observable only since B6.8: the second `POST` must be
+      answered by a replay, not by a second execution.** Until the epilogue
+      existed no reservation reached `Succeeded`, so a retry could only ever be
+      answered by re-entering the body — "one `UserRegistered`" and "one effect"
+      were both satisfiable with zero replay, because each aggregate's receipt
+      answered for its own step.
+      **Comparing the two response bodies does not establish this, and must not
+      be the evidence.** `RegisterOutput` is built by copying `input.user_id` and
+      `input.tenant_id` verbatim (`application.rs:357`), so two identical
+      requests produce byte-identical responses whether the body ran once, twice,
+      or not at all. That assertion cannot fail, which makes it worth nothing.
+      What must be observed instead:
+      - `RegisterUserImpl::register`'s body runs **exactly once** across both
+        requests — counted in the implementation, not inferred from the response;
+      - the store records **one** `complete()` after the first `POST`;
+      - the second `POST` reads `Succeeded` and issues **no** second `complete()`;
+      - and the replayed value is tied to the store rather than to the request:
+        either compare it against the bytes the store itself recorded, or have
+        the store return a marked response the handler could not have produced.
+      A test that asserts only "both responses are equal" has replaced one
+      un-failable box with another, which is the specific failure this note
+      exists to prevent.
 - [ ] B6.10 GREEN: prove the marker governs the **real HTTP path**, and verify
       B6.9 passes.
       **Restated, because its original work is already done.** This box used to
