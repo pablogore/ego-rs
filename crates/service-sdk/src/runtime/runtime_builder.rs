@@ -194,7 +194,7 @@ enum OperatorAction {
     MonitorRate,
     /// Compare the configured lease against how long the work actually takes.
     ReviewLeaseDuration,
-    /// Someone has to look at this one. It will not clear itself.
+    /// Do not assume retry or waiting will clear it; investigate.
     Investigate,
 }
 
@@ -809,9 +809,10 @@ impl RuntimeInner {
     ///   succeed on the next, or depend on state outside the value entirely.
     ///
     ///   So this is not a proof that the failure recurs. It is a judgement that
-    ///   waiting will not fix it and infrastructure retry is the wrong response:
-    ///   somebody has to look. Until they do, this operation does not reach
-    ///   `Succeeded` and does not replay.
+    ///   waiting is not a justified recovery strategy: the failure requires
+    ///   investigation, and treating it as an infrastructure blip that will pass
+    ///   is the one response the evidence does not support. Until someone looks,
+    ///   this operation does not reach `Succeeded` and does not replay.
     pub async fn complete_idempotent_operation<T: serde::Serialize>(
         &self,
         reservation: Option<&ReservationDecision>,

@@ -613,9 +613,10 @@ unchanged, which is the point of stopping here.
       `not_encodable` → `investigate`: this *value* failed to serialise.
       `T: Serialize` is satisfied at compile time, so this is not "the type
       cannot be serialised" — a hand-written `Serialize` may fail on one value
-      and succeed on the next. It is a judgement that waiting will not fix it and
-      infrastructure retry is the wrong response, not a proof that the failure
-      recurs. Until someone looks, that operation does not reach `Succeeded`.
+      and succeed on the next. It is a judgement that waiting is not a justified
+      recovery strategy — the failure requires investigation — not a proof that
+      the failure recurs. Until someone looks, that operation does not reach
+      `Succeeded`.
       **Where the chain is proven.** Each link lives in the layer that owns it:
       a failed completion leaving the handler's `Ok` intact, in this unit's
       `a_stale_completion_does_not_fail_the_operation` and
