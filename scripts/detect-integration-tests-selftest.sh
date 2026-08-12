@@ -86,14 +86,105 @@ fi
 cleanup
 trap - EXIT
 
-# --- 3. The tree is back as it was ----------------------------------------
+# --- 3. The membership check, driven with controlled metadata --------------
+#
+# Check 4b asks cargo whether `integration-tests/` resolves as a member of the
+# root workspace. Running it against the real tree can only ever demonstrate the
+# passing case — and a check shown only to pass is exactly the failure this
+# self-test exists to prevent.
+#
+# So the evaluator is driven directly, through the guard's `--eval-membership`
+# seam, with metadata this script writes. That covers the membership regression
+# without mutating the real workspace: mutating it for real is not equivalent,
+# because a glob plus the carve-out's own `[workspace]` table makes cargo refuse
+# outright, so the interesting case — silent membership — cannot be reached by
+# editing the root manifest alone.
+FAKE_ROOT='/fake/repo'
+
+# 3a. Metadata in which the carve-out IS a member. The evaluator must reject it.
+#
+# This is the regression the old text search missed entirely: the member is
+# resolved through a glob, so the name never appears in the root manifest.
+member_metadata='{"packages":[
+  {"name":"ego-domain","manifest_path":"/fake/repo/crates/domain/Cargo.toml"},
+  {"name":"ego-integration-tests","manifest_path":"/fake/repo/integration-tests/Cargo.toml"}
+]}'
+if printf '%s' "$member_metadata" | "$GUARD" --eval-membership "$FAKE_ROOT" >/dev/null 2>&1; then
+    echo "FAIL[selftest]: the membership check PASSED on metadata that lists"
+    echo "  /fake/repo/integration-tests/Cargo.toml as a workspace member."
+    echo "  A glob in the root's members list would make the carve-out part of"
+    echo "  'cargo test --workspace' without ever spelling its name."
+    failures=1
+else
+    echo "ok[selftest]: membership check rejects a carve-out resolved as a member"
+fi
+
+# 3b. Metadata in which it is not. The evaluator must accept it — otherwise 3a
+#     passes for the trivial reason that the check rejects everything.
+clean_metadata='{"packages":[
+  {"name":"ego-domain","manifest_path":"/fake/repo/crates/domain/Cargo.toml"},
+  {"name":"ego-persistence","manifest_path":"/fake/repo/crates/persistence/Cargo.toml"}
+]}'
+if printf '%s' "$clean_metadata" | "$GUARD" --eval-membership "$FAKE_ROOT" >/dev/null 2>&1; then
+    echo "ok[selftest]: membership check accepts a workspace without the carve-out"
+else
+    echo "FAIL[selftest]: the membership check rejected clean metadata."
+    echo "  A check that rejects everything proves nothing about the case above."
+    failures=1
+fi
+
+# 3c. A sibling whose name merely starts with the carve-out's is NOT inside it.
+#     Guards against a prefix match standing in for a path match.
+sibling_metadata='{"packages":[
+  {"name":"helpers","manifest_path":"/fake/repo/integration-tests-helpers/Cargo.toml"}
+]}'
+if printf '%s' "$sibling_metadata" | "$GUARD" --eval-membership "$FAKE_ROOT" >/dev/null 2>&1; then
+    echo "ok[selftest]: membership check does not confuse a sibling for a child"
+else
+    echo "FAIL[selftest]: 'integration-tests-helpers' was treated as living"
+    echo "  inside 'integration-tests/'. The prefix test needs its trailing slash."
+    failures=1
+fi
+
+# 3d. Empty input finds no violations, and must not crash trying.
+#
+# Emptiness is what a failed `cargo metadata` produces, so the evaluator has to
+# survive it predictably. It reports no violations — which is why the guard
+# treats a metadata failure as a FAIL *before* the evaluator ever sees the
+# output. That ordering is the real defence; this asserts the evaluator does not
+# instead abort under `pipefail` and get misread as a violation.
+if printf '' | "$GUARD" --eval-membership "$FAKE_ROOT" >/dev/null 2>&1; then
+    echo "ok[selftest]: empty metadata is handled without crashing"
+else
+    echo "FAIL[selftest]: the evaluator errored on empty input. A failed"
+    echo "  'cargo metadata' would then be reported as a membership violation,"
+    echo "  or worse, abort the guard mid-run."
+    failures=1
+fi
+
+# 3e. And the real tree must satisfy the check it ships with.
+real_metadata=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null || true)
+if [ -z "$real_metadata" ]; then
+    echo "FAIL[selftest]: could not read real root metadata, so the shipped"
+    echo "  membership check is unverified on this tree."
+    failures=1
+elif printf '%s' "$real_metadata" | "$GUARD" --eval-membership "$ROOT" >/dev/null 2>&1; then
+    echo "ok[selftest]: real root metadata places the carve-out outside the workspace"
+else
+    echo "FAIL[selftest]: cargo resolves integration-tests/ as a member of the"
+    echo "  root workspace. That is the isolation every E2E here depends on."
+    failures=1
+fi
+
+# --- 4. The tree is back as it was ----------------------------------------
 if [ -e "$PLANTED" ]; then
     echo "FAIL[selftest]: the planted file survived cleanup."
     failures=1
 fi
 
 if [ "$failures" -eq 0 ]; then
-    echo "PASS[selftest]: the guard examines files and rejects what it must."
+    echo "PASS[selftest]: the guard examines files, resolves real membership, and"
+    echo "  rejects what it must."
     exit 0
 fi
 
