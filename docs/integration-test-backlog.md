@@ -50,7 +50,7 @@ is a claim that the in-process suites cover it.
 | **SQL / migrations** | `aggregate_type` backfill: clean split, revert, zero-row commit, store refusing to open until complete; aborts proven to run *before* the first `UPDATE` | §1 `aggregate_type_backfill` |
 | **Constraints** | Index shapes read from `pg_index` rather than the `.sql`; complete tenant-partitioned uniqueness pairs with no gap or overlap; the reservation table's AD-1 partial pair; refusal of inconsistent completions and non-positive fencing tokens | §1 `schema_index_assertion`, `reservation_store_postgres` |
 | **Concurrency** | Concurrent appends yielding one winner and only conflicts; unique violation surfacing as a conflict with the real version; six contenders racing one expired lease. Determinism came from polling `pg_locks`, never from sleeping | §1 `stream_identity_uniqueness`, `reservation_store_postgres` |
-| **Fencing** | A takeover whose `UPDATE` waits on a row lock re-checking the lease it read, with the window forced open via `SELECT … FOR UPDATE`; exhaustion at the storable token limit changing nothing | §1 `reservation_store_postgres` — **highest value, see the note there** |
+| **Fencing** | A takeover whose `UPDATE` waits on a row lock re-checking the lease it read, with the window forced open via `SELECT … FOR UPDATE` — **rebuilt**, see the note; exhaustion at the storable token limit changing nothing — still missing | §1 `reservation_store_postgres` — was **highest value** |
 | **Readiness** | `probe()` against a real database: reachable, empty-table, non-mutating, and the down-and-back-up transition | §1 `reservation_store_readiness_postgres` |
 | **Recovery** | Unit-of-work rollback and isolation; recovery of a never-persisted aggregate against both implementations; NULL-tenant streams under SQL three-valued logic | §1 `event_store_uow`, `recovery_of_a_fresh_aggregate`, `systemwide_streams` |
 | **Transport / e2e** | Real socket bind and bounded graceful shutdown; OTLP wire round-trip asserting received ids; CORE-018's real-HTTP end-to-end criterion | §2, §3, §4 |
@@ -224,6 +224,22 @@ scenarios cannot reach:
 exercised by the forced-window test. It was verified by neutralising the guard and
 watching the conformance suite stay green — so a rebuild that drops this test loses
 the only check on the fencing guarantee under contention.
+
+**REBUILT** as `integration-tests/tests/fencing_window_postgres.rs`. The forced
+window is reproduced with `SELECT … FOR UPDATE`, the lease is renewed inside the
+holding transaction while the contender blocks, and the refusal is required.
+Re-measured on the rebuild: neutralising the predicate fails that test and leaves
+the other three tests in the suite green, so the note above still describes the
+situation exactly — it is the only check, and it now exists.
+
+Determinism came from polling `pg_stat_activity` for a backend blocked on a lock,
+not `pg_locks.relation`: a row-lock wait is a `transactionid` lock with a NULL
+`relation`, so the obvious join matches nothing. Worth carrying forward to the
+remaining concurrency items on this list, which the original note describes as
+`pg_locks` polls.
+
+Still missing from this group: six contenders racing one expired lease, and
+exhaustion at the storable token limit.
 
 ### `reservation_store_readiness_postgres.rs` (4 tests)
 
