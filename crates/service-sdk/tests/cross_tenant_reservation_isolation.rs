@@ -46,8 +46,22 @@
 //! with [`ReservationRejection::TenantUnresolved`] before the store is reached.
 //! So the property is stated one step earlier than the disclosure: an operation
 //! with no resolved scope never reserves, and something that never reserves can
-//! never be answered from another scope's row. Restoring the `and_then` — turning
-//! `None` back into the systemwide namespace — puts every test in this file red.
+//! never be answered from another scope's row.
+//!
+//! # What the mutation kills, counted rather than asserted broadly
+//!
+//! Restoring the `and_then` — turning `None` back into the systemwide namespace —
+//! puts the **two cross-scope tests in this file** red on their refusals, plus one
+//! in-crate test (`an_unresolved_scope_is_refused_rather_than_filed_as_systemwide`
+//! in `runtime_builder.rs`) on the scope the store was handed. Three across both
+//! layers; two of them here.
+//!
+//! Deliberately not "every test in this file", which an earlier version of this
+//! note claimed and which is false. The control cases go on passing under that
+//! mutation, and that is the point of having them: what they pin is that the
+//! refusal did not cost the legitimate scopes their reservation or their replay. A
+//! test that failed under both the defect and a fix that simply disabled replay
+//! would not be telling the two apart.
 //!
 //! The store is wrapped in a counter so the refusals are asserted by an
 //! **observed count of `reserve` calls**, not only by the returned error. An
