@@ -9,6 +9,7 @@
 pub mod config;
 pub mod error;
 pub mod idempotency;
+pub mod operation_key;
 pub mod propagation;
 pub mod security;
 pub mod server;
@@ -17,6 +18,7 @@ pub mod state;
 pub use config::GrpcServerConfig;
 pub use error::TransportError;
 pub use idempotency::HeaderCarrier;
+pub use operation_key::OperationKeyExtractor;
 pub use propagation::TraceContextExtractor;
 pub use security::AuthenticatedContext;
 pub use server::serve;

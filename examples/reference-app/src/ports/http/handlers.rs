@@ -8,7 +8,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::ReservationRejection;
-use ego_transport::{AppState, AuthenticatedContext, TraceContextExtractor, TransportError};
+use ego_transport::{
+    AppState, AuthenticatedContext, OperationKeyExtractor, TraceContextExtractor, TransportError,
+};
 use kitlogger_log_domain::Severity;
 
 use crate::application::{
@@ -82,6 +84,12 @@ pub async fn register_handler(
     // starts a fresh root trace. Handlers just declare the extractor; they
     // never hand-repeat the header-reading/origination logic.
     TraceContextExtractor(trace_context): TraceContextExtractor,
+    // PROD-012: the `Idempotency-Key` header is read, validated and admitted or
+    // refused at the boundary, once, under the runtime's own policy — the same
+    // arrangement as the trace context above. A rejection happens here, before
+    // `register` is invoked at all. This handler only carries the result
+    // forward; it re-decides nothing and regenerates nothing.
+    OperationKeyExtractor(operation_key): OperationKeyExtractor,
     Json(input): Json<RegisterInput>,
 ) -> Result<(StatusCode, Json<RegisterOutput>), TransportError> {
     log(
@@ -95,10 +103,17 @@ pub async fn register_handler(
         .resolve::<RegisterUserTag>()
         .map_err(|_| TransportError::Internal)?;
 
-    let ctx = ServiceContext::new()
+    let mut ctx = ServiceContext::new()
         .with_security(Arc::new(security))
         .with_tenant_id(input.tenant_id.clone())
         .with_trace_context(trace_context);
+    // Set only when the boundary resolved one. `None` means this deployment
+    // permits a keyless request, and inventing a key here would manufacture an
+    // identity the caller never supplied — which is the one thing the extraction
+    // contract exists to prevent.
+    if let Some(key) = operation_key {
+        ctx = ctx.with_operation_key(key);
+    }
 
     let user_id = input.user_id.clone();
     match proxy.register(ctx, input).await {

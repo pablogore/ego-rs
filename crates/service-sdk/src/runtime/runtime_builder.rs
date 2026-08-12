@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::runtime::error::RuntimeInfraError;
-use crate::runtime::idempotency::{ReservationConfig, ReservationDecision, ReservationRejection};
+use crate::runtime::idempotency::{
+    IdempotencyEnforcementMode, ReservationConfig, ReservationDecision, ReservationRejection,
+};
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::operation::OperationFingerprint;
@@ -304,6 +306,21 @@ pub struct RuntimeInner {
     /// Built from the [`TenantEnforcementMode`] configured via
     /// `RuntimeBuilder::with_tenant_enforcement_mode` (AD-012).
     tenant_resolver: TenantResolver,
+    /// The idempotency policy this runtime was built under, retained exactly as
+    /// configured.
+    ///
+    /// The builder already validates it — it refuses to build under
+    /// [`IdempotencyEnforcementMode::MandatoryKey`] with no reservation store,
+    /// because a runtime promising every mutating operation carries a key and
+    /// having nowhere to reserve one cannot keep the promise. What it did not do
+    /// was *keep* the value, so nothing downstream could apply the policy the
+    /// build was validated against.
+    ///
+    /// A transport must read it from here. The alternative — configuring the
+    /// same policy again at the HTTP layer — creates two places that can
+    /// disagree about whether keys are mandatory, and the one that decides
+    /// whether a request is rejected would not be the one the builder checked.
+    idempotency_enforcement_mode: IdempotencyEnforcementMode,
     /// The logger constructed by the host and registered via `RuntimeBuilder::with_logger`.
     logger: Option<Arc<KITLogger>>,
     /// The reservation store registered via
@@ -414,6 +431,7 @@ impl RuntimeInner {
         logger: Option<Arc<KITLogger>>,
         teardown: Mutex<TeardownStack>,
         tenant_resolver: TenantResolver,
+        idempotency_enforcement_mode: IdempotencyEnforcementMode,
         reservation: Option<ReservationConfig>,
         observability: Option<Arc<dyn Observability>>,
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
@@ -429,6 +447,7 @@ impl RuntimeInner {
             teardown,
             async_teardown: Mutex::new(Vec::new()),
             tenant_resolver,
+            idempotency_enforcement_mode,
             reservation,
             observability,
             effect_acceptor_impl,
@@ -436,6 +455,18 @@ impl RuntimeInner {
             effect_drain_deadline,
             data_provider_access,
         }
+    }
+
+    /// The idempotency policy this runtime was built and validated under.
+    ///
+    /// A transport reads this to decide what to do with an operation key it did
+    /// or did not receive — but it must read it *only to pass it on*. The policy
+    /// table itself has exactly one owner,
+    /// [`resolve_operation_key`](crate::idempotency::resolve_operation_key);
+    /// matching on this value to re-decide whether a missing key is admissible
+    /// would create the second definition that module exists to prevent.
+    pub fn idempotency_enforcement_mode(&self) -> IdempotencyEnforcementMode {
+        self.idempotency_enforcement_mode
     }
 
     /// Returns the registered logger, if any.
@@ -980,6 +1011,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(mode),
+            IdempotencyEnforcementMode::Compatibility,
             None,
             None,
             None,
@@ -1007,6 +1039,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            IdempotencyEnforcementMode::Compatibility,
             None,
             Some(obs),
             None,
@@ -1039,6 +1072,7 @@ impl RuntimeInner {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            IdempotencyEnforcementMode::Compatibility,
             None,
             None,
             None,
@@ -1954,6 +1988,7 @@ mod tests {
             None,
             Mutex::new(TeardownStack::new()),
             TenantResolver::new(TenantEnforcementMode::AuthenticatedOnly),
+            IdempotencyEnforcementMode::Compatibility,
             None,
             None,
             None,
