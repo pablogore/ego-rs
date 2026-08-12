@@ -294,9 +294,10 @@ dependencies = [
 [[package]]
 name = "console-exporter"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "kitlogger-log-domain",
+ "output-adapter-contracts",
  "thiserror 1.0.69",
 ]
 
@@ -869,6 +870,16 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "file-exporter"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
+dependencies = [
+ "kit-config",
+ "kitlogger-log-domain",
+ "output-adapter-contracts",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1541,12 +1552,18 @@ dependencies = [
 [[package]]
 name = "kitlogger"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "async-trait",
+ "chrono",
  "console-exporter",
+ "file-exporter",
+ "kit-config",
  "kitlogger-formatter",
  "kitlogger-log-domain",
+ "kitlogger-redaction",
+ "kitlogger-sampling",
+ "output-adapter-contracts",
  "telemetry-adapter-contracts",
  "telemetry-config-semantics",
  "telemetry-types",
@@ -1555,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "kitlogger-formatter"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "kitlogger-log-domain",
  "serde_json",
@@ -1565,7 +1582,32 @@ dependencies = [
 [[package]]
 name = "kitlogger-log-domain"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kitlogger-redaction"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
+dependencies = [
+ "kit-config",
+ "kitlogger-log-domain",
+]
+
+[[package]]
+name = "kitlogger-sampling"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
+dependencies = [
+ "chrono",
+ "fastrand",
+ "kit-config",
+ "kitlogger-log-domain",
+]
 
 [[package]]
 name = "lazy_static"
@@ -1925,6 +1967,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "output-adapter-contracts"
+version = "0.1.0"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
+dependencies = [
+ "kitlogger-log-domain",
 ]
 
 [[package]]
@@ -3199,7 +3249,7 @@ checksum = "591ef38edfb78ca4771ee32cf494cb8771944bee237a9b91fc9c1424ac4b777b"
 [[package]]
 name = "telemetry-adapter-contracts"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "async-trait",
  "serde",
@@ -3209,7 +3259,7 @@ dependencies = [
 [[package]]
 name = "telemetry-config-semantics"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "serde",
 ]
@@ -3217,7 +3267,7 @@ dependencies = [
 [[package]]
 name = "telemetry-types"
 version = "0.1.0"
-source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#bfb30ae45e255deba6417268eebf0f84a7240cbb"
+source = "git+https://github.com/pablogore/kitlogger.git?branch=develop#92f04014ec5873c93b6d7b46adc93c65502b4486"
 dependencies = [
  "serde",
 ]
