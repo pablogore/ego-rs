@@ -18,9 +18,21 @@
 //!
 //! **The marker itself is read from the generated contract**, not from source.
 //! `ServiceContract::operations()` reports what the macro actually produced, so
-//! `descriptor.idempotent` is the real answer to "is this operation governed by a
-//! reservation". A grep for the attribute would pass on an attribute that failed to
-//! expand.
+//! `descriptor.idempotent` answers "did the generator consume the marker and
+//! publish it". A grep for the attribute would pass on one that failed to expand.
+//!
+//! It does **not** answer "is this operation governed by a reservation". Those are
+//! different questions, and the difference is not theoretical: a marker can be
+//! recognised, reach the descriptor, and still dispatch through a reservation slot
+//! that does nothing — that exact state existed in this codebase before the slot
+//! was filled. Governance is established by the behavioural tests over the real
+//! HTTP path, which observe one execution, one recorded completion, and a replay
+//! tied to stored bytes.
+//!
+//! So what this file guards is the *declaration*: that every operation somebody
+//! judged to be mutating carries the marker the dispatch relies on. If the marker
+//! is present and the dispatch is inert, this test passes and the behavioural ones
+//! fail — which is the correct division of labour, not a gap.
 //!
 //! **Operation-level completeness is also a fact.** The inventory is compared to the
 //! contract in both directions, so adding an operation to an existing trait fails
@@ -61,7 +73,13 @@ enum Effect {
     /// the marker — is the one that keeps the classification honest instead of
     /// letting `Mutating` become a rubber stamp. Deleting it would mean the next
     /// read-only operation has nowhere to be recorded.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "no read-only operation is published yet; `expect` rather than \
+                  `allow` so the compiler retires this suppression itself the \
+                  moment the first one is classified, instead of leaving a stale \
+                  exemption nobody revisits"
+    )]
     ReadOnly,
 }
 
