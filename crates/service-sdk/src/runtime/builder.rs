@@ -814,6 +814,11 @@ impl RuntimeBuilder {
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
+                // Exactly the value this build was validated against — see the
+                // check above, which refuses MandatoryKey with no store. Passing
+                // it on rather than dropping it is what lets a transport apply
+                // the same policy instead of choosing its own.
+                self.idempotency_enforcement_mode,
                 reservation,
                 self.observability,
                 effect_acceptor_impl,
@@ -985,6 +990,16 @@ impl Runtime {
     /// Returns the registered security providers, if any.
     pub fn security_providers(&self) -> Option<&SecurityProviders> {
         self.inner.security_providers.as_ref()
+    }
+
+    /// The idempotency policy this runtime was built and validated under.
+    ///
+    /// Exposed so a transport can apply the same policy the build was checked
+    /// against, rather than carrying a second copy of the configuration that
+    /// could drift from it. Read it to *pass it on* — the policy table has one
+    /// owner, `resolve_operation_key`.
+    pub fn idempotency_enforcement_mode(&self) -> IdempotencyEnforcementMode {
+        self.inner.idempotency_enforcement_mode()
     }
 
     /// Returns the registered logger, if any.
@@ -1237,6 +1252,13 @@ impl RuntimeResolver {
         Tag: Resolvable + 'static,
     {
         self.runtime.resolve::<Tag>()
+    }
+
+    /// The idempotency policy this runtime was built under — identical to
+    /// [`Runtime::idempotency_enforcement_mode`]. This is the accessor the HTTP
+    /// operation-key extractor reads.
+    pub fn idempotency_enforcement_mode(&self) -> IdempotencyEnforcementMode {
+        self.runtime.idempotency_enforcement_mode()
     }
 
     /// Returns the registered logger, if any — identical to [`Runtime::logger`].

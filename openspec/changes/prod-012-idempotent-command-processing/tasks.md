@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 83 complete and 33 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 85 complete and 31 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -562,8 +562,68 @@ unchanged, which is the point of stopping here.
       response is neither `StoreUnavailable` (the store answered correctly) nor
       `FingerprintConflict` (the request is the one that succeeded). Permanent
       for the caller, recoverable by an operator.
-- [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
-- [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
+- [x] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
+      **A prerequisite neither box named, found while wiring it.** The builder
+      validated `IdempotencyEnforcementMode` at startup — refusing `MandatoryKey`
+      with no reservation store — and then **discarded the value**. Nothing
+      downstream could read the policy the build had been checked against, so a
+      transport had no way to apply it. Retaining it on `RuntimeInner` is not
+      accidental scope: it is the minimum state required for the boundary to
+      enforce the same policy the runtime promised, rather than a second copy of
+      the configuration that could drift from it.
+      **The policy table keeps its single owner.** The extractor reads the mode
+      and passes it to `resolve_operation_key`; it never matches on it. A
+      `MandatoryKey`/`Compatibility` match inside the transport would be a second
+      definition of the rule, and the copy deciding whether a real request is
+      rejected would not be the one the builder validated.
+      **Correction to a stated criterion:** the default is **`MandatoryKey`**,
+      not `Compatibility` — fail-closed, so a caller who never considered
+      idempotency does not silently get none. A bare `RuntimeBuilder::new()`
+      cannot even `build()`: the validation refuses it for having nowhere to
+      reserve. Pinned in `the_runtime_reports_the_mode_it_was_built_under`.
+- [x] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
+      **Done.** `OperationKeyExtractor` (`crates/transport/src/operation_key.rs`)
+      joins the three pieces that already existed and were never connected: the
+      header carrier, the shared policy table, and the runtime's retained mode.
+      Shaped after `TraceContextExtractor` — boundary work done once, handlers
+      declare it — except that its rejection cannot be `Infallible`, since a
+      missing key under an enforcing runtime must stop the request before the
+      operation. Every rejection maps to `400`: the request is unusable, and
+      `401`/`403` would send a caller looking for a fix in identity or
+      permission, where nothing failed.
+      The handler only transfers the result, and only when there is one — a
+      `None` stays `None`, because inventing a key would manufacture an identity
+      the caller never supplied.
+      **Both mutations bite.** Hardcoding `Compatibility` in the extractor
+      instead of reading the runtime kills the mandatory-key test; dropping
+      `.with_operation_key(..)` in the handler kills the carriage test.
+      The second one is the reason a second test file exists: the extractor's own
+      tests all still pass under that mutation, because the extractor is not what
+      broke. Only an assertion on what the **service received** — the real router
+      driven end to end against a recording `RegisterUser` — can tell a working
+      transfer from a dropped one.
+      **The same separation applies to the mode, and had to be closed too.**
+      Review found the central claim — a missing key under `MandatoryKey` is
+      refused before the operation runs — proven only by calling
+      `from_request_parts` directly. That establishes the extractor's policy, not
+      the router's behaviour, and says nothing about whether the operation ran.
+      The router-level file is now parameterised by mode and covers it with three
+      observations, because a status code alone cannot distinguish "refused
+      before dispatch" from "refused after running": **400**, the service
+      recorder still `None`, and **zero** reservations — a refusal at the
+      boundary leaves no lease behind for a legitimate retry to contend with.
+      Its control uses the same enforcing runtime and the same store with a key
+      present, so the refusal is attributable to the missing header rather than
+      to an enforcing runtime rejecting everything. That control also observes
+      one `reserve` **and one `complete`**, which is B6.8's epilogue running
+      through the HTTP path: the header a client sent reaching the reservation,
+      the operation, and the completion that makes the next identical request
+      replayable.
+      Hardcoding `Compatibility` in the extractor now fails at the **router**
+      level, so one mutation demonstrates the whole chain rather than an isolated
+      component.
+      Verified: fmt, integration guard, `clippy -D warnings` and
+      `cargo test --workspace --no-fail-fast` all 0 — 117 targets, 1618 tests.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
 - [x] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
       **Done.** The epilogue is one call to a public runtime method, same shape
