@@ -144,15 +144,11 @@ impl ReservationConfig {
 
     /// The durable reservation store.
     ///
-    /// Read by the builder's own tests, which assert what `build()` wired.
-    /// [`ReservationConfig::reserve`] reads the field directly, so nothing in a
-    /// release build goes through here — and it stays `expect` rather than
-    /// `allow` so the day a production caller appears, the attribute becomes an
-    /// error instead of a stale note.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "asserted by the builder's wiring tests")
-    )]
+    /// Read by the builder's tests, which assert what `build()` wired, and by
+    /// [`RuntimeInner::complete_idempotent_operation`](crate::runtime::RuntimeInner::complete_idempotent_operation),
+    /// which is the production caller the `expect(dead_code)` this used to carry
+    /// was waiting for. The attribute was `expect` rather than `allow` precisely
+    /// so its removal would be forced rather than remembered.
     pub(crate) fn store(&self) -> &Arc<dyn OperationReservationStore> {
         &self.store
     }
@@ -205,10 +201,9 @@ pub struct ReservationPermit {
 impl ReservationPermit {
     /// The fence a later `complete` must present. Conditional on it, so a lease
     /// taken over in the meantime cannot have its result overwritten.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the slot-3 epilogue, B6.8")
-    )]
+    ///
+    /// The epilogue this was reserved for now exists: see
+    /// [`RuntimeInner::complete_idempotent_operation`](crate::runtime::RuntimeInner::complete_idempotent_operation).
     pub(crate) fn fence(&self) -> &OwnerFence {
         &self.fence
     }

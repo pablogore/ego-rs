@@ -136,6 +136,10 @@ struct CountingBilling {
     charge_calls: Arc<AtomicUsize>,
     settle_calls: Arc<AtomicUsize>,
     observed: Arc<Mutex<ObservedIdentity>>,
+    /// When set, `settle` runs and then fails. The body having *run* is the
+    /// point: the epilogue must distinguish "the operation produced an answer"
+    /// from "the operation was reached", and only the first may be recorded.
+    settle_fails: bool,
 }
 
 impl CountingBilling {
@@ -168,6 +172,9 @@ impl BillingService for CountingBilling {
     ) -> Result<ChargeReceipt, BillingError> {
         self.observe(&ctx);
         self.settle_calls.fetch_add(1, Ordering::Relaxed);
+        if self.settle_fails {
+            return Err(BillingError::Security("settlement declined".to_string()));
+        }
         Ok(ChargeReceipt {
             confirmation: format!("settled:{}", request.reference),
         })
@@ -193,6 +200,12 @@ impl Clock for FrozenClock {
 struct SpyStore {
     script: Mutex<Vec<Result<ReservationOutcome, ReservationError>>>,
     seen: Mutex<Vec<ReserveRequest>>,
+    /// Every `complete` this store was asked to perform, with the fence it was
+    /// asked to perform it under. The epilogue's only observable effect, so
+    /// every assertion about it reads this.
+    completed: Mutex<Vec<(OwnerFence, StoredServiceResponse)>>,
+    /// What `complete` answers. `Ok(())` unless a test is about the failure.
+    complete_answer: Mutex<Result<(), ReservationError>>,
 }
 
 impl SpyStore {
@@ -201,7 +214,30 @@ impl SpyStore {
             // Popped from the back, so the script reads in call order.
             script: Mutex::new(answers.into_iter().rev().collect()),
             seen: Mutex::new(Vec::new()),
+            completed: Mutex::new(Vec::new()),
+            complete_answer: Mutex::new(Ok(())),
         })
+    }
+
+    /// Makes `complete` fail. The operation has already succeeded by the time
+    /// the epilogue runs, so this is about what the *caller* sees, not about
+    /// whether the work happened.
+    fn completing_with(self: Arc<Self>, answer: ReservationError) -> Arc<Self> {
+        *self.complete_answer.lock().expect("not poisoned") = Err(answer);
+        self
+    }
+
+    fn complete_calls(&self) -> usize {
+        self.completed.lock().expect("not poisoned").len()
+    }
+
+    fn first_completion(&self) -> (OwnerFence, StoredServiceResponse) {
+        self.completed
+            .lock()
+            .expect("not poisoned")
+            .first()
+            .cloned()
+            .expect("the operation completed at least once")
     }
 
     fn reserve_calls(&self) -> usize {
@@ -229,17 +265,21 @@ impl OperationReservationStore for SpyStore {
             .expect("the script covers every reserve this test makes")
     }
     async fn renew(&self, _f: &OwnerFence, _u: DateTime<Utc>) -> Result<(), ReservationError> {
-        panic!("slot 3 only reserves; completion lands in B6.8");
+        panic!("nothing renews a lease yet");
     }
     async fn complete(
         &self,
-        _f: &OwnerFence,
-        _r: StoredServiceResponse,
+        f: &OwnerFence,
+        r: StoredServiceResponse,
     ) -> Result<(), ReservationError> {
-        panic!("slot 3 only reserves; completion lands in B6.8");
+        self.completed
+            .lock()
+            .expect("not poisoned")
+            .push((f.clone(), r));
+        self.complete_answer.lock().expect("not poisoned").clone()
     }
     async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
-        panic!("slot 3 only reserves; completion lands in B6.8");
+        panic!("a failed operation leaves its lease to expire rather than abandoning it");
     }
     async fn purge_completed_before(
         &self,
@@ -324,6 +364,24 @@ fn proxy(
     Arc<AtomicUsize>,
     Arc<Mutex<ObservedIdentity>>,
 ) {
+    proxy_inner(rt, false)
+}
+
+/// Same fixture, with a `settle` that runs and then fails.
+fn failing_proxy(rt: &Runtime) -> (BillingServiceRef, Arc<AtomicUsize>) {
+    let (proxy, _, settle_calls, _) = proxy_inner(rt, true);
+    (proxy, settle_calls)
+}
+
+fn proxy_inner(
+    rt: &Runtime,
+    settle_fails: bool,
+) -> (
+    BillingServiceRef,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<Mutex<ObservedIdentity>>,
+) {
     let charge_calls = Arc::new(AtomicUsize::new(0));
     let settle_calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(Mutex::new(ObservedIdentity::default()));
@@ -331,6 +389,7 @@ fn proxy(
         charge_calls: charge_calls.clone(),
         settle_calls: settle_calls.clone(),
         observed: observed.clone(),
+        settle_fails,
     });
     let proxy = BillingServiceRef::new(
         inner,
@@ -883,4 +942,171 @@ fn the_fingerprint_is_bounded_regardless_of_payload_size() {
         64,
         "a SHA-256 digest rendered as hex, independent of the input's size"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The epilogue — what a completed operation records, and what it does not
+// ---------------------------------------------------------------------------
+
+/// The point of the epilogue: an operation that produced an answer records it,
+/// so the next identical arrival replays instead of running. Asserted through
+/// the store rather than through the return value, because a `complete` that
+/// never happened is invisible from the caller's side — by design.
+#[tokio::test]
+async fn a_completed_operation_records_its_response_under_the_permits_fence() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
+
+    let out = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("a fresh reservation proceeds");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        store.complete_calls(),
+        1,
+        "recorded once, not per aggregate"
+    );
+
+    let (fence, stored) = store.first_completion();
+    // The fence is what makes the write conditional: a lease taken over in the
+    // meantime must not have its result overwritten by the owner it replaced.
+    let lease = fresh_lease();
+    assert_eq!(fence.owner_id, lease.owner_id);
+    assert_eq!(fence.fencing_token, lease.fencing_token);
+    assert_eq!(fence.operation_id, lease.operation_id);
+
+    // Round-tripped through the same codec the replay path reads with. Asserting
+    // the bytes would pin a format; asserting the round-trip pins the contract
+    // that actually matters — that a later replay reconstructs this answer.
+    let decoded: ChargeReceipt =
+        ego_service_sdk::runtime::decode_stored_response(&stored).expect("decodes");
+    assert_eq!(decoded, out);
+}
+
+/// A failed operation has no answer to record, and recording one would tell the
+/// next identical arrival that the work is done. The lease is left to expire
+/// instead, so a retry can take it over — which is why `abandon` panics in this
+/// file's store rather than being expected.
+#[tokio::test]
+async fn a_failed_operation_records_nothing() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, settle_calls) = failing_proxy(&rt);
+
+    let result = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await;
+
+    assert!(result.is_err(), "the handler failed");
+    assert_eq!(
+        settle_calls.load(Ordering::Relaxed),
+        1,
+        "the body ran — which is exactly why 'reached' must not be confused with \
+         'produced an answer'"
+    );
+    assert_eq!(store.complete_calls(), 0);
+}
+
+/// A replay produced no new response; it returned one that was already stored.
+/// Recording again would overwrite a durable answer with a copy of itself, under
+/// a fence this dispatch never held.
+#[tokio::test]
+async fn a_replay_records_nothing() {
+    let stored = ego_service_sdk::runtime::encode_stored_response(&ChargeReceipt {
+        confirmation: "settled-on-the-first-attempt".to_string(),
+    })
+    .expect("encodes");
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Succeeded(stored))]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, _, _observed) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("a completed reservation replays");
+
+    assert_eq!(store.complete_calls(), 0);
+}
+
+/// Every refusal stops dispatch, so there is no answer to record either.
+#[tokio::test]
+async fn a_refused_operation_records_nothing() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::OtherInProgress)]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, _, _observed) = proxy(&rt);
+
+    let result = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(store.complete_calls(), 0);
+}
+
+/// A dispatch that never reserved has no fence to present, so there is nothing
+/// to complete under — and inventing one would record an answer for an operation
+/// nothing authorised.
+#[tokio::test]
+async fn a_dispatch_that_did_not_reserve_records_nothing() {
+    let store = SpyStore::scripted(vec![]);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new(), request())
+        .await
+        .expect("no key, no reservation");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.reserve_calls(), 0);
+    assert_eq!(store.complete_calls(), 0);
+}
+
+/// **A failed completion must not fail an operation that succeeded.** By the
+/// time the epilogue runs, the handler returned `Ok` and every aggregate
+/// committed. Reporting an error now would describe successful work as a
+/// failure and invite a retry of something that must not run twice.
+///
+/// What is lost is the replay shortcut, not the guarantee: a later identical
+/// request re-reserves and re-enters the body, where each aggregate's receipt
+/// answers for the step it already did.
+#[tokio::test]
+async fn a_stale_completion_does_not_fail_the_operation() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))])
+        .completing_with(ReservationError::StaleOwner);
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, _, _observed) = proxy(&rt);
+
+    let out = proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect(
+            "another owner completed this operation first; ours is discarded, but \
+             the work this call did still happened and its answer is still true",
+        );
+
+    assert_eq!(out.confirmation, "settled:ref-1");
+    assert_eq!(store.complete_calls(), 1, "it was attempted");
+}
+
+/// Same rule for the store simply being unreachable. Distinguished from the
+/// stale case only in what an operator should do about it, never in what the
+/// caller sees.
+#[tokio::test]
+async fn an_unreachable_store_does_not_fail_a_completed_operation() {
+    let store = SpyStore::scripted(vec![Ok(ReservationOutcome::Fresh(fresh_lease()))])
+        .completing_with(ReservationError::Backend("down".to_string()));
+    let rt = runtime_with(store.clone(), None);
+    let (proxy, _, settle_calls, _observed) = proxy(&rt);
+
+    proxy
+        .settle(ServiceContext::new().with_operation_key(key()), request())
+        .await
+        .expect("the operation succeeded; only its bookkeeping did not");
+
+    assert_eq!(settle_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.complete_calls(), 1);
 }

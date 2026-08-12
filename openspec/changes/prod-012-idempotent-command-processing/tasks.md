@@ -4,7 +4,7 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 82 complete and 34 pending. Complete: B0.1–B0.3 (merged as
+> **116 tasks total** — 83 complete and 33 pending. Complete: B0.1–B0.3 (merged as
 > `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
 > B1.1–B1.10, B2.1–B2.9.
 >
@@ -565,7 +565,84 @@ unchanged, which is the point of stopping here.
 - [ ] B6.5 RED: HTTP-level test (`crates/transport`) — missing/invalid `Idempotency-Key` rejected before the guarded operation runs; valid key surfaces identically on `ServiceContext` (http-transport spec scenarios).
 - [ ] B6.6 GREEN: wire the HTTP carrier + `resolve_operation_key` at the axum layer ahead of the guarded operation.
 - [ ] B6.7 RED: replay vs. conflict HTTP response test — same key/same fingerprint returns the original stored response unexecuted; same key/different fingerprint returns a distinguishable permanent-conflict response (http-transport spec scenarios).
-- [ ] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
+- [x] B6.8 GREEN: implement the slot-3 epilogue — `store.complete(op_id, owner, fencing_token, response)` as a conditional update; stale completion discards the response and does not overwrite state.
+      **Done.** The epilogue is one call to a public runtime method, same shape
+      as the reservation itself (AD-3g): `RuntimeInner::complete_idempotent_operation`
+      encodes through the AD-3k codec — the same one the replay path reads with,
+      asserted by round-trip rather than by pinning bytes — and completes under
+      the fence the permit carries. It runs only on `Ok`: a failed operation has
+      no answer to record, and recording one would tell the next identical
+      arrival the work is done. Its lease is left to expire so a retry can take
+      it over, which is why the test store still panics on `abandon`.
+      **A failed completion does not fail an operation that succeeded.** By the
+      time the epilogue runs the handler returned `Ok` and every aggregate
+      committed, so reporting an error would describe successful work as a
+      failure and invite a retry of something that must not run twice.
+      **What that costs, stated precisely** — not "the retry just re-runs the
+      body", because the reservation stays open and there is a window:
+      the durable work stays successful; the immediate replay is lost, since the
+      reservation never reached `Succeeded`; **while the lease is still valid,
+      retries are refused as in progress** (`SelfInProgress`/`OtherInProgress`,
+      AD-3h) and do not reach the body, which is a real unavailability window as
+      long as the configured lease; once it expires a retry takes ownership
+      (`TakenOver`) and does reach the body; and the per-aggregate receipts then
+      stop each already-confirmed durable step from happening twice.
+      **Scope.** That last step protects what the receipt protocol covers —
+      durable aggregate writes and effects made idempotent through it. It says
+      nothing about an arbitrary external side effect performed outside that
+      protocol, and nothing here makes such an effect safe to repeat.
+      Because the loss is invisible to the caller by design, it is emitted as an
+      `idempotency.completion_lost` semantic event through the same
+      `Observability` sink and panic isolation as `record_security_denial`. Each
+      carries a `reason` and an `action`, because the three call for different
+      responses and an operator should not have to infer that from the tag. What
+      travels is the action, deliberately **not** a claim about whether the
+      failure would recur — that is not something this code can establish.
+      `store_unavailable` → `monitor_rate`: the ordinary contingency, where one
+      occurrence is noise and a rate is a problem.
+      `stale_owner` → `review_lease_duration`: this response was discarded
+      because the caller no longer held a current fence. That is all the contract
+      guarantees. It does **not** say another owner completed the operation —
+      another owner may have taken over and still be running, or already
+      completed, or the lease may simply have expired with no takeover at all,
+      and what the reservation looks like now is not knowable from this error.
+      Worth acting on regardless, because every path here means the lease elapsed
+      before the work did. The lease window described above also does not apply
+      as written to this case: the reservation is not necessarily still open
+      under this owner.
+      `not_encodable` → `investigate`: this *value* failed to serialise.
+      `T: Serialize` is satisfied at compile time, so this is not "the type
+      cannot be serialised" — a hand-written `Serialize` may fail on one value
+      and succeed on the next. It is a judgement that waiting is not a justified
+      recovery strategy — the failure requires investigation — not a proof that
+      the failure recurs. Until someone looks, that operation does not reach
+      `Succeeded`.
+      **Where the chain is proven.** Each link lives in the layer that owns it:
+      a failed completion leaving the handler's `Ok` intact, in this unit's
+      `a_stale_completion_does_not_fail_the_operation` and
+      `an_unreachable_store_does_not_fail_a_completed_operation`; mid-lease
+      refusal and post-expiry takeover, in the shared
+      `assert_reservation_store_conformance` suite every store implementation
+      runs; in-progress stopping dispatch, in
+      `every_refusal_stops_dispatch_and_arrives_as_itself`; and a `TakenOver`
+      retry not repeating an already-receipted step, in
+      `register_user_multi_aggregate_recovery`.
+      **The two `expect(dead_code)` annotations this was waiting for are gone.**
+      `ReservationPermit::fence()` and `ReservationConfig::store()` now have
+      production callers, and because they were `expect` rather than `allow`,
+      `unfulfilled_lint_expectations` forced their removal rather than leaving
+      them as stale notes.
+      Seven behavioural tests, each an observed count on the store: a completed
+      operation records once under the permit's fence and round-trips; a failed
+      one records nothing though its body ran; replay, refusal and an unreserved
+      dispatch record nothing; and neither `StaleOwner` nor an unreachable store
+      turns a succeeded operation into a failure.
+      **Mutation.** Emptying the epilogue kills the three tests that assert a
+      completion happened. The four "records nothing" tests survive by design —
+      they are negative controls and cannot detect an absent epilogue, which is
+      why they are not the evidence.
+      Verified: fmt, integration guard, `clippy -D warnings` and
+      `cargo test --workspace --no-fail-fast` all 0 — 115 targets, 1607 tests.
 - [ ] B6.9 RED: `examples/reference-app/tests/e2e_register.rs` — retried `POST /register` with the identical `Idempotency-Key` and payload produces exactly one `UserRegistered` and one welcome-email effect (reference-service spec — **closes the `UserEntity` bug end to end**, distinct from and layered on top of B0's defensive fix).
 - [ ] B6.10 GREEN: mark `RegisterUserImpl`'s handler(s) with `#[idempotent]`; verify B6.9 passes.
 - [ ] B6.11 RED: reference-app test enumerating every mutating operation and asserting each carries the `#[idempotent]` marker (design.md Risks — mitigates the marker-completeness residual gap).
