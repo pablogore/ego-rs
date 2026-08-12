@@ -287,8 +287,11 @@ impl OperationReservationStore for PostgresOperationReservationStore {
             // `integration-tests/tests/fencing_window_postgres.rs` forces the window
             // open with `SELECT … FOR UPDATE`, renews the lease while the takeover
             // blocks, and requires the refusal. Neutralising this predicate makes
-            // that test report a takeover of the renewed lease — measured, and with
-            // the rest of that suite staying green, so it is the only check.
+            // that test report a takeover of the renewed lease. Measured when it was
+            // written, with every other test in that suite green at the time — so it
+            // was then the only check. Stated as the observation it is rather than as
+            // a standing fact, which would quietly stop being true if something else
+            // later covered the same predicate.
             //
             // An earlier version of this comment said the predicate was unguarded
             // because the original test had been moved out of the workspace. That was

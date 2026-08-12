@@ -54,10 +54,15 @@ That exception has been used exactly once, and it is classified separately rathe
 than counted as a fifth end-to-end scenario:
 
 ```
-End-to-end scenarios ................. 4 / 4
+End-to-end scenarios ................. 3 / 4
 PostgreSQL concurrency invariants .... 1 / 1
-Total infrastructure tests ........... 5
+Total infrastructure tests ........... 4
 ```
+
+The counts describe the tests that exist, not the ones planned. The first version
+of this block read `4 / 4` and `Total 5` while scenario 4 was still unwritten —
+a ledger that runs ahead of the tree is worse than none, because it retires the
+question it exists to keep open.
 
 The concurrency invariant is `tests/fencing_window_postgres.rs`, and it is
 deliberately **store-level** rather than end-to-end: the evidence it needs is
@@ -111,7 +116,9 @@ Why it was admitted, with the evidence: `reservation.rs` stated in its own comme
 that this predicate was "currently unguarded by any test here", and this document's
 own rebuild note called it the highest-value missing guarantee, recording that
 neutralising the predicate left the conformance suite green. Re-measured on the
-rebuild — neutralising it now fails this test and leaves the other three green.
+rebuild — neutralising it now fails this test while `replay_from_postgres`,
+`conflict_from_postgres` and `takeover_fencing_postgres` all stay green. Named
+rather than counted, so the claim does not silently go stale when scenario 4 lands.
 
 Row 2's justification took two corrections, both found by checking it rather than
 trusting it:

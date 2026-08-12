@@ -40,8 +40,10 @@
 //!   conformance suite green.
 //!
 //! Re-measured here rather than inherited: neutralising the predicate fails this
-//! test and leaves the suite's other three tests green, so it really is the only
-//! check on the guarantee.
+//! test while `replay_from_postgres`, `conflict_from_postgres` and
+//! `takeover_fencing_postgres` all stay green, so it really is the only check on
+//! the guarantee. Named rather than counted, because a count goes stale the moment
+//! another test lands and would then read as a claim nobody re-measured.
 //!
 //! The four end-to-end scenarios do not close it, and that was traced rather than
 //! assumed: two replicas racing a *fresh* key never reach this code. The winner
@@ -227,11 +229,18 @@ async fn a_takeover_waiting_on_the_row_lock_rechecks_the_lease_it_finds_not_the_
     assert_eq!(locked.0, "owner-a", "the lock is held over A's reservation");
 
     // --- The contender starts, reads an expired lease, and blocks ------------
+    // Its requested lease is derived from `t0`, on the same axis as the clock the
+    // store reads. An earlier version used `Utc::now() + 60s`, which put the
+    // contender's request on the wall clock while every decision about it was made
+    // against `TestClock` — two axes in a test whose whole premise is one
+    // controlled one. It changed no assertion here, because a refused takeover
+    // never writes this value, but the relationship between it and the store's
+    // frozen `now` drifted with however long the test happened to take.
     let contender = tokio::spawn({
         let store = PostgresOperationReservationStore::new(store_pool.clone(), clock.clone());
         async move {
             store
-                .reserve(request("owner-b", Utc::now() + Duration::seconds(60)))
+                .reserve(request("owner-b", t0 + Duration::seconds(91)))
                 .await
         }
     });

@@ -228,9 +228,12 @@ the only check on the fencing guarantee under contention.
 **REBUILT** as `integration-tests/tests/fencing_window_postgres.rs`. The forced
 window is reproduced with `SELECT … FOR UPDATE`, the lease is renewed inside the
 holding transaction while the contender blocks, and the refusal is required.
-Re-measured on the rebuild: neutralising the predicate fails that test and leaves
-the other three tests in the suite green, so the note above still describes the
-situation exactly — it is the only check, and it now exists.
+Re-measured on the rebuild: neutralising the predicate fails that test while
+`replay_from_postgres`, `conflict_from_postgres` and `takeover_fencing_postgres`
+all stay green. So the note above still describes the situation exactly — it is the
+only check, and it now exists. The other tests are named rather than counted: a
+count would read as a re-measured claim the moment another test lands, when in fact
+nobody had re-run it.
 
 Determinism came from polling `pg_stat_activity` for a backend blocked on a lock,
 not `pg_locks.relation`: a row-lock wait is a `transactionid` lock with a NULL
