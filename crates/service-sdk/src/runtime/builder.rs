@@ -855,6 +855,13 @@ impl RuntimeBuilder {
                 effect_acceptor_impl,
                 self.effect_drain_deadline,
                 data_provider_access,
+                // The same `Arc` the `TracingInterceptor` above was built from,
+                // cloned rather than re-registered. The interceptor owns the
+                // request-boundary span; `RuntimeInner` needs the tracer for the
+                // idempotency spans (AD-10), which belong to the reservation path
+                // and have no interceptor to hang off. Two readers of one
+                // registration, never two registrations.
+                self.tracer,
             )),
         };
 

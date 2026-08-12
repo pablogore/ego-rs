@@ -26,8 +26,9 @@ use crate::runtime::idempotency::{
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::operation::OperationFingerprint;
+use ego_domain::operation::OperationKeyHash;
 use ego_domain::operation::ReservationError;
-use ego_domain::{Observability, SemanticEvent};
+use ego_domain::{Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{
@@ -393,6 +394,20 @@ pub struct RuntimeInner {
     /// `RuntimeDataProviderAccess` never spawns a task, so it is fully usable
     /// the moment `build()` returns.
     pub(crate) data_provider_access: Option<Arc<dyn DataProviderAccess>>,
+    /// The `Tracer` registered via `RuntimeBuilder::with_tracer`, **retained**
+    /// rather than only consumed at `build()` time.
+    ///
+    /// It used to be consumed solely to construct a `TracingInterceptor` and then
+    /// dropped, which meant nothing outside the interceptor chain could open a
+    /// span — including this type's own idempotency instrumentation (AD-10),
+    /// whose spans belong to the reservation path rather than to a request
+    /// boundary. Keeping it here is what makes those emittable at all.
+    ///
+    /// `None` means no tracer was registered, and every span site is then a
+    /// no-op. That mirrors `TracingInterceptor`'s own behaviour when a request
+    /// carries no `TraceContext`: no silent `NoopTracer` standing in, and nothing
+    /// running for nothing.
+    tracer: Option<Arc<dyn Tracer>>,
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -439,6 +454,7 @@ impl RuntimeInner {
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
         data_provider_access: Option<Arc<dyn DataProviderAccess>>,
+        tracer: Option<Arc<dyn Tracer>>,
     ) -> Self {
         Self {
             registry,
@@ -457,6 +473,7 @@ impl RuntimeInner {
             retention_started: AtomicBool::new(false),
             effect_drain_deadline,
             data_provider_access,
+            tracer,
         }
     }
 
@@ -797,7 +814,65 @@ impl RuntimeInner {
             Some(resolved) => resolved.tenant_id().cloned(),
         };
 
-        let decision = config.reserve(tenant, key, fingerprint.clone()).await?;
+        // AD-10's `idempotency.reserve` span, opened around the durable write and
+        // nothing else.
+        //
+        // Opened here rather than at the top of the method, deliberately: the span
+        // reports a reserve *attempt*, and the two early exits above — no store or
+        // no key, and an unresolved scope — never attempt one. A span covering
+        // those would report a durable write that did not happen, with a duration
+        // that means nothing.
+        //
+        // A child `TraceContext`, so this span has its own `SpanId`. The adapter's
+        // table is keyed on that id and ignores a duplicate start for a live one,
+        // so reusing the request's id would silently drop either this span or the
+        // interceptor's. This is the first production caller of
+        // `TraceContext::child()`, which existed as a seam for exactly this.
+        //
+        // No tracer registered, or no `TraceContext` on the request, means no span
+        // — the same rule `TracingInterceptor` follows for a request that
+        // originated no trace. Minting a root here instead would attach orphans to
+        // no trace, on the hot path of every keyed operation.
+        let span =
+            self.tracer
+                .as_ref()
+                .zip(ctx.trace_context().copied())
+                .map(|(tracer, parent)| {
+                    let child = parent.child();
+                    tracer.start_span(
+                        &child,
+                        "idempotency.reserve",
+                        // The key is about to be moved into `reserve`, so the token is
+                        // derived first. `OperationKeyHash::of` is the only way to build
+                        // one, so the raw key cannot be what lands here.
+                        SpanAttributes::new().with_operation_key_hash(OperationKeyHash::of(&key)),
+                    );
+                    (tracer, child.span_id())
+                });
+
+        let outcome = config.reserve(tenant, key, fingerprint.clone()).await;
+
+        if let Some((tracer, span_id)) = span {
+            // A refusal on the merits is not a failed span. `Conflict`,
+            // `OtherInProgress` and the rest are answers the store gave, and the
+            // attempt they answer completed exactly as designed — recording them as
+            // errors would make a correctly-refused duplicate look like an outage
+            // on every dashboard that counts span errors. Only the case where the
+            // store could not answer at all is a failure of this attempt.
+            //
+            // The message is a fixed string. `SpanOutcome::Error`'s own contract
+            // requires a redaction-safe one, and the rejection carries nothing
+            // worth forwarding anyway.
+            let ended = match &outcome {
+                Err(ReservationRejection::StoreUnavailable) => SpanOutcome::Error {
+                    status_message: "the reservation store could not answer".to_string(),
+                },
+                _ => SpanOutcome::Ok,
+            };
+            tracer.end_span(span_id, ended);
+        }
+
+        let decision = outcome?;
 
         // Stamped only after the store accepted it. A fingerprint left on a
         // context whose reservation was refused would be carried into an
@@ -1064,6 +1139,7 @@ impl RuntimeInner {
             None,
             Duration::from_secs(5),
             None,
+            None,
         )
     }
 
@@ -1091,6 +1167,7 @@ impl RuntimeInner {
             Some(obs),
             None,
             Duration::from_secs(5),
+            None,
             None,
         )
     }
@@ -1124,6 +1201,7 @@ impl RuntimeInner {
             None,
             None,
             Duration::from_secs(5),
+            None,
             None,
         )
     }
@@ -2049,6 +2127,7 @@ mod tests {
             None,
             Duration::from_secs(5),
             None,
+            None,
         );
 
         let result = rt.authorization_provider();
@@ -2156,6 +2235,162 @@ mod tests {
             .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
             .with_reservation_lease_duration(Duration::from_secs(30))
             .build()
+    }
+
+    /// Records every span the runtime opens, with the attributes it was given.
+    ///
+    /// The attributes are the point. A spy that discarded them — as the one in
+    /// `ingress_trace_wiring.rs` does, because that test is about ids — could not
+    /// tell an `idempotency.reserve` span carrying the operation key's token apart
+    /// from one carrying nothing.
+    struct SpanRecordingTracer {
+        started: Mutex<Vec<(String, SpanAttributes)>>,
+        ended: Mutex<Vec<ego_domain::SpanId>>,
+    }
+
+    impl SpanRecordingTracer {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: Mutex::new(Vec::new()),
+                ended: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn started(&self) -> Vec<(String, SpanAttributes)> {
+            self.started.lock().expect("not poisoned").clone()
+        }
+
+        fn ended_count(&self) -> usize {
+            self.ended.lock().expect("not poisoned").len()
+        }
+    }
+
+    impl Tracer for SpanRecordingTracer {
+        fn start_span(&self, _ctx: &ego_domain::TraceContext, name: &str, attrs: SpanAttributes) {
+            self.started
+                .lock()
+                .expect("not poisoned")
+                .push((name.to_string(), attrs));
+        }
+        fn end_span(&self, span: ego_domain::SpanId, _outcome: SpanOutcome) {
+            self.ended.lock().expect("not poisoned").push(span);
+        }
+    }
+
+    fn reserving_runtime_with_tracer(
+        store: Arc<ScopeRecordingStore>,
+        tracer: Arc<SpanRecordingTracer>,
+    ) -> Runtime {
+        RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(tracer as Arc<dyn Tracer>)
+            .build()
+    }
+
+    /// A keyed reservation opens `idempotency.reserve`, carrying the token of the
+    /// key that was actually presented.
+    ///
+    /// The token is compared against one this test derives from its own key, so
+    /// the assertion is that the *presented* key was hashed — not merely that some
+    /// 16-hex value appeared. An implementation hashing a constant, or the wrong
+    /// value, produces a different token and fails here.
+    #[tokio::test]
+    async fn a_reservation_opens_a_span_carrying_the_presented_keys_token() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        let started = tracer.started();
+        assert_eq!(started.len(), 1, "exactly one span, got {started:?}");
+        assert_eq!(started[0].0, "idempotency.reserve");
+        assert_eq!(
+            started[0].1.operation_key_hash(),
+            Some(OperationKeyHash::of(&scope_test_key()).as_str()),
+            "the span must carry the token of the key this dispatch presented"
+        );
+        assert_eq!(
+            tracer.ended_count(),
+            1,
+            "an opened span must be closed, or the adapter's table leaks it"
+        );
+    }
+
+    /// No `TraceContext` on the request means no span, and dispatch is unaffected.
+    ///
+    /// Same rule `TracingInterceptor` already follows: a request that originated no
+    /// trace makes every hook a no-op. Opening a root span here instead would mint
+    /// orphans attached to no trace, and would do it on the hot path of every
+    /// keyed operation.
+    #[tokio::test]
+    async fn a_request_with_no_trace_context_opens_no_span_and_still_reserves() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation still proceeds without tracing");
+
+        assert!(
+            tracer.started().is_empty(),
+            "no trace context, no span: got {:?}",
+            tracer.started()
+        );
+    }
+
+    /// A dispatch refused before the store is reached opens no span either.
+    ///
+    /// The span describes a reserve *attempt*. An unresolved scope never attempts
+    /// one — it is refused before the store is asked — so a span here would report
+    /// a durable write that never happened, and its duration would be noise.
+    #[tokio::test]
+    async fn a_dispatch_refused_before_the_store_opens_no_span() {
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+
+        let result = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await;
+
+        assert!(result.is_err(), "an unresolved scope is refused");
+        assert!(
+            tracer.started().is_empty(),
+            "nothing was attempted, so nothing may be reported as attempted: {:?}",
+            tracer.started()
+        );
     }
 
     fn scope_test_key() -> OperationKey {
