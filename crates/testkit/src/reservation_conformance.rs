@@ -888,6 +888,67 @@ where
             "draining the eligible set must never remove an ineligible row"
         );
     }
+
+    // --- 8. Eligibility reads when it completed, not when it was created ----
+    //
+    // Every scenario above uses `completed_at`, which positions the clock and then
+    // reserves *and* completes at that one instant. So creation and completion
+    // coincide in all of them, and a store measuring eligibility from the wrong
+    // column would satisfy the seven of them exactly as well as the right one.
+    //
+    // This scenario is the only one that separates the two: reserved early,
+    // completed late, purged with a cutoff that falls between. Eligibility is
+    // defined on completion, so the reservation must survive — while a store
+    // reading its creation time would find it eligible and remove it.
+    //
+    // Getting this wrong is not a rounding error. It would purge reservations whose
+    // answers are still inside the retention window, so a client retrying within
+    // the window it was promised would re-execute instead of replaying.
+    {
+        let (store, clock) = fresh().await;
+
+        // Reserved well before the cutoff.
+        position(&clock, t0);
+        let outcome = store
+            .reserve(request(
+                "owner-a",
+                "op-late-completion",
+                cutoff + Duration::seconds(400),
+            ))
+            .await
+            .unwrap();
+        let fence = match outcome {
+            ReservationOutcome::Fresh(lease) => fence_of(&lease),
+            other => panic!("setup: expected Fresh, got {other:?}"),
+        };
+
+        // Completed well after it. The lease was opened generously above so this
+        // completion is never refused for having lapsed, which would leave the
+        // scenario asserting the wrong thing.
+        position(&clock, cutoff + Duration::seconds(200));
+        store
+            .complete(
+                &fence,
+                StoredServiceResponse::new(b"completed-after-the-cutoff".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let removed = store.purge_completed_before(cutoff, 10).await.unwrap();
+        assert_eq!(
+            removed, 0,
+            "nothing is eligible: the reservation completed after the cutoff, even \
+             though it was created long before it. A non-zero count here means \
+             eligibility was measured from creation time"
+        );
+        assert!(
+            survives(&store, &clock, "op-late-completion").await,
+            "the reservation must still answer. It was created before the cutoff \
+             and completed after it, and eligibility is defined on completion — a \
+             store reading creation time would have purged an answer still inside \
+             its retention window"
+        );
+    }
 }
 
 /// The whole shared contract: every scenario, in one call.
