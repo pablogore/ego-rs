@@ -54,8 +54,18 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
             TransportError::ServiceUnavailable
         }
         // The operation already completed and its answer cannot be read back,
-        // or the request could not be fingerprinted at all. Retrying either one
-        // reproduces it exactly, so 500 is honest: an operator has to act.
+        // or the request could not be fingerprinted at all. Both need someone to
+        // look: no amount of waiting or retrying is a justified recovery for
+        // either, so 500 is the honest answer.
+        //
+        // Deliberately not "retrying reproduces it exactly". That holds for the
+        // stored bytes, which do not change. It does not follow for a
+        // fingerprint failure: `Serialize` is satisfied at compile time, so what
+        // failed is *this value*, and a hand-written impl may fail on one value
+        // and succeed on the next, or depend on state outside the value
+        // entirely. Same overstatement that was withdrawn from the epilogue's
+        // docs — the status is chosen for the action it implies, not for a
+        // prediction about recurrence.
         RegisterUserError::Refused(_) => TransportError::Internal,
     }
 }
@@ -174,6 +184,61 @@ mod tests {
     use ego_security_sdk::SecurityError;
 
     use super::*;
+
+    /// Every `ReservationRejection`, pinned to the status it becomes.
+    ///
+    /// The HTTP-level suite (`http_replay_and_conflict.rs`) drives five of these
+    /// through the real router by scripting the reservation store. The sixth,
+    /// `RequestNotFingerprintable`, **cannot be provoked that way**: it is
+    /// raised before the store is reached, when an operation's arguments fail to
+    /// serialise, and `RegisterInput` always serialises. Its translation is
+    /// therefore proven here, directly against the mapper — which is also why
+    /// this test enumerates all six rather than only the one that is otherwise
+    /// unreachable. A table with one entry proven somewhere else and five
+    /// assumed is how a mapping drifts.
+    ///
+    /// The split is by what the caller can do about it, never by which enum the
+    /// value came from.
+    #[test]
+    fn every_reservation_rejection_maps_to_the_status_its_caller_can_act_on() {
+        use ego_service_sdk::runtime::ReservationRejection;
+
+        let cases = [
+            // This key is taken — by this request or another. Something a caller
+            // can act on: wait, or stop reusing the key.
+            (ReservationRejection::SelfInProgress, StatusCode::CONFLICT),
+            (ReservationRejection::OtherInProgress, StatusCode::CONFLICT),
+            (
+                ReservationRejection::FingerprintConflict,
+                StatusCode::CONFLICT,
+            ),
+            // The machinery could not answer. Well-formed, and may well succeed
+            // later — a caller that gave up on a 500 would abandon something
+            // transient.
+            (
+                ReservationRejection::StoreUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            // Neither of the above: nothing a caller can do, and waiting is not
+            // a justified strategy. Someone has to look.
+            (
+                ReservationRejection::StoredResponseIncompatible,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ReservationRejection::RequestNotFingerprintable,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (rejection, expected) in cases {
+            assert_eq!(
+                map_register_error(RegisterUserError::Refused(rejection.clone())).status_code(),
+                expected,
+                "{rejection:?} must translate to the status its caller can act on"
+            );
+        }
+    }
 
     // Finding 4 (RED first): map_register_error must delegate every
     // Security(_) denial to ego-transport's own granular
