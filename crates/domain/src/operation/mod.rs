@@ -26,7 +26,7 @@ pub mod reservation;
 pub mod receipt;
 
 pub use identity::OperationIdentity;
-pub use key::{OperationFingerprint, OperationKey, OperationKeyError};
+pub use key::{OperationFingerprint, OperationKey, OperationKeyError, OperationKeyHash};
 pub use receipt::{AggregateOutcome, AggregateOutcomeError, OperationReceipt};
 pub use reservation::{
     FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, OwnerId,

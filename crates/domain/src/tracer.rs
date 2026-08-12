@@ -286,6 +286,9 @@ impl std::error::Error for TraceParseError {}
 pub struct SpanAttributes {
     tenant_present: Option<bool>,
     duration: Option<Duration>,
+    /// The **redacted** operation key (AD-10), typed so the raw one cannot be
+    /// put here. See [`SpanAttributes::with_operation_key_hash`].
+    operation_key_hash: Option<crate::operation::OperationKeyHash>,
 }
 
 impl SpanAttributes {
@@ -321,6 +324,33 @@ impl SpanAttributes {
     /// The recorded duration, if any.
     pub fn duration(&self) -> Option<Duration> {
         self.duration
+    }
+
+    /// Record the **redacted** operation key for an idempotency span (AD-10).
+    ///
+    /// Takes an [`OperationKeyHash`](crate::operation::OperationKeyHash), not a
+    /// string. That type's only constructor hashes an `OperationKey`, so a raw
+    /// client-supplied key is not something this method can be handed — the
+    /// redaction is a property of the signature rather than of every call site
+    /// remembering to hash first. There is deliberately no `with_operation_key`
+    /// and no `impl Into<String>` overload; either would reopen exactly the path
+    /// this type exists to close.
+    ///
+    /// Emitted as the span attribute `idempotency.operation_key_hash`. It is a
+    /// span attribute **only** — never a metric one, because the value is
+    /// unbounded and would multiply time series without limit. That is not left
+    /// to discipline either:
+    /// [`Observability::metric`](crate::observability::Observability::metric)
+    /// takes a name and a value and has no attribute parameter, so there is no
+    /// metric dimension for it to become.
+    pub fn with_operation_key_hash(mut self, hash: crate::operation::OperationKeyHash) -> Self {
+        self.operation_key_hash = Some(hash);
+        self
+    }
+
+    /// The redacted operation key, if recorded.
+    pub fn operation_key_hash(&self) -> Option<&str> {
+        self.operation_key_hash.as_ref().map(|h| h.as_str())
     }
 }
 
@@ -629,6 +659,46 @@ mod tests {
         let attrs = SpanAttributes::new();
         assert_eq!(attrs.tenant_present(), None);
         assert_eq!(attrs.duration(), None);
+        assert_eq!(attrs.operation_key_hash(), None);
+    }
+
+    /// The allow-list carries the *redacted* operation key, and can carry nothing
+    /// else about it.
+    ///
+    /// AD-10 requires `idempotency.operation_key_hash` on the reservation spans.
+    /// It is admitted here as one more curated concept, the way
+    /// `tenant_present` already is — not as an arbitrary string field, which is
+    /// what would actually widen this type's promise.
+    ///
+    /// The structural point: the builder takes an
+    /// [`OperationKeyHash`](crate::operation::OperationKeyHash), whose only
+    /// constructor hashes an `OperationKey`. So there is no sequence of calls
+    /// that puts a raw client-supplied key on a span — not "no call site does
+    /// it", but no such call exists to make. There is deliberately no
+    /// `with_operation_key`, and no `String` overload that would accept one.
+    #[test]
+    fn span_attributes_carry_the_redacted_operation_key_and_not_the_key() {
+        use crate::operation::{OperationKey, OperationKeyHash};
+
+        let key = OperationKey::parse("customer-4417-invoice-2026-03").expect("valid key");
+        let hash = OperationKeyHash::of(&key);
+        let attrs = SpanAttributes::new().with_operation_key_hash(hash.clone());
+
+        assert_eq!(attrs.operation_key_hash(), Some(hash.as_str()));
+        assert_eq!(
+            attrs.operation_key_hash().map(str::len),
+            Some(16),
+            "the attribute carries the 16-hex digest, nothing wider"
+        );
+
+        // The raw key is absent from every value this type can expose. Asserted
+        // over the whole rendered attribute set rather than the one field, so a
+        // future field that smuggled the key in would fail here too.
+        let rendered = format!("{attrs:?}");
+        assert!(
+            !rendered.contains("customer-4417-invoice-2026-03"),
+            "no attribute may carry the client-supplied key: {rendered}"
+        );
     }
 
     #[test]

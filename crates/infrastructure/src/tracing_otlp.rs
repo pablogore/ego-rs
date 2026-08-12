@@ -207,12 +207,22 @@ impl OtlpTracer {
 /// key/values. No redaction step here — the port already guarantees
 /// `SpanAttributes` cannot carry sensitive data (ADR-6).
 fn to_otel_attributes(attrs: &SpanAttributes) -> Vec<KeyValue> {
-    let mut kvs = Vec::with_capacity(2);
+    let mut kvs = Vec::with_capacity(3);
     if let Some(present) = attrs.tenant_present() {
         kvs.push(KeyValue::new("tenant.present", present));
     }
     if let Some(duration) = attrs.duration() {
         kvs.push(KeyValue::new("duration_ms", duration.as_millis() as i64));
+    }
+    // AD-10. The value arrives already redacted — `SpanAttributes` can only hold
+    // an `OperationKeyHash`, whose sole constructor hashes — so there is nothing
+    // for this function to strip. It copies a digest across, and a raw operation
+    // key could not have reached it to begin with.
+    if let Some(hash) = attrs.operation_key_hash() {
+        kvs.push(KeyValue::new(
+            "idempotency.operation_key_hash",
+            hash.to_string(),
+        ));
     }
     kvs
 }
@@ -670,6 +680,81 @@ mod tests {
         let finished = exporter.get_finished_spans().unwrap();
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[0].name, "outbound.call");
+    }
+
+    // -----------------------------------------------------------------
+    // AD-10 redaction, asserted on what actually left the adapter
+    // -----------------------------------------------------------------
+
+    /// The redacted operation key reaches the exporter under its documented
+    /// attribute name, and the raw key reaches it nowhere.
+    ///
+    /// Asserted against the **exported span**, not against `to_otel_attributes`.
+    /// A test of the mapping function would pass while the adapter dropped the
+    /// attribute before export, or attached it to the wrong span; what AD-10
+    /// promises is about the telemetry that leaves the process.
+    ///
+    /// The negative half sweeps the whole exported span rather than the one
+    /// attribute it expects to be wrong. A leak that mattered would most likely
+    /// appear somewhere nobody thought to look — the span name, another
+    /// attribute, a status message — so the assertion is over everything the span
+    /// carries.
+    ///
+    /// # What this does NOT establish
+    ///
+    /// The attributes here are built by this test. So this covers **transport**:
+    /// a hash handed to the adapter arrives at the exporter under the documented
+    /// name, unmodified, and the raw key is nowhere on the span. It does **not**
+    /// show that any production path attaches the hash, because no idempotency
+    /// span exists yet — `RuntimeInner` retains no tracer, so nothing on the
+    /// reservation path can open one.
+    ///
+    /// The behavioural claim — that idempotency instrumentation never emits a raw
+    /// operation key — needs the full chain `OperationKey` → `OperationKeyHash` →
+    /// `SpanAttributes` → observed exporter, driven from a real reservation. That
+    /// belongs to the spans slice, and is deliberately not claimed here.
+    #[test]
+    fn the_exported_span_carries_the_redacted_key_and_never_the_raw_one() {
+        use ego_domain::operation::{OperationKey, OperationKeyHash};
+
+        const RAW: &str = "customer-4417-invoice-2026-03";
+        let key = OperationKey::parse(RAW).expect("valid key");
+        let hash = OperationKeyHash::of(&key);
+
+        let (tracer, exporter) = otlp_tracer_with_in_memory_exporter(4);
+        let ctx = TraceContext::root();
+        tracer.start_span(
+            &ctx,
+            "idempotency.reserve",
+            SpanAttributes::new().with_operation_key_hash(hash.clone()),
+        );
+        tracer.end_span(ctx.span_id(), SpanOutcome::Ok);
+        tracer
+            .processor
+            .force_flush()
+            .expect("in-memory exporter flush must not fail");
+
+        let finished = exporter.get_finished_spans().unwrap();
+        assert_eq!(finished.len(), 1);
+        let span = &finished[0];
+
+        let found = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "idempotency.operation_key_hash")
+            .expect("AD-10's attribute must be on the exported span");
+        assert_eq!(
+            found.value.as_str(),
+            hash.as_str(),
+            "the exported value must be the digest the domain produced"
+        );
+
+        // Nothing anywhere on this span carries the client-supplied key.
+        let rendered = format!("{span:?}");
+        assert!(
+            !rendered.contains(RAW),
+            "the raw operation key must appear nowhere on the exported span: {rendered}"
+        );
     }
 
     // -----------------------------------------------------------------
