@@ -714,6 +714,23 @@ impl RuntimeInner {
     /// [`ServiceContext::tenant_hint`] — a caller-supplied hint must not choose
     /// which namespace its key lands in.
     ///
+    /// # An unresolved scope is refused, never defaulted
+    ///
+    /// A context that resolved *no* scope is not a context that resolved to the
+    /// systemwide one. The first has no namespace; the second's namespace is the
+    /// absent partition. Treating them alike files every unresolved dispatch in
+    /// the shared tenant-less partition, where two tenants presenting one
+    /// operation key become one operation — the second replaying the first's
+    /// stored response, or being refused as a conflict against it. So an
+    /// unresolved scope returns
+    /// [`ReservationRejection::TenantUnresolved`](crate::runtime::ReservationRejection::TenantUnresolved)
+    /// before the store is reached.
+    ///
+    /// The contract is **"a scope was resolved before reserving"**, not "a
+    /// particular attribute is present". Nothing here inspects markers: an
+    /// operation reaches this method with a resolved scope or it does not, and how
+    /// it got one is not this method's business.
+    ///
     /// # The three answers, and why `Option` rather than a third decision
     ///
     /// `None` means **this runtime did not reserve** — either no
@@ -749,9 +766,36 @@ impl RuntimeInner {
             return Ok(None);
         };
 
-        let tenant = ctx
-            .canonical_tenant()
-            .and_then(|resolved| resolved.tenant_id().cloned());
+        // An explicit `match` over three states, not `and_then` over two.
+        //
+        // `canonical_tenant()` is `None` when nothing on this path resolved a
+        // scope, and `Some(_)` when something did — where that resolution may
+        // legitimately be the tenant-less systemwide scope, whose namespace is the
+        // absent one. Those are three answers, and only two of them name a
+        // namespace.
+        //
+        // `and_then` flattened the first into the third. It compiled, it read
+        // naturally, and it filed every unresolved dispatch in the shared
+        // tenant-less partition — so two tenants presenting one operation key
+        // became one operation there. Measured before this changed, through
+        // generated dispatch with two authenticated principals and one key: with
+        // an identical payload the handler ran once and the second tenant was
+        // handed the first's stored response; with a differing payload the second
+        // tenant was refused `FingerprintConflict` against a reservation belonging
+        // to the other scope. The first of those is an information disclosure, not
+        // a correctness slip.
+        //
+        // `crates/service-sdk/tests/cross_tenant_reservation_isolation.rs` holds
+        // it. Restoring the `and_then` puts two of its tests red on the refusal
+        // they assert, and a third in-crate test red on the reserve count.
+        //
+        // Refused before the store is reached, deliberately: reserving first and
+        // refusing afterwards would leave the lease taken under a namespace this
+        // dispatch was never entitled to.
+        let tenant = match ctx.canonical_tenant() {
+            None => return Err(ReservationRejection::TenantUnresolved),
+            Some(resolved) => resolved.tenant_id().cloned(),
+        };
 
         let decision = config.reserve(tenant, key, fingerprint.clone()).await?;
 
@@ -1202,6 +1246,14 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ego_domain::operation::{
+        FencingToken, Lease, OperationId, OperationKey, OperationReservationStore, OwnerFence,
+        OwnerId, ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    };
+    use ego_domain::time::Clock;
+
+    use crate::runtime::{Runtime, RuntimeBuilder};
 
     // -- DependencyTable unit tests -----------------------------------------
 
@@ -2005,6 +2057,260 @@ mod tests {
             Arc::as_ptr(result.as_ref().unwrap()),
             authz_ptr,
             "Returned Arc must point to the same AuthorizationProvider"
+        );
+    }
+
+    // -- The reservation namespace: three states, not two --------------------
+    //
+    // These live in-crate because the third state cannot be reached from
+    // outside it. `CanonicalTenant::systemwide()` is `pub(super)` and
+    // `ServiceContext::set_resolved_tenant` is `pub(crate)` — deliberately, since
+    // `TenantResolver` is meant to be the only thing that resolves a scope. So a
+    // test in `tests/` can build "no scope" and "scope with a tenant" but not
+    // "scope resolved to systemwide", and that last one is exactly the state the
+    // fix must not have broken.
+    //
+    // The behavioural pair over generated dispatch lives in
+    // `crates/service-sdk/tests/cross_tenant_reservation_isolation.rs`.
+
+    /// Records the scope each `reserve` was handed, and answers from a script.
+    struct ScopeRecordingStore {
+        scopes: Mutex<Vec<Option<TenantId>>>,
+        answer: Mutex<Option<ReservationOutcome>>,
+    }
+
+    impl ScopeRecordingStore {
+        fn answering(answer: ReservationOutcome) -> Arc<Self> {
+            Arc::new(Self {
+                scopes: Mutex::new(Vec::new()),
+                answer: Mutex::new(Some(answer)),
+            })
+        }
+
+        fn scopes(&self) -> Vec<Option<TenantId>> {
+            self.scopes.lock().expect("not poisoned").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for ScopeRecordingStore {
+        async fn reserve(
+            &self,
+            req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            self.scopes
+                .lock()
+                .expect("not poisoned")
+                .push(req.tenant.clone());
+            Ok(self
+                .answer
+                .lock()
+                .expect("not poisoned")
+                .take()
+                .expect("each store answers exactly one reserve"))
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _u: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests only reserve");
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests only reserve");
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            panic!("these tests only reserve");
+        }
+        async fn purge_completed_before(
+            &self,
+            _c: chrono::DateTime<chrono::Utc>,
+            _b: usize,
+        ) -> Result<u64, ReservationError> {
+            panic!("these tests only reserve");
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            use chrono::TimeZone;
+            chrono::Utc
+                .timestamp_opt(1_000, 0)
+                .single()
+                .expect("valid instant")
+        }
+    }
+
+    fn reserving_runtime(store: Arc<ScopeRecordingStore>) -> Runtime {
+        RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .build()
+    }
+
+    fn scope_test_key() -> OperationKey {
+        OperationKey::parse("scope-under-test").expect("a non-empty key parses")
+    }
+
+    fn lease_for(tenant: Option<TenantId>) -> Lease {
+        Lease {
+            operation_id: OperationId::new(tenant, scope_test_key()),
+            owner_id: OwnerId::new("in-crate-owner"),
+            fencing_token: FencingToken::initial(),
+            lease_until: FixedClock.now() + chrono::Duration::seconds(30),
+        }
+    }
+
+    /// A context that resolved no scope is refused, and the store is never asked.
+    ///
+    /// The reserve count is the assertion that matters. An implementation that
+    /// returned the right error *after* reserving would satisfy an
+    /// error-only check while having already taken the lease under a namespace it
+    /// was not entitled to — and the next caller in that namespace would then
+    /// contend with it.
+    ///
+    /// Reverting the `match` to `and_then` makes this fail on the recorded scope:
+    /// the store is reached, and it is handed `None`.
+    #[tokio::test]
+    async fn an_unresolved_scope_is_refused_rather_than_filed_as_systemwide() {
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let rt = reserving_runtime(store.clone());
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        assert!(
+            ctx.canonical_tenant().is_none(),
+            "the precondition: nothing resolved a scope on this path"
+        );
+
+        let result = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await;
+
+        match result {
+            Err(rejection) => assert_eq!(
+                rejection,
+                ReservationRejection::TenantUnresolved,
+                "an unresolved scope names no namespace, so it cannot be reserved"
+            ),
+            Ok(other) => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(
+            store.scopes().is_empty(),
+            "the store must never be reached: reserving first and refusing after \
+             would leave the lease taken, got {:?}",
+            store.scopes()
+        );
+        assert!(
+            ctx.operation_fingerprint().is_none(),
+            "a refused dispatch must not carry a fingerprint into the receipt gate"
+        );
+    }
+
+    /// A scope that resolved *to* systemwide still reserves, under the absent
+    /// namespace.
+    ///
+    /// This is the case the refusal above must not have swallowed. Systemwide is a
+    /// legitimate resolution whose namespace is `None`; what is refused is the
+    /// absence of a resolution, which is a different thing wearing the same
+    /// `Option` shape. Without this test the fix would be indistinguishable from
+    /// "reject every tenant-less reservation", which would break the mode
+    /// outright.
+    #[tokio::test]
+    async fn a_resolved_systemwide_scope_reserves_under_the_absent_namespace() {
+        use crate::runtime::CanonicalTenant;
+
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let rt = reserving_runtime(store.clone());
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(CanonicalTenant::systemwide());
+
+        let decision = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("a resolved systemwide scope is reservable");
+
+        assert!(
+            matches!(decision, Some(ReservationDecision::Proceed(_))),
+            "got {decision:?}"
+        );
+        assert_eq!(
+            store.scopes(),
+            vec![None],
+            "the systemwide scope's namespace is the absent one — reached, not refused"
+        );
+    }
+
+    /// And a completed operation in the systemwide scope still replays, within
+    /// that scope.
+    ///
+    /// Isolation that cost the systemwide mode its replay would be a regression
+    /// dressed as a fix, so the read path is pinned alongside the write path.
+    #[tokio::test]
+    async fn a_resolved_systemwide_scope_replays_within_its_own_namespace() {
+        use crate::runtime::CanonicalTenant;
+
+        let stored = StoredServiceResponse::new(b"systemwide-answer".to_vec());
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Succeeded(stored.clone()));
+        let rt = reserving_runtime(store.clone());
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(CanonicalTenant::systemwide());
+
+        let decision = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("a completed systemwide operation answers");
+
+        match decision {
+            Some(ReservationDecision::Replay(response)) => assert_eq!(
+                response, stored,
+                "the replay returns the systemwide scope's own stored response"
+            ),
+            other => panic!("expected a replay, got {other:?}"),
+        }
+        assert_eq!(
+            store.scopes(),
+            vec![None],
+            "the lookup was made in the absent namespace, which is where it was stored"
+        );
+    }
+
+    /// The scope carried to the store is the resolved tenant when there is one.
+    ///
+    /// The positive counterpart of the refusal: three states, and this is the one
+    /// that names a concrete partition.
+    #[tokio::test]
+    async fn a_resolved_tenant_scope_reserves_under_that_tenant() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let rt = reserving_runtime(store.clone());
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant.clone()));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("a resolved tenant scope is reservable");
+
+        assert_eq!(
+            store.scopes(),
+            vec![Some(tenant)],
+            "the namespace is the resolved tenant, never the absent partition"
         );
     }
 }

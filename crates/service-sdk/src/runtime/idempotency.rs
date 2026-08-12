@@ -284,6 +284,34 @@ pub enum ReservationRejection {
     /// the marker exists to prevent.
     #[error("the request's arguments could not be reduced to a canonical fingerprint")]
     RequestNotFingerprintable,
+    /// No tenant scope had been resolved by the time the operation was about to
+    /// be reserved, so there is no namespace to reserve it under.
+    ///
+    /// # Why this cannot be answered by defaulting to the absent scope
+    ///
+    /// "Not resolved" and "resolved to the systemwide scope" are different
+    /// statements, and only the second one names a namespace. Treating the first
+    /// as the second files the reservation in the shared, tenant-less partition,
+    /// where two callers from two different tenants presenting the same key
+    /// become one operation: the second is answered with the first's stored
+    /// response, or refused as a conflict against a request it has nothing to do
+    /// with. Both outcomes let one scope's result govern another, and the first
+    /// discloses it.
+    ///
+    /// **The store is never reached.** Like
+    /// [`RequestNotFingerprintable`](ReservationRejection::RequestNotFingerprintable),
+    /// this is decided before the reservation, which is why it is neither
+    /// `StoreUnavailable` — the store was never asked — nor
+    /// `FingerprintConflict`, which requires two fingerprints that were both
+    /// computed and then differed.
+    ///
+    /// **A deployment or authoring fault, not a client one.** The request may be
+    /// perfectly well-formed; what is missing is that the operation is marked
+    /// idempotent while nothing on its path resolved a tenant. No client retry
+    /// changes that, so it is kept distinguishable from the refusals a caller can
+    /// act on.
+    #[error("no tenant scope was resolved before the reservation, so it has no namespace")]
+    TenantUnresolved,
 }
 
 /// The digest of an operation's canonical semantic input (AD-3f).

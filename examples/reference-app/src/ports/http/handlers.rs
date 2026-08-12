@@ -53,10 +53,17 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
         RegisterUserError::Refused(ReservationRejection::StoreUnavailable) => {
             TransportError::ServiceUnavailable
         }
-        // The operation already completed and its answer cannot be read back,
-        // or the request could not be fingerprinted at all. Both need someone to
-        // look: no amount of waiting or retrying is a justified recovery for
-        // either, so 500 is the honest answer.
+        // Three remaining cases, all needing someone to look rather than
+        // something to be retried: the operation completed but its answer cannot
+        // be read back; the request could not be fingerprinted at all; or no
+        // tenant scope was resolved before the reservation. No amount of waiting
+        // is a justified recovery for any of them, so 500 is the honest answer.
+        //
+        // The third is deliberately here and not a 4xx. `TenantUnresolved` means
+        // an operation is marked idempotent while nothing on its path resolves a
+        // scope — a wiring fault in this service, not something the caller did or
+        // can fix. Reporting it as a client error would send the caller looking
+        // for a mistake in a request that is fine.
         //
         // Deliberately not "retrying reproduces it exactly". That holds for the
         // stored bytes, which do not change. It does not follow for a
