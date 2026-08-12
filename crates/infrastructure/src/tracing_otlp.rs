@@ -203,9 +203,21 @@ impl OtlpTracer {
     }
 }
 
-/// Map the redaction-safe domain [`SpanAttributes`] allow-list to OTel
-/// key/values. No redaction step here — the port already guarantees
-/// `SpanAttributes` cannot carry sensitive data (ADR-6).
+/// Map the domain [`SpanAttributes`] allow-list to OTel key/values.
+///
+/// No filtering step here, and the reason is structural rather than a claim about
+/// the data: `SpanAttributes` is a closed allow-list (ADR-6), so the only things
+/// this function can be handed are the concepts that type admits. There is
+/// nothing to strip because nothing else can arrive.
+///
+/// **That is not the same as "cannot carry sensitive data", which this comment
+/// used to say and which is no longer true.** Since AD-10, the allow-list
+/// includes a diagnostic token derived from a client-supplied operation key, used
+/// to correlate attempts of one key across traces. It is not the raw key, but it
+/// is derived from one and is a meaningful correlator to anyone who can read these
+/// spans — and low-entropy keys remain vulnerable to dictionary enumeration. What
+/// is structurally prevented is narrower and accurate: the **raw** operation key
+/// cannot reach here, and neither can any attribute outside the allow-list.
 fn to_otel_attributes(attrs: &SpanAttributes) -> Vec<KeyValue> {
     let mut kvs = Vec::with_capacity(3);
     if let Some(present) = attrs.tenant_present() {
@@ -214,10 +226,11 @@ fn to_otel_attributes(attrs: &SpanAttributes) -> Vec<KeyValue> {
     if let Some(duration) = attrs.duration() {
         kvs.push(KeyValue::new("duration_ms", duration.as_millis() as i64));
     }
-    // AD-10. The value arrives already redacted — `SpanAttributes` can only hold
-    // an `OperationKeyHash`, whose sole constructor hashes — so there is nothing
-    // for this function to strip. It copies a digest across, and a raw operation
-    // key could not have reached it to begin with.
+    // AD-10. `SpanAttributes` can only hold an `OperationKeyHash`, whose sole
+    // constructor hashes, so there is nothing for this function to strip: it copies
+    // a correlation token across, and the raw operation key could not have reached
+    // it to begin with. That is the whole of the guarantee — the token itself is
+    // derived from client input and is not anonymous.
     if let Some(hash) = attrs.operation_key_hash() {
         kvs.push(KeyValue::new(
             "idempotency.operation_key_hash",
@@ -683,11 +696,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // AD-10 redaction, asserted on what actually left the adapter
+    // AD-10, asserted on what actually left the adapter
     // -----------------------------------------------------------------
 
-    /// The redacted operation key reaches the exporter under its documented
-    /// attribute name, and the raw key reaches it nowhere.
+    /// The correlation token reaches the exporter under its documented attribute
+    /// name, and the raw key reaches it nowhere.
     ///
     /// Asserted against the **exported span**, not against `to_otel_attributes`.
     /// A test of the mapping function would pass while the adapter dropped the
@@ -714,7 +727,7 @@ mod tests {
     /// `SpanAttributes` → observed exporter, driven from a real reservation. That
     /// belongs to the spans slice, and is deliberately not claimed here.
     #[test]
-    fn the_exported_span_carries_the_redacted_key_and_never_the_raw_one() {
+    fn the_exported_span_carries_the_correlation_token_and_never_the_raw_key() {
         use ego_domain::operation::{OperationKey, OperationKeyHash};
 
         const RAW: &str = "customer-4417-invoice-2026-03";
@@ -746,7 +759,7 @@ mod tests {
         assert_eq!(
             found.value.as_str(),
             hash.as_str(),
-            "the exported value must be the digest the domain produced"
+            "the exported value must be the token the domain produced"
         );
 
         // Nothing anywhere on this span carries the client-supplied key.

@@ -127,23 +127,51 @@ const HASH_HEX_LEN: usize = 16;
 /// An `OperationKey` is client-supplied and may carry business identifiers — an
 /// invoice number, an email, a customer reference. AD-10 forbids emitting it
 /// raw, and a rule stated only in prose is a rule every future call site has to
-/// remember. This type makes the redaction unavoidable instead: the sole
+/// remember. This type makes the substitution unavoidable instead: the sole
 /// constructor takes an `OperationKey` and hashes it, so there is no path from a
 /// raw string to a value telemetry accepts. Nothing here can be built *around*
 /// the hashing.
 ///
 /// That is the same posture
 /// [`SpanAttributes`](crate::tracer::SpanAttributes) already takes for tenancy —
-/// redaction enforced structurally at a type, not by a filter in an adapter that
-/// could be bypassed or forgotten.
+/// enforced structurally at a type, not by a filter in an adapter that could be
+/// bypassed or forgotten.
 ///
-/// # Truncation is deliberate, and it is not a security weakening
+/// # What this is for
 ///
-/// 16 hex characters is 64 bits. That is chosen for *cardinality*, not for
-/// preimage resistance: the value exists to group a retry with its original in a
-/// trace, and a full 64-character digest would cost four times the bytes on every
-/// span for no extra grouping power. It is not a commitment, not a lookup key,
-/// and nothing authenticates against it.
+/// A **diagnostic token for correlating attempts of the same operation key across
+/// traces.** That is the job, and it is not one the trace id can do: a retry
+/// arrives as a new request with a new trace, so the trace id is precisely what
+/// *cannot* link it to the original. The token can.
+///
+/// It is not an identity, not a lookup key, and never an input to a security
+/// decision. Nothing authenticates against it, nothing is fetched by it, and no
+/// code may assume two equal tokens mean two equal keys.
+///
+/// # Exactly what this guarantees — and what it does not
+///
+/// **The guarantee is narrow and worth stating precisely: the raw key is never
+/// emitted literally; the only thing emitted is the correlation token AD-10
+/// permits.** That is all. In particular:
+///
+/// - **This is not anonymisation, and not secrecy.** `OperationKey` values are
+///   frequently low-entropy and guessable — `order-1234`, an invoice number, a
+///   sequential id. Such keys remain vulnerable to dictionary enumeration: anyone
+///   holding these spans and a plausible key format can hash candidates and look
+///   for matches. Treat the emitted value as *pseudonymous correlation data*, not
+///   as something that protects the key's content.
+/// - **Truncation is a real tradeoff, not a free one.** 16 hex characters is 64
+///   bits, down from SHA-256's 256. That reduces uniqueness and collision
+///   resistance — two distinct operation keys can share a token, and a full digest
+///   would collide less often, so a full digest *would* correlate strictly better.
+///   What truncation does **not** do is add confidentiality: computing SHA-256
+///   costs the same either way, and comparing only a prefix reduces an attacker's
+///   ability to *discard* candidates while raising false positives, rather than
+///   making the search materially cheaper.
+///
+/// AD-10 accepts the weaker value deliberately, given what it is used for. The
+/// 16-hex width comes from the spec (CORE-019 §12) and is not a local choice to
+/// revisit here; what is local is saying honestly what it buys and what it costs.
 ///
 /// # A span attribute only, never a metric attribute
 ///
@@ -323,12 +351,30 @@ mod tests {
         assert_eq!(OperationKeyHash::of(&one), OperationKeyHash::of(&two));
     }
 
-    /// And two different keys do not collapse into one bucket.
+    /// Two representative keys produce two different tokens — which is enough to
+    /// catch a digest that ignores its input.
+    ///
+    /// # Scope, because the obvious name would overclaim
+    ///
+    /// This is deliberately *not* "different keys hash differently". At 64 bits
+    /// that is universally false: distinct operation keys can and eventually will
+    /// share a token, and no test can establish otherwise. What this shows is that
+    /// *these two* keys do not collide, and that is worth having for one specific
+    /// reason — it is the assertion that dies when the digest stops depending on
+    /// the key at all. Replacing the hashed input with a constant makes every key
+    /// map to one token, and this is what notices.
+    ///
+    /// Nothing downstream may assume two equal tokens mean two equal keys. See the
+    /// type's docs on what truncation costs.
     #[test]
-    fn different_keys_hash_differently() {
+    fn two_representative_keys_produce_two_different_tokens() {
         let a = OperationKey::parse("op-a").expect("valid key");
         let b = OperationKey::parse("op-b").expect("valid key");
-        assert_ne!(OperationKeyHash::of(&a), OperationKeyHash::of(&b));
+        assert_ne!(
+            OperationKeyHash::of(&a),
+            OperationKeyHash::of(&b),
+            "a digest that ignored its input would map both to the same token"
+        );
     }
 
     /// `Display` and `Debug` must both be safe to put in a log line.

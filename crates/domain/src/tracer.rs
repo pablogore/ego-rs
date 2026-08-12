@@ -12,9 +12,11 @@
 //! - Carry W3C-compatible trace/span identity (`TraceId`, `SpanId`,
 //!   `TraceContext`)
 //! - Parse/serialize the W3C `traceparent` header
-//! - Provide a redaction-safe, typed `SpanAttributes` allow-list so
-//!   sensitive data (tenant ids, credentials, principal subject, arbitrary
-//!   payloads) is structurally unrepresentable
+//! - Provide a closed, typed `SpanAttributes` allow-list so unapproved data
+//!   (raw tenant ids, credentials, principal subject, arbitrary payloads, a raw
+//!   operation key) is structurally unrepresentable. Closed does not mean every
+//!   admitted value is insensitive — see `SpanAttributes` on the correlation
+//!   token AD-10 admits.
 //! - Define the `Tracer` span start/end port and a separate
 //!   `TracerLifecycle` shutdown port (ADR-9)
 //!
@@ -274,20 +276,33 @@ impl std::error::Error for TraceParseError {}
 // SpanAttributes / SpanOutcome
 // ---------------------------------------------------------------------------
 
-/// Redaction-safe allow-list of span attributes (ADR-6).
+/// Closed allow-list of span attributes (ADR-6).
 ///
 /// This is the ONLY way to attach attributes to a span. There is
 /// deliberately no constructor or field for a raw tenant id, a
 /// credential/token, a principal subject, or an arbitrary payload — such
-/// data cannot be expressed as `SpanAttributes`, so redaction is enforced
+/// data cannot be expressed as `SpanAttributes`, so the restriction is enforced
 /// structurally at this type rather than by a runtime filter in the
 /// adapter.
+///
+/// # What "closed" does and does not promise
+///
+/// It promises that only the concepts listed here can reach a span, and that a
+/// raw key, credential, tenant id, or payload is not among them. It does **not**
+/// promise that everything here is insensitive. Since AD-10 the list includes
+/// [`operation_key_hash`](SpanAttributes::with_operation_key_hash) — a diagnostic
+/// token *derived* from a client-supplied operation key, for correlating attempts
+/// of one key across traces. It is not the key, but it is not anonymous either:
+/// low-entropy keys remain vulnerable to dictionary enumeration. Anyone who can
+/// read these spans should be treated as able to correlate operations, and to
+/// recover guessable keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpanAttributes {
     tenant_present: Option<bool>,
     duration: Option<Duration>,
-    /// The **redacted** operation key (AD-10), typed so the raw one cannot be
-    /// put here. See [`SpanAttributes::with_operation_key_hash`].
+    /// The correlation token derived from the operation key (AD-10), typed so the
+    /// raw key cannot be put here. See
+    /// [`SpanAttributes::with_operation_key_hash`].
     operation_key_hash: Option<crate::operation::OperationKeyHash>,
 }
 
@@ -326,15 +341,20 @@ impl SpanAttributes {
         self.duration
     }
 
-    /// Record the **redacted** operation key for an idempotency span (AD-10).
+    /// Record the correlation token derived from the operation key (AD-10).
     ///
     /// Takes an [`OperationKeyHash`](crate::operation::OperationKeyHash), not a
     /// string. That type's only constructor hashes an `OperationKey`, so a raw
     /// client-supplied key is not something this method can be handed — the
-    /// redaction is a property of the signature rather than of every call site
+    /// substitution is a property of the signature rather than of every call site
     /// remembering to hash first. There is deliberately no `with_operation_key`
     /// and no `impl Into<String>` overload; either would reopen exactly the path
     /// this type exists to close.
+    ///
+    /// What that buys is narrow, and `OperationKeyHash`'s own docs state it: the
+    /// raw key is never emitted literally. The token is still derived from client
+    /// input and is not anonymous — see those docs before treating it as safe to
+    /// expose widely.
     ///
     /// Emitted as the span attribute `idempotency.operation_key_hash`. It is a
     /// span attribute **only** — never a metric one, because the value is
@@ -348,7 +368,7 @@ impl SpanAttributes {
         self
     }
 
-    /// The redacted operation key, if recorded.
+    /// The correlation token derived from the operation key, if recorded.
     pub fn operation_key_hash(&self) -> Option<&str> {
         self.operation_key_hash.as_ref().map(|h| h.as_str())
     }
@@ -662,8 +682,8 @@ mod tests {
         assert_eq!(attrs.operation_key_hash(), None);
     }
 
-    /// The allow-list carries the *redacted* operation key, and can carry nothing
-    /// else about it.
+    /// The allow-list carries the *correlation token*, and can carry nothing else
+    /// about the operation key.
     ///
     /// AD-10 requires `idempotency.operation_key_hash` on the reservation spans.
     /// It is admitted here as one more curated concept, the way
@@ -677,7 +697,7 @@ mod tests {
     /// it", but no such call exists to make. There is deliberately no
     /// `with_operation_key`, and no `String` overload that would accept one.
     #[test]
-    fn span_attributes_carry_the_redacted_operation_key_and_not_the_key() {
+    fn span_attributes_carry_the_correlation_token_and_not_the_key() {
         use crate::operation::{OperationKey, OperationKeyHash};
 
         let key = OperationKey::parse("customer-4417-invoice-2026-03").expect("valid key");
