@@ -56,6 +56,28 @@
 //! satisfy it. Neither is redundant: the status describes the consequence, the row
 //! count describes why.
 //!
+//! # The fingerprint's representation, and why shape alone was not enough
+//!
+//! The comparison that produces a conflict is string equality against the
+//! `fingerprint` column, so the digest has to come back in the form it went in.
+//!
+//! An earlier version asserted only that the stored value was 64 characters and
+//! all hex. That is not the property: `to_uppercase()` satisfies both and still
+//! breaks the equality the protocol runs on. So the real assertion compares the
+//! stored value against the fingerprint **observed at the port** by
+//! `CountingStore` — what PostgreSQL was handed, versus what PostgreSQL returned.
+//! Nothing is recomputed, so the test commits to no assumption about how the
+//! generated dispatch builds a fingerprint.
+//!
+//! Measured, by uppercasing the digest in the adapter's `INSERT`: this test fails
+//! at that equality, `EFBD…` against `efbd…`, while both shape checks pass.
+//!
+//! Stated precisely, because it is easy to overclaim: all three tests in this
+//! suite fail under that mutation, since every one of them depends on the digest
+//! round-tripping. What this assertion adds is *localisation* — the others report
+//! a wrong status or outcome several layers away, and this one names the boundary
+//! and shows both values.
+//!
 //! One further thing only a real database can show: a refused request does not
 //! corrupt the completed reservation it collided with.
 //!
@@ -73,7 +95,7 @@
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -90,7 +112,7 @@ use ego_persistence::postgres::migrations;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::{
-    encode_stored_response, operation_fingerprint, IdempotencyEnforcementMode, RuntimeBuilder,
+    encode_stored_response, IdempotencyEnforcementMode, RuntimeBuilder,
 };
 use ego_testkit::{ScriptedAuthorizationProvider, TestJwtBuilder};
 use ego_transport::AppState;
@@ -140,10 +162,17 @@ impl RegisterUser for CountingRegister {
 }
 
 /// Counts what the durable store was asked to do, and delegates every call.
+///
+/// It also records the fingerprint of every `ReserveRequest` that passes through,
+/// in order. That is the boundary where the runtime hands a fingerprint to
+/// storage, so it is the one place a test can learn what PostgreSQL was *given*
+/// without recomputing it — and therefore without knowing how the generated
+/// dispatch produced it.
 struct CountingStore {
     inner: PostgresOperationReservationStore,
     reserves: AtomicUsize,
     completes: AtomicUsize,
+    fingerprints: Mutex<Vec<String>>,
 }
 
 impl CountingStore {
@@ -152,7 +181,13 @@ impl CountingStore {
             inner,
             reserves: AtomicUsize::new(0),
             completes: AtomicUsize::new(0),
+            fingerprints: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The fingerprints handed to storage, in the order the requests arrived.
+    fn fingerprints(&self) -> Vec<String> {
+        self.fingerprints.lock().expect("not poisoned").clone()
     }
 }
 
@@ -160,6 +195,10 @@ impl CountingStore {
 impl OperationReservationStore for CountingStore {
     async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
         self.reserves.fetch_add(1, Ordering::SeqCst);
+        self.fingerprints
+            .lock()
+            .expect("not poisoned")
+            .push(req.fingerprint.as_str().to_string());
         self.inner.reserve(req).await
     }
     async fn renew(&self, f: &OwnerFence, until: DateTime<Utc>) -> Result<(), ReservationError> {
@@ -252,16 +291,6 @@ fn post(email: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// The input as the dispatch will fingerprint it, for the premise check below.
-fn input(email: &str) -> RegisterInput {
-    RegisterInput {
-        user_id: "user-1".to_string(),
-        email: email.to_string(),
-        tenant_id: "tenant-a".to_string(),
-        org_name: "Acme".to_string(),
-    }
-}
-
 async fn send(router: Router, email: &str) -> (StatusCode, Vec<u8>) {
     let response = router
         .oneshot(post(email))
@@ -330,31 +359,6 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
     ));
     let calls = Arc::new(AtomicUsize::new(0));
 
-    // --- The premise, asserted rather than assumed ---------------------------
-    //
-    // The whole scenario rests on these two payloads fingerprinting differently.
-    // If they collided — a canonicalisation that dropped `email`, say — the
-    // second request would be a *replay* and every assertion below would be
-    // testing something else while still passing.
-    //
-    // Only inequality is asserted, deliberately. The generated dispatch
-    // fingerprints a tuple of the operation's arguments rather than the input
-    // struct alone, so a locally computed digest is not expected to equal the
-    // stored one; pinning that shape here would be asserting the macro's
-    // internal encoding, and a future change to it would fail this test as
-    // though production had broken. Inequality survives any canonicalisation
-    // that still reads `email`, which is the only property this test needs.
-    assert_ne!(
-        operation_fingerprint(&(&input(EMAIL_FIRST),))
-            .expect("fingerprintable")
-            .as_str(),
-        operation_fingerprint(&(&input(EMAIL_SECOND),))
-            .expect("fingerprintable")
-            .as_str(),
-        "the two payloads must fingerprint differently, or this test is silently \
-         exercising replay instead of conflict"
-    );
-
     // --- First POST: the operation runs and completes ------------------------
     let (status, body) = send(app(store.clone(), calls.clone()), EMAIL_FIRST).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -373,12 +377,17 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
     // character varying(8)`. An earlier version of this comment justified the
     // check by silent truncation, which does not happen.
     //
-    // What it does guard is representation. The comparison that produces a
-    // conflict is string equality against this column, so anything that changed
-    // the digest's form on the way through — case folding, padding, hex decoded
-    // to bytes and re-encoded some other way — would compare unequal to a
-    // freshly computed digest and turn every replay into a conflict, or the
-    // reverse. That failure is silent and only visible by reading the column.
+    // What is at stake is representation. The comparison that produces a conflict
+    // is string equality against this column, so anything that changed the
+    // digest's form on the way through — case folding, padding, hex decoded to
+    // bytes and re-encoded some other way — would compare unequal to a freshly
+    // computed digest and turn every replay into a conflict, or the reverse.
+    //
+    // Shape alone does not establish that, and an earlier version of this test
+    // stopped there. `to_uppercase()` is still 64 hex characters and would sail
+    // past both assertions below while breaking exactly the equality the protocol
+    // depends on. So the shape checks stay as a sanity check on what a failure
+    // message will show, and the real assertion is the one after them.
     assert_eq!(
         stored_fp.len(),
         64,
@@ -389,8 +398,50 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
         "the stored fingerprint is hex, not a mangled encoding: {stored_fp:?}"
     );
 
+    // The digest PostgreSQL was handed is the digest PostgreSQL returned.
+    //
+    // The left side is observed at the port boundary by `CountingStore`, not
+    // recomputed. That matters twice over: it is the actual value the runtime
+    // produced for this request, and it commits this test to nothing about *how*
+    // the generated dispatch builds a fingerprint. Comparing against a locally
+    // computed `operation_fingerprint(&(&input,))` would pin the macro's argument
+    // encoding and fail this test on an unrelated change to it.
+    let observed = store.fingerprints();
+    assert_eq!(
+        observed.len(),
+        1,
+        "one request has reached the store so far, got {observed:?}"
+    );
+    assert_eq!(
+        stored_fp, observed[0],
+        "the fingerprint read back from PostgreSQL must be byte-identical to the \
+         one it was given. A store that re-encoded it would still hold 64 hex \
+         characters while comparing unequal to every future request — silently \
+         turning replays into conflicts"
+    );
+
     // --- Second POST: same key, different payload ----------------------------
     let (status, body) = send(app(store.clone(), calls.clone()), EMAIL_SECOND).await;
+
+    // --- The premise, from what the runtime actually produced -----------------
+    //
+    // The whole scenario rests on these two payloads fingerprinting differently.
+    // If they collided — a canonicalisation that dropped `email`, say — the second
+    // request would be a *replay*, and the assertions below would be describing
+    // something else entirely.
+    //
+    // Asserted from the two fingerprints observed at the port rather than from
+    // locally recomputed ones, for the same reason as above: no assumption about
+    // the dispatch's encoding, and it is the real values that decided this
+    // request's fate. Checked before the status, so a collision reports itself
+    // rather than surfacing as a confusing 201.
+    let observed = store.fingerprints();
+    assert_eq!(observed.len(), 2, "two requests have reached the store");
+    assert_ne!(
+        observed[0], observed[1],
+        "the two payloads must fingerprint differently, or this test is silently \
+         exercising replay instead of conflict"
+    );
 
     assert_eq!(
         status,
