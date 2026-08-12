@@ -169,6 +169,16 @@ impl ReservationConfig {
     /// The lease expiry a fresh reservation or takeover would establish,
     /// computed from the configured clock and nothing else — which is what
     /// makes expiry testable without wall time.
+    /// The clock every expiry and retention decision reads.
+    ///
+    /// Exposed so the retention worker computes its cutoff from the same source
+    /// the reservations were stamped by. A worker reading wall time while the
+    /// store reads an injected clock would disagree with it under test and,
+    /// worse, under clock skew.
+    pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     pub(crate) fn lease_until(&self) -> chrono::DateTime<chrono::Utc> {
         self.clock.now() + self.lease_duration
     }

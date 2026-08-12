@@ -106,6 +106,7 @@ pub struct RuntimeBuilder {
     idempotency_enforcement_mode: IdempotencyEnforcementMode,
     /// The single registered reservation store, if any.
     idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+    retention_policy: Option<crate::runtime::RetentionPolicy>,
     /// Clock the reservation lease is computed from. `None` means the real one.
     /// Injectable so lease expiry is testable without wall time (AD-3i).
     reservation_clock: Option<Arc<dyn ego_domain::time::Clock>>,
@@ -210,6 +211,7 @@ impl RuntimeBuilder {
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
             idempotency_enforcement_mode: IdempotencyEnforcementMode::default(),
             idempotency_reservation_store: None,
+            retention_policy: None,
             reservation_clock: None,
             reservation_owner_id: None,
             reservation_lease_duration: std::time::Duration::from_secs(30),
@@ -409,6 +411,20 @@ impl RuntimeBuilder {
     /// Exactly one: a second call replaces the first rather than accumulating,
     /// because two stores would mean two places a key could be reserved and no
     /// answer to which one decides.
+    /// Enables retention of completed reservations.
+    ///
+    /// Optional and absent by default: without this call no worker is started and
+    /// nothing is ever deleted. An SDK upgrade must not begin removing a service's
+    /// data on a schedule nobody chose.
+    ///
+    /// Requires a registered [`OperationReservationStore`]; `build()` refuses
+    /// otherwise, because a retention schedule with nothing to purge is a
+    /// configuration that cannot mean what it says.
+    pub fn with_retention_policy(mut self, policy: crate::runtime::RetentionPolicy) -> Self {
+        self.retention_policy = Some(policy);
+        self
+    }
+
     pub fn with_operation_reservation_store(
         mut self,
         store: Arc<dyn OperationReservationStore>,
@@ -799,7 +815,22 @@ impl RuntimeBuilder {
             }
         };
 
+        // A retention schedule with nothing to purge cannot mean what it says, so it
+        // is refused at build time rather than starting a worker that would find no
+        // store to call. Panicking here matches the existing refusal for a missing
+        // reservation store in the enforcing mode; `try_build` callers reach the
+        // same check through the same path.
+        assert!(
+            !(self.retention_policy.is_some() && reservation.is_none()),
+            "a retention policy was configured but no OperationReservationStore is \
+             registered: retention purges completed reservations, so without a store \
+             there is nothing for it to purge and the schedule would run forever \
+             removing nothing"
+        );
+        let retention_policy = self.retention_policy;
+
         let runtime = Runtime {
+            retention_policy,
             health_aggregator,
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
@@ -941,6 +972,10 @@ impl Default for RuntimeBuilder {
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
+    /// The retention schedule, if one was configured. Absent by default, and the
+    /// only thing [`Runtime::start_retention`] consults before deciding whether
+    /// there is a worker to start at all.
+    retention_policy: Option<crate::runtime::RetentionPolicy>,
     /// The runtime-owned health aggregator (PROD-005 PR2 TASK-018/019),
     /// built once by [`RuntimeBuilder::build`] from every registered
     /// lifecycle component's `health_contributors()`. Cheap to clone (an
@@ -1032,6 +1067,78 @@ impl Runtime {
     /// `Deferred`-mode runner task was never spawned — closing the "effects
     /// accepted into a queue nobody ever drains" gap a synchronous,
     /// auto-starting `build()` used to leave open.
+    /// Starts the retention worker, if a policy was configured.
+    ///
+    /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
+    /// should begin deleting rows as a side effect of `build()`. A runtime with no
+    /// policy returns `Ok(())` having started nothing.
+    ///
+    /// The shutdown hook is registered here rather than at build time, so a worker
+    /// that was never started never contributes a hook — the ordering of the
+    /// remaining hooks is then exactly what it was.
+    pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
+        let Some(policy) = self.retention_policy else {
+            return Ok(());
+        };
+        // Guaranteed by the build-time refusal above; stated rather than assumed.
+        let reservation = self
+            .inner
+            .reservation()
+            .expect("build() refuses a retention policy without a reservation store");
+
+        let worker = crate::runtime::retention::RetentionWorker::start(
+            policy,
+            reservation.store().clone(),
+            reservation.clock().clone(),
+        );
+
+        // Bounded, ordered and panic-isolated, matching the provider teardown
+        // precedent: a worker that panics or overruns must not stop the hooks
+        // after it, and must not vanish silently either. Reporting beyond this is
+        // B7.10/B7.11's subject.
+        let deadline = policy
+            .interval()
+            .saturating_mul(2)
+            .max(Duration::from_secs(1));
+        let worker = std::sync::Mutex::new(Some(worker));
+        self.register_async_teardown(async move {
+            let taken = worker.lock().ok().and_then(|mut slot| slot.take());
+            let Some(worker) = taken else { return Ok(()) };
+
+            // The outcome is *returned*, not logged. That matches the provider
+            // precedent — hooks all run, and a failure is surfaced afterwards as
+            // `RuntimeInfraError::Teardown` — and it keeps this path free of a
+            // logger it would otherwise have to reach for. Richer reporting is
+            // B7.10/B7.11's subject.
+            let mut outcome = crate::runtime::retention::RetentionShutdown::Stopped;
+            let panicked = crate::runtime::retention::isolate_panics(async {
+                outcome = worker.stop(deadline).await;
+            })
+            .await;
+
+            if panicked {
+                return Err(RuntimeInfraError::Teardown {
+                    reason: "the retention teardown hook panicked".to_string(),
+                });
+            }
+            match outcome {
+                crate::runtime::retention::RetentionShutdown::Stopped => Ok(()),
+                crate::runtime::retention::RetentionShutdown::Panicked => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker panicked".to_string(),
+                    })
+                }
+                crate::runtime::retention::RetentionShutdown::TimedOut => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker did not stop within its deadline".to_string(),
+                    })
+                }
+            }
+        });
+
+        Ok(())
+    }
+
     pub async fn start_effects(&self) -> Result<(), RuntimeInfraError> {
         let Some(acceptor) = self.inner.effect_acceptor_impl.clone() else {
             return Ok(());
