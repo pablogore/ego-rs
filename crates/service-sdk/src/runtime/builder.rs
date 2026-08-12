@@ -1067,6 +1067,60 @@ impl Runtime {
     /// `Deferred`-mode runner task was never spawned — closing the "effects
     /// accepted into a queue nobody ever drains" gap a synchronous,
     /// auto-starting `build()` used to leave open.
+    ///
+    pub async fn start_effects(&self) -> Result<(), RuntimeInfraError> {
+        let Some(acceptor) = self.inner.effect_acceptor_impl.clone() else {
+            return Ok(());
+        };
+        if self
+            .inner
+            .effect_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // Already started by a previous call — idempotent no-op rather
+            // than double-spawning the runner task.
+            return Ok(());
+        }
+
+        let handle = acceptor.start();
+        let deadline = self.inner.effect_drain_deadline;
+        // Same "a failing hook surfaces through shutdown_async" contract
+        // Finding 6/F-02 already established: `EffectRuntimeHandle::
+        // shutdown_and_wait`'s `Result` is propagated, never swallowed.
+        self.register_async_teardown(async move {
+            handle
+                .shutdown_and_wait(deadline)
+                .await
+                .map_err(|err| RuntimeInfraError::Teardown {
+                    reason: format!(
+                        "external-effects drain deadline reached before shutdown completed \
+                     cleanly (drain_incomplete): {err}"
+                    ),
+                })
+        });
+        Ok(())
+    }
+
+    /// Returns the external-effects [`EffectAcceptor`] started via
+    /// [`Runtime::start_effects`], if at least one executor was registered
+    /// AND `start_effects` has actually run (CORE-019 Phase 9; PR4 review
+    /// F-01). `None` both in the zero-cost path (design.md §8/§20 — no
+    /// store, no queue, no acceptor was ever constructed) and in the
+    /// constructed-but-not-yet-started path — a caller cannot obtain (and so
+    /// cannot silently use) an acceptor whose `Deferred`-mode runner was
+    /// never spawned.
+    ///
+    /// This is the seam a host wires into its entity-level runtime (e.g.
+    /// `persistent_entity::builder::EntityRuntimeBuilder`) so spawned actors
+    /// stop silently discarding described effects — that host-side plumbing
+    /// is out of `ego-service-sdk`'s scope (it lives wherever the host
+    /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
     /// Starts the retention worker, if a policy was configured.
     ///
     /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
@@ -1076,10 +1130,30 @@ impl Runtime {
     /// The shutdown hook is registered here rather than at build time, so a worker
     /// that was never started never contributes a hook — the ordering of the
     /// remaining hooks is then exactly what it was.
+    ///
+    /// **Idempotent.** Calling this twice starts one worker and registers one hook,
+    /// guarded by the same compare-and-exchange the effects subsystem uses. An
+    /// earlier version had no guard: a second call spawned a second loop purging on
+    /// the same schedule and a second teardown hook, while this documentation —
+    /// inherited from `start_effects` by an editing slip — claimed it never
+    /// double-spawned.
     pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
         let Some(policy) = self.retention_policy else {
             return Ok(());
         };
+        if self
+            .inner
+            .retention_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
         // Guaranteed by the build-time refusal above; stated rather than assumed.
         let reservation = self
             .inner
@@ -1139,59 +1213,6 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn start_effects(&self) -> Result<(), RuntimeInfraError> {
-        let Some(acceptor) = self.inner.effect_acceptor_impl.clone() else {
-            return Ok(());
-        };
-        if self
-            .inner
-            .effect_started
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_err()
-        {
-            // Already started by a previous call — idempotent no-op rather
-            // than double-spawning the runner task.
-            return Ok(());
-        }
-
-        let handle = acceptor.start();
-        let deadline = self.inner.effect_drain_deadline;
-        // Same "a failing hook surfaces through shutdown_async" contract
-        // Finding 6/F-02 already established: `EffectRuntimeHandle::
-        // shutdown_and_wait`'s `Result` is propagated, never swallowed.
-        self.register_async_teardown(async move {
-            handle
-                .shutdown_and_wait(deadline)
-                .await
-                .map_err(|err| RuntimeInfraError::Teardown {
-                    reason: format!(
-                        "external-effects drain deadline reached before shutdown completed \
-                     cleanly (drain_incomplete): {err}"
-                    ),
-                })
-        });
-        Ok(())
-    }
-
-    /// Returns the external-effects [`EffectAcceptor`] started via
-    /// [`Runtime::start_effects`], if at least one executor was registered
-    /// AND `start_effects` has actually run (CORE-019 Phase 9; PR4 review
-    /// F-01). `None` both in the zero-cost path (design.md §8/§20 — no
-    /// store, no queue, no acceptor was ever constructed) and in the
-    /// constructed-but-not-yet-started path — a caller cannot obtain (and so
-    /// cannot silently use) an acceptor whose `Deferred`-mode runner was
-    /// never spawned.
-    ///
-    /// This is the seam a host wires into its entity-level runtime (e.g.
-    /// `persistent_entity::builder::EntityRuntimeBuilder`) so spawned actors
-    /// stop silently discarding described effects — that host-side plumbing
-    /// is out of `ego-service-sdk`'s scope (it lives wherever the host
-    /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
     pub fn effect_acceptor(&self) -> Option<Arc<dyn EffectAcceptor>> {
         if !self
             .inner

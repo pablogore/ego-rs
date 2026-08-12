@@ -377,6 +377,8 @@ pub struct RuntimeInner {
     /// never silently use) an acceptor that would just accept effects into a
     /// queue nobody drains (PR4 review F-01).
     pub(crate) effect_started: AtomicBool,
+    /// Guards `start_retention` so a second call starts no second worker.
+    pub(crate) retention_started: AtomicBool,
     /// How long `Runtime::start_effects`'s registered async teardown hook
     /// waits for the `Deferred` drain loop before forcing remaining
     /// in-flight effects back to `Pending` (design.md §8). Meaningless when
@@ -452,6 +454,7 @@ impl RuntimeInner {
             observability,
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
+            retention_started: AtomicBool::new(false),
             effect_drain_deadline,
             data_provider_access,
         }

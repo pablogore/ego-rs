@@ -276,3 +276,161 @@ async fn shutdown_leaves_an_in_progress_reservation_exactly_as_it_was() {
          completed nor renewed. Got {after:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 6. A worker that overruns its deadline is cancelled, not detached
+// ---------------------------------------------------------------------------
+
+/// A store whose purge never returns until released.
+///
+/// This is how the timeout branch is reached deterministically: the worker is
+/// parked inside `purge_completed_before`, so cancellation cannot be acknowledged
+/// through the loop's `select!` and the bounded wait must expire.
+struct HangingStore {
+    entered: Arc<AtomicUsize>,
+    /// Incremented **after** the hang is released, which is the observable that
+    /// distinguishes an aborted task from a detached one. A cancelled task is
+    /// dropped at its await point and never gets here; a detached one resumes and
+    /// does. Counting only entries could not tell them apart — the cancel permit
+    /// left by shutdown makes even a detached loop exit at its next `select!`, so
+    /// it never enters a second purge either way.
+    resumed: Arc<AtomicUsize>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl OperationReservationStore for HangingStore {
+    async fn reserve(&self, _r: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        unreachable!("this store only ever purges")
+    }
+    async fn renew(&self, _f: &OwnerFence, _u: DateTime<Utc>) -> Result<(), ReservationError> {
+        unreachable!("shutdown must never renew")
+    }
+    async fn complete(
+        &self,
+        _f: &OwnerFence,
+        _r: StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        unreachable!("shutdown must never complete")
+    }
+    async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+        unreachable!("shutdown must never abandon")
+    }
+    async fn purge_completed_before(
+        &self,
+        _cutoff: DateTime<Utc>,
+        _batch: usize,
+    ) -> Result<u64, ReservationError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.release.notified().await;
+        self.resumed.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+    async fn probe(&self) -> Result<(), ReservationError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_worker_that_overruns_its_deadline_is_aborted_rather_than_left_running() {
+    let clock = Arc::new(TestClock::new(epoch()));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let resumed = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(HangingStore {
+        entered: entered.clone(),
+        resumed: resumed.clone(),
+        release: release.clone(),
+    });
+
+    // The smallest interval the policy admits, so the shutdown deadline derived
+    // from it is short and this test does not wait on a long one.
+    let policy = RetentionPolicy::new(Duration::from_secs(60), Duration::from_nanos(1), 1)
+        .expect("a valid policy");
+
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    // It is inside the purge and will not come out.
+    for _ in 0..500 {
+        if entered.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        entered.load(Ordering::SeqCst) >= 1,
+        "setup: the worker must be parked inside the purge"
+    );
+
+    // Shutdown reports the overrun rather than hiding it.
+    let outcome = runtime.shutdown_async().await;
+    assert!(
+        outcome.is_err(),
+        "an overrunning worker must be surfaced, not swallowed: got {outcome:?}"
+    );
+
+    // And the worker is genuinely gone, not merely unreferenced. Dropping a
+    // `JoinHandle` detaches the task in Tokio rather than cancelling it, so the
+    // question is whether the parked purge can still resume. Releasing the hang
+    // answers it: a detached task wakes and increments `resumed`; an aborted one
+    // was dropped at that await point and never can.
+    release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        resumed.load(Ordering::SeqCst),
+        0,
+        "the parked purge resumed after shutdown returned, so the task was detached \
+         rather than aborted — shutdown reported a failure while the thing it was \
+         shutting down carried on"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Starting twice starts one worker
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn starting_retention_twice_starts_one_worker() {
+    let clock = Arc::new(TestClock::new(epoch()));
+    let store = RecordingStore::wrapping(InMemoryOperationReservationStore::new(clock.clone()));
+
+    // Long interval: each worker purges once promptly and then waits, so the count
+    // after both calls distinguishes one worker from two without racing ticks.
+    let policy = RetentionPolicy::new(Duration::from_secs(60), Duration::from_secs(3_600), 5)
+        .expect("a valid policy");
+
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .build();
+
+    runtime
+        .start_retention()
+        .await
+        .expect("the first call starts");
+    runtime
+        .start_retention()
+        .await
+        .expect("the second call is a no-op");
+
+    wait_for_a_purge(&store).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    assert_eq!(
+        store.calls(),
+        1,
+        "one worker, one first pass. Two would mean a second loop purging on the \
+         same schedule — and a second teardown hook to stop it, which the first \
+         shutdown would not know about"
+    );
+
+    runtime.shutdown_async().await.expect("shutdown succeeds");
+}

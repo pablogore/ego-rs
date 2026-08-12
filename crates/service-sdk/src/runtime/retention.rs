@@ -163,6 +163,10 @@ impl RetentionWorker {
     /// `abandon`, `complete` or `renew`: a worker that only ever purges completed
     /// rows has no lease of its own, and shutting it down must not touch a
     /// reservation another owner is still holding.
+    /// On timeout the task is **aborted and then awaited**, not dropped. Dropping a
+    /// `JoinHandle` detaches the task in Tokio rather than cancelling it, so an
+    /// earlier version returned `TimedOut` while the worker carried on purging — the
+    /// shutdown reported a failure and the thing it was shutting down survived it.
     pub(crate) async fn stop(self, deadline: Duration) -> RetentionShutdown {
         self.cancel.notify_waiters();
         // `notify_waiters` reaches a task already parked in `select!`; a task
@@ -171,11 +175,20 @@ impl RetentionWorker {
         // bounded wait below would always spend its full deadline.
         self.cancel.notify_one();
 
-        match tokio::time::timeout(deadline, self.task).await {
+        let mut task = self.task;
+        match tokio::time::timeout(deadline, &mut task).await {
             Ok(Ok(())) => RetentionShutdown::Stopped,
             Ok(Err(joined)) if joined.is_panic() => RetentionShutdown::Panicked,
             Ok(Err(_)) => RetentionShutdown::Stopped,
-            Err(_) => RetentionShutdown::TimedOut,
+            Err(_) => {
+                // It did not leave on its own, so it is cancelled — and awaited, so
+                // this returns only once the task is genuinely gone. Awaiting an
+                // aborted handle yields `Err(is_cancelled)`, which is the expected
+                // outcome here rather than a further failure.
+                task.abort();
+                let _ = task.await;
+                RetentionShutdown::TimedOut
+            }
         }
     }
 }
