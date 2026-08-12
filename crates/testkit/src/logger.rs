@@ -227,8 +227,11 @@ fn parse_captured_line(line: &str) -> CapturedRecord {
                 fields,
             }
         }
-        // Back-compat `log(Severity, &str)` path: no formatter, no JSON —
-        // the raw message is exactly what was written (grounding note (c)).
+        // Anything that is not a JSON object: the raw line is exactly what was
+        // written, and there is no level to recover from it. `log(Severity,
+        // &str)` used to land here; since kitlogger `92f04014` it is formatted
+        // like every other path, so this arm now covers only genuinely
+        // unstructured output.
         _ => CapturedRecord {
             level: None,
             message: line.to_string(),
@@ -270,11 +273,16 @@ mod tests {
         );
     }
 
+    /// `KITLogger::log` used to bypass the formatter, so the severity was not
+    /// recoverable from the captured bytes and this asserted `None`. It goes
+    /// through the formatter now — kitlogger `92f04014` — so the severity a
+    /// caller passed is the severity a test observes.
+    ///
+    /// The old expectation was an upstream limitation written down as a
+    /// contract. Reasserting `None` today would be asking this crate to hide an
+    /// improvement it just received.
     #[test]
-    fn simple_log_path_captures_message_with_empty_fields() {
-        // Grounding note (c): KITLogger::log bypasses the formatter, so the
-        // exact Severity is not recoverable from the captured bytes — only
-        // message and (necessarily empty) fields are.
+    fn simple_log_path_captures_severity_message_and_empty_fields() {
         let capturing = CapturingLogger::new();
 
         capturing
@@ -284,7 +292,12 @@ mod tests {
 
         let records = capturing.records();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].level, None);
+        assert_eq!(
+            records[0].level,
+            Some(Severity::Warn),
+            "the severity the caller passed, recoverable now that log() is \
+             formatted rather than written raw"
+        );
         assert_eq!(records[0].message, "disk almost full");
         assert!(records[0].fields.is_empty());
     }

@@ -72,36 +72,6 @@ variant of another.
 Scenario 4 is the one issue #275 calls the highest-value invariant in the
 backlog: today it is guarded by nothing.
 
-## Upstream blocker — what this suite cannot depend on yet
-
-`ego-testkit`, `ego-service-sdk` and `reference-app` **cannot be dependencies of
-this workspace today**, which means the four PROD-012 scenarios above are not yet
-implementable here. The takeover/fencing invariant — issue #275's stated
-priority, and the one thing in the backlog guarded by nothing — is, because it
-needs only `ego-domain` and `ego-persistence`.
-
-The cause is upstream. `kitlogger` declares:
-
-```toml
-kit-config = { path = "../../../kit-config/crates/kit-config", ... }
-```
-
-a relative path that escapes its own git repository. Cargo resolves a git
-dependency's path dependencies *inside* that checkout, where `kit-config` does
-not exist, so resolution fails with `no matching package named kit-config`.
-
-**This is not specific to the nested workspace.** Measured: deleting the root
-`Cargo.lock` and running `cargo generate-lockfile` at the root fails the same
-way. The repository builds only because a committed lockfile already pins the
-package — it cannot regenerate it. A workspace with no lockfile, like this one,
-has nothing to fall back on.
-
-Declaring `kit-config` from git in this manifest does **not** help: the failure
-is kitlogger's path dependency, not a missing source.
-
-Until the upstream manifest is fixed, adding any of the three crates turns
-`cargo generate-lockfile` here into a hard error.
-
 ## Conventions
 
 - **One shared PostgreSQL per run**, isolated per test by schema or database.
