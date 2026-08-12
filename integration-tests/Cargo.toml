@@ -1,0 +1,41 @@
+# An INDEPENDENT Cargo workspace, deliberately not a member of the root.
+#
+# The root workspace must keep building and testing with no Docker, and must
+# neither compile nor run anything here:
+#
+#   cargo test --workspace                                  # root; no Docker, never touches this
+#   cargo test --manifest-path integration-tests/Cargo.toml  # this suite, explicit and opt-in
+#
+# No `exclude` entry is required in the root manifest: it uses an explicit
+# `members` list with no globs, and a subdirectory carrying its own
+# `[workspace]` table is its own workspace root. The separation is structural,
+# not a list someone has to remember to maintain.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "ego-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# Declared here for the same reason the root resolves it: `kitlogger` requires
+# `kit-config`, and only a manifest in this workspace naming the git source can
+# make it resolvable. The root gets this for free because `reference-app`
+# declares it; a nested workspace does not inherit that unification.
+
+ego-domain = { path = "../crates/domain" }
+ego-persistence = { path = "../crates/persistence" }
+
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "migrate"] }
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
