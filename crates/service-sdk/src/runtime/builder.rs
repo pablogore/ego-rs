@@ -1142,102 +1142,6 @@ impl Runtime {
     /// [`Runtime::effect_acceptor`], this is available immediately after
     /// `build()` — there is no separate `start_effects`-style step, since
     /// `RuntimeDataProviderAccess` never spawns a task.
-    /// Starts the retention worker, if a policy was configured.
-    ///
-    /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
-    /// should begin deleting rows as a side effect of `build()`. A runtime with no
-    /// policy returns `Ok(())` having started nothing.
-    ///
-    /// The shutdown hook is registered here rather than at build time, so a worker
-    /// that was never started never contributes a hook — the ordering of the
-    /// remaining hooks is then exactly what it was.
-    ///
-    /// **Idempotent.** Calling this twice starts one worker and registers one hook,
-    /// guarded by the same compare-and-exchange the effects subsystem uses. An
-    /// earlier version had no guard: a second call spawned a second loop purging on
-    /// the same schedule and a second teardown hook, while this documentation —
-    /// inherited by an editing slip — claimed it never double-spawned.
-    ///
-    /// That slip happened twice: inserting this function above another one left the
-    /// preceding doc comment attached to it, first `start_effects`' and then
-    /// `effect_acceptor`'s. Both are restored, and this function now sits after the
-    /// accessor rather than between a doc comment and the item it describes.
-    pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
-        let Some(policy) = self.retention_policy else {
-            return Ok(());
-        };
-        if self
-            .inner
-            .retention_started
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_err()
-        {
-            return Ok(());
-        }
-        // Guaranteed by the build-time refusal above; stated rather than assumed.
-        let reservation = self
-            .inner
-            .reservation()
-            .expect("build() refuses a retention policy without a reservation store");
-
-        let worker = crate::runtime::retention::RetentionWorker::start(
-            policy,
-            reservation.store().clone(),
-            reservation.clock().clone(),
-        );
-
-        // Bounded, ordered and panic-isolated, matching the provider teardown
-        // precedent: a worker that panics or overruns must not stop the hooks
-        // after it, and must not vanish silently either. Reporting beyond this is
-        // B7.10/B7.11's subject.
-        let deadline = policy
-            .interval()
-            .saturating_mul(2)
-            .max(Duration::from_secs(1));
-        let worker = std::sync::Mutex::new(Some(worker));
-        self.register_async_teardown(async move {
-            let taken = worker.lock().ok().and_then(|mut slot| slot.take());
-            let Some(worker) = taken else { return Ok(()) };
-
-            // The outcome is *returned*, not logged. That matches the provider
-            // precedent — hooks all run, and a failure is surfaced afterwards as
-            // `RuntimeInfraError::Teardown` — and it keeps this path free of a
-            // logger it would otherwise have to reach for. Richer reporting is
-            // B7.10/B7.11's subject.
-            let mut outcome = crate::runtime::retention::RetentionShutdown::Stopped;
-            let panicked = crate::runtime::retention::isolate_panics(async {
-                outcome = worker.stop(deadline).await;
-            })
-            .await;
-
-            if panicked {
-                return Err(RuntimeInfraError::Teardown {
-                    reason: "the retention teardown hook panicked".to_string(),
-                });
-            }
-            match outcome {
-                crate::runtime::retention::RetentionShutdown::Stopped => Ok(()),
-                crate::runtime::retention::RetentionShutdown::Panicked => {
-                    Err(RuntimeInfraError::Teardown {
-                        reason: "the retention worker panicked".to_string(),
-                    })
-                }
-                crate::runtime::retention::RetentionShutdown::TimedOut => {
-                    Err(RuntimeInfraError::Teardown {
-                        reason: "the retention worker did not stop within its deadline".to_string(),
-                    })
-                }
-            }
-        });
-
-        Ok(())
-    }
-
     pub fn data_provider_access(&self) -> Option<Arc<dyn DataProviderAccess>> {
         self.inner.data_provider_access.clone()
     }
@@ -1358,6 +1262,108 @@ impl Runtime {
         RuntimeResolver {
             runtime: self.clone(),
         }
+    }
+
+    /// **Placed last in this `impl` on purpose.** Inserting this method above
+    /// another one left the preceding doc comment attached to it three separate
+    /// times — `start_effects`', then `effect_acceptor`'s, then
+    /// `data_provider_access`'. Each time the neighbour lost its documentation and
+    /// this method's rustdoc claimed something it does not do. At the end of the
+    /// block there is no following item whose doc it can take.
+    ///
+    /// Starts the retention worker, if a policy was configured.
+    ///
+    /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
+    /// should begin deleting rows as a side effect of `build()`. A runtime with no
+    /// policy returns `Ok(())` having started nothing.
+    ///
+    /// The shutdown hook is registered here rather than at build time, so a worker
+    /// that was never started never contributes a hook — the ordering of the
+    /// remaining hooks is then exactly what it was.
+    ///
+    /// **Idempotent.** Calling this twice starts one worker and registers one hook,
+    /// guarded by the same compare-and-exchange the effects subsystem uses. An
+    /// earlier version had no guard: a second call spawned a second loop purging on
+    /// the same schedule and a second teardown hook, while this documentation —
+    /// inherited by an editing slip — claimed it never double-spawned.
+    ///
+    /// That slip happened three times before it was fixed properly — see the note
+    /// above. Moving the method after one accessor only relocated the problem to the
+    /// next one; being last in the block is what actually settles it.
+    pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
+        let Some(policy) = self.retention_policy else {
+            return Ok(());
+        };
+        if self
+            .inner
+            .retention_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        // Guaranteed by the build-time refusal above; stated rather than assumed.
+        let reservation = self
+            .inner
+            .reservation()
+            .expect("build() refuses a retention policy without a reservation store");
+
+        let worker = crate::runtime::retention::RetentionWorker::start(
+            policy,
+            reservation.store().clone(),
+            reservation.clock().clone(),
+        );
+
+        // Bounded, ordered and panic-isolated, matching the provider teardown
+        // precedent: a worker that panics or overruns must not stop the hooks
+        // after it, and must not vanish silently either. Reporting beyond this is
+        // B7.10/B7.11's subject.
+        let deadline = policy
+            .interval()
+            .saturating_mul(2)
+            .max(Duration::from_secs(1));
+        let worker = std::sync::Mutex::new(Some(worker));
+        self.register_async_teardown(async move {
+            let taken = worker.lock().ok().and_then(|mut slot| slot.take());
+            let Some(worker) = taken else { return Ok(()) };
+
+            // The outcome is *returned*, not logged. That matches the provider
+            // precedent — hooks all run, and a failure is surfaced afterwards as
+            // `RuntimeInfraError::Teardown` — and it keeps this path free of a
+            // logger it would otherwise have to reach for. Richer reporting is
+            // B7.10/B7.11's subject.
+            let mut outcome = crate::runtime::retention::RetentionShutdown::Stopped;
+            let panicked = crate::runtime::retention::isolate_panics(async {
+                outcome = worker.stop(deadline).await;
+            })
+            .await;
+
+            if panicked {
+                return Err(RuntimeInfraError::Teardown {
+                    reason: "the retention teardown hook panicked".to_string(),
+                });
+            }
+            match outcome {
+                crate::runtime::retention::RetentionShutdown::Stopped => Ok(()),
+                crate::runtime::retention::RetentionShutdown::Panicked => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker panicked".to_string(),
+                    })
+                }
+                crate::runtime::retention::RetentionShutdown::TimedOut => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker did not stop within its deadline".to_string(),
+                    })
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 
