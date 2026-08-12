@@ -160,7 +160,11 @@ impl OperationReservationStore for CountingStore {
     }
 }
 
-/// Records every effect handed to the real acceptor, and delegates.
+/// Delegates to the real acceptor and records what it **accepted**.
+///
+/// Not what it was handed: a rejected effect must not be counted, or the assertion
+/// "one accepted welcome-email effect" would be satisfied by one the acceptor
+/// refused.
 ///
 /// `accept()` runs synchronously in the command's post-commit step, so a count
 /// taken here is settled before the HTTP response returns. That is why acceptance
@@ -194,16 +198,26 @@ impl EffectAcceptor for CountingAcceptor {
         tenant: &TenantId,
         effects: Vec<ExternalEffectDescription>,
     ) -> Result<(), EffectAcceptanceError> {
-        {
-            let mut seen = self.accepted.lock().expect("not poisoned");
-            for effect in &effects {
-                seen.push((
+        // Metadata captured first because `effects` is moved into the delegate, but
+        // recorded only after it answers `Ok`. An earlier version pushed before
+        // delegating, which counted *attempts* to accept rather than acceptances —
+        // a real difference, since `accept()` returns `Err` when a store error
+        // exhausts its retry policy. The assertion in this file says "one accepted
+        // effect", so it has to be one the acceptor actually took.
+        let observed: Vec<(String, String)> = effects
+            .iter()
+            .map(|effect| {
+                (
                     effect.effect_type.clone(),
                     effect.idempotency_key.as_str().to_string(),
-                ));
-            }
-        }
-        self.inner.accept(tenant, effects).await
+                )
+            })
+            .collect();
+
+        self.inner.accept(tenant, effects).await?;
+
+        self.accepted.lock().expect("not poisoned").extend(observed);
+        Ok(())
     }
 }
 
@@ -537,7 +551,12 @@ async fn two_identical_posts_execute_once_and_the_second_is_served_from_postgres
     //
     // The two consequences a duplicate execution would have, each observed at its
     // own boundary. A second `UserRegistered` is a second row in the read side; a
-    // second accepted effect is a second welcome email actually sent.
+    // second welcome-email effect accepted for delivery is a second one queued to
+    // be sent.
+    //
+    // Deliberately not "actually sent": acceptance is not delivery, and this file
+    // does not observe the deferred runner. Overstating that here would undo the
+    // reason acceptance was chosen as the observation point.
     assert_eq!(
         user_registered_count(&sink_store, "tenant-a").await,
         1,
