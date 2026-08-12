@@ -85,6 +85,41 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// The receipts table is not reachable from a reservation deletion.
+    ///
+    /// The guarantee this guards — an ordinary purge never removes a receipt — holds
+    /// **by construction** rather than by behaviour: `purge_completed_before` deletes
+    /// only from `operation_reservations`, and this table declares no relationship to
+    /// it. There is no execution path from one to the other, so there is nothing
+    /// dynamic to observe. Spinning up PostgreSQL to watch an unrelated table survive
+    /// would be testing the engine, not this code.
+    ///
+    /// What can genuinely regress is the **precondition**: someone relates the two
+    /// tables and a cascade quietly carries receipts away without any query naming
+    /// them. That is what this asserts, against the migration text the crate already
+    /// embeds — a bounded substring check, not SQL parsing.
+    ///
+    /// **The obligation this defers.** If a future migration does relate receipts to
+    /// reservations, this assertion is the wrong shape and must be replaced by a
+    /// catalogue check that the relationship carries no cascading delete. That
+    /// obligation is born with the foreign key, not before it.
+    #[test]
+    fn the_receipts_table_declares_no_relationship_a_purge_could_cascade_through() {
+        let sql = MIGRATION_011_CREATE_OPERATION_RECEIPTS.to_ascii_uppercase();
+
+        for forbidden in ["REFERENCES", "FOREIGN KEY", "CASCADE"] {
+            assert!(
+                !sql.contains(forbidden),
+                "the receipts migration now contains `{forbidden}`. An ordinary purge \
+                 deletes only from `operation_reservations`, and it stays unable to \
+                 reach a receipt only while the two tables are unrelated. If this \
+                 relationship is intended, replace this assertion with a catalogue \
+                 check that the constraint carries no cascading delete — and add the \
+                 behavioural test that becomes meaningful once a path exists."
+            );
+        }
+    }
+
     /// Every `.sql` file in the migrations directory is registered above, and
     /// every registered name has a file.
     ///
