@@ -163,6 +163,7 @@ impl RetentionWorker {
     /// `abandon`, `complete` or `renew`: a worker that only ever purges completed
     /// rows has no lease of its own, and shutting it down must not touch a
     /// reservation another owner is still holding.
+    ///
     /// On timeout the task is **aborted and then awaited**, not dropped. Dropping a
     /// `JoinHandle` detaches the task in Tokio rather than cancelling it, so an
     /// earlier version returned `TimedOut` while the worker carried on purging — the
@@ -206,8 +207,10 @@ pub(crate) enum RetentionShutdown {
     /// The loop panicked. Isolated rather than propagated: a worker's failure
     /// must not stop the remaining teardown hooks.
     Panicked,
-    /// The loop did not exit within the deadline. Abandoned rather than waited
-    /// for, for the same reason.
+    /// The loop did not exit within the deadline, so it was **aborted and then
+    /// awaited** — this outcome is reported only once the task is gone. Not
+    /// abandoned: dropping the handle would detach the task and leave it purging
+    /// past a shutdown that had already reported failure.
     TimedOut,
 }
 

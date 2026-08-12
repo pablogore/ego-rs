@@ -1121,6 +1121,27 @@ impl Runtime {
     /// stop silently discarding described effects — that host-side plumbing
     /// is out of `ego-service-sdk`'s scope (it lives wherever the host
     /// constructs its `EntityRuntimeBuilder`/`EntityRuntime`).
+    pub fn effect_acceptor(&self) -> Option<Arc<dyn EffectAcceptor>> {
+        if !self
+            .inner
+            .effect_started
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        self.inner
+            .effect_acceptor_impl
+            .as_ref()
+            .map(|acceptor| acceptor.clone() as Arc<dyn EffectAcceptor>)
+    }
+
+    /// Returns the external-data-provider [`DataProviderAccess`] facade
+    /// built via [`RuntimeBuilder::register_data_provider`] (CORE-019A Phase
+    /// 4), if at least one provider was registered. `None` in the zero-cost
+    /// path (AD-006) — no registry, no facade was ever constructed. Unlike
+    /// [`Runtime::effect_acceptor`], this is available immediately after
+    /// `build()` — there is no separate `start_effects`-style step, since
+    /// `RuntimeDataProviderAccess` never spawns a task.
     /// Starts the retention worker, if a policy was configured.
     ///
     /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
@@ -1135,8 +1156,12 @@ impl Runtime {
     /// guarded by the same compare-and-exchange the effects subsystem uses. An
     /// earlier version had no guard: a second call spawned a second loop purging on
     /// the same schedule and a second teardown hook, while this documentation —
-    /// inherited from `start_effects` by an editing slip — claimed it never
-    /// double-spawned.
+    /// inherited by an editing slip — claimed it never double-spawned.
+    ///
+    /// That slip happened twice: inserting this function above another one left the
+    /// preceding doc comment attached to it, first `start_effects`' and then
+    /// `effect_acceptor`'s. Both are restored, and this function now sits after the
+    /// accessor rather than between a doc comment and the item it describes.
     pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
         let Some(policy) = self.retention_policy else {
             return Ok(());
@@ -1213,27 +1238,6 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn effect_acceptor(&self) -> Option<Arc<dyn EffectAcceptor>> {
-        if !self
-            .inner
-            .effect_started
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return None;
-        }
-        self.inner
-            .effect_acceptor_impl
-            .as_ref()
-            .map(|acceptor| acceptor.clone() as Arc<dyn EffectAcceptor>)
-    }
-
-    /// Returns the external-data-provider [`DataProviderAccess`] facade
-    /// built via [`RuntimeBuilder::register_data_provider`] (CORE-019A Phase
-    /// 4), if at least one provider was registered. `None` in the zero-cost
-    /// path (AD-006) — no registry, no facade was ever constructed. Unlike
-    /// [`Runtime::effect_acceptor`], this is available immediately after
-    /// `build()` — there is no separate `start_effects`-style step, since
-    /// `RuntimeDataProviderAccess` never spawns a task.
     pub fn data_provider_access(&self) -> Option<Arc<dyn DataProviderAccess>> {
         self.inner.data_provider_access.clone()
     }
