@@ -65,13 +65,30 @@ variant of another.
 | # | Scenario | Guarantee it demonstrates | Why in-process cannot show it | Status |
 |---|---|---|---|---|
 | 1 | Two identical `POST /register` | One execution, a durably completed response, and a replay served from PostgreSQL | The stored response has to survive a real commit and be read back through a real query — a scripted store returns whatever it was handed | `tests/replay_from_postgres.rs` |
-| 2 | Same key, different payload | Permanent conflict, with no second execution | The fingerprint comparison is a real uniqueness constraint under a real transaction, not an `if` in a test double | not written |
+| 2 | Same key, different payload | Permanent conflict, with no second execution, and the collided-with answer left intact | Reaching the fingerprint comparison at all depends on `(tenant_id, operation_key)` being genuinely unique. Without it the insert succeeds, a second row appears, and the conflict is never detected. The scenario runs under one tenant, so it loads the **tenant-scoped** partial index specifically | `tests/conflict_from_postgres.rs` |
 | 3 | Recovery after an expired lease | Takeover under real fencing, without repeating steps already confirmed | Lease expiry is a clock-versus-row-state race resolved by the database; the receipt that stops the repeat was committed by a previous transaction | `tests/takeover_fencing_postgres.rs` |
 | 4 | Two concurrent replicas | Exactly one obtains the permit; the other does not execute | Mutual exclusion between processes is what the `lease_until <= $N` guard exists for, and a single-process test cannot contend for it | not written |
 
-**Consumed: 2 of 4.** The Status column is the budget ledger — it lives here rather
+**Consumed: 3 of 4.** The Status column is the budget ledger — it lives here rather
 than in pull-request descriptions, which get buried. A row that gains a file
 spends one of the four.
+
+Row 2's justification took two corrections, both found by checking it rather than
+trusting it:
+
+1. It claimed the fingerprint comparison was "a real uniqueness constraint under a
+   real transaction". It is an `if` in Rust over a value read back from the row.
+   The real database-only mechanism is one step earlier — reaching that comparison
+   at all requires genuine uniqueness on `(tenant_id, operation_key)`.
+2. It then claimed the test demonstrated *both* complementary partial indexes. It
+   does not: the scenario runs under one tenant, and deleting only the systemwide
+   (`WHERE tenant_id IS NULL`) index leaves it green. Measured. The claim is now
+   scoped to the tenant-scoped index, which is the one it actually loads.
+
+A justification nobody checks is how a scenario earns a slot it does not deserve,
+and a justification that is *nearly* right is the harder case — it survives
+review. Both of these did, once. Worth re-reading this column before the last
+slot is spent.
 
 Scenario 4 is the one issue #275 calls the highest-value invariant in the
 backlog: today it is guarded by nothing.
