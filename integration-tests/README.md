@@ -54,15 +54,20 @@ That exception has been used exactly once, and it is classified separately rathe
 than counted as a fifth end-to-end scenario:
 
 ```
-End-to-end scenarios ................. 3 / 4
+End-to-end scenarios ................. 4 / 4
 PostgreSQL concurrency invariants .... 1 / 1
-Total infrastructure tests ........... 4
+Total infrastructure tests ........... 5
 ```
 
-The counts describe the tests that exist, not the ones planned. The first version
-of this block read `4 / 4` and `Total 5` while scenario 4 was still unwritten —
-a ledger that runs ahead of the tree is worse than none, because it retires the
-question it exists to keep open.
+The counts describe the tests that exist, not the ones planned. An earlier version
+of this block read `4 / 4` while scenario 4 was still unwritten — a ledger that runs
+ahead of the tree is worse than none, because it retires the question it exists to
+keep open. It is accurate now because the fourth scenario landed, not because the
+number was aspirational.
+
+**The end-to-end budget is spent.** Every further scenario is a variant, and
+variants belong in the fast suite. A sixth infrastructure test needs its own new
+infrastructure risk, stated and measured the way the concurrency invariant's was.
 
 The concurrency invariant is `tests/fencing_window_postgres.rs`, and it is
 deliberately **store-level** rather than end-to-end: the evidence it needs is
@@ -91,9 +96,9 @@ variant of another.
 | 1 | Two identical `POST /register` | One execution, a durably completed response, and a replay served from PostgreSQL | The stored response has to survive a real commit and be read back through a real query — a scripted store returns whatever it was handed | `tests/replay_from_postgres.rs` |
 | 2 | Same key, different payload | Permanent conflict, with no second execution, and the collided-with answer left intact | Reaching the fingerprint comparison at all depends on `(tenant_id, operation_key)` being genuinely unique. Without it the insert succeeds, a second row appears, and the conflict is never detected. The scenario runs under one tenant, so it loads the **tenant-scoped** partial index specifically | `tests/conflict_from_postgres.rs` |
 | 3 | Recovery after an expired lease | Takeover under real fencing, without repeating steps already confirmed | Lease expiry is a clock-versus-row-state race resolved by the database; the receipt that stops the repeat was committed by a previous transaction | `tests/takeover_fencing_postgres.rs` |
-| 4 | Two concurrent replicas | Exactly one obtains the permit; the other is refused without executing | Two genuinely concurrent `INSERT … ON CONFLICT DO NOTHING` statements resolving to exactly one winner is a database outcome; two runtimes sharing no memory can only be coordinated by the row | not written |
+| 4 | Two concurrent replicas | Exactly one obtains the permit; the other is refused without executing | Two genuinely concurrent `INSERT … ON CONFLICT DO NOTHING` statements resolving to exactly one winner is a database outcome; two runtimes sharing no memory can only be coordinated by the row | `tests/concurrent_replicas_postgres.rs` |
 
-**End-to-end consumed: 3 of 4.** The Status column is the ledger — it lives here
+**End-to-end consumed: 4 of 4.** The Status column is the ledger — it lives here
 rather than in pull-request descriptions, which get buried. A row that gains a file
 spends one of the four.
 
