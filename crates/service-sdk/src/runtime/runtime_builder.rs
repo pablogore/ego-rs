@@ -1085,13 +1085,29 @@ impl RuntimeInner {
 
         match config.store().complete(permit.fence(), stored).await {
             Ok(()) => {}
-            Err(ReservationError::StaleOwner) => self.record_completion_lost(
-                "stale_owner",
-                OperatorAction::ReviewLeaseDuration,
-                "this response was discarded because the caller no longer held a \
-                 current fence — the lease had lapsed or been taken over. What the \
-                 reservation looks like now is not knowable from this error",
-            ),
+            Err(ReservationError::StaleOwner) => {
+                // AD-10's `idempotency.lease.stale_owner`, whose attribute names the
+                // operation that hit it. The name carries `complete` because that is
+                // the only one of the three the runtime ever calls: nothing invokes
+                // `renew` or `abandon`, so neither can return `StaleOwner` and neither
+                // has a value to emit. The amendment recording that lands with the
+                // last metrics slice, where the whole table is in view.
+                //
+                // A counter and not just the existing operator event: this is the
+                // signal a rate alert fires on. `record_completion_lost` below emits a
+                // semantic event carrying the operator action, which is what somebody
+                // reads *after* being paged — the two are not substitutes.
+                if let Some(obs) = &self.observability {
+                    obs.metric("idempotency.lease.stale_owner.complete", 1.0);
+                }
+                self.record_completion_lost(
+                    "stale_owner",
+                    OperatorAction::ReviewLeaseDuration,
+                    "this response was discarded because the caller no longer held a \
+                     current fence — the lease had lapsed or been taken over. What the \
+                     reservation looks like now is not knowable from this error",
+                )
+            }
             Err(e) => self.record_completion_lost(
                 "store_unavailable",
                 OperatorAction::MonitorRate,
@@ -2540,6 +2556,240 @@ mod tests {
         async fn probe(&self) -> Result<(), ReservationError> {
             Ok(())
         }
+    }
+
+    /// Reserves successfully, then refuses the completion as `StaleOwner`.
+    ///
+    /// The pair is the point: the runtime has to mint a real permit before there is
+    /// anything to complete, and the refused completion is what the counter counts.
+    struct StaleCompletingStore;
+
+    impl StaleCompletingStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for StaleCompletingStore {
+        async fn reserve(
+            &self,
+            req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            Ok(ReservationOutcome::Fresh(Lease {
+                operation_id: OperationId::new(req.tenant.clone(), req.operation_key.clone()),
+                owner_id: req.owner_id.clone(),
+                fencing_token: FencingToken::initial(),
+                lease_until: req.lease_until,
+            }))
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _u: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!("no runtime component renews — that is why there is no metric")
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            Err(ReservationError::StaleOwner)
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!("no runtime component abandons — that is why there is no metric")
+        }
+        async fn purge_completed_before(
+            &self,
+            _c: chrono::DateTime<chrono::Utc>,
+            _b: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!("this store exists for the completion path")
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    /// Reserves successfully and **accepts** the completion.
+    ///
+    /// The counterpart of `StaleCompletingStore`, and it exists because the negative
+    /// control needs a completion that actually succeeds. Without it that test only
+    /// reserved, so a mutation counting `stale_owner` on *every* completion — success
+    /// included — went undetected: measured, and it is why this store is here.
+    struct CompletingStore;
+
+    impl CompletingStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for CompletingStore {
+        async fn reserve(
+            &self,
+            req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            Ok(ReservationOutcome::Fresh(Lease {
+                operation_id: OperationId::new(req.tenant.clone(), req.operation_key.clone()),
+                owner_id: req.owner_id.clone(),
+                fencing_token: FencingToken::initial(),
+                lease_until: req.lease_until,
+            }))
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _u: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!("no runtime component renews")
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            Ok(())
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!("no runtime component abandons")
+        }
+        async fn purge_completed_before(
+            &self,
+            _c: chrono::DateTime<chrono::Utc>,
+            _b: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!("this store exists for the completion path")
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    /// Completes an operation whose fence the store rejects, and returns the metrics.
+    async fn metrics_for_a_stale_completion(obs: Arc<crate::test_support::RecordingObservability>) {
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(StaleCompletingStore::new())
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_observability(obs as Arc<dyn Observability>)
+            .build();
+
+        // A *real* permit, obtained by reserving through the runtime rather than
+        // synthesised: `ReservationPermit` has no test constructor, and building one
+        // would assert against a fence this path never minted.
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(crate::runtime::CanonicalTenant::scoped(
+            TenantId::new("tenant-a").expect("valid tenant"),
+        ));
+        let decision = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds")
+            .expect("a decision was made");
+
+        rt.inner()
+            .complete_idempotent_operation(Some(&decision), &"answer")
+            .await;
+    }
+
+    /// A completion the store refuses as `StaleOwner` counts
+    /// `idempotency.lease.stale_owner.complete`.
+    ///
+    /// This is the signal a rate alert fires on. Without it a lease configured too
+    /// short is invisible in aggregate: each individual case emits an operator event,
+    /// but nothing says "this is happening a hundred times an hour", which is the
+    /// difference between a curiosity and a misconfiguration.
+    #[tokio::test]
+    async fn a_stale_completion_counts_the_stale_owner_metric() {
+        let obs = Arc::new(crate::test_support::RecordingObservability::new());
+        metrics_for_a_stale_completion(obs.clone()).await;
+
+        let names = obs.metric_names();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| *n == "idempotency.lease.stale_owner.complete")
+                .count(),
+            1,
+            "a discarded completion counts exactly once, or a rate is not a rate: {names:?}"
+        );
+    }
+
+    /// A completion the store **accepts** counts no stale owner.
+    ///
+    /// The negative control, and the version of it that works. An earlier one only
+    /// *reserved* — it never completed anything — so a mutation emitting the counter on
+    /// every completion, success included, passed it untouched. Measured, not
+    /// theorised. A counter that fires on success would make its own alert meaningless
+    /// while looking correct in aggregate.
+    #[tokio::test]
+    async fn a_successful_completion_counts_no_stale_owner() {
+        let obs = Arc::new(crate::test_support::RecordingObservability::new());
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(CompletingStore::new())
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_observability(obs.clone() as Arc<dyn Observability>)
+            .build();
+
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(crate::runtime::CanonicalTenant::scoped(
+            TenantId::new("tenant-a").expect("valid tenant"),
+        ));
+        let decision = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds")
+            .expect("a decision was made");
+
+        // The completion the store accepts. This is the call the earlier control was
+        // missing entirely.
+        rt.inner()
+            .complete_idempotent_operation(Some(&decision), &"answer")
+            .await;
+
+        assert!(
+            !obs.metric_names()
+                .iter()
+                .any(|n| n.starts_with("idempotency.lease.stale_owner")),
+            "the completion was accepted, so nothing lost a fence: {:?}",
+            obs.metric_names()
+        );
+    }
+
+    /// An uninstrumented runtime handles the same refusal identically.
+    #[tokio::test]
+    async fn an_uninstrumented_stale_completion_is_handled_the_same() {
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(StaleCompletingStore::new())
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .build();
+
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(crate::runtime::CanonicalTenant::scoped(
+            TenantId::new("tenant-a").expect("valid tenant"),
+        ));
+        let decision = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds")
+            .expect("a decision was made");
+
+        // Returns rather than panicking: a discarded completion is reported, never
+        // fatal, and metrics must not change that.
+        rt.inner()
+            .complete_idempotent_operation(Some(&decision), &"answer")
+            .await;
     }
 
     /// A cancelled reserve closes its span exactly once, as an error.
