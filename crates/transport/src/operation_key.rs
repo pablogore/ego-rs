@@ -30,11 +30,27 @@ use async_trait::async_trait;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use ego_domain::operation::OperationKey;
-use ego_service_sdk::idempotency::resolve_operation_key;
+use ego_service_sdk::idempotency::{resolve_operation_key, OperationKeyRejection};
 
 use crate::error::TransportError;
 use crate::idempotency::HeaderCarrier;
 use crate::state::AppState;
+
+/// The static metric name each rejection folds into.
+///
+/// Three names, one per rejection. `Unreadable` gets its own rather than being folded
+/// into `invalid`, even though both end as the same status code: the rejection type
+/// keeps the two apart on purpose — no `OperationKeyError` describes a value that never
+/// became a string — and collapsing them here would discard exactly the distinction it
+/// was split to preserve. An operator seeing `unreadable` is looking at a transport or
+/// encoding problem; `invalid` is a client sending a malformed key.
+fn key_rejected_metric(rejection: &OperationKeyRejection) -> &'static str {
+    match rejection {
+        OperationKeyRejection::Missing { .. } => "idempotency.key.rejected.missing",
+        OperationKeyRejection::Invalid { .. } => "idempotency.key.rejected.invalid",
+        OperationKeyRejection::Unreadable { .. } => "idempotency.key.rejected.unreadable",
+    }
+}
 
 /// The operation key this request carries, as resolved under the runtime's own
 /// idempotency policy.
@@ -67,6 +83,25 @@ where
             // Deliberately not 401/403: nothing about identity or permission
             // failed, and mapping it there would send a caller looking for the
             // wrong fix.
-            .map_err(|_| TransportError::BadRequest)
+            .map_err(|rejection| {
+                // Counted here because this is the only place a rejection exists:
+                // `resolve_operation_key` returns it and the mapping below discards it,
+                // so a counter anywhere downstream would have nothing left to count.
+                //
+                // The reason is folded into the name — `Observability::metric` takes a
+                // name and a value and has no attribute parameter. The variants are a
+                // closed enum, and the match is exhaustive with no wildcard so a fourth
+                // rejection added upstream breaks the build rather than being counted
+                // as whichever arm happened to be last.
+                //
+                // `carrier` is deliberately *not* folded in. It would multiply against
+                // the reason, and it grows with adapters rather than being closed. The
+                // value stays available on the rejection for a future dimensional API;
+                // what is dropped is only its use as a metric dimension.
+                if let Some(obs) = state.runtime.observability() {
+                    obs.metric(key_rejected_metric(&rejection), 1.0);
+                }
+                TransportError::BadRequest
+            })
     }
 }
