@@ -933,7 +933,17 @@ impl RuntimeInner {
                     OpenSpan::new(tracer.clone(), child.span_id())
                 });
 
-        let outcome = config.reserve(tenant, key, fingerprint.clone()).await;
+        let outcome = config
+            .reserve(
+                tenant,
+                key,
+                fingerprint.clone(),
+                // The registered instance, or `None`. A runtime with no observability
+                // emits no counters and dispatches identically — the same posture the
+                // tracer takes.
+                self.observability.as_ref(),
+            )
+            .await;
 
         if let Some(span) = span {
             // A refusal on the merits is not a failed span. `Conflict`,

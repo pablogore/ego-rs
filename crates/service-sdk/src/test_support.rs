@@ -29,11 +29,34 @@ use crate::context::ServiceContext;
 #[derive(Default)]
 pub(crate) struct RecordingObservability {
     pub(crate) events: Mutex<Vec<SemanticEvent>>,
+    /// Every `metric` call, in order, as `(name, value)`.
+    ///
+    /// This used to be discarded — `metric` had an empty body — which meant no test
+    /// could assert on a counter at all. Recording it is what makes the AD-10 signals
+    /// checkable, and what lets a mutation to a metric name or value fail something.
+    pub(crate) metrics: Mutex<Vec<(String, f64)>>,
 }
 
 impl RecordingObservability {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// The names of every recorded metric, in call order.
+    #[allow(dead_code)] // not every internal unit test asserts on metrics
+    pub(crate) fn metric_names(&self) -> Vec<String> {
+        self.metrics
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Every recorded metric as `(name, value)`, in call order.
+    #[allow(dead_code)] // not every internal unit test asserts on metrics
+    pub(crate) fn metrics(&self) -> Vec<(String, f64)> {
+        self.metrics.lock().unwrap().clone()
     }
 
     /// Returns the recorded `denial_kind` metadata values, in call order.
@@ -52,7 +75,9 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric(&self, _name: &str, _value: f64) {}
+    fn metric(&self, name: &str, value: f64) {
+        self.metrics.lock().unwrap().push((name.to_string(), value));
+    }
     fn log(&self, _level: Level, _message: &str) {}
 }
 

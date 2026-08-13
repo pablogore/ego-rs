@@ -442,6 +442,56 @@ pub fn decode_stored_response<T: serde::de::DeserializeOwned>(
         .map_err(|_| ReservationRejection::StoredResponseIncompatible)
 }
 
+/// The static metric names AD-10's `outcome` values fold into.
+///
+/// # Why the value is in the name
+///
+/// AD-10 specifies `idempotency.reservation.outcome` as one counter with an
+/// `outcome` attribute. [`Observability::metric`] takes a name and a value and has
+/// **no attribute parameter**, so that shape is not expressible. Every value in
+/// that attribute is a bounded enum — six variants, fixed by
+/// [`ReservationOutcome`] — so folding it into the name preserves the information
+/// without inventing an attribute API. See AD-10b.
+///
+/// Exhaustive with no wildcard, deliberately. A seventh outcome added upstream must
+/// break this match rather than be silently counted as whichever arm happened to be
+/// last, which is the same reason the dispatch match below has none.
+///
+/// [`Observability::metric`]: ego_domain::Observability::metric
+fn outcome_metric(outcome: &ReservationOutcome) -> &'static str {
+    match outcome {
+        ReservationOutcome::Fresh(_) => "idempotency.reservation.outcome.fresh",
+        ReservationOutcome::TakenOver(_) => "idempotency.reservation.outcome.taken_over",
+        ReservationOutcome::OwnedInProgress(_) => {
+            "idempotency.reservation.outcome.owned_in_progress"
+        }
+        ReservationOutcome::OtherInProgress => "idempotency.reservation.outcome.other_in_progress",
+        ReservationOutcome::Succeeded(_) => "idempotency.reservation.outcome.succeeded",
+        ReservationOutcome::Conflict => "idempotency.reservation.outcome.conflict",
+    }
+}
+
+/// AD-10's `idempotency.lease.event`, for the two values a caller can observe.
+///
+/// `acquired` and `taken_over` are the two the runtime sees: a `Fresh` outcome means
+/// this attempt now holds a lease it did not before, and `TakenOver` means it holds
+/// one it displaced. The other two values in AD-10's table — `renewed` and
+/// `expired` — have no observation point here and are amended out in AD-10b:
+/// `renew` is never invoked by any runtime component, and expiry is decided inside
+/// the store, which reports it only as the takeover it caused.
+///
+/// `None` for every other outcome: those observe no lease change at all.
+fn lease_event_metric(outcome: &ReservationOutcome) -> Option<&'static str> {
+    match outcome {
+        ReservationOutcome::Fresh(_) => Some("idempotency.lease.event.acquired"),
+        ReservationOutcome::TakenOver(_) => Some("idempotency.lease.event.taken_over"),
+        ReservationOutcome::OwnedInProgress(_)
+        | ReservationOutcome::OtherInProgress
+        | ReservationOutcome::Succeeded(_)
+        | ReservationOutcome::Conflict => None,
+    }
+}
+
 impl ReservationConfig {
     /// Reserves one operation, and decides what dispatch may do with the answer.
     ///
@@ -453,11 +503,16 @@ impl ReservationConfig {
     /// `tenant`, `key` and `fingerprint` arrive already definitive — the
     /// generated code canonicalises the typed arguments and computes the
     /// fingerprint before calling (AD-3f). Nothing is derived here.
+    /// `observability` is passed rather than held on `ReservationConfig`, so this
+    /// type stays about reservation policy instead of accumulating capabilities, and
+    /// so the public `ReservationConfig::new` keeps its signature. There is one
+    /// caller, and it already holds the registered instance.
     pub(crate) async fn reserve(
         &self,
         tenant: Option<TenantId>,
         key: OperationKey,
         fingerprint: OperationFingerprint,
+        observability: Option<&Arc<dyn ego_domain::Observability>>,
     ) -> Result<ReservationDecision, ReservationRejection> {
         let outcome = self
             .store
@@ -473,6 +528,17 @@ impl ReservationConfig {
             // merits; it is the absence of an answer, and it stays its own case
             // so a caller can retry it where a conflict must never be retried.
             .map_err(|_| ReservationRejection::StoreUnavailable)?;
+
+        // AD-10's reservation counters, emitted here because this is where the
+        // outcome is known: `decide` below collapses `Fresh` and `TakenOver` into one
+        // `Proceed`, so a caller reading the decision cannot tell them apart, and
+        // both the outcome counter and the lease event need to.
+        if let Some(obs) = observability {
+            obs.metric(outcome_metric(&outcome), 1.0);
+            if let Some(event) = lease_event_metric(&outcome) {
+                obs.metric(event, 1.0);
+            }
+        }
 
         // Exhaustive on purpose: no wildcard. A seventh outcome added upstream
         // must break this match rather than fall into whichever arm happened to
@@ -578,6 +644,133 @@ mod reserve_mapping_tests {
         }
     }
 
+    /// Drives one `reserve` against a scripted outcome and returns what was counted.
+    async fn metrics_for(outcome: ReservationOutcome) -> Vec<(String, f64)> {
+        let store = ScriptedStore::new(Ok(outcome));
+        let config = ReservationConfig::new(
+            store,
+            Arc::new(FrozenClock),
+            OwnerId::new("owner-under-test"),
+            Duration::from_secs(30),
+        )
+        .expect("a valid config");
+        let obs = Arc::new(crate::test_support::RecordingObservability::new());
+        let as_port: Arc<dyn ego_domain::Observability> = obs.clone();
+        let _ = config
+            .reserve(None, key(), OperationFingerprint::new("fp"), Some(&as_port))
+            .await;
+        obs.metrics()
+    }
+
+    /// Each of the six outcomes counts under its own static name, and the two that
+    /// change lease ownership also count a lease event.
+    ///
+    /// The table is written out rather than derived from `outcome_metric`, which
+    /// would be circular: a mutation renaming a metric would rename the expectation
+    /// with it. Every name here is a literal a dashboard would be configured with.
+    #[tokio::test]
+    async fn each_outcome_counts_under_its_own_static_name() {
+        let cases: Vec<(ReservationOutcome, Vec<&str>)> = vec![
+            (
+                ReservationOutcome::Fresh(lease_with(0)),
+                vec![
+                    "idempotency.reservation.outcome.fresh",
+                    "idempotency.lease.event.acquired",
+                ],
+            ),
+            (
+                ReservationOutcome::TakenOver(lease_with(1)),
+                vec![
+                    "idempotency.reservation.outcome.taken_over",
+                    "idempotency.lease.event.taken_over",
+                ],
+            ),
+            (
+                ReservationOutcome::OwnedInProgress(lease_with(0)),
+                vec!["idempotency.reservation.outcome.owned_in_progress"],
+            ),
+            (
+                ReservationOutcome::OtherInProgress,
+                vec!["idempotency.reservation.outcome.other_in_progress"],
+            ),
+            (
+                ReservationOutcome::Succeeded(StoredServiceResponse::new(b"x".to_vec())),
+                vec!["idempotency.reservation.outcome.succeeded"],
+            ),
+            (
+                ReservationOutcome::Conflict,
+                vec!["idempotency.reservation.outcome.conflict"],
+            ),
+        ];
+
+        for (outcome, expected) in cases {
+            let label = format!("{outcome:?}");
+            let recorded = metrics_for(outcome).await;
+            let names: Vec<String> = recorded.iter().map(|(n, _)| n.clone()).collect();
+            assert_eq!(
+                names,
+                expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "wrong counters for {label}"
+            );
+            for (name, value) in &recorded {
+                assert_eq!(
+                    *value, 1.0,
+                    "{name} is a counter increment, so each emission is exactly one"
+                );
+            }
+        }
+    }
+
+    /// The outcomes that observe no lease change emit no lease event.
+    ///
+    /// Stated as its own test because the table above would still pass if a lease
+    /// event were emitted for, say, `Conflict` *and* the expectation updated to match.
+    /// This pins the property rather than the table: only ownership changes count as
+    /// lease events.
+    #[tokio::test]
+    async fn only_an_ownership_change_counts_as_a_lease_event() {
+        for outcome in [
+            ReservationOutcome::OwnedInProgress(lease_with(0)),
+            ReservationOutcome::OtherInProgress,
+            ReservationOutcome::Succeeded(StoredServiceResponse::new(b"x".to_vec())),
+            ReservationOutcome::Conflict,
+        ] {
+            let label = format!("{outcome:?}");
+            let recorded = metrics_for(outcome).await;
+            assert!(
+                !recorded
+                    .iter()
+                    .any(|(name, _)| name.starts_with("idempotency.lease.event")),
+                "{label} changes no lease, so it must count no lease event: {recorded:?}"
+            );
+        }
+    }
+
+    /// A runtime with no observability reserves identically and counts nothing.
+    ///
+    /// The negative control: metrics must not become a precondition for dispatch, and
+    /// the uninstrumented configuration is the one most deployments run today — there
+    /// is no OTLP metrics exporter in this workspace at all.
+    #[tokio::test]
+    async fn an_uninstrumented_reservation_still_proceeds() {
+        let store = ScriptedStore::new(Ok(ReservationOutcome::Fresh(lease_with(0))));
+        let config = ReservationConfig::new(
+            store,
+            Arc::new(FrozenClock),
+            OwnerId::new("owner-under-test"),
+            Duration::from_secs(30),
+        )
+        .expect("a valid config");
+
+        let decision = config
+            .reserve(None, key(), OperationFingerprint::new("fp"), None)
+            .await;
+        assert!(
+            matches!(decision, Ok(ReservationDecision::Proceed(_))),
+            "got {decision:?}"
+        );
+    }
+
     fn key() -> OperationKey {
         OperationKey::parse("op-1").expect("a non-empty key parses")
     }
@@ -624,7 +817,7 @@ mod reserve_mapping_tests {
         )
         .expect("a positive lease");
         let decision = config
-            .reserve(None, key(), OperationFingerprint::new("fp"))
+            .reserve(None, key(), OperationFingerprint::new("fp"), None)
             .await;
         (decision, store)
     }
