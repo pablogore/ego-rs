@@ -29,7 +29,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_domain::operation::OperationReservationStore;
-use ego_domain::Clock;
+use ego_domain::{Clock, SpanAttributes, SpanOutcome, TraceContext, Tracer};
+
+use super::runtime_builder::OpenSpan;
 use futures::FutureExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -127,6 +129,7 @@ impl RetentionWorker {
         policy: RetentionPolicy,
         store: Arc<dyn OperationReservationStore>,
         clock: Arc<dyn Clock>,
+        tracer: Option<Arc<dyn Tracer>>,
     ) -> Self {
         let cancel = Arc::new(Notify::new());
         let loop_cancel = cancel.clone();
@@ -140,12 +143,54 @@ impl RetentionWorker {
 
             loop {
                 let cutoff = clock.now() - window;
-                // A failed purge is not fatal: the next tick tries again. Whether
-                // it is *reported* is B7.10/B7.11's subject; swallowing it here is
-                // deliberate for now rather than overlooked.
-                let _ = store
+
+                // AD-10's `idempotency.purge_batch`, and the one span in that table
+                // whose parent is **root**: a background tick has no request boundary
+                // to descend from, and attaching it to one would bill a single caller
+                // for work done on behalf of everybody.
+                //
+                // A fresh root per tick rather than one for the worker's lifetime.
+                // Each batch is its own unit of work, and a single trace spanning
+                // every tick of a long-lived worker would never close.
+                //
+                // No `operation_key_hash`: a purge is about many reservations, so
+                // there is no one key it could name.
+                //
+                // `OpenSpan` is the same guard the reservation span uses, not a second
+                // one. The reason applies identically here and is if anything sharper:
+                // the `.await` below is a cancellation point, and shutdown *does*
+                // cancel it — `RetentionWorker::stop` aborts the task when a purge
+                // overruns its deadline, which is exactly a drop mid-`await`. Without
+                // the guard every such shutdown would leak an entry in the adapter's
+                // bounded table.
+                let span = tracer.as_ref().map(|tracer| {
+                    let ctx = TraceContext::root();
+                    tracer.start_span(&ctx, "idempotency.purge_batch", SpanAttributes::new());
+                    OpenSpan::new(tracer.clone(), ctx.span_id())
+                });
+
+                // A failed purge is not fatal: the next tick tries again.
+                //
+                // A purge failure now closes `idempotency.purge_batch` as `Error`
+                // **when tracing is configured**; without a tracer, retention
+                // behaviour is unchanged — the `Result` produces no observable signal
+                // and the loop carries on exactly as before. That gap is deliberate
+                // at this point rather than overlooked: a failure counter is a metric,
+                // and metrics are what B7.10/B7.11 still owe.
+                let purged = store
                     .purge_completed_before(cutoff, policy.batch_size())
                     .await;
+
+                if let Some(span) = span {
+                    span.close(match &purged {
+                        Ok(_) => SpanOutcome::Ok,
+                        // A fixed, redaction-safe message: a store error can quote a
+                        // DSN, and `SpanOutcome::Error` requires a safe one.
+                        Err(_) => SpanOutcome::Error {
+                            status_message: "the reservation store could not purge".to_string(),
+                        },
+                    });
+                }
 
                 tokio::select! {
                     _ = loop_cancel.notified() => break,

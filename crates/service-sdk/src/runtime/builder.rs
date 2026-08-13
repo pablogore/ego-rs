@@ -1324,6 +1324,9 @@ impl Runtime {
             policy,
             reservation.store().clone(),
             reservation.clock().clone(),
+            // `None` when no tracer was registered, which makes the span site a no-op
+            // rather than driving a `NoopTracer` on every tick.
+            self.inner.tracer(),
         );
 
         // Bounded, ordered and panic-isolated, matching the provider teardown

@@ -444,14 +444,14 @@ pub struct RuntimeInner {
 /// closed twice would be absorbed by the adapter. The flag is kept regardless, so
 /// the *recorded* outcome is the classified one rather than whichever call landed
 /// second — which is what makes the distinction assertable in a test.
-struct OpenSpan {
+pub(super) struct OpenSpan {
     tracer: Arc<dyn Tracer>,
     span_id: ego_domain::SpanId,
     closed: bool,
 }
 
 impl OpenSpan {
-    fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
+    pub(super) fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
         Self {
             tracer,
             span_id,
@@ -460,7 +460,7 @@ impl OpenSpan {
     }
 
     /// Closes the span with the outcome the completed work earned.
-    fn close(mut self, outcome: SpanOutcome) {
+    pub(super) fn close(mut self, outcome: SpanOutcome) {
         self.tracer.end_span(self.span_id, outcome);
         self.closed = true;
     }
@@ -766,6 +766,16 @@ impl RuntimeInner {
     /// The store is reached only through here, never handed out. AD-3g keeps the
     /// reservation and its outcome branching inside this crate so there is one
     /// implementation to test rather than one copy per generated operation.
+    /// The registered `Tracer`, if any.
+    ///
+    /// `pub(super)`, which is the least that works: the only callers are span sites
+    /// inside `crate::runtime` — this module's own reservation span and the retention
+    /// worker's. Handing it out beyond that would let an adopter open spans that look
+    /// like the runtime's own.
+    pub(super) fn tracer(&self) -> Option<Arc<dyn Tracer>> {
+        self.tracer.clone()
+    }
+
     pub(crate) fn reservation(&self) -> Option<&ReservationConfig> {
         self.reservation.as_ref()
     }
