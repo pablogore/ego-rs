@@ -2153,13 +2153,21 @@ mod tests {
     // `crates/service-sdk/tests/cross_tenant_reservation_isolation.rs`.
 
     /// Records the scope each `reserve` was handed, and answers from a script.
+    ///
+    /// The answer is a full `Result`, so a test can script a store *failure* as
+    /// well as an outcome — which is what the span's `Ok`/`Error` classification
+    /// has to be judged against.
     struct ScopeRecordingStore {
         scopes: Mutex<Vec<Option<TenantId>>>,
-        answer: Mutex<Option<ReservationOutcome>>,
+        answer: Mutex<Option<Result<ReservationOutcome, ReservationError>>>,
     }
 
     impl ScopeRecordingStore {
         fn answering(answer: ReservationOutcome) -> Arc<Self> {
+            Self::answering_with(Ok(answer))
+        }
+
+        fn answering_with(answer: Result<ReservationOutcome, ReservationError>) -> Arc<Self> {
             Arc::new(Self {
                 scopes: Mutex::new(Vec::new()),
                 answer: Mutex::new(Some(answer)),
@@ -2181,12 +2189,11 @@ mod tests {
                 .lock()
                 .expect("not poisoned")
                 .push(req.tenant.clone());
-            Ok(self
-                .answer
+            self.answer
                 .lock()
                 .expect("not poisoned")
                 .take()
-                .expect("each store answers exactly one reserve"))
+                .expect("each store answers exactly one reserve")
         }
         async fn renew(
             &self,
@@ -2237,15 +2244,30 @@ mod tests {
             .build()
     }
 
-    /// Records every span the runtime opens, with the attributes it was given.
+    /// One recorded `start_span` call: everything the runtime handed the port.
     ///
-    /// The attributes are the point. A spy that discarded them — as the one in
-    /// `ingress_trace_wiring.rs` does, because that test is about ids — could not
-    /// tell an `idempotency.reserve` span carrying the operation key's token apart
-    /// from one carrying nothing.
+    /// The `TraceContext` is kept whole rather than reduced to a name, because the
+    /// parent linkage is a property under test: an earlier version of this spy
+    /// ignored the context, and with it a mutation reusing the request's context
+    /// instead of deriving a child left the whole suite green.
+    #[derive(Clone, Debug)]
+    struct StartedSpan {
+        name: String,
+        ctx: ego_domain::TraceContext,
+        attrs: SpanAttributes,
+    }
+
+    /// Records every span the runtime opens **and how it closed** — the context,
+    /// the attributes, and the terminal outcome.
+    ///
+    /// Every field here exists because dropping it made a real mutation
+    /// undetectable. Attributes: without them, a span carrying no token looks like
+    /// one carrying the right token. Context: without it, reusing the request's
+    /// `SpanId` instead of a child's is invisible. Outcome: without it, ending
+    /// every span `Ok`, or every span `Error`, is invisible.
     struct SpanRecordingTracer {
-        started: Mutex<Vec<(String, SpanAttributes)>>,
-        ended: Mutex<Vec<ego_domain::SpanId>>,
+        started: Mutex<Vec<StartedSpan>>,
+        ended: Mutex<Vec<(ego_domain::SpanId, SpanOutcome)>>,
     }
 
     impl SpanRecordingTracer {
@@ -2256,24 +2278,54 @@ mod tests {
             })
         }
 
-        fn started(&self) -> Vec<(String, SpanAttributes)> {
+        fn started(&self) -> Vec<StartedSpan> {
             self.started.lock().expect("not poisoned").clone()
+        }
+
+        fn ended(&self) -> Vec<(ego_domain::SpanId, SpanOutcome)> {
+            self.ended.lock().expect("not poisoned").clone()
         }
 
         fn ended_count(&self) -> usize {
             self.ended.lock().expect("not poisoned").len()
         }
+
+        /// The single span this runtime opened, or a failure naming what it saw.
+        fn only_span(&self) -> StartedSpan {
+            let started = self.started();
+            assert_eq!(
+                started.len(),
+                1,
+                "expected exactly one span, got {:?}",
+                started.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+            );
+            started[0].clone()
+        }
+
+        /// How the single span closed.
+        fn only_outcome(&self) -> SpanOutcome {
+            let ended = self.ended();
+            assert_eq!(ended.len(), 1, "expected exactly one closed span");
+            ended[0].1.clone()
+        }
     }
 
     impl Tracer for SpanRecordingTracer {
-        fn start_span(&self, _ctx: &ego_domain::TraceContext, name: &str, attrs: SpanAttributes) {
+        fn start_span(&self, ctx: &ego_domain::TraceContext, name: &str, attrs: SpanAttributes) {
             self.started
                 .lock()
                 .expect("not poisoned")
-                .push((name.to_string(), attrs));
+                .push(StartedSpan {
+                    name: name.to_string(),
+                    ctx: *ctx,
+                    attrs,
+                });
         }
-        fn end_span(&self, span: ego_domain::SpanId, _outcome: SpanOutcome) {
-            self.ended.lock().expect("not poisoned").push(span);
+        fn end_span(&self, span: ego_domain::SpanId, outcome: SpanOutcome) {
+            self.ended
+                .lock()
+                .expect("not poisoned")
+                .push((span, outcome));
         }
     }
 
@@ -2318,11 +2370,10 @@ mod tests {
             .await
             .expect("the reservation proceeds");
 
-        let started = tracer.started();
-        assert_eq!(started.len(), 1, "exactly one span, got {started:?}");
-        assert_eq!(started[0].0, "idempotency.reserve");
+        let span = tracer.only_span();
+        assert_eq!(span.name, "idempotency.reserve");
         assert_eq!(
-            started[0].1.operation_key_hash(),
+            span.attrs.operation_key_hash(),
             Some(OperationKeyHash::of(&scope_test_key()).as_str()),
             "the span must carry the token of the key this dispatch presented"
         );
@@ -2330,6 +2381,239 @@ mod tests {
             tracer.ended_count(),
             1,
             "an opened span must be closed, or the adapter's table leaks it"
+        );
+    }
+
+    /// The span's context is a **child** of the request's: same trace, new span id,
+    /// parent pointing back at the request's span.
+    ///
+    /// This is the assertion that was missing while the spy discarded the context,
+    /// and its absence was not harmless — reusing `parent` instead of deriving a
+    /// child left the whole suite green, while the adapter's `SpanId`-keyed table
+    /// would have silently dropped either this span or the interceptor's as a
+    /// duplicate start.
+    ///
+    /// All three parts are checked. Same `trace_id` or the span leaves the trace.
+    /// A new `span_id` or it collides. And `parent_span_id` equal to the request's
+    /// span, or the collector cannot stitch it under the request that caused it.
+    #[tokio::test]
+    async fn the_span_context_is_a_child_of_the_requests() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let request_ctx = ego_domain::TraceContext::root();
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(request_ctx);
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        let span = tracer.only_span();
+        assert_eq!(
+            span.ctx.trace_id(),
+            request_ctx.trace_id(),
+            "a child must stay in the request's trace"
+        );
+        assert_ne!(
+            span.ctx.span_id(),
+            request_ctx.span_id(),
+            "the span needs its own id: the adapter's table is keyed on it, and a \
+             duplicate start for a live id is dropped"
+        );
+        assert_eq!(
+            span.ctx.parent_span_id(),
+            Some(request_ctx.span_id()),
+            "the parent must be the request's span, or nothing can stitch this \
+             under the request that caused it"
+        );
+        // And the span that was closed is this one, not the request's.
+        assert_eq!(
+            tracer.ended().first().map(|(id, _)| *id),
+            Some(span.ctx.span_id())
+        );
+    }
+
+    /// A store that could not answer ends the span `Error`.
+    ///
+    /// Half of the classification, and the half a dashboard alerts on. While the
+    /// spy discarded the outcome, ending every span `Error` — or every span `Ok` —
+    /// was invisible.
+    #[tokio::test]
+    async fn a_store_that_could_not_answer_ends_the_span_as_an_error() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store =
+            ScopeRecordingStore::answering_with(Err(ReservationError::Backend("boom".into())));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        let result = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await;
+        match result {
+            Err(rejection) => assert_eq!(rejection, ReservationRejection::StoreUnavailable),
+            Ok(other) => panic!("a failed store must refuse, got {other:?}"),
+        }
+
+        match tracer.only_outcome() {
+            SpanOutcome::Error { status_message } => assert!(
+                !status_message.is_empty(),
+                "an error outcome needs a message an operator can read"
+            ),
+            SpanOutcome::Ok => {
+                panic!("a store that could not answer is a failed attempt, not a completed one")
+            }
+        }
+    }
+
+    /// A refusal on the merits ends the span `Ok`.
+    ///
+    /// `Conflict` is an *answer*: the attempt completed and the store said no. The
+    /// span describes the attempt, so recording this as an error would make every
+    /// correctly-refused duplicate look like an outage on any dashboard that counts
+    /// span errors — and duplicates are the ordinary traffic this whole mechanism
+    /// exists to absorb.
+    #[tokio::test]
+    async fn a_refusal_on_the_merits_ends_the_span_ok() {
+        use crate::runtime::CanonicalTenant;
+
+        for refused in [
+            ReservationOutcome::Conflict,
+            ReservationOutcome::OtherInProgress,
+        ] {
+            let tenant = TenantId::new("tenant-a").expect("valid tenant");
+            let store = ScopeRecordingStore::answering(refused.clone());
+            let tracer = SpanRecordingTracer::new();
+            let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+            let mut ctx = ServiceContext::new()
+                .with_operation_key(scope_test_key())
+                .with_trace_context(ego_domain::TraceContext::root());
+            ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+            let result = rt
+                .inner()
+                .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+                .await;
+            assert!(result.is_err(), "{refused:?} refuses the dispatch");
+
+            assert_eq!(
+                tracer.only_outcome(),
+                SpanOutcome::Ok,
+                "{refused:?} is an answer the store gave, so the attempt completed"
+            );
+        }
+    }
+
+    /// And a successful reservation ends `Ok` too — the third classification, so
+    /// the `Error` case above is shown to be the exception rather than the rule.
+    #[tokio::test]
+    async fn a_successful_reservation_ends_the_span_ok() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        assert_eq!(tracer.only_outcome(), SpanOutcome::Ok);
+    }
+
+    /// A request that carries a `TraceContext` but reaches a runtime with **no
+    /// tracer** still reserves.
+    ///
+    /// The other half of the no-op rule. The neighbouring test covers tracer
+    /// present with no context; without this one, an implementation that unwrapped
+    /// an absent tracer would pass everything and panic in the deployments that
+    /// register none — which is most of them.
+    #[tokio::test]
+    async fn a_traced_request_against_an_untraced_runtime_still_reserves() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        // No `with_tracer`, deliberately.
+        let rt = reserving_runtime(store.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant.clone()));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("a runtime with no tracer still reserves");
+
+        assert_eq!(
+            store.scopes(),
+            vec![Some(tenant)],
+            "the reservation happened; only its span did not"
+        );
+    }
+
+    /// The runtime retains the **same** `Arc` that was registered — not an
+    /// equivalent tracer.
+    ///
+    /// `Arc::ptr_eq`, because nothing weaker can tell the two apart: a second
+    /// instance of the same type would satisfy every behavioural assertion in this
+    /// file while being a different object, and a build that constructed one tracer
+    /// for the interceptor and another for this field would look correct in every
+    /// test that only counts spans.
+    #[test]
+    fn the_runtime_retains_the_registered_tracer_itself() {
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let registered = SpanRecordingTracer::new();
+        let as_port: Arc<dyn Tracer> = registered.clone();
+
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(as_port.clone())
+            .build();
+
+        let retained = rt
+            .inner()
+            .tracer
+            .as_ref()
+            .expect("a registered tracer must be retained");
+        assert!(
+            Arc::ptr_eq(retained, &as_port),
+            "the retained tracer must be the registered object, not another one \
+             built alongside it"
         );
     }
 
