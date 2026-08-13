@@ -781,3 +781,233 @@ async fn an_untraced_worker_still_purges() {
     assert!(store.calls() >= 1, "the purge happens without tracing");
     let _ = runtime.shutdown_async().await;
 }
+
+// ---------------------------------------------------------------------------
+// AD-10: the two purge metrics
+// ---------------------------------------------------------------------------
+
+/// Records every `metric` call in order, as `(name, value)`.
+///
+/// The value matters as much as the name here: `idempotency.purge.rows` is a number an
+/// operator sizes a batch from, so a counter that always said one — or zero — would be
+/// worse than none while passing any name-only assertion.
+#[derive(Default)]
+struct RecordingObservability {
+    metrics: Mutex<Vec<(String, f64)>>,
+}
+
+impl RecordingObservability {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    fn metrics(&self) -> Vec<(String, f64)> {
+        self.metrics.lock().expect("not poisoned").clone()
+    }
+    fn names(&self) -> Vec<String> {
+        self.metrics().into_iter().map(|(n, _)| n).collect()
+    }
+    fn values_of(&self, name: &str) -> Vec<f64> {
+        self.metrics()
+            .into_iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, v)| v)
+            .collect()
+    }
+}
+
+impl ego_domain::Observability for RecordingObservability {
+    fn trace(&self, _e: ego_domain::SemanticEvent) {}
+    fn metric(&self, name: &str, value: f64) {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .push((name.to_string(), value));
+    }
+    fn log(&self, _l: ego_domain::Level, _m: &str) {}
+}
+
+async fn wait_for_a_metric(obs: &RecordingObservability, name: &str) {
+    for _ in 0..500 {
+        if obs.names().iter().any(|n| n == name) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the worker never emitted {name}; it was configured, instrumented and started");
+}
+
+/// Stages `count` completed reservations, all eligible for purging.
+async fn stage_eligible(
+    inner: &InMemoryOperationReservationStore,
+    clock: &TestClock,
+    count: usize,
+) {
+    use ego_domain::Clock as _;
+    let now = clock.now();
+    for i in 0..count {
+        let outcome = inner
+            .reserve(ReserveRequest {
+                tenant: None,
+                operation_key: OperationKey::parse(format!("op-{i}")).expect("valid"),
+                fingerprint: OperationFingerprint::new("fp"),
+                owner_id: OwnerId::new("seeder"),
+                lease_until: now + chrono::Duration::seconds(30),
+            })
+            .await
+            .expect("a fresh reservation");
+        let lease = match outcome {
+            ReservationOutcome::Fresh(lease) => lease,
+            other => panic!("expected Fresh, got {other:?}"),
+        };
+        inner
+            .complete(
+                &OwnerFence {
+                    operation_id: lease.operation_id.clone(),
+                    owner_id: lease.owner_id.clone(),
+                    fencing_token: lease.fencing_token,
+                },
+                StoredServiceResponse::new(b"done".to_vec()),
+            )
+            .await
+            .expect("completion");
+    }
+    // Past the retention window, so every staged row is eligible.
+    clock.advance(chrono::Duration::seconds(3_600));
+}
+
+/// A successful tick counts the rows it actually removed, and how long it took.
+///
+/// Three rows are staged so the expected value is not the degenerate zero or one that
+/// a hard-coded counter would also produce.
+#[tokio::test]
+async fn a_successful_tick_counts_the_rows_it_removed_and_its_duration() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(1_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+    stage_eligible(&inner, &clock, 3).await;
+
+    let store = RecordingStore::wrapping(inner);
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone() as Arc<dyn ego_domain::Observability>)
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.rows").await;
+    let _ = runtime.shutdown_async().await;
+
+    let rows = obs.values_of("idempotency.purge.rows");
+    assert_eq!(
+        rows.first().copied(),
+        Some(3.0),
+        "the first tick removed all three eligible reservations, so the counter must \
+         say three — a number an operator sizes the batch from, which a counter \
+         hard-coded to one or zero would pass a name-only check with"
+    );
+
+    let durations = obs.values_of("idempotency.purge.batch_duration");
+    assert!(!durations.is_empty(), "the batch duration must be emitted");
+    for d in &durations {
+        assert!(
+            d.is_finite() && *d >= 0.0,
+            "a duration in seconds must be finite and non-negative, got {d}"
+        );
+    }
+}
+
+/// A failing purge reports its duration and **no** row count.
+///
+/// Both halves are the point. The duration because a failed batch still consumed time,
+/// and dropping it would make failure look instantaneous exactly when the database is
+/// the slow thing. The absent row count because a failed purge removed nothing —
+/// emitting zero would claim work that did not happen and be indistinguishable from a
+/// healthy tick with nothing eligible, two states that call for different actions.
+#[tokio::test]
+async fn a_failing_purge_reports_its_duration_and_no_rows() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(1_000)));
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(Arc::new(FailingStore))
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone() as Arc<dyn ego_domain::Observability>)
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.batch_duration").await;
+    let _ = runtime.shutdown_async().await;
+
+    assert!(
+        !obs.values_of("idempotency.purge.batch_duration").is_empty(),
+        "a failed batch still took time: {:?}",
+        obs.names()
+    );
+    assert!(
+        obs.values_of("idempotency.purge.rows").is_empty(),
+        "a failed purge removed nothing, so a row count would claim work that did not \
+         happen: {:?}",
+        obs.names()
+    );
+}
+
+/// A tick with nothing eligible counts zero rows — and that zero is meaningful.
+///
+/// The distinction the previous test protects, from the other side: an empty-but-healthy
+/// tick *does* report a row count, of zero. So "no `purge.rows` sample" means failure and
+/// "a sample of zero" means nothing to do, and the two are readable apart.
+#[tokio::test]
+async fn a_tick_with_nothing_eligible_counts_zero_rows() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(1_000)));
+    let store = RecordingStore::wrapping(InMemoryOperationReservationStore::new(clock.clone()));
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone() as Arc<dyn ego_domain::Observability>)
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.rows").await;
+    let _ = runtime.shutdown_async().await;
+
+    assert_eq!(
+        obs.values_of("idempotency.purge.rows").first().copied(),
+        Some(0.0),
+        "nothing was eligible, so the count is a real zero rather than absent"
+    );
+}
+
+/// An uninstrumented worker purges and counts nothing.
+#[tokio::test]
+async fn an_uninstrumented_worker_still_purges_and_counts_nothing() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(1_000)));
+    let store = RecordingStore::wrapping(InMemoryOperationReservationStore::new(clock.clone()));
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_purge(&store).await;
+    assert!(
+        store.calls() >= 1,
+        "the purge happens without instrumentation"
+    );
+    let _ = runtime.shutdown_async().await;
+}

@@ -1327,6 +1327,9 @@ impl Runtime {
             // `None` when no tracer was registered, which makes the span site a no-op
             // rather than driving a `NoopTracer` on every tick.
             self.inner.tracer(),
+            // `None` when nothing was registered, which makes the metric sites no-ops
+            // rather than driving a discarding implementation on every tick.
+            self.inner.observability(),
         );
 
         // Bounded, ordered and panic-isolated, matching the provider teardown
