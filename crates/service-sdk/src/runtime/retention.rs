@@ -26,10 +26,10 @@
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ego_domain::operation::OperationReservationStore;
-use ego_domain::{Clock, SpanAttributes, SpanOutcome, TraceContext, Tracer};
+use ego_domain::{Clock, Observability, SpanAttributes, SpanOutcome, TraceContext, Tracer};
 
 use super::runtime_builder::OpenSpan;
 use futures::FutureExt;
@@ -130,6 +130,7 @@ impl RetentionWorker {
         store: Arc<dyn OperationReservationStore>,
         clock: Arc<dyn Clock>,
         tracer: Option<Arc<dyn Tracer>>,
+        observability: Option<Arc<dyn Observability>>,
     ) -> Self {
         let cancel = Arc::new(Notify::new());
         let loop_cancel = cancel.clone();
@@ -169,6 +170,14 @@ impl RetentionWorker {
                     OpenSpan::new(tracer.clone(), ctx.span_id())
                 });
 
+                // Measured around the store call alone, so it is the time the purge
+                // took and not the time the tick took. `Instant`, not the injected
+                // clock: that clock is a *logical* one a test positions freely, so a
+                // duration read from it would be zero under a frozen clock and
+                // nonsense under a jumped one. This is the one place in this file that
+                // legitimately wants wall time.
+                let started = Instant::now();
+
                 // A failed purge is not fatal: the next tick tries again.
                 //
                 // A purge failure now closes `idempotency.purge_batch` as `Error`
@@ -180,6 +189,28 @@ impl RetentionWorker {
                 let purged = store
                     .purge_completed_before(cutoff, policy.batch_size())
                     .await;
+
+                // AD-10's two purge metrics.
+                //
+                // The duration goes out whatever the outcome: a batch that failed still
+                // consumed time, and omitting it would make failure look instantaneous
+                // on a latency panel — the opposite of what an operator needs when the
+                // database is the thing that is slow.
+                //
+                // The row count goes out only on success. A failed purge removed
+                // nothing, so counting zero would claim work that did not happen, and
+                // would be indistinguishable from a healthy tick with nothing eligible.
+                // Those two states call for different actions, so they must not share a
+                // number.
+                if let Some(obs) = observability.as_ref() {
+                    obs.metric(
+                        "idempotency.purge.batch_duration",
+                        started.elapsed().as_secs_f64(),
+                    );
+                    if let Ok(rows) = &purged {
+                        obs.metric("idempotency.purge.rows", *rows as f64);
+                    }
+                }
 
                 if let Some(span) = span {
                     span.close(match &purged {

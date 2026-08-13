@@ -759,6 +759,14 @@ impl RuntimeInner {
         self.tracer.clone()
     }
 
+    /// The registered `Observability`, if any.
+    ///
+    /// `pub(super)` for the same reason as [`RuntimeInner::tracer`]: the only callers
+    /// are metric sites inside `crate::runtime`.
+    pub(super) fn observability(&self) -> Option<Arc<dyn Observability>> {
+        self.observability.clone()
+    }
+
     /// The reservation capability, if this deployment configured one.
     ///
     /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it
