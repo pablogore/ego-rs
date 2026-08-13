@@ -444,14 +444,14 @@ pub struct RuntimeInner {
 /// closed twice would be absorbed by the adapter. The flag is kept regardless, so
 /// the *recorded* outcome is the classified one rather than whichever call landed
 /// second — which is what makes the distinction assertable in a test.
-struct OpenSpan {
+pub(super) struct OpenSpan {
     tracer: Arc<dyn Tracer>,
     span_id: ego_domain::SpanId,
     closed: bool,
 }
 
 impl OpenSpan {
-    fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
+    pub(super) fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
         Self {
             tracer,
             span_id,
@@ -460,7 +460,7 @@ impl OpenSpan {
     }
 
     /// Closes the span with the outcome the completed work earned.
-    fn close(mut self, outcome: SpanOutcome) {
+    pub(super) fn close(mut self, outcome: SpanOutcome) {
         self.tracer.end_span(self.span_id, outcome);
         self.closed = true;
     }
@@ -747,6 +747,16 @@ impl RuntimeInner {
         let canonical = self.tenant_resolver.resolve(facts)?;
         ctx.set_resolved_tenant(canonical);
         Ok(())
+    }
+
+    /// The registered `Tracer`, if any.
+    ///
+    /// `pub(super)`, which is the least that works: the only callers are span sites
+    /// inside `crate::runtime` — this module's own reservation span and the retention
+    /// worker's. Handing it out beyond that would let an adopter open spans that look
+    /// like the runtime's own.
+    pub(super) fn tracer(&self) -> Option<Arc<dyn Tracer>> {
+        self.tracer.clone()
     }
 
     /// The reservation capability, if this deployment configured one.
@@ -2484,7 +2494,12 @@ mod tests {
             &self,
             _req: ReserveRequest,
         ) -> Result<ReservationOutcome, ReservationError> {
-            self.entered.notify_waiters();
+            // `notify_one`, not `notify_waiters`. `Notified` registers on its first
+            // poll, and `select!` polls its branches in an unspecified order — so with
+            // `notify_waiters` a run that polled the reservation first would fire into
+            // no waiter, lose the signal, and then park forever. A permit-leaving
+            // notification makes the handshake independent of that order.
+            self.entered.notify_one();
             // Parked forever. The test cancels instead of releasing.
             std::future::pending().await
         }
