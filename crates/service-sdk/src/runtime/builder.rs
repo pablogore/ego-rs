@@ -1049,6 +1049,17 @@ impl Runtime {
         self.inner.logger()
     }
 
+    /// The registered `Observability`, if any.
+    ///
+    /// Public because the transport edge needs it: the operation-key extractor runs
+    /// before any service is resolved, so it cannot reach the runtime any other way.
+    /// This mirrors [`Runtime::logger`], which is public for the same reason and is the
+    /// precedent for exposing a capability this narrowly rather than handing out the
+    /// runtime.
+    pub fn observability(&self) -> Option<Arc<dyn Observability>> {
+        self.inner.observability()
+    }
+
     /// Spawns the external-effects `Deferred`-mode drain loop (if any
     /// executor was registered) and registers its drain-on-shutdown teardown
     /// hook.
@@ -1415,6 +1426,15 @@ impl RuntimeResolver {
     /// Returns the registered logger, if any — identical to [`Runtime::logger`].
     pub fn logger(&self) -> Option<&Arc<KITLogger>> {
         self.runtime.logger()
+    }
+
+    /// The registered `Observability`, if any — identical to
+    /// [`Runtime::observability`].
+    ///
+    /// Read by the HTTP operation-key extractor, which rejects a request before any
+    /// handler runs and so has no other route to a registered instance.
+    pub fn observability(&self) -> Option<Arc<dyn Observability>> {
+        self.runtime.observability()
     }
 }
 

@@ -203,3 +203,201 @@ async fn an_invalid_key_is_refused_under_both_modes() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// AD-10: idempotency.key.rejected
+// ---------------------------------------------------------------------------
+
+/// Records every `metric` call in order.
+#[derive(Default)]
+struct RecordingObservability {
+    metrics: std::sync::Mutex<Vec<(String, f64)>>,
+}
+
+impl RecordingObservability {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    fn names(&self) -> Vec<String> {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+    fn values(&self) -> Vec<f64> {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .map(|(_, v)| *v)
+            .collect()
+    }
+}
+
+impl ego_domain::Observability for RecordingObservability {
+    fn trace(&self, _e: ego_domain::SemanticEvent) {}
+    fn metric(&self, name: &str, value: f64) {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .push((name.to_string(), value));
+    }
+    fn log(&self, _l: ego_domain::Level, _m: &str) {}
+}
+
+/// Same wiring as `state_under`, plus a recording `Observability`.
+fn instrumented_state_under(
+    mode: IdempotencyEnforcementMode,
+    obs: Arc<RecordingObservability>,
+) -> AppState {
+    let mut builder = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(mode)
+        .with_observability(obs as Arc<dyn ego_domain::Observability>);
+    if matches!(mode, IdempotencyEnforcementMode::MandatoryKey) {
+        builder = builder
+            .with_operation_reservation_store(Arc::new(
+                ego_testkit::InMemoryOperationReservationStore::new(Arc::new(
+                    ego_domain::time::SystemClock,
+                )),
+            ))
+            .with_reservation_owner_id(ego_domain::operation::OwnerId::new("under-test"))
+            .with_reservation_lease_duration(std::time::Duration::from_secs(30));
+    }
+    AppState::new(builder.build().resolver(), Arc::new(UnusedAuthn))
+}
+
+/// Runs the real extractor against an instrumented runtime and returns what was
+/// counted alongside the outcome.
+async fn extract_instrumented(
+    mode: IdempotencyEnforcementMode,
+    header: Option<&str>,
+) -> (
+    Result<OperationKeyExtractor, TransportError>,
+    Arc<RecordingObservability>,
+) {
+    let obs = RecordingObservability::new();
+    let mut request = Request::builder().uri("/register");
+    if let Some(value) = header {
+        request = request.header("Idempotency-Key", value);
+    }
+    let (mut parts, _) = request.body(()).expect("a valid request").into_parts();
+    let state = instrumented_state_under(mode, obs.clone());
+    let result = OperationKeyExtractor::from_request_parts(&mut parts, &state).await;
+    (result, obs)
+}
+
+/// A missing key under `MandatoryKey` counts `…rejected.missing`, once.
+#[tokio::test]
+async fn a_missing_key_counts_the_missing_rejection() {
+    let (result, obs) = extract_instrumented(IdempotencyEnforcementMode::MandatoryKey, None).await;
+    assert!(
+        result.is_err(),
+        "a missing key is refused under MandatoryKey"
+    );
+    assert_eq!(
+        obs.names(),
+        vec!["idempotency.key.rejected.missing".to_string()],
+        "exactly one counter, naming the reason"
+    );
+    assert_eq!(obs.values(), vec![1.0], "a counter increment is one");
+}
+
+/// A malformed key counts `…rejected.invalid`, under either mode.
+///
+/// Both modes are exercised because `Compatibility` loosens only the *missing*-key
+/// policy: an invalid key is refused either way, so it must be counted either way. A
+/// counter wired only into the mandatory path would go quiet exactly where a
+/// deployment had loosened the rules and most needed to see the traffic.
+#[tokio::test]
+async fn a_malformed_key_counts_the_invalid_rejection_under_both_modes() {
+    for mode in [
+        IdempotencyEnforcementMode::MandatoryKey,
+        IdempotencyEnforcementMode::Compatibility,
+    ] {
+        let (result, obs) = extract_instrumented(mode, Some("   ")).await;
+        assert!(result.is_err(), "{mode:?} refuses a whitespace-only key");
+        assert_eq!(
+            obs.names(),
+            vec!["idempotency.key.rejected.invalid".to_string()],
+            "{mode:?} must count the invalid rejection"
+        );
+    }
+}
+
+/// A header whose bytes are not text counts `…rejected.unreadable`.
+///
+/// The third name, and it exists because `OperationKeyRejection` keeps `Unreadable`
+/// apart from `Invalid` on purpose: no `OperationKeyError` describes a value that never
+/// became a string. Folding them would discard exactly that distinction — an operator
+/// seeing `unreadable` is looking at a transport or encoding fault, while `invalid` is a
+/// client sending a malformed key, and the two lead somewhere different.
+///
+/// AD-10's table lists `reason = missing | invalid` and not this one, so emitting it is
+/// an **addition** to that table rather than a reading of it; the amendment records it
+/// alongside the removals, since an addition needs justifying too.
+///
+/// Reachable, not theoretical: `HeaderValue` holds arbitrary bytes and `to_str` fails on
+/// non-UTF-8, which is what `HeaderCarrier` reports as `Unreadable`.
+#[tokio::test]
+async fn a_header_that_is_not_text_counts_the_unreadable_rejection() {
+    let obs = RecordingObservability::new();
+    let mut request = Request::builder().uri("/register");
+    request = request.header(
+        "Idempotency-Key",
+        axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("a byte header value"),
+    );
+    let (mut parts, _) = request.body(()).expect("a valid request").into_parts();
+    let state = instrumented_state_under(IdempotencyEnforcementMode::MandatoryKey, obs.clone());
+
+    let result = OperationKeyExtractor::from_request_parts(&mut parts, &state).await;
+    assert!(result.is_err(), "a key that is not text is refused");
+    assert_eq!(
+        obs.names(),
+        vec!["idempotency.key.rejected.unreadable".to_string()],
+        "an unreadable value is its own reason, not an invalid string"
+    );
+}
+
+/// An accepted request counts nothing.
+///
+/// The negative control, and it covers both ways a request is accepted: a valid key,
+/// and a *missing* key under `Compatibility` — which is an admission, not a rejection,
+/// and must not be counted as one. Without the second case a counter emitted on every
+/// extraction would pass.
+#[tokio::test]
+async fn an_accepted_request_counts_nothing() {
+    let (result, obs) =
+        extract_instrumented(IdempotencyEnforcementMode::MandatoryKey, Some("op-1")).await;
+    assert!(result.is_ok(), "a valid key is carried through");
+    assert!(
+        obs.names().is_empty(),
+        "nothing was rejected: {:?}",
+        obs.names()
+    );
+
+    let (result, obs) = extract_instrumented(IdempotencyEnforcementMode::Compatibility, None).await;
+    assert!(result.is_ok(), "Compatibility admits a missing key");
+    assert!(
+        obs.names().is_empty(),
+        "an admission is not a rejection: {:?}",
+        obs.names()
+    );
+}
+
+/// An uninstrumented runtime rejects and admits exactly as before.
+#[tokio::test]
+async fn an_uninstrumented_extractor_behaves_identically() {
+    assert!(extract(IdempotencyEnforcementMode::MandatoryKey, None)
+        .await
+        .is_err());
+    assert!(
+        extract(IdempotencyEnforcementMode::MandatoryKey, Some("op-1"))
+            .await
+            .is_ok()
+    );
+    assert!(extract(IdempotencyEnforcementMode::Compatibility, None)
+        .await
+        .is_ok());
+}
