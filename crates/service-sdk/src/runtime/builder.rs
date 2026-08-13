@@ -1443,6 +1443,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use ego_domain::Observability;
     use ego_security_sdk::authentication::AuthenticationProvider;
     use ego_security_sdk::authorization::{AuthorizationDecision, AuthorizationProvider};
     use ego_security_sdk::context::SecurityContext;
@@ -3049,6 +3050,65 @@ mod tests {
         let rt = compat().build();
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    /// The accessor hands back the very instance that was registered.
+    ///
+    /// Pointer identity, not "some implementor": the transport edge reads this to emit
+    /// counters, and a copy or a freshly constructed default would swallow them
+    /// silently — every assertion downstream would still see a live `Observability` and
+    /// pass while the registered collector recorded nothing.
+    #[test]
+    fn observability_returns_the_registered_instance() {
+        let obs = Arc::new(RecordingObservability::new());
+        let registered: Arc<dyn Observability> = obs.clone();
+        let rt = compat().with_observability(obs).build();
+
+        let exposed = rt
+            .observability()
+            .expect("a registered Observability is reachable");
+        assert!(
+            Arc::ptr_eq(&registered, &exposed),
+            "the accessor must expose the registered instance, not an equivalent one"
+        );
+    }
+
+    /// Nothing registered reads as `None`, not as an inert stand-in.
+    ///
+    /// The distinction is the caller's to make. A silently substituted no-op would let
+    /// a runtime that was never instrumented look instrumented at every call site.
+    #[test]
+    fn observability_is_none_when_none_was_registered() {
+        assert!(
+            compat().build().observability().is_none(),
+            "an uninstrumented runtime has no Observability to hand out"
+        );
+    }
+
+    /// The resolver is a view of the same runtime, not a second source of truth.
+    ///
+    /// Both directions are asserted. The registered case is what the transport edge
+    /// actually reads; the unregistered case guards the delegation against inverting
+    /// `Some` and `None`, which a Some-only test cannot see.
+    #[test]
+    fn the_resolver_exposes_the_same_observability_as_the_runtime() {
+        let obs = Arc::new(RecordingObservability::new());
+        let registered: Arc<dyn Observability> = obs.clone();
+        let rt = compat().with_observability(obs).build();
+
+        let exposed = rt
+            .resolver()
+            .observability()
+            .expect("the resolver reaches the registered Observability");
+        assert!(
+            Arc::ptr_eq(&registered, &exposed),
+            "the resolver must delegate to the runtime, not hold its own"
+        );
+
+        assert!(
+            compat().build().resolver().observability().is_none(),
+            "an uninstrumented runtime's resolver has nothing to hand out either"
+        );
     }
 
     // -- Finding 6 (post-CORE-018 review): async teardown hooks -------------

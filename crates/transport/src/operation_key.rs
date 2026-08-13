@@ -38,8 +38,8 @@ use crate::state::AppState;
 
 /// The static metric name each rejection folds into.
 ///
-/// Three names, not AD-10's two. `Unreadable` is a variant that table does not list,
-/// and it gets its own name rather than being folded into `invalid`: the rejection type
+/// Three names, one per rejection. `Unreadable` gets its own rather than being folded
+/// into `invalid`, even though both end as the same status code: the rejection type
 /// keeps the two apart on purpose — no `OperationKeyError` describes a value that never
 /// became a string — and collapsing them here would discard exactly the distinction it
 /// was split to preserve. An operator seeing `unreadable` is looking at a transport or
@@ -84,10 +84,9 @@ where
             // failed, and mapping it there would send a caller looking for the
             // wrong fix.
             .map_err(|rejection| {
-                // AD-10's `idempotency.key.rejected`, counted here because this is the
-                // only place a rejection exists: `resolve_operation_key` returns it and
-                // the mapping below discards it, so a counter anywhere downstream would
-                // have nothing left to count.
+                // Counted here because this is the only place a rejection exists:
+                // `resolve_operation_key` returns it and the mapping below discards it,
+                // so a counter anywhere downstream would have nothing left to count.
                 //
                 // The reason is folded into the name — `Observability::metric` takes a
                 // name and a value and has no attribute parameter. The variants are a

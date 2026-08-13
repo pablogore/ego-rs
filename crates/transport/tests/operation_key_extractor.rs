@@ -205,7 +205,7 @@ async fn an_invalid_key_is_refused_under_both_modes() {
 }
 
 // ---------------------------------------------------------------------------
-// AD-10: idempotency.key.rejected
+// Counting refused idempotency keys, by reason
 // ---------------------------------------------------------------------------
 
 /// Records every `metric` call in order.
@@ -326,7 +326,29 @@ async fn a_malformed_key_counts_the_invalid_rejection_under_both_modes() {
     }
 }
 
-/// A header whose bytes are not text counts `…rejected.unreadable`.
+/// Runs the real extractor against a header carrying bytes that are not text.
+///
+/// Separate from `extract_instrumented` because that helper takes a `&str`, and a value
+/// that never became a string is the whole point here.
+async fn extract_instrumented_raw_header(
+    mode: IdempotencyEnforcementMode,
+    bytes: &[u8],
+) -> (
+    Result<OperationKeyExtractor, TransportError>,
+    Arc<RecordingObservability>,
+) {
+    let obs = RecordingObservability::new();
+    let request = Request::builder().uri("/register").header(
+        "Idempotency-Key",
+        axum::http::HeaderValue::from_bytes(bytes).expect("a byte header value"),
+    );
+    let (mut parts, _) = request.body(()).expect("a valid request").into_parts();
+    let state = instrumented_state_under(mode, obs.clone());
+    let result = OperationKeyExtractor::from_request_parts(&mut parts, &state).await;
+    (result, obs)
+}
+
+/// A header whose bytes are not text counts `…rejected.unreadable`, under either mode.
 ///
 /// The third name, and it exists because `OperationKeyRejection` keeps `Unreadable`
 /// apart from `Invalid` on purpose: no `OperationKeyError` describes a value that never
@@ -334,30 +356,31 @@ async fn a_malformed_key_counts_the_invalid_rejection_under_both_modes() {
 /// seeing `unreadable` is looking at a transport or encoding fault, while `invalid` is a
 /// client sending a malformed key, and the two lead somewhere different.
 ///
-/// AD-10's table lists `reason = missing | invalid` and not this one, so emitting it is
-/// an **addition** to that table rather than a reading of it; the amendment records it
-/// alongside the removals, since an addition needs justifying too.
+/// Both modes are exercised for the same reason the invalid case is: `Compatibility`
+/// loosens only the *missing*-key policy, so a value that never became a string is
+/// refused either way and must be counted either way.
 ///
 /// Reachable, not theoretical: `HeaderValue` holds arbitrary bytes and `to_str` fails on
 /// non-UTF-8, which is what `HeaderCarrier` reports as `Unreadable`.
 #[tokio::test]
-async fn a_header_that_is_not_text_counts_the_unreadable_rejection() {
-    let obs = RecordingObservability::new();
-    let mut request = Request::builder().uri("/register");
-    request = request.header(
-        "Idempotency-Key",
-        axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("a byte header value"),
-    );
-    let (mut parts, _) = request.body(()).expect("a valid request").into_parts();
-    let state = instrumented_state_under(IdempotencyEnforcementMode::MandatoryKey, obs.clone());
-
-    let result = OperationKeyExtractor::from_request_parts(&mut parts, &state).await;
-    assert!(result.is_err(), "a key that is not text is refused");
-    assert_eq!(
-        obs.names(),
-        vec!["idempotency.key.rejected.unreadable".to_string()],
-        "an unreadable value is its own reason, not an invalid string"
-    );
+async fn a_header_that_is_not_text_counts_the_unreadable_rejection_under_both_modes() {
+    for mode in [
+        IdempotencyEnforcementMode::MandatoryKey,
+        IdempotencyEnforcementMode::Compatibility,
+    ] {
+        let (result, obs) = extract_instrumented_raw_header(mode, &[0xff, 0xfe]).await;
+        assert!(result.is_err(), "{mode:?} refuses a key that is not text");
+        assert_eq!(
+            obs.names(),
+            vec!["idempotency.key.rejected.unreadable".to_string()],
+            "{mode:?}: an unreadable value is its own reason, not an invalid string"
+        );
+        assert_eq!(
+            obs.values(),
+            vec![1.0],
+            "{mode:?}: a counter increment is one"
+        );
+    }
 }
 
 /// An accepted request counts nothing.
