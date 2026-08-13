@@ -410,6 +410,76 @@ pub struct RuntimeInner {
     tracer: Option<Arc<dyn Tracer>>,
 }
 
+/// A started span that is guaranteed to be closed, even if the work it wraps never
+/// finishes.
+///
+/// # Why a guard and not two calls
+///
+/// The obvious shape — `start_span`, `.await`, `end_span` — leaks a span whenever
+/// the future is dropped between them. That is not exotic: an `.await` is a
+/// cancellation point, so a client disconnect, a timeout wrapper, a `select!` that
+/// another branch wins, or a panic unwinding through the frame all drop the future
+/// mid-flight and skip the `end_span` that follows.
+///
+/// The consequence is worse than one missing span. The OTLP adapter's table is
+/// bounded by `max_in_flight_spans`, and **at capacity it drops new spans rather
+/// than evicting live ones**. So leaked entries accumulate, and once they fill the
+/// table the adapter silently stops recording anything — tracing degrades to
+/// nothing under exactly the conditions (load, timeouts, cancellation) where it is
+/// most needed, and reports no error while doing so.
+///
+/// `Drop` closes what a normal path did not, so the leak is not reachable rather
+/// than merely unlikely.
+///
+/// # The cancelled outcome is an error, and a fixed one
+///
+/// A reserve attempt that was abandoned did not complete, so `Ok` would be a lie
+/// about work whose result nobody ever learned. The message is a constant:
+/// `SpanOutcome::Error` requires a redaction-safe one, and there is nothing about
+/// the cancellation worth forwarding.
+///
+/// # Double-closing is harmless anyway
+///
+/// `Tracer::end_span` is contractually idempotent per `SpanId`, so a guard that
+/// closed twice would be absorbed by the adapter. The flag is kept regardless, so
+/// the *recorded* outcome is the classified one rather than whichever call landed
+/// second — which is what makes the distinction assertable in a test.
+struct OpenSpan {
+    tracer: Arc<dyn Tracer>,
+    span_id: ego_domain::SpanId,
+    closed: bool,
+}
+
+impl OpenSpan {
+    fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
+        Self {
+            tracer,
+            span_id,
+            closed: false,
+        }
+    }
+
+    /// Closes the span with the outcome the completed work earned.
+    fn close(mut self, outcome: SpanOutcome) {
+        self.tracer.end_span(self.span_id, outcome);
+        self.closed = true;
+    }
+}
+
+impl Drop for OpenSpan {
+    fn drop(&mut self) {
+        if !self.closed {
+            self.tracer.end_span(
+                self.span_id,
+                SpanOutcome::Error {
+                    status_message: "the reservation attempt was abandoned before it completed"
+                        .to_string(),
+                },
+            );
+        }
+    }
+}
+
 impl std::fmt::Debug for RuntimeInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeInner")
@@ -833,6 +903,9 @@ impl RuntimeInner {
         // — the same rule `TracingInterceptor` follows for a request that
         // originated no trace. Minting a root here instead would attach orphans to
         // no trace, on the hot path of every keyed operation.
+        //
+        // Held as a guard rather than as a plain id, because the `.await` below is a
+        // cancellation point: see [`OpenSpan`].
         let span =
             self.tracer
                 .as_ref()
@@ -847,12 +920,12 @@ impl RuntimeInner {
                         // one, so the raw key cannot be what lands here.
                         SpanAttributes::new().with_operation_key_hash(OperationKeyHash::of(&key)),
                     );
-                    (tracer, child.span_id())
+                    OpenSpan::new(tracer.clone(), child.span_id())
                 });
 
         let outcome = config.reserve(tenant, key, fingerprint.clone()).await;
 
-        if let Some((tracer, span_id)) = span {
+        if let Some(span) = span {
             // A refusal on the merits is not a failed span. `Conflict`,
             // `OtherInProgress` and the rest are answers the store gave, and the
             // attempt they answer completed exactly as designed — recording them as
@@ -869,7 +942,7 @@ impl RuntimeInner {
                 },
                 _ => SpanOutcome::Ok,
             };
-            tracer.end_span(span_id, ended);
+            span.close(ended);
         }
 
         let decision = outcome?;
@@ -2382,6 +2455,159 @@ mod tests {
             1,
             "an opened span must be closed, or the adapter's table leaks it"
         );
+    }
+
+    /// A store whose `reserve` announces that it was entered and then never returns.
+    ///
+    /// The two halves are both needed: the notification is what lets the test know
+    /// the future has reached its `.await` — rather than guessing with a sleep — and
+    /// the park is what makes the future genuinely cancellable at that point.
+    struct ParkingStore {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl ParkingStore {
+        fn new() -> (Arc<Self>, Arc<tokio::sync::Notify>) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            (
+                Arc::new(Self {
+                    entered: entered.clone(),
+                }),
+                entered,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for ParkingStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            self.entered.notify_waiters();
+            // Parked forever. The test cancels instead of releasing.
+            std::future::pending().await
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _u: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn purge_completed_before(
+            &self,
+            _c: chrono::DateTime<chrono::Utc>,
+            _b: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    /// A cancelled reserve closes its span exactly once, as an error.
+    ///
+    /// The leak this prevents, stated as the mechanism rather than as a worry: the
+    /// `.await` on `reserve` is a cancellation point, and `end_span` is only reached
+    /// after it. A dropped future therefore left the adapter holding a live entry —
+    /// and the adapter's table is bounded and **drops new spans at capacity instead
+    /// of evicting**, so leaked entries accumulate until tracing silently stops. A
+    /// client disconnect, a timeout wrapper, or a losing `select!` branch all reach
+    /// it, so this is ordinary traffic rather than an edge.
+    ///
+    /// Construction: the store announces entry and then parks, so the future is
+    /// pinned at exactly the cancellation point — no sleep, no race. The span is
+    /// asserted open and *not yet closed* before the drop, so the single `end_span`
+    /// afterwards can only have come from the guard.
+    ///
+    /// A panic unwinding through the same frame is covered by the same mechanism and
+    /// is not separately tested: `Drop` is what runs in both cases, and a test that
+    /// panicked inside the store would be asserting on `catch_unwind` rather than on
+    /// this guard.
+    #[tokio::test]
+    async fn a_cancelled_reserve_still_closes_its_span_exactly_once_as_an_error() {
+        use crate::runtime::CanonicalTenant;
+
+        let (store, entered) = ParkingStore::new();
+        let tracer = SpanRecordingTracer::new();
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(tracer.clone() as Arc<dyn Tracer>)
+            .build();
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(
+            TenantId::new("tenant-a").expect("valid tenant"),
+        ));
+
+        let notified = entered.notified();
+        let inner = rt.inner();
+        // `Box::pin`, not `tokio::pin!`: the latter shadows the binding with a
+        // `Pin<&mut _>`, so `drop(reserving)` would drop a *reference* and leave the
+        // future alive in a hidden local until the end of scope — which is how an
+        // earlier version of this test observed no cancellation at all and briefly
+        // looked like a missing guard. Owning the future is what makes the drop the
+        // cancellation.
+        let mut reserving =
+            Box::pin(inner.reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp")));
+        tokio::pin!(notified);
+
+        // Drive the future only until the store reports it is parked. `&mut`, so
+        // losing this `select!` does not drop it yet.
+        tokio::select! {
+            _ = &mut reserving => panic!("a parked store cannot let the reservation complete"),
+            _ = &mut notified => {}
+        }
+
+        let span = tracer.only_span();
+        assert_eq!(span.name, "idempotency.reserve");
+        assert!(
+            tracer.ended().is_empty(),
+            "the span must still be open at the cancellation point, or this test \
+             would be asserting about the normal path"
+        );
+
+        // The cancellation.
+        drop(reserving);
+
+        let ended = tracer.ended();
+        assert_eq!(
+            ended.len(),
+            1,
+            "a cancelled attempt must close its span exactly once, got {ended:?}"
+        );
+        assert_eq!(
+            ended[0].0,
+            span.ctx.span_id(),
+            "the closed span must be the one that was opened"
+        );
+        match &ended[0].1 {
+            SpanOutcome::Error { status_message } => assert!(
+                !status_message.is_empty(),
+                "an abandoned attempt needs a message naming what happened"
+            ),
+            SpanOutcome::Ok => panic!(
+                "an abandoned attempt never learned its result, so Ok would claim \
+                 something nobody observed"
+            ),
+        }
     }
 
     /// The span's context is a **child** of the request's: same trace, new span id,

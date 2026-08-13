@@ -987,10 +987,17 @@ increment carries none of those. What is lost is therefore real and worth naming
   takeover that is slow is visible only as a slow `reserve`, not as a slow takeover.
 - **no independent causal position.** A takeover cannot be located within the
   reserve, nor ordered against anything else inside it.
+- **no circumstances.** `idempotency.reservation.outcome` carries `outcome` and
+  nothing else, so the counter says takeovers happened and how many. It does not
+  say which operation, which tenant, which owner was displaced, or under what
+  conditions — none of those is an attribute it has, and adding an unbounded one
+  would be the cardinality problem this table's redaction rule exists to prevent.
 
-What remains sufficient for the purpose the signal serves: knowing takeovers are
-occurring, how often, and under which conditions — which is what an operator acts
-on. Diagnosing a *slow* takeover specifically would need the store instrumented.
+What remains, stated as exactly what the counter carries: **occurrence and
+frequency.** That is enough to notice takeovers are happening and whether the rate
+is changing, which is what an alert fires on. It is not enough to investigate one.
+Diagnosing a slow takeover, or attributing takeovers to a tenant or an owner, would
+need the store instrumented.
 
 Revisiting this decision is reasonable only alongside a decision to instrument the
 reservation store itself, which is where the two intervals are separable.
