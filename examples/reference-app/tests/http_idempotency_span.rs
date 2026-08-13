@@ -8,11 +8,15 @@
 //! **real** client presented. Everything before this was either a unit asserting a
 //! type's behaviour or a test that built the span attributes itself.
 //!
-//! Here nothing is constructed by the test except the request. The key arrives in
-//! an `Idempotency-Key` header, crosses `resolve_operation_key`, the generated
-//! proxy, `#[authorize]`, `#[tenant_scoped]`, and reaches the reservation slot —
-//! and what is asserted is the token the runtime handed the `Tracer`, compared
-//! against one this test derives from the header value it sent.
+//! The precise property here is that **no intermediate idempotency value or span
+//! attribute is injected by the test**. The test does build a runtime, a reservation
+//! store double, a tracer double, a service impl, and the token it expects — what it
+//! does not do is hand any of those to the code under test as an input. The key
+//! arrives only in an `Idempotency-Key` header, crosses `resolve_operation_key`, the
+//! generated proxy, `#[authorize]`, `#[tenant_scoped]`, and reaches the reservation
+//! slot; every value in between is production's. What is asserted is the token the
+//! runtime handed the `Tracer`, compared against one this test derives independently
+//! from the header value it sent.
 //!
 //! The chain is:
 //!
@@ -243,8 +247,11 @@ fn post() -> Request<Body> {
 /// - **its token is the one derived from the header value**, compared against a
 ///   token this test computes from `KEY` *and* against the key the store recorded
 ///   — dies if the wrong value is hashed, or a constant is;
-/// - **the raw key appears in no attribute** — dies if the emission ever carries
-///   the key instead of its digest.
+/// - **no rendered attribute contains the raw key** — a regression tripwire over the
+///   current `Debug` representation, not structural evidence; the structural
+///   guarantee is the closed allow-list plus `OperationKeyHash`'s hashing
+///   constructor. It dies if the emission ever carries the key instead of its
+///   digest.
 #[tokio::test]
 async fn a_real_request_emits_the_reserve_span_with_the_presented_keys_token() {
     let store = RecordingStore::new();
@@ -286,13 +293,23 @@ async fn a_real_request_emits_the_reserve_span_with_the_presented_keys_token() {
          some other value, and not a constant"
     );
 
-    // And nowhere on that span is the key itself. Swept over the whole rendered
-    // attribute set rather than the one field expected to be wrong, because a leak
-    // worth catching would most likely surface somewhere nobody thought to check.
+    // A regression tripwire, and deliberately not the guarantee.
+    //
+    // What it checks is that the *current* `Debug` rendering of `SpanAttributes`
+    // does not contain the key. That is not universal evidence that no attribute
+    // ever could: a future field whose `Debug` elided or encoded its contents would
+    // pass this while carrying anything.
+    //
+    // The guarantee that the raw key cannot be emitted is structural and lives
+    // elsewhere: `SpanAttributes` is a closed allow-list with no field that accepts a
+    // raw key, `OperationKeyHash`'s only constructor hashes, and the token equality
+    // asserted just above pins that what is carried is the digest. This sweep exists
+    // to notice if some later field starts carrying the key anyway — cheap, and it
+    // fails loudly on the mutation that emits the raw key instead of hashing it.
     let rendered = format!("{:?}", reserve[0].1);
     assert!(
         !rendered.contains(KEY),
-        "the client-supplied key must appear in no attribute: {rendered}"
+        "no rendered attribute may contain the client-supplied key: {rendered}"
     );
 
     assert_eq!(
