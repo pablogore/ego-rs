@@ -26,8 +26,9 @@ use crate::runtime::idempotency::{
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::operation::OperationFingerprint;
+use ego_domain::operation::OperationKeyHash;
 use ego_domain::operation::ReservationError;
-use ego_domain::{Observability, SemanticEvent};
+use ego_domain::{Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{
@@ -393,6 +394,90 @@ pub struct RuntimeInner {
     /// `RuntimeDataProviderAccess` never spawns a task, so it is fully usable
     /// the moment `build()` returns.
     pub(crate) data_provider_access: Option<Arc<dyn DataProviderAccess>>,
+    /// The `Tracer` registered via `RuntimeBuilder::with_tracer`, **retained**
+    /// rather than only consumed at `build()` time.
+    ///
+    /// It used to be consumed solely to construct a `TracingInterceptor` and then
+    /// dropped, which meant nothing outside the interceptor chain could open a
+    /// span — including this type's own idempotency instrumentation (AD-10),
+    /// whose spans belong to the reservation path rather than to a request
+    /// boundary. Keeping it here is what makes those emittable at all.
+    ///
+    /// `None` means no tracer was registered, and every span site is then a
+    /// no-op. That mirrors `TracingInterceptor`'s own behaviour when a request
+    /// carries no `TraceContext`: no silent `NoopTracer` standing in, and nothing
+    /// running for nothing.
+    tracer: Option<Arc<dyn Tracer>>,
+}
+
+/// A started span that is guaranteed to be closed, even if the work it wraps never
+/// finishes.
+///
+/// # Why a guard and not two calls
+///
+/// The obvious shape — `start_span`, `.await`, `end_span` — leaks a span whenever
+/// the future is dropped between them. That is not exotic: an `.await` is a
+/// cancellation point, so a client disconnect, a timeout wrapper, a `select!` that
+/// another branch wins, or a panic unwinding through the frame all drop the future
+/// mid-flight and skip the `end_span` that follows.
+///
+/// The consequence is worse than one missing span. The OTLP adapter's table is
+/// bounded by `max_in_flight_spans`, and **at capacity it drops new spans rather
+/// than evicting live ones**. So leaked entries accumulate, and once they fill the
+/// table the adapter silently stops recording anything — tracing degrades to
+/// nothing under exactly the conditions (load, timeouts, cancellation) where it is
+/// most needed, and reports no error while doing so.
+///
+/// `Drop` closes what a normal path did not, so the leak is not reachable rather
+/// than merely unlikely.
+///
+/// # The cancelled outcome is an error, and a fixed one
+///
+/// A reserve attempt that was abandoned did not complete, so `Ok` would be a lie
+/// about work whose result nobody ever learned. The message is a constant:
+/// `SpanOutcome::Error` requires a redaction-safe one, and there is nothing about
+/// the cancellation worth forwarding.
+///
+/// # Double-closing is harmless anyway
+///
+/// `Tracer::end_span` is contractually idempotent per `SpanId`, so a guard that
+/// closed twice would be absorbed by the adapter. The flag is kept regardless, so
+/// the *recorded* outcome is the classified one rather than whichever call landed
+/// second — which is what makes the distinction assertable in a test.
+struct OpenSpan {
+    tracer: Arc<dyn Tracer>,
+    span_id: ego_domain::SpanId,
+    closed: bool,
+}
+
+impl OpenSpan {
+    fn new(tracer: Arc<dyn Tracer>, span_id: ego_domain::SpanId) -> Self {
+        Self {
+            tracer,
+            span_id,
+            closed: false,
+        }
+    }
+
+    /// Closes the span with the outcome the completed work earned.
+    fn close(mut self, outcome: SpanOutcome) {
+        self.tracer.end_span(self.span_id, outcome);
+        self.closed = true;
+    }
+}
+
+impl Drop for OpenSpan {
+    fn drop(&mut self) {
+        if !self.closed {
+            self.tracer.end_span(
+                self.span_id,
+                SpanOutcome::Error {
+                    status_message: "the reservation attempt was abandoned before it completed"
+                        .to_string(),
+                },
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for RuntimeInner {
@@ -439,6 +524,7 @@ impl RuntimeInner {
         effect_acceptor_impl: Option<Arc<RuntimeEffectAcceptor>>,
         effect_drain_deadline: Duration,
         data_provider_access: Option<Arc<dyn DataProviderAccess>>,
+        tracer: Option<Arc<dyn Tracer>>,
     ) -> Self {
         Self {
             registry,
@@ -457,6 +543,7 @@ impl RuntimeInner {
             retention_started: AtomicBool::new(false),
             effect_drain_deadline,
             data_provider_access,
+            tracer,
         }
     }
 
@@ -797,7 +884,68 @@ impl RuntimeInner {
             Some(resolved) => resolved.tenant_id().cloned(),
         };
 
-        let decision = config.reserve(tenant, key, fingerprint.clone()).await?;
+        // AD-10's `idempotency.reserve` span, opened around the durable write and
+        // nothing else.
+        //
+        // Opened here rather than at the top of the method, deliberately: the span
+        // reports a reserve *attempt*, and the two early exits above — no store or
+        // no key, and an unresolved scope — never attempt one. A span covering
+        // those would report a durable write that did not happen, with a duration
+        // that means nothing.
+        //
+        // A child `TraceContext`, so this span has its own `SpanId`. The adapter's
+        // table is keyed on that id and ignores a duplicate start for a live one,
+        // so reusing the request's id would silently drop either this span or the
+        // interceptor's. This is the first production caller of
+        // `TraceContext::child()`, which existed as a seam for exactly this.
+        //
+        // No tracer registered, or no `TraceContext` on the request, means no span
+        // — the same rule `TracingInterceptor` follows for a request that
+        // originated no trace. Minting a root here instead would attach orphans to
+        // no trace, on the hot path of every keyed operation.
+        //
+        // Held as a guard rather than as a plain id, because the `.await` below is a
+        // cancellation point: see [`OpenSpan`].
+        let span =
+            self.tracer
+                .as_ref()
+                .zip(ctx.trace_context().copied())
+                .map(|(tracer, parent)| {
+                    let child = parent.child();
+                    tracer.start_span(
+                        &child,
+                        "idempotency.reserve",
+                        // The key is about to be moved into `reserve`, so the token is
+                        // derived first. `OperationKeyHash::of` is the only way to build
+                        // one, so the raw key cannot be what lands here.
+                        SpanAttributes::new().with_operation_key_hash(OperationKeyHash::of(&key)),
+                    );
+                    OpenSpan::new(tracer.clone(), child.span_id())
+                });
+
+        let outcome = config.reserve(tenant, key, fingerprint.clone()).await;
+
+        if let Some(span) = span {
+            // A refusal on the merits is not a failed span. `Conflict`,
+            // `OtherInProgress` and the rest are answers the store gave, and the
+            // attempt they answer completed exactly as designed — recording them as
+            // errors would make a correctly-refused duplicate look like an outage
+            // on every dashboard that counts span errors. Only the case where the
+            // store could not answer at all is a failure of this attempt.
+            //
+            // The message is a fixed string. `SpanOutcome::Error`'s own contract
+            // requires a redaction-safe one, and the rejection carries nothing
+            // worth forwarding anyway.
+            let ended = match &outcome {
+                Err(ReservationRejection::StoreUnavailable) => SpanOutcome::Error {
+                    status_message: "the reservation store could not answer".to_string(),
+                },
+                _ => SpanOutcome::Ok,
+            };
+            span.close(ended);
+        }
+
+        let decision = outcome?;
 
         // Stamped only after the store accepted it. A fingerprint left on a
         // context whose reservation was refused would be carried into an
@@ -1064,6 +1212,7 @@ impl RuntimeInner {
             None,
             Duration::from_secs(5),
             None,
+            None,
         )
     }
 
@@ -1091,6 +1240,7 @@ impl RuntimeInner {
             Some(obs),
             None,
             Duration::from_secs(5),
+            None,
             None,
         )
     }
@@ -1124,6 +1274,7 @@ impl RuntimeInner {
             None,
             None,
             Duration::from_secs(5),
+            None,
             None,
         )
     }
@@ -2049,6 +2200,7 @@ mod tests {
             None,
             Duration::from_secs(5),
             None,
+            None,
         );
 
         let result = rt.authorization_provider();
@@ -2074,13 +2226,21 @@ mod tests {
     // `crates/service-sdk/tests/cross_tenant_reservation_isolation.rs`.
 
     /// Records the scope each `reserve` was handed, and answers from a script.
+    ///
+    /// The answer is a full `Result`, so a test can script a store *failure* as
+    /// well as an outcome — which is what the span's `Ok`/`Error` classification
+    /// has to be judged against.
     struct ScopeRecordingStore {
         scopes: Mutex<Vec<Option<TenantId>>>,
-        answer: Mutex<Option<ReservationOutcome>>,
+        answer: Mutex<Option<Result<ReservationOutcome, ReservationError>>>,
     }
 
     impl ScopeRecordingStore {
         fn answering(answer: ReservationOutcome) -> Arc<Self> {
+            Self::answering_with(Ok(answer))
+        }
+
+        fn answering_with(answer: Result<ReservationOutcome, ReservationError>) -> Arc<Self> {
             Arc::new(Self {
                 scopes: Mutex::new(Vec::new()),
                 answer: Mutex::new(Some(answer)),
@@ -2102,12 +2262,11 @@ mod tests {
                 .lock()
                 .expect("not poisoned")
                 .push(req.tenant.clone());
-            Ok(self
-                .answer
+            self.answer
                 .lock()
                 .expect("not poisoned")
                 .take()
-                .expect("each store answers exactly one reserve"))
+                .expect("each store answers exactly one reserve")
         }
         async fn renew(
             &self,
@@ -2156,6 +2315,592 @@ mod tests {
             .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
             .with_reservation_lease_duration(Duration::from_secs(30))
             .build()
+    }
+
+    /// One recorded `start_span` call: everything the runtime handed the port.
+    ///
+    /// The `TraceContext` is kept whole rather than reduced to a name, because the
+    /// parent linkage is a property under test: an earlier version of this spy
+    /// ignored the context, and with it a mutation reusing the request's context
+    /// instead of deriving a child left the whole suite green.
+    #[derive(Clone, Debug)]
+    struct StartedSpan {
+        name: String,
+        ctx: ego_domain::TraceContext,
+        attrs: SpanAttributes,
+    }
+
+    /// Records every span the runtime opens **and how it closed** — the context,
+    /// the attributes, and the terminal outcome.
+    ///
+    /// Every field here exists because dropping it made a real mutation
+    /// undetectable. Attributes: without them, a span carrying no token looks like
+    /// one carrying the right token. Context: without it, reusing the request's
+    /// `SpanId` instead of a child's is invisible. Outcome: without it, ending
+    /// every span `Ok`, or every span `Error`, is invisible.
+    struct SpanRecordingTracer {
+        started: Mutex<Vec<StartedSpan>>,
+        ended: Mutex<Vec<(ego_domain::SpanId, SpanOutcome)>>,
+    }
+
+    impl SpanRecordingTracer {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: Mutex::new(Vec::new()),
+                ended: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn started(&self) -> Vec<StartedSpan> {
+            self.started.lock().expect("not poisoned").clone()
+        }
+
+        fn ended(&self) -> Vec<(ego_domain::SpanId, SpanOutcome)> {
+            self.ended.lock().expect("not poisoned").clone()
+        }
+
+        fn ended_count(&self) -> usize {
+            self.ended.lock().expect("not poisoned").len()
+        }
+
+        /// The single span this runtime opened, or a failure naming what it saw.
+        fn only_span(&self) -> StartedSpan {
+            let started = self.started();
+            assert_eq!(
+                started.len(),
+                1,
+                "expected exactly one span, got {:?}",
+                started.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+            );
+            started[0].clone()
+        }
+
+        /// How the single span closed.
+        fn only_outcome(&self) -> SpanOutcome {
+            let ended = self.ended();
+            assert_eq!(ended.len(), 1, "expected exactly one closed span");
+            ended[0].1.clone()
+        }
+    }
+
+    impl Tracer for SpanRecordingTracer {
+        fn start_span(&self, ctx: &ego_domain::TraceContext, name: &str, attrs: SpanAttributes) {
+            self.started
+                .lock()
+                .expect("not poisoned")
+                .push(StartedSpan {
+                    name: name.to_string(),
+                    ctx: *ctx,
+                    attrs,
+                });
+        }
+        fn end_span(&self, span: ego_domain::SpanId, outcome: SpanOutcome) {
+            self.ended
+                .lock()
+                .expect("not poisoned")
+                .push((span, outcome));
+        }
+    }
+
+    fn reserving_runtime_with_tracer(
+        store: Arc<ScopeRecordingStore>,
+        tracer: Arc<SpanRecordingTracer>,
+    ) -> Runtime {
+        RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(tracer as Arc<dyn Tracer>)
+            .build()
+    }
+
+    /// A keyed reservation opens `idempotency.reserve`, carrying the token of the
+    /// key that was actually presented.
+    ///
+    /// The token is compared against one this test derives from its own key, so
+    /// the assertion is that the *presented* key was hashed — not merely that some
+    /// 16-hex value appeared. An implementation hashing a constant, or the wrong
+    /// value, produces a different token and fails here.
+    #[tokio::test]
+    async fn a_reservation_opens_a_span_carrying_the_presented_keys_token() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        let span = tracer.only_span();
+        assert_eq!(span.name, "idempotency.reserve");
+        assert_eq!(
+            span.attrs.operation_key_hash(),
+            Some(OperationKeyHash::of(&scope_test_key()).as_str()),
+            "the span must carry the token of the key this dispatch presented"
+        );
+        assert_eq!(
+            tracer.ended_count(),
+            1,
+            "an opened span must be closed, or the adapter's table leaks it"
+        );
+    }
+
+    /// A store whose `reserve` announces that it was entered and then never returns.
+    ///
+    /// The two halves are both needed: the notification is what lets the test know
+    /// the future has reached its `.await` — rather than guessing with a sleep — and
+    /// the park is what makes the future genuinely cancellable at that point.
+    struct ParkingStore {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl ParkingStore {
+        fn new() -> (Arc<Self>, Arc<tokio::sync::Notify>) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            (
+                Arc::new(Self {
+                    entered: entered.clone(),
+                }),
+                entered,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for ParkingStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            self.entered.notify_waiters();
+            // Parked forever. The test cancels instead of releasing.
+            std::future::pending().await
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _u: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn purge_completed_before(
+            &self,
+            _c: chrono::DateTime<chrono::Utc>,
+            _b: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!("this store only parks in reserve")
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    /// A cancelled reserve closes its span exactly once, as an error.
+    ///
+    /// The leak this prevents, stated as the mechanism rather than as a worry: the
+    /// `.await` on `reserve` is a cancellation point, and `end_span` is only reached
+    /// after it. A dropped future therefore left the adapter holding a live entry —
+    /// and the adapter's table is bounded and **drops new spans at capacity instead
+    /// of evicting**, so leaked entries accumulate until tracing silently stops. A
+    /// client disconnect, a timeout wrapper, or a losing `select!` branch all reach
+    /// it, so this is ordinary traffic rather than an edge.
+    ///
+    /// Construction: the store announces entry and then parks, so the future is
+    /// pinned at exactly the cancellation point — no sleep, no race. The span is
+    /// asserted open and *not yet closed* before the drop, so the single `end_span`
+    /// afterwards can only have come from the guard.
+    ///
+    /// A panic unwinding through the same frame is covered by the same mechanism and
+    /// is not separately tested: `Drop` is what runs in both cases, and a test that
+    /// panicked inside the store would be asserting on `catch_unwind` rather than on
+    /// this guard.
+    #[tokio::test]
+    async fn a_cancelled_reserve_still_closes_its_span_exactly_once_as_an_error() {
+        use crate::runtime::CanonicalTenant;
+
+        let (store, entered) = ParkingStore::new();
+        let tracer = SpanRecordingTracer::new();
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(tracer.clone() as Arc<dyn Tracer>)
+            .build();
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(
+            TenantId::new("tenant-a").expect("valid tenant"),
+        ));
+
+        let notified = entered.notified();
+        let inner = rt.inner();
+        // `Box::pin`, not `tokio::pin!`: the latter shadows the binding with a
+        // `Pin<&mut _>`, so `drop(reserving)` would drop a *reference* and leave the
+        // future alive in a hidden local until the end of scope — which is how an
+        // earlier version of this test observed no cancellation at all and briefly
+        // looked like a missing guard. Owning the future is what makes the drop the
+        // cancellation.
+        let mut reserving =
+            Box::pin(inner.reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp")));
+        tokio::pin!(notified);
+
+        // Drive the future only until the store reports it is parked. `&mut`, so
+        // losing this `select!` does not drop it yet.
+        tokio::select! {
+            _ = &mut reserving => panic!("a parked store cannot let the reservation complete"),
+            _ = &mut notified => {}
+        }
+
+        let span = tracer.only_span();
+        assert_eq!(span.name, "idempotency.reserve");
+        assert!(
+            tracer.ended().is_empty(),
+            "the span must still be open at the cancellation point, or this test \
+             would be asserting about the normal path"
+        );
+
+        // The cancellation.
+        drop(reserving);
+
+        let ended = tracer.ended();
+        assert_eq!(
+            ended.len(),
+            1,
+            "a cancelled attempt must close its span exactly once, got {ended:?}"
+        );
+        assert_eq!(
+            ended[0].0,
+            span.ctx.span_id(),
+            "the closed span must be the one that was opened"
+        );
+        match &ended[0].1 {
+            SpanOutcome::Error { status_message } => assert!(
+                !status_message.is_empty(),
+                "an abandoned attempt needs a message naming what happened"
+            ),
+            SpanOutcome::Ok => panic!(
+                "an abandoned attempt never learned its result, so Ok would claim \
+                 something nobody observed"
+            ),
+        }
+    }
+
+    /// The span's context is a **child** of the request's: same trace, new span id,
+    /// parent pointing back at the request's span.
+    ///
+    /// This is the assertion that was missing while the spy discarded the context,
+    /// and its absence was not harmless — reusing `parent` instead of deriving a
+    /// child left the whole suite green, while the adapter's `SpanId`-keyed table
+    /// would have silently dropped either this span or the interceptor's as a
+    /// duplicate start.
+    ///
+    /// All three parts are checked. Same `trace_id` or the span leaves the trace.
+    /// A new `span_id` or it collides. And `parent_span_id` equal to the request's
+    /// span, or the collector cannot stitch it under the request that caused it.
+    #[tokio::test]
+    async fn the_span_context_is_a_child_of_the_requests() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let request_ctx = ego_domain::TraceContext::root();
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(request_ctx);
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        let span = tracer.only_span();
+        assert_eq!(
+            span.ctx.trace_id(),
+            request_ctx.trace_id(),
+            "a child must stay in the request's trace"
+        );
+        assert_ne!(
+            span.ctx.span_id(),
+            request_ctx.span_id(),
+            "the span needs its own id: the adapter's table is keyed on it, and a \
+             duplicate start for a live id is dropped"
+        );
+        assert_eq!(
+            span.ctx.parent_span_id(),
+            Some(request_ctx.span_id()),
+            "the parent must be the request's span, or nothing can stitch this \
+             under the request that caused it"
+        );
+        // And the span that was closed is this one, not the request's.
+        assert_eq!(
+            tracer.ended().first().map(|(id, _)| *id),
+            Some(span.ctx.span_id())
+        );
+    }
+
+    /// A store that could not answer ends the span `Error`.
+    ///
+    /// Half of the classification, and the half a dashboard alerts on. While the
+    /// spy discarded the outcome, ending every span `Error` — or every span `Ok` —
+    /// was invisible.
+    #[tokio::test]
+    async fn a_store_that_could_not_answer_ends_the_span_as_an_error() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store =
+            ScopeRecordingStore::answering_with(Err(ReservationError::Backend("boom".into())));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        let result = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await;
+        match result {
+            Err(rejection) => assert_eq!(rejection, ReservationRejection::StoreUnavailable),
+            Ok(other) => panic!("a failed store must refuse, got {other:?}"),
+        }
+
+        match tracer.only_outcome() {
+            SpanOutcome::Error { status_message } => assert!(
+                !status_message.is_empty(),
+                "an error outcome needs a message an operator can read"
+            ),
+            SpanOutcome::Ok => {
+                panic!("a store that could not answer is a failed attempt, not a completed one")
+            }
+        }
+    }
+
+    /// A refusal on the merits ends the span `Ok`.
+    ///
+    /// `Conflict` is an *answer*: the attempt completed and the store said no. The
+    /// span describes the attempt, so recording this as an error would make every
+    /// correctly-refused duplicate look like an outage on any dashboard that counts
+    /// span errors — and duplicates are the ordinary traffic this whole mechanism
+    /// exists to absorb.
+    #[tokio::test]
+    async fn a_refusal_on_the_merits_ends_the_span_ok() {
+        use crate::runtime::CanonicalTenant;
+
+        for refused in [
+            ReservationOutcome::Conflict,
+            ReservationOutcome::OtherInProgress,
+        ] {
+            let tenant = TenantId::new("tenant-a").expect("valid tenant");
+            let store = ScopeRecordingStore::answering(refused.clone());
+            let tracer = SpanRecordingTracer::new();
+            let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+            let mut ctx = ServiceContext::new()
+                .with_operation_key(scope_test_key())
+                .with_trace_context(ego_domain::TraceContext::root());
+            ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+            let result = rt
+                .inner()
+                .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+                .await;
+            assert!(result.is_err(), "{refused:?} refuses the dispatch");
+
+            assert_eq!(
+                tracer.only_outcome(),
+                SpanOutcome::Ok,
+                "{refused:?} is an answer the store gave, so the attempt completed"
+            );
+        }
+    }
+
+    /// And a successful reservation ends `Ok` too — the third classification, so
+    /// the `Error` case above is shown to be the exception rather than the rule.
+    #[tokio::test]
+    async fn a_successful_reservation_ends_the_span_ok() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation proceeds");
+
+        assert_eq!(tracer.only_outcome(), SpanOutcome::Ok);
+    }
+
+    /// A request that carries a `TraceContext` but reaches a runtime with **no
+    /// tracer** still reserves.
+    ///
+    /// The other half of the no-op rule. The neighbouring test covers tracer
+    /// present with no context; without this one, an implementation that unwrapped
+    /// an absent tracer would pass everything and panic in the deployments that
+    /// register none — which is most of them.
+    #[tokio::test]
+    async fn a_traced_request_against_an_untraced_runtime_still_reserves() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        // No `with_tracer`, deliberately.
+        let rt = reserving_runtime(store.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant.clone()));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("a runtime with no tracer still reserves");
+
+        assert_eq!(
+            store.scopes(),
+            vec![Some(tenant)],
+            "the reservation happened; only its span did not"
+        );
+    }
+
+    /// The runtime retains the **same** `Arc` that was registered — not an
+    /// equivalent tracer.
+    ///
+    /// `Arc::ptr_eq`, because nothing weaker can tell the two apart: a second
+    /// instance of the same type would satisfy every behavioural assertion in this
+    /// file while being a different object, and a build that constructed one tracer
+    /// for the interceptor and another for this field would look correct in every
+    /// test that only counts spans.
+    #[test]
+    fn the_runtime_retains_the_registered_tracer_itself() {
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let registered = SpanRecordingTracer::new();
+        let as_port: Arc<dyn Tracer> = registered.clone();
+
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(store)
+            .with_reservation_clock(Arc::new(FixedClock))
+            .with_reservation_owner_id(OwnerId::new("in-crate-owner"))
+            .with_reservation_lease_duration(Duration::from_secs(30))
+            .with_tracer(as_port.clone())
+            .build();
+
+        let retained = rt
+            .inner()
+            .tracer
+            .as_ref()
+            .expect("a registered tracer must be retained");
+        assert!(
+            Arc::ptr_eq(retained, &as_port),
+            "the retained tracer must be the registered object, not another one \
+             built alongside it"
+        );
+    }
+
+    /// No `TraceContext` on the request means no span, and dispatch is unaffected.
+    ///
+    /// Same rule `TracingInterceptor` already follows: a request that originated no
+    /// trace makes every hook a no-op. Opening a root span here instead would mint
+    /// orphans attached to no trace, and would do it on the hot path of every
+    /// keyed operation.
+    #[tokio::test]
+    async fn a_request_with_no_trace_context_opens_no_span_and_still_reserves() {
+        use crate::runtime::CanonicalTenant;
+
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(Some(
+            tenant.clone(),
+        ))));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new().with_operation_key(scope_test_key());
+        ctx.set_resolved_tenant(CanonicalTenant::scoped(tenant));
+
+        rt.inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await
+            .expect("the reservation still proceeds without tracing");
+
+        assert!(
+            tracer.started().is_empty(),
+            "no trace context, no span: got {:?}",
+            tracer.started()
+        );
+    }
+
+    /// A dispatch refused before the store is reached opens no span either.
+    ///
+    /// The span describes a reserve *attempt*. An unresolved scope never attempts
+    /// one — it is refused before the store is asked — so a span here would report
+    /// a durable write that never happened, and its duration would be noise.
+    #[tokio::test]
+    async fn a_dispatch_refused_before_the_store_opens_no_span() {
+        let store = ScopeRecordingStore::answering(ReservationOutcome::Fresh(lease_for(None)));
+        let tracer = SpanRecordingTracer::new();
+        let rt = reserving_runtime_with_tracer(store, tracer.clone());
+
+        let mut ctx = ServiceContext::new()
+            .with_operation_key(scope_test_key())
+            .with_trace_context(ego_domain::TraceContext::root());
+
+        let result = rt
+            .inner()
+            .reserve_idempotent_operation(&mut ctx, OperationFingerprint::new("fp"))
+            .await;
+
+        assert!(result.is_err(), "an unresolved scope is refused");
+        assert!(
+            tracer.started().is_empty(),
+            "nothing was attempted, so nothing may be reported as attempted: {:?}",
+            tracer.started()
+        );
     }
 
     fn scope_test_key() -> OperationKey {

@@ -939,14 +939,68 @@ after A2 lands until A2 is verified in a real environment.
 
 ### AD-10 — Observability
 
-**Decision**: three spans, everything else a span event plus a counter, on the
+**Decision**: **two** spans, everything else a span event plus a counter, on the
 existing CORE-012A / PROD-003 OTLP surface.
 
 | Span | Parent | Why a span |
 |---|---|---|
 | `idempotency.reserve` | request-boundary span (`TracingInterceptor`) | A durable write with its own latency and failure mode |
-| `idempotency.takeover` | request-boundary span | A distinct causal unit with a different owner |
 | `idempotency.purge_batch` | root | Background worker; there is no request span |
+
+#### AD-10a — `idempotency.takeover` is a counter value, not a span
+
+**Amends AD-10, which originally specified three spans.** This is a change to the
+decision, recorded here rather than as an implementation note, because dropping a
+required span is a change to what the design mandates.
+
+The original entry read `idempotency.takeover | request-boundary span | A distinct
+causal unit with a different owner`. It is not implementable as specified, for two
+independent reasons found while implementing it:
+
+1. **A span's name is fixed before its work runs.** `Tracer::start_span` takes the
+   name, and the adapter stamps `start_time` at that call. Whether a reservation
+   was *taken over* is only known when `reserve` returns. Honouring the table would
+   therefore require either a zero-duration marker span opened after the fact —
+   misrepresenting exactly what a span exists to represent — or a span whose
+   timestamps are fabricated to cover work that had already finished.
+2. **From the runtime's vantage point there is one timed operation.** The takeover
+   happens *inside* the store: `reserve` performs an insert, a read, and possibly a
+   conditional update, and returns a single outcome. The runtime cannot time the
+   takeover separately from the reserve, so the two-span design presumes a
+   visibility the caller does not have. Producing it honestly would mean handing a
+   tracer to the `OperationReservationStore` port, coupling a persistence
+   capability to tracing across both implementations.
+
+**Replacement, and exactly what it does and does not preserve**: that a takeover
+happened stays independently observable through
+`idempotency.reservation.outcome` with `outcome = taken_over`, which this same
+table already requires. The `TakenOver` variant remains distinct in
+`ReservationOutcome` for that reason.
+
+**The counter preserves the fact, not the timing.** It is not a substitute for the
+span, and this amendment does not claim it is. A span would have carried a
+duration, a start instant, and a position in the trace's causal ordering; a counter
+increment carries none of those. What is lost is therefore real and worth naming:
+
+- **no separate latency for the takeover.** `idempotency.reserve`'s duration covers
+  the whole call — insert, read, and the conditional update when one happens — so a
+  takeover that is slow is visible only as a slow `reserve`, not as a slow takeover.
+- **no independent causal position.** A takeover cannot be located within the
+  reserve, nor ordered against anything else inside it.
+- **no circumstances.** `idempotency.reservation.outcome` carries `outcome` and
+  nothing else, so the counter says takeovers happened and how many. It does not
+  say which operation, which tenant, which owner was displaced, or under what
+  conditions — none of those is an attribute it has, and adding an unbounded one
+  would be the cardinality problem this table's redaction rule exists to prevent.
+
+What remains, stated as exactly what the counter carries: **occurrence and
+frequency.** That is enough to notice takeovers are happening and whether the rate
+is changing, which is what an alert fires on. It is not enough to investigate one.
+Diagnosing a slow takeover, or attributing takeovers to a tenant or an owner, would
+need the store instrumented.
+
+Revisiting this decision is reasonable only alongside a decision to instrument the
+reservation store itself, which is where the two intervals are separable.
 
 | Signal | Kind | Attributes |
 |---|---|---|
