@@ -749,6 +749,16 @@ impl RuntimeInner {
         Ok(())
     }
 
+    /// The registered `Tracer`, if any.
+    ///
+    /// `pub(super)`, which is the least that works: the only callers are span sites
+    /// inside `crate::runtime` — this module's own reservation span and the retention
+    /// worker's. Handing it out beyond that would let an adopter open spans that look
+    /// like the runtime's own.
+    pub(super) fn tracer(&self) -> Option<Arc<dyn Tracer>> {
+        self.tracer.clone()
+    }
+
     /// The reservation capability, if this deployment configured one.
     ///
     /// `pub(crate)` deliberately. Idempotent dispatch is the only caller, and it
@@ -766,16 +776,6 @@ impl RuntimeInner {
     /// The store is reached only through here, never handed out. AD-3g keeps the
     /// reservation and its outcome branching inside this crate so there is one
     /// implementation to test rather than one copy per generated operation.
-    /// The registered `Tracer`, if any.
-    ///
-    /// `pub(super)`, which is the least that works: the only callers are span sites
-    /// inside `crate::runtime` — this module's own reservation span and the retention
-    /// worker's. Handing it out beyond that would let an adopter open spans that look
-    /// like the runtime's own.
-    pub(super) fn tracer(&self) -> Option<Arc<dyn Tracer>> {
-        self.tracer.clone()
-    }
-
     pub(crate) fn reservation(&self) -> Option<&ReservationConfig> {
         self.reservation.as_ref()
     }
@@ -2494,7 +2494,12 @@ mod tests {
             &self,
             _req: ReserveRequest,
         ) -> Result<ReservationOutcome, ReservationError> {
-            self.entered.notify_waiters();
+            // `notify_one`, not `notify_waiters`. `Notified` registers on its first
+            // poll, and `select!` polls its branches in an unspecified order — so with
+            // `notify_waiters` a run that polled the reservation first would fire into
+            // no waiter, lose the signal, and then park forever. A permit-leaving
+            // notification makes the handshake independent of that order.
+            self.entered.notify_one();
             // Parked forever. The test cancels instead of releasing.
             std::future::pending().await
         }

@@ -545,7 +545,11 @@ impl OperationReservationStore for ParkingStore {
         _c: DateTime<Utc>,
         _b: usize,
     ) -> Result<u64, ReservationError> {
-        self.entered.notify_waiters();
+        // `notify_one`, not `notify_waiters`: the latter only wakes waiters already
+        // registered, so a signal fired before the test polls its `Notified` is lost
+        // forever. `notify_one` leaves a permit behind, which makes the handshake
+        // independent of who gets scheduled first.
+        self.entered.notify_one();
         std::future::pending().await
     }
     async fn probe(&self) -> Result<(), ReservationError> {
@@ -712,7 +716,14 @@ async fn a_shutdown_that_cancels_an_in_flight_purge_closes_the_span_once_as_an_e
     );
     runtime.start_retention().await.expect("the worker starts");
 
-    wait_for_a_span(&tracer).await;
+    // Wait for the store's own signal, not merely for the span. The span is opened
+    // *before* the store is called, so `wait_for_a_span` alone would let this proceed
+    // while the worker had not yet reached the `.await` — and a later edit adding any
+    // yield in between would make that the common case rather than a latent one. The
+    // property under test is a drop *at* the cancellation point, so the handshake has
+    // to be with the code that owns it.
+    entered.notified().await;
+
     let started = tracer.started();
     assert_eq!(started.len(), 1, "one parked tick, got {started:?}");
     assert!(
