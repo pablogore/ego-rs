@@ -1106,7 +1106,7 @@ impl RuntimeInner {
                 // semantic event carrying the operator action, which is what somebody
                 // reads *after* being paged — the two are not substitutes.
                 if let Some(obs) = &self.observability {
-                    obs.metric("idempotency.lease.stale_owner.complete", 1.0);
+                    obs.counter("idempotency.lease.stale_owner.complete", 1.0, &[]);
                 }
                 self.record_completion_lost(
                     "stale_owner",

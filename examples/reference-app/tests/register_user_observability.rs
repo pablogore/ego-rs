@@ -31,15 +31,6 @@ impl RecordingObservability {
         Self::default()
     }
 
-    fn last_metric_attributes(&self) -> Vec<(String, String)> {
-        self.metrics
-            .lock()
-            .unwrap()
-            .last()
-            .map(|m| m.attributes.clone())
-            .unwrap_or_default()
-    }
-
     fn event_names(&self) -> Vec<String> {
         self.events
             .lock()
@@ -54,27 +45,22 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric_with_attributes(
-        &self,
-        name: &'static str,
-        value: f64,
-        attributes: &[ego_domain::MetricAttribute<'_>],
-    ) {
+    fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
         self.metrics
             .lock()
             .unwrap()
-            .push(ego_testkit::RecordedMetric::capture(
-                name, value, attributes,
-            ));
+            .push(ego_testkit::RecordedMetric::capture(&observation));
     }
     fn log(&self, _level: Level, _message: &str) {}
 }
 
-/// This file's double preserves the dimensions it is handed.
+/// This file's double preserves every field of what it is handed.
 #[test]
-fn the_double_preserves_metric_attributes() {
+fn the_double_preserves_metric_observations() {
     let obs = RecordingObservability::new();
-    ego_testkit::assert_metric_attributes_are_preserved(&obs, || obs.last_metric_attributes());
+    ego_testkit::assert_metric_observations_are_preserved(&obs, || {
+        obs.metrics.lock().unwrap().clone()
+    });
 }
 
 fn make_service() -> Arc<dyn RegisterUser> {

@@ -88,18 +88,22 @@ where
                 // `resolve_operation_key` returns it and the mapping below discards it,
                 // so a counter anywhere downstream would have nothing left to count.
                 //
-                // The reason is folded into the name — `Observability::metric` takes a
-                // name and a value and has no attribute parameter. The variants are a
-                // closed enum, and the match is exhaustive with no wildcard so a fourth
-                // rejection added upstream breaks the build rather than being counted
-                // as whichever arm happened to be last.
+                // The reason is still folded into the name, and that is now a
+                // migration debt rather than a limit of the port: the port expresses
+                // dimensions, and this call site has not been moved onto them yet.
+                // The move happens with the rest of the already-emitted signals, in
+                // one slice, so the folded and dimensional forms do not coexist
+                // across a release. The variants are a closed enum, and the match is
+                // exhaustive with no wildcard so a fourth rejection added upstream
+                // breaks the build rather than being counted as whichever arm
+                // happened to be last.
                 //
-                // `carrier` is deliberately *not* folded in. It would multiply against
-                // the reason, and it grows with adapters rather than being closed. The
-                // value stays available on the rejection for a future dimensional API;
-                // what is dropped is only its use as a metric dimension.
+                // `carrier` is not emitted at all today. It stays available on the
+                // rejection, and becomes a dimension in that same slice — folding it
+                // into the name was never an option, since it multiplies against the
+                // reason and grows with adapters rather than being closed.
                 if let Some(obs) = state.runtime.observability() {
-                    obs.metric(key_rejected_metric(&rejection), 1.0);
+                    obs.counter(key_rejected_metric(&rejection), 1.0, &[]);
                 }
                 TransportError::BadRequest
             })

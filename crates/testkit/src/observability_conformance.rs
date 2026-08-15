@@ -1,22 +1,24 @@
-//! One shared proof that an `Observability` implementor preserves the dimensions
-//! it is handed.
+//! One shared proof that an `Observability` implementor preserves the whole
+//! observation it is handed.
 //!
-//! The port's required method takes attributes by borrow, which means an
-//! implementor can satisfy the compiler while binding them to `_` and throwing
-//! them away. That is precisely the failure the port's shape was changed to
-//! prevent, and it is invisible from the outside: names and values still arrive,
-//! assertions on them still pass, and only the dimensions are gone.
+//! The port's required method takes a single record, which keeps the four fields
+//! associated but does nothing to make an implementor honour them: one can read
+//! three and ignore the fourth and still satisfy the compiler. No signature can
+//! close that, which is why the check is a test rather than a type. The failure is
+//! also invisible from the outside — names and values still arrive, assertions on
+//! them still pass, and only the kind, or only the dimensions, are gone.
 //!
 //! Every implementor is therefore checked against the same probe rather than each
 //! writing its own — one definition of "preserved" that cannot drift between
 //! doubles, and a single place to strengthen when the contract grows.
 
-use ego_domain::{MetricAttribute, Observability};
+use ego_domain::{MetricKind, MetricObservation, Observability};
 
-/// One emission as it arrived: its name, its value, and the dimensions it carried.
+/// One emission as it arrived: how it aggregates, its name, its value, and the
+/// dimensions it carried.
 ///
 /// Shared rather than redefined per fixture, because the reason for its shape is a
-/// single invariant that must not drift. The three fields live in one record so a
+/// single invariant that must not drift. The four fields live in one record so a
 /// recorder can append them inside one critical section; parallel collections can
 /// only stay aligned if every writer holds every lock at once, and two concurrent
 /// emissions would otherwise leave one call's name paired with another call's
@@ -26,6 +28,8 @@ use ego_domain::{MetricAttribute, Observability};
 /// the recorder did not retain the caller's references, which the port forbids.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedMetric {
+    /// How this emission aggregates.
+    pub kind: MetricKind,
     /// The metric name this emission carried.
     pub name: String,
     /// The observed value.
@@ -35,7 +39,7 @@ pub struct RecordedMetric {
 }
 
 impl RecordedMetric {
-    /// Captures one emission, copying the dimensions out of the borrowed slice.
+    /// Captures one emission, copying the observation out of the borrowed record.
     ///
     /// Every recorder builds its record through this, so "what counts as recording
     /// an emission" is defined once and cannot drift between fixtures.
@@ -44,17 +48,19 @@ impl RecordedMetric {
     ///
     /// Several doubles assert on semantic events, not counters, and have no
     /// reason of their own to keep metrics. They keep them anyway, because a
-    /// double that binds the dimensions to `_` is indistinguishable from one that
-    /// supports them — exactly the confusion the port's shape was changed to
-    /// prevent. Recording is also append-only: keeping just the most recent
-    /// emission would silently drop every earlier one, so a flow emitting more
-    /// than one metric would answer for the last and nothing could detect the
-    /// loss.
-    pub fn capture(name: &str, value: f64, attributes: &[MetricAttribute<'_>]) -> Self {
+    /// double that ignores a field is indistinguishable from one that supports it
+    /// until something reads the field back — which is what this probe exists to
+    /// do, since no signature can rule the case out. Recording
+    /// is also append-only: keeping just the most recent emission would silently
+    /// drop every earlier one, so a flow emitting more than one metric would
+    /// answer for the last and nothing could detect the loss.
+    pub fn capture(observation: &MetricObservation<'_>) -> Self {
         Self {
-            name: name.to_string(),
-            value,
-            attributes: attributes
+            kind: observation.kind,
+            name: observation.name.to_string(),
+            value: observation.value,
+            attributes: observation
+                .attributes
                 .iter()
                 .map(|a| (a.key.to_string(), a.value.to_string()))
                 .collect(),
@@ -62,19 +68,29 @@ impl RecordedMetric {
     }
 }
 
-/// The metric name the probe emits under.
+/// The metric names the probe emits under, one per kind.
 ///
-/// Deliberately not one of the real signal names, so a fixture that filters or
+/// Deliberately not any of the real signal names, so a fixture that filters or
 /// asserts on production metrics is unaffected by having been probed.
-pub const PROBE_METRIC: &str = "testkit.observability.conformance.probe";
+pub const PROBE_COUNTER_METRIC: &str = "testkit.observability.conformance.probe.counter";
+/// See [`PROBE_COUNTER_METRIC`].
+pub const PROBE_HISTOGRAM_METRIC: &str = "testkit.observability.conformance.probe.histogram";
+/// See [`PROBE_COUNTER_METRIC`].
+pub const PROBE_GAUGE_METRIC: &str = "testkit.observability.conformance.probe.gauge";
 
-/// Asserts that `observability` kept both dimensions of one emission, in order,
-/// with each key still paired to its own value.
+/// Asserts that `observability` kept every field of every observation it was
+/// handed: kind, name, value, and both dimensions in order.
 ///
-/// `read_back` must return the attributes the implementor recorded for the most
-/// recent emission, as `(key, value)` pairs.
+/// `read_back` must return every emission the implementor recorded, oldest first.
+/// The probe compares against the **last three**, so a double that also records
+/// production signals passes without having to be cleared first.
 ///
 /// # What the probe is shaped to catch
+///
+/// One observation per kind, so an implementor that collapses all three to a
+/// single variant — or hardcodes one — fails rather than passing on the one kind
+/// it happens to handle. The three carry different values as well as different
+/// names, so a record assembled from the wrong call is not coincidentally equal.
 ///
 /// Two attributes, not one, so dropping only the tail is caught. No value equals
 /// any key, and the two pairs share no text, so a transposition of key and value
@@ -85,28 +101,59 @@ pub const PROBE_METRIC: &str = "testkit.observability.conformance.probe";
 ///
 /// Panics with the difference if the implementor dropped, reordered, or
 /// transposed anything.
-pub fn assert_metric_attributes_are_preserved<O, F>(observability: &O, read_back: F)
+pub fn assert_metric_observations_are_preserved<O, F>(observability: &O, read_back: F)
 where
     O: Observability + ?Sized,
-    F: FnOnce() -> Vec<(String, String)>,
+    F: FnOnce() -> Vec<RecordedMetric>,
 {
-    observability.metric_with_attributes(
-        PROBE_METRIC,
-        1.0,
-        &[
-            MetricAttribute::new("probe_first", "alpha"),
-            MetricAttribute::new("probe_second", "beta"),
-        ],
-    );
+    let attributes = [
+        ego_domain::MetricAttribute::new("probe_first", "alpha"),
+        ego_domain::MetricAttribute::new("probe_second", "beta"),
+    ];
+
+    observability.counter(PROBE_COUNTER_METRIC, 1.0, &attributes);
+    observability.histogram(PROBE_HISTOGRAM_METRIC, 2.5, &attributes);
+    observability.gauge(PROBE_GAUGE_METRIC, 3.0, &attributes);
+
+    let expected_attributes = vec![
+        ("probe_first".to_string(), "alpha".to_string()),
+        ("probe_second".to_string(), "beta".to_string()),
+    ];
+    let expected = vec![
+        RecordedMetric {
+            kind: MetricKind::Counter,
+            name: PROBE_COUNTER_METRIC.to_string(),
+            value: 1.0,
+            attributes: expected_attributes.clone(),
+        },
+        RecordedMetric {
+            kind: MetricKind::Histogram,
+            name: PROBE_HISTOGRAM_METRIC.to_string(),
+            value: 2.5,
+            attributes: expected_attributes.clone(),
+        },
+        RecordedMetric {
+            kind: MetricKind::Gauge,
+            name: PROBE_GAUGE_METRIC.to_string(),
+            value: 3.0,
+            attributes: expected_attributes,
+        },
+    ];
+
+    let recorded = read_back();
+    let observed: Vec<_> = recorded
+        .iter()
+        .rev()
+        .take(expected.len())
+        .rev()
+        .cloned()
+        .collect();
 
     assert_eq!(
-        read_back(),
-        vec![
-            ("probe_first".to_string(), "alpha".to_string()),
-            ("probe_second".to_string(), "beta".to_string()),
-        ],
-        "the implementor must record both dimensions, in order, each key with its own value — \
-         binding the attributes slice to `_` lets a future emitter's dimensions vanish silently"
+        observed, expected,
+        "the implementor must record every field of every observation — its kind, its name, \
+         its value, and both dimensions in order, each key with its own value. Ignoring one \
+         field lets a future emitter's kind or dimensions vanish silently"
     );
 }
 
@@ -119,37 +166,63 @@ mod tests {
     /// Keeps what it is given.
     #[derive(Default)]
     struct Preserving {
-        attributes: Mutex<Vec<(String, String)>>,
+        metrics: Mutex<Vec<RecordedMetric>>,
     }
 
     impl Observability for Preserving {
         fn trace(&self, _event: SemanticEvent) {}
-        fn metric_with_attributes(
-            &self,
-            _name: &'static str,
-            _value: f64,
-            attributes: &[MetricAttribute<'_>],
-        ) {
-            *self.attributes.lock().unwrap() = attributes
-                .iter()
-                .map(|a| (a.key.to_string(), a.value.to_string()))
-                .collect();
+        fn record_metric(&self, observation: MetricObservation<'_>) {
+            self.metrics
+                .lock()
+                .unwrap()
+                .push(RecordedMetric::capture(&observation));
         }
         fn log(&self, _level: Level, _message: &str) {}
     }
 
-    /// Throws them away, which is the shape the probe exists to reject.
+    /// Throws the dimensions away, which is one shape the probe exists to reject.
     #[derive(Default)]
-    struct Discarding;
+    struct DiscardingAttributes {
+        metrics: Mutex<Vec<RecordedMetric>>,
+    }
 
-    impl Observability for Discarding {
+    impl Observability for DiscardingAttributes {
         fn trace(&self, _event: SemanticEvent) {}
-        fn metric_with_attributes(
-            &self,
-            _name: &'static str,
-            _value: f64,
-            _attributes: &[MetricAttribute<'_>],
-        ) {
+        fn record_metric(&self, observation: MetricObservation<'_>) {
+            self.metrics.lock().unwrap().push(RecordedMetric {
+                kind: observation.kind,
+                name: observation.name.to_string(),
+                value: observation.value,
+                attributes: Vec::new(),
+            });
+        }
+        fn log(&self, _level: Level, _message: &str) {}
+    }
+
+    /// Records everything except which kind it was, which is the failure the
+    /// typed surface exists to make detectable.
+    ///
+    /// It reads three of four fields and substitutes a plausible default for the
+    /// fourth — the exact shape that would compile, look complete at every call
+    /// site, and export a histogram as a counter.
+    #[derive(Default)]
+    struct FlatteningKind {
+        metrics: Mutex<Vec<RecordedMetric>>,
+    }
+
+    impl Observability for FlatteningKind {
+        fn trace(&self, _event: SemanticEvent) {}
+        fn record_metric(&self, observation: MetricObservation<'_>) {
+            self.metrics.lock().unwrap().push(RecordedMetric {
+                kind: MetricKind::Counter,
+                name: observation.name.to_string(),
+                value: observation.value,
+                attributes: observation
+                    .attributes
+                    .iter()
+                    .map(|a| (a.key.to_string(), a.value.to_string()))
+                    .collect(),
+            });
         }
         fn log(&self, _level: Level, _message: &str) {}
     }
@@ -157,17 +230,42 @@ mod tests {
     #[test]
     fn a_preserving_implementor_passes() {
         let obs = Preserving::default();
-        assert_metric_attributes_are_preserved(&obs, || obs.attributes.lock().unwrap().clone());
+        assert_metric_observations_are_preserved(&obs, || obs.metrics.lock().unwrap().clone());
     }
 
-    /// The probe has teeth: an implementor that discards fails it.
+    /// A double that already recorded other emissions still passes.
+    ///
+    /// The probe compares the tail rather than the whole log, so a fixture that
+    /// captures production signals does not have to be drained before it can be
+    /// checked for conformance.
+    #[test]
+    fn earlier_unrelated_emissions_do_not_disturb_the_probe() {
+        let obs = Preserving::default();
+        obs.counter("some.earlier.signal", 41.0, &[]);
+
+        assert_metric_observations_are_preserved(&obs, || obs.metrics.lock().unwrap().clone());
+    }
+
+    /// The probe has teeth: an implementor that discards dimensions fails it.
     ///
     /// Without this, the helper could be vacuous — asserting something every
     /// implementor satisfies — and every call site would be decoration.
     #[test]
-    #[should_panic(expected = "must record both dimensions")]
-    fn a_discarding_implementor_fails() {
-        let obs = Discarding;
-        assert_metric_attributes_are_preserved(&obs, Vec::new);
+    #[should_panic(expected = "must record every field")]
+    fn an_implementor_discarding_attributes_fails() {
+        let obs = DiscardingAttributes::default();
+        assert_metric_observations_are_preserved(&obs, || obs.metrics.lock().unwrap().clone());
+    }
+
+    /// And teeth on the kind specifically: preserving the other three fields is
+    /// not enough.
+    ///
+    /// This is the case the older attribute-only probe could not see. It passed
+    /// every assertion that existed before the kind did.
+    #[test]
+    #[should_panic(expected = "must record every field")]
+    fn an_implementor_flattening_the_kind_fails() {
+        let obs = FlatteningKind::default();
+        assert_metric_observations_are_preserved(&obs, || obs.metrics.lock().unwrap().clone());
     }
 }

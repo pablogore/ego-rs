@@ -236,28 +236,15 @@ impl RecordingObservability {
             .map(|m| m.value)
             .collect()
     }
-    fn last_metric_attributes(&self) -> Vec<(String, String)> {
-        self.metrics
-            .lock()
-            .expect("not poisoned")
-            .last()
-            .map(|m| m.attributes.clone())
-            .unwrap_or_default()
-    }
 }
 
 impl ego_domain::Observability for RecordingObservability {
     fn trace(&self, _e: ego_domain::SemanticEvent) {}
-    fn metric_with_attributes(
-        &self,
-        name: &'static str,
-        value: f64,
-        attributes: &[ego_domain::MetricAttribute<'_>],
-    ) {
+    fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
         self.metrics
             .lock()
             .expect("not poisoned")
-            .push(RecordedMetric::capture(name, value, attributes));
+            .push(RecordedMetric::capture(&observation));
     }
     fn log(&self, _l: ego_domain::Level, _m: &str) {}
 }
@@ -430,10 +417,10 @@ async fn an_accepted_request_counts_nothing() {
 /// if the double dropped them — and a later signal that does carry dimensions
 /// would lose them silently.
 #[test]
-fn the_double_preserves_metric_attributes() {
+fn the_double_preserves_metric_observations() {
     let obs = RecordingObservability::new();
-    ego_testkit::assert_metric_attributes_are_preserved(obs.as_ref(), || {
-        obs.last_metric_attributes()
+    ego_testkit::assert_metric_observations_are_preserved(obs.as_ref(), || {
+        obs.metrics.lock().expect("not poisoned").clone()
     });
 }
 

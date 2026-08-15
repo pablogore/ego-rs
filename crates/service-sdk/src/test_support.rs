@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ego_domain::{Level, MetricAttribute, Observability, SemanticEvent};
+use ego_domain::{Level, MetricAttribute, MetricObservation, Observability, SemanticEvent};
 use ego_security_sdk::authorization::{
     AccessRequest, AuthorizationDecision, AuthorizationProvider,
 };
@@ -46,17 +46,6 @@ pub(crate) struct RecordingObservability {
 impl RecordingObservability {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    /// The attributes recorded for the metric emitted at `index`.
-    #[allow(dead_code)] // not every internal unit test asserts on attributes
-    pub(crate) fn attributes_at(&self, index: usize) -> Vec<(String, String)> {
-        self.metrics
-            .lock()
-            .unwrap()
-            .get(index)
-            .map(|m| m.attributes.clone())
-            .unwrap_or_default()
     }
 
     /// The names of every recorded metric, in call order.
@@ -97,16 +86,11 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric_with_attributes(
-        &self,
-        name: &'static str,
-        value: f64,
-        attributes: &[MetricAttribute<'_>],
-    ) {
+    fn record_metric(&self, observation: MetricObservation<'_>) {
         self.metrics
             .lock()
             .unwrap()
-            .push(RecordedMetric::capture(name, value, attributes));
+            .push(RecordedMetric::capture(&observation));
     }
     fn log(&self, _level: Level, _message: &str) {}
 }
@@ -115,11 +99,13 @@ impl Observability for RecordingObservability {
 mod recording_observability_contract {
     use super::*;
 
-    /// The fixture keeps the dimensions it is handed.
+    /// The fixture keeps every field of the observations it is handed.
     #[test]
-    fn it_preserves_metric_attributes() {
+    fn it_preserves_metric_observations() {
         let obs = RecordingObservability::new();
-        ego_testkit::assert_metric_attributes_are_preserved(&obs, || obs.attributes_at(0));
+        ego_testkit::assert_metric_observations_are_preserved(&obs, || {
+            obs.metrics.lock().unwrap().clone()
+        });
     }
 
     /// Name, value and dimensions stay together under concurrent emission.
@@ -155,7 +141,7 @@ mod recording_observability_contract {
                     let tag = thread.to_string();
                     start.wait();
                     for _ in 0..PER_THREAD {
-                        obs.metric_with_attributes(
+                        obs.counter(
                             "concurrency.probe",
                             thread as f64,
                             &[MetricAttribute::new("thread", &tag)],
@@ -199,13 +185,7 @@ impl Observability for PanickingObservability {
     fn trace(&self, _event: SemanticEvent) {
         panic!("PanickingObservability::trace always panics (test double)");
     }
-    fn metric_with_attributes(
-        &self,
-        _name: &'static str,
-        _value: f64,
-        _attributes: &[MetricAttribute<'_>],
-    ) {
-    }
+    fn record_metric(&self, _observation: MetricObservation<'_>) {}
     fn log(&self, _level: Level, _message: &str) {}
 }
 
