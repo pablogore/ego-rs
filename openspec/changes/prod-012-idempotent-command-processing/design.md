@@ -1004,7 +1004,7 @@ reservation store itself, which is where the two intervals are separable.
 
 | Signal | Kind | Attributes |
 |---|---|---|
-| `idempotency.key.rejected` | counter | `reason` = `missing` \| `invalid`, `carrier` |
+| `idempotency.key.rejected` | counter | `reason` = `missing` \| `invalid` \| `unreadable` (AD-10b), `carrier` |
 | `idempotency.reservation.outcome` | counter | `outcome` = `fresh` \| `taken_over` \| `owned_in_progress` \| `other_in_progress` \| `succeeded` \| `conflict` |
 | `idempotency.lease.event` | counter | `event` = `acquired` \| `renewed` \| `expired` \| `taken_over` |
 | `idempotency.lease.stale_owner` | counter | `operation` = `renew` \| `complete` \| `abandon` |
@@ -1020,6 +1020,32 @@ CORE-019 §12. Because that value is unbounded, it is a **span attribute only,
 never a metric attribute**; `aggregate_type` is bounded by the registered entity
 set and is safe as a metric attribute. Stored responses are never logged, never
 emitted as attributes, and never included in error messages.
+
+#### AD-10b — `key.rejected.reason` admits `unreadable`
+
+**Amends the signal table above, which originally specified `reason` = `missing` |
+`invalid`.** Recorded as an amendment rather than a typo fix because the table is
+normative: a reviewer checking the emitted attribute against two admissible values
+would have to reject a third, and the third is the one the rejection type was split
+to preserve.
+
+`OperationKeyRejection` has carried **three** variants since extraction was written
+(`crates/service-sdk/src/idempotency/extraction.rs`). `Unreadable` is kept separate
+from `Invalid` on a stated ground: no `OperationKeyError` describes it, because that
+type judges a string's validity and an unreadable value never became a string.
+Collapsing the two here would discard exactly the distinction the variant exists for.
+
+The distinction is operational, not only structural. `invalid` is a client sending a
+malformed key — the client is at fault and the fix is on its side. `unreadable` is a
+value that never decoded as text, which points at a transport or encoding fault
+between the client and the handler. An operator seeing a rise in one is not looking
+at the same incident as an operator seeing a rise in the other, and a `reason` that
+merged them would report a client problem where there is an infrastructure one.
+
+**Scope of the amendment**: the admissible value set for one attribute. Cardinality
+is unchanged in kind — `reason` remains a closed set bounded by the enum's variants,
+which is what makes it safe as a metric attribute at all. No other row, and no part
+of the redaction rule, is affected.
 
 ---
 
