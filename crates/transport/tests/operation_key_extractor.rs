@@ -208,10 +208,12 @@ async fn an_invalid_key_is_refused_under_both_modes() {
 // Counting refused idempotency keys, by reason
 // ---------------------------------------------------------------------------
 
+use ego_testkit::RecordedMetric;
+
 /// Records every `metric` call in order.
 #[derive(Default)]
 struct RecordingObservability {
-    metrics: std::sync::Mutex<Vec<(String, f64)>>,
+    metrics: std::sync::Mutex<Vec<RecordedMetric>>,
 }
 
 impl RecordingObservability {
@@ -223,7 +225,7 @@ impl RecordingObservability {
             .lock()
             .expect("not poisoned")
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|m| m.name.clone())
             .collect()
     }
     fn values(&self) -> Vec<f64> {
@@ -231,18 +233,31 @@ impl RecordingObservability {
             .lock()
             .expect("not poisoned")
             .iter()
-            .map(|(_, v)| *v)
+            .map(|m| m.value)
             .collect()
+    }
+    fn last_metric_attributes(&self) -> Vec<(String, String)> {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .last()
+            .map(|m| m.attributes.clone())
+            .unwrap_or_default()
     }
 }
 
 impl ego_domain::Observability for RecordingObservability {
     fn trace(&self, _e: ego_domain::SemanticEvent) {}
-    fn metric(&self, name: &str, value: f64) {
+    fn metric_with_attributes(
+        &self,
+        name: &'static str,
+        value: f64,
+        attributes: &[ego_domain::MetricAttribute<'_>],
+    ) {
         self.metrics
             .lock()
             .expect("not poisoned")
-            .push((name.to_string(), value));
+            .push(RecordedMetric::capture(name, value, attributes));
     }
     fn log(&self, _l: ego_domain::Level, _m: &str) {}
 }
@@ -407,6 +422,19 @@ async fn an_accepted_request_counts_nothing() {
         "an admission is not a rejection: {:?}",
         obs.names()
     );
+}
+
+/// This file's double preserves the dimensions it is handed.
+///
+/// The extractor's counters carry none today, so nothing else here would notice
+/// if the double dropped them — and a later signal that does carry dimensions
+/// would lose them silently.
+#[test]
+fn the_double_preserves_metric_attributes() {
+    let obs = RecordingObservability::new();
+    ego_testkit::assert_metric_attributes_are_preserved(obs.as_ref(), || {
+        obs.last_metric_attributes()
+    });
 }
 
 /// An uninstrumented runtime rejects and admits exactly as before.

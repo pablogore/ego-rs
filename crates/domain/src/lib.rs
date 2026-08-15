@@ -112,7 +112,7 @@ pub use health::{
     HealthReport, HealthStatus, ProbeKind,
 };
 pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
-pub use observability::{Level, Observability, SemanticEvent, SemanticEventError};
+pub use observability::{Level, MetricAttribute, Observability, SemanticEvent, SemanticEventError};
 pub use query::Query;
 pub use tracer::{
     parse_traceparent, NoopTracer, SpanAttributes, SpanId, SpanOutcome, TraceContext, TraceId,

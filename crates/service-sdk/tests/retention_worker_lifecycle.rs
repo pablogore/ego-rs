@@ -793,15 +793,30 @@ async fn an_untraced_worker_still_purges() {
 /// worse than none while passing any name-only assertion.
 #[derive(Default)]
 struct RecordingObservability {
-    metrics: Mutex<Vec<(String, f64)>>,
+    metrics: Mutex<Vec<RecordedMetric>>,
 }
+
+use ego_testkit::RecordedMetric;
 
 impl RecordingObservability {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
     fn metrics(&self) -> Vec<(String, f64)> {
-        self.metrics.lock().expect("not poisoned").clone()
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .map(|m| (m.name.clone(), m.value))
+            .collect()
+    }
+    fn last_metric_attributes(&self) -> Vec<(String, String)> {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .last()
+            .map(|m| m.attributes.clone())
+            .unwrap_or_default()
     }
     fn names(&self) -> Vec<String> {
         self.metrics().into_iter().map(|(n, _)| n).collect()
@@ -817,13 +832,27 @@ impl RecordingObservability {
 
 impl ego_domain::Observability for RecordingObservability {
     fn trace(&self, _e: ego_domain::SemanticEvent) {}
-    fn metric(&self, name: &str, value: f64) {
+    fn metric_with_attributes(
+        &self,
+        name: &'static str,
+        value: f64,
+        attributes: &[ego_domain::MetricAttribute<'_>],
+    ) {
         self.metrics
             .lock()
             .expect("not poisoned")
-            .push((name.to_string(), value));
+            .push(RecordedMetric::capture(name, value, attributes));
     }
     fn log(&self, _l: ego_domain::Level, _m: &str) {}
+}
+
+/// This file's double preserves the dimensions it is handed.
+#[test]
+fn the_double_preserves_metric_attributes() {
+    let obs = RecordingObservability::new();
+    ego_testkit::assert_metric_attributes_are_preserved(obs.as_ref(), || {
+        obs.last_metric_attributes()
+    });
 }
 
 async fn wait_for_a_metric(obs: &RecordingObservability, name: &str) {

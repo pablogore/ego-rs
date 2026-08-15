@@ -19,11 +19,25 @@ use support::make_register_user;
 #[derive(Default)]
 struct RecordingObservability {
     events: Mutex<Vec<SemanticEvent>>,
+    /// Every metric emission, whole and in order.
+    ///
+    /// See [`ego_testkit::RecordedMetric::capture`] for why a trace-focused
+    /// double records these at all, and why it appends rather than overwrites.
+    metrics: Mutex<Vec<ego_testkit::RecordedMetric>>,
 }
 
 impl RecordingObservability {
     fn new() -> Self {
         Self::default()
+    }
+
+    fn last_metric_attributes(&self) -> Vec<(String, String)> {
+        self.metrics
+            .lock()
+            .unwrap()
+            .last()
+            .map(|m| m.attributes.clone())
+            .unwrap_or_default()
     }
 
     fn event_names(&self) -> Vec<String> {
@@ -40,8 +54,27 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric(&self, _name: &str, _value: f64) {}
+    fn metric_with_attributes(
+        &self,
+        name: &'static str,
+        value: f64,
+        attributes: &[ego_domain::MetricAttribute<'_>],
+    ) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .push(ego_testkit::RecordedMetric::capture(
+                name, value, attributes,
+            ));
+    }
     fn log(&self, _level: Level, _message: &str) {}
+}
+
+/// This file's double preserves the dimensions it is handed.
+#[test]
+fn the_double_preserves_metric_attributes() {
+    let obs = RecordingObservability::new();
+    ego_testkit::assert_metric_attributes_are_preserved(&obs, || obs.last_metric_attributes());
 }
 
 fn make_service() -> Arc<dyn RegisterUser> {
