@@ -478,10 +478,18 @@ fn outcome_metric(outcome: &ReservationOutcome) -> &'static str {
 ///
 /// `acquired` and `taken_over` are the two the runtime sees: a `Fresh` outcome means
 /// this attempt now holds a lease it did not before, and `TakenOver` means it holds
-/// one it displaced. The other two values in AD-10's table — `renewed` and
-/// `expired` — have no observation point here and are amended out in AD-10b:
-/// `renew` is never invoked by any runtime component, and expiry is decided inside
-/// the store, which reports it only as the takeover it caused.
+/// one it displaced. AD-10's table originally listed two more — `renewed` and
+/// `expired` — and **AD-10c withdraws both**, so this function is exhaustive against
+/// the amended table rather than short of the original one.
+///
+/// They are withdrawn because neither exists as an independently observable runtime
+/// event: renewal is never invoked, while expiry is discovered lazily inside
+/// `reserve` and surfaces only through a subsequent takeover. The two differ — a
+/// renewal never happens at all, whereas a lease genuinely does lapse but nothing
+/// observes it doing so. Counting an expiry at takeover would name the reclaimed
+/// ones after the whole population, and would double-count a single transition
+/// alongside `taken_over`. AD-10c carries the full reasoning and the condition for
+/// reopening it.
 ///
 /// `None` for every other outcome: those observe no lease change at all.
 fn lease_event_metric(outcome: &ReservationOutcome) -> Option<&'static str> {

@@ -1006,7 +1006,7 @@ reservation store itself, which is where the two intervals are separable.
 |---|---|---|
 | `idempotency.key.rejected` | counter | `reason` = `missing` \| `invalid` \| `unreadable` (AD-10b), `carrier` |
 | `idempotency.reservation.outcome` | counter | `outcome` = `fresh` \| `taken_over` \| `owned_in_progress` \| `other_in_progress` \| `succeeded` \| `conflict` |
-| `idempotency.lease.event` | counter | `event` = `acquired` \| `renewed` \| `expired` \| `taken_over` |
+| `idempotency.lease.event` | counter | `event` = `acquired` \| `taken_over` (AD-10c) |
 | `idempotency.lease.stale_owner` | counter | `operation` = `renew` \| `complete` \| `abandon` |
 | `idempotency.receipt.outcome` | counter | `outcome` = `confirmed` \| `already_applied` \| `conflict`, `aggregate_type` |
 | `idempotency.purge.rows` | counter | — |
@@ -1047,7 +1047,76 @@ is unchanged in kind — `reason` remains a closed set bounded by the enum's var
 which is what makes it safe as a metric attribute at all. No other row, and no part
 of the redaction rule, is affected.
 
----
+#### AD-10c — `lease.event` withdraws `renewed` and `expired`
+
+**Amends the signal table above, which originally specified `event` = `acquired` |
+`renewed` | `expired` | `taken_over`.** The row becomes:
+
+| Signal | Kind | Attributes |
+|---|---|---|
+| `idempotency.lease.event` | counter | `event` = `acquired` \| `taken_over` |
+
+This is a withdrawal, not a deferral. The two values are withdrawn because **the
+runtime produces no independently observable event with either meaning** — not
+because nobody has wired an existing event up yet. That distinction is what this
+campaign holds to, and it is why `idempotency.receipt.outcome`,
+`idempotency.purge.oldest_completed_age`, real attributes on the folded signals, and
+a metrics exporter all remain **required**: each of those is an event the system
+genuinely produces, waiting only to be emitted.
+
+The two withdrawn values fail that test differently, and the difference matters:
+
+- **`renewed` — the transition never occurs.** Nothing in the runtime renews a
+  lease, so there is no event, observable or otherwise.
+- **`expired` — the state occurs, but is never observed autonomously.** A lease does
+  lapse when the clock passes `lease_until`. What does not exist is any moment at
+  which the system notices, records, or acts on that lapse on its own; it is
+  discovered lazily, during a later takeover, or never.
+
+**`renewed` is withdrawn: there is no renewal.** `OperationReservationStore` offers
+`renew` (`crates/domain/src/operation/reservation.rs:57`), and no runtime component
+calls it. The only callers in the workspace are the store conformance harness in
+`ego-testkit`, which exercises the port, and store implementations delegating to an
+inner store. Emitting `renewed` therefore requires first introducing a productive
+renewal policy — a heartbeat, a lease extension on long operations — which is a
+behavioural change to how leases are held, not a telemetry change. Counting an event
+the system never performs would report zero forever and read as "renewals are
+healthy" rather than "renewal does not exist".
+
+**`expired` is withdrawn: expiry is lazily evaluated internal state, not an emitted
+transition.** The Postgres store decides expiry inside `reserve`
+(`crates/persistence/src/postgres/reservation.rs:275`): it compares `now` against the
+row's `lease_until` at the moment *another* reservation arrives, and when the lease
+has lapsed it performs the conditional takeover guarded by `lease_until <= $7`. There
+is no reaper, no scan, and no point at which the system observes an expiry on its
+own. Three consequences follow, and each is a reason the value cannot be honestly
+emitted:
+
+1. **A lease can expire and never be noticed.** If nothing reclaims it, no code path
+   ever evaluates that row again. A counter incremented at takeover would therefore
+   not mean "leases that expired" — it would mean "expired leases that were
+   subsequently reclaimed", a different and smaller population under a name that
+   claims the larger one.
+2. **It would double-count one transition.** Emitting `expired` *and* `taken_over`
+   for the same `reserve` call presents two lease transitions where the runtime
+   observed exactly one. `taken_over` already carries the fact.
+3. **Producing it honestly means instrumenting the store.** The expiry decision lives
+   inside the reservation store, so a truthful `expired` requires handing an
+   `Observability` to `OperationReservationStore` — coupling a persistence capability
+   to telemetry across both implementations. **AD-10a rejected exactly that coupling**
+   for `idempotency.takeover`, and nothing here justifies paying it for a strictly
+   weaker signal.
+
+**What `taken_over` does and does not preserve.** It preserves the expiries that
+actually caused a later acquisition, which is the population an operator can act on:
+a rising rate means work is being displaced. It does not measure lease lifetime,
+does not count expiries that went unclaimed, and does not distinguish a takeover of a
+long-dead lease from one of a lease that lapsed a second ago.
+
+**Reopening condition, stated so it is not rediscovered.** If a heartbeat or renewal
+policy is introduced, `renewed` becomes emittable and this row must be widened again.
+If a reaper is introduced that materialises expiries as events of their own, the same
+applies to `expired`. Until one of those exists, the table describes the system.
 
 ## Data Flow — Happy Path
 
