@@ -177,11 +177,16 @@ const HASH_HEX_LEN: usize = 16;
 ///
 /// The value is unbounded in the number of distinct values it can take — one per
 /// operation key — so as a metric dimension it would multiply time series
-/// without limit. It is not expressible as one either: [`Observability::metric`]
-/// takes a name and a value and has no attribute parameter at all, so this is
-/// held by the shape of that port rather than by anyone's discipline.
+/// without limit.
 ///
-/// [`Observability::metric`]: crate::observability::Observability::metric
+/// This was once held by the shape of the port rather than by discipline:
+/// [`Observability`] had no attribute parameter at all, so no value could become
+/// a metric dimension. That is no longer true — [`MetricAttribute`] exists — so
+/// the rule is now one that must be kept and tested at each emission site rather
+/// than one the port makes unrepresentable.
+///
+/// [`Observability`]: crate::observability::Observability
+/// [`MetricAttribute`]: crate::observability::MetricAttribute
 ///
 /// # What this type establishes, and what it does not
 ///

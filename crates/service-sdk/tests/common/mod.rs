@@ -38,16 +38,6 @@ impl RecordingObservability {
         Self::default()
     }
 
-    /// The dimensions recorded for the most recent emission.
-    pub fn last_metric_attributes(&self) -> Vec<(String, String)> {
-        self.metrics
-            .lock()
-            .unwrap()
-            .last()
-            .map(|m| m.attributes.clone())
-            .unwrap_or_default()
-    }
-
     /// Returns the recorded `denial_kind` metadata values, in call order.
     pub fn denial_kinds(&self) -> Vec<String> {
         self.events
@@ -63,18 +53,11 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric_with_attributes(
-        &self,
-        name: &'static str,
-        value: f64,
-        attributes: &[ego_domain::MetricAttribute<'_>],
-    ) {
+    fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
         self.metrics
             .lock()
             .unwrap()
-            .push(ego_testkit::RecordedMetric::capture(
-                name, value, attributes,
-            ));
+            .push(ego_testkit::RecordedMetric::capture(&observation));
     }
     fn log(&self, _level: Level, _message: &str) {}
 }
@@ -103,10 +86,12 @@ pub fn authenticated_ctx_with_hint(tenant: Option<&str>, hint: Option<&str>) -> 
 mod observability_contract {
     use super::RecordingObservability;
 
-    /// This module's double preserves the dimensions it is handed.
+    /// This module's double preserves every field of what it is handed.
     #[test]
-    fn the_double_preserves_metric_attributes() {
+    fn the_double_preserves_metric_observations() {
         let obs = RecordingObservability::new();
-        ego_testkit::assert_metric_attributes_are_preserved(&obs, || obs.last_metric_attributes());
+        ego_testkit::assert_metric_observations_are_preserved(&obs, || {
+            obs.metrics.lock().unwrap().clone()
+        });
     }
 }

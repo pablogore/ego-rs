@@ -358,11 +358,17 @@ impl SpanAttributes {
     ///
     /// Emitted as the span attribute `idempotency.operation_key_hash`. It is a
     /// span attribute **only** — never a metric one, because the value is
-    /// unbounded and would multiply time series without limit. That is not left
-    /// to discipline either:
-    /// [`Observability::metric`](crate::observability::Observability::metric)
-    /// takes a name and a value and has no attribute parameter, so there is no
-    /// metric dimension for it to become.
+    /// unbounded and would multiply time series without limit.
+    ///
+    /// This used to hold structurally, because
+    /// [`Observability`](crate::observability::Observability) had no way to carry
+    /// a metric dimension at all. It no longer does:
+    /// [`MetricAttribute`](crate::observability::MetricAttribute) exists, so
+    /// "never a metric attribute" is a rule that must be kept and tested rather
+    /// than one the types make unrepresentable. What remains structural is the
+    /// other half — this method takes an
+    /// [`OperationKeyHash`](crate::operation::OperationKeyHash) and never a
+    /// `String`, so the raw key cannot arrive here in the first place.
     pub fn with_operation_key_hash(mut self, hash: crate::operation::OperationKeyHash) -> Self {
         self.operation_key_hash = Some(hash);
         self

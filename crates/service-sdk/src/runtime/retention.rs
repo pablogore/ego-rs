@@ -203,12 +203,13 @@ impl RetentionWorker {
                 // Those two states call for different actions, so they must not share a
                 // number.
                 if let Some(obs) = observability.as_ref() {
-                    obs.metric(
+                    obs.histogram(
                         "idempotency.purge.batch_duration",
                         started.elapsed().as_secs_f64(),
+                        &[],
                     );
                     if let Ok(rows) = &purged {
-                        obs.metric("idempotency.purge.rows", *rows as f64);
+                        obs.counter("idempotency.purge.rows", *rows as f64, &[]);
                     }
                 }
 

@@ -43,7 +43,8 @@ pub use identity::{principal, PrincipalBuilder};
 pub use jwt::TestJwtBuilder;
 pub use logger::{CapturedRecord, CapturingLogger};
 pub use observability_conformance::{
-    assert_metric_attributes_are_preserved, RecordedMetric, PROBE_METRIC,
+    assert_metric_observations_are_preserved, RecordedMetric, PROBE_COUNTER_METRIC,
+    PROBE_GAUGE_METRIC, PROBE_HISTOGRAM_METRIC,
 };
 pub use providers::{RecordingDataProvider, StaticDataProvider};
 pub use reservation::{InMemoryOperationReservationStore, TestClock};

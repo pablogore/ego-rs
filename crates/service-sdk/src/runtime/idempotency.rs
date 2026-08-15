@@ -447,17 +447,20 @@ pub fn decode_stored_response<T: serde::de::DeserializeOwned>(
 /// # Why the value is in the name
 ///
 /// AD-10 specifies `idempotency.reservation.outcome` as one counter with an
-/// `outcome` attribute. [`Observability::metric`] takes a name and a value and has
-/// **no attribute parameter**, so that shape is not expressible. Every value in
-/// that attribute is a bounded enum — six variants, fixed by
-/// [`ReservationOutcome`] — so folding it into the name preserves the information
-/// without inventing an attribute API. See AD-10b.
+/// `outcome` attribute. When this was written the port had **no attribute
+/// parameter**, so that shape was not expressible, and every value in the
+/// attribute is a bounded enum — six variants, fixed by [`ReservationOutcome`] —
+/// so folding it into the name preserved the information without inventing an
+/// attribute API.
+///
+/// The port now expresses attributes and kinds, so the folded names here are
+/// migration debt rather than a limit: this function is replaced by the counter
+/// carrying a real `outcome` attribute, in the slice that migrates the
+/// already-emitted signals.
 ///
 /// Exhaustive with no wildcard, deliberately. A seventh outcome added upstream must
 /// break this match rather than be silently counted as whichever arm happened to be
 /// last, which is the same reason the dispatch match below has none.
-///
-/// [`Observability::metric`]: ego_domain::Observability::metric
 fn outcome_metric(outcome: &ReservationOutcome) -> &'static str {
     match outcome {
         ReservationOutcome::Fresh(_) => "idempotency.reservation.outcome.fresh",
@@ -534,9 +537,9 @@ impl ReservationConfig {
         // `Proceed`, so a caller reading the decision cannot tell them apart, and
         // both the outcome counter and the lease event need to.
         if let Some(obs) = observability {
-            obs.metric(outcome_metric(&outcome), 1.0);
+            obs.counter(outcome_metric(&outcome), 1.0, &[]);
             if let Some(event) = lease_event_metric(&outcome) {
-                obs.metric(event, 1.0);
+                obs.counter(event, 1.0, &[]);
             }
         }
 
