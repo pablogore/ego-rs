@@ -22,6 +22,7 @@ mod idempotency;
 mod identity;
 mod jwt;
 mod logger;
+mod observability_conformance;
 mod providers;
 mod reservation;
 mod reservation_conformance;
@@ -41,6 +42,9 @@ pub use idempotency::assert_carrier_conformance;
 pub use identity::{principal, PrincipalBuilder};
 pub use jwt::TestJwtBuilder;
 pub use logger::{CapturedRecord, CapturingLogger};
+pub use observability_conformance::{
+    assert_metric_attributes_are_preserved, RecordedMetric, PROBE_METRIC,
+};
 pub use providers::{RecordingDataProvider, StaticDataProvider};
 pub use reservation::{InMemoryOperationReservationStore, TestClock};
 pub use reservation_conformance::{

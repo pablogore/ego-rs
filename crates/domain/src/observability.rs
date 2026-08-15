@@ -151,6 +151,41 @@ impl Level {
     }
 }
 
+/// One dimension of a metric observation: a contract-owned key, a runtime value.
+///
+/// # Why the key is `&'static str` and the value is not
+///
+/// The two sides have different owners. A key names a dimension the metric
+/// contract declares, so it is known when the code is written and there is no
+/// legitimate source for one computed at runtime; typing it `&'static str` makes
+/// a key built from a request unrepresentable rather than merely discouraged.
+///
+/// A value is the opposite: it comes from a registered descriptor or a closed
+/// enum, and is only known once something is running. It borrows, so a caller
+/// can pass a value it already holds without allocating on a path that may run
+/// per request.
+///
+/// # What a value must not be
+///
+/// Values are bounded by something the deployment registers — an entity type
+/// from the registry, a variant of a closed enum. Raw request input is never a
+/// value: it is attacker-influenced and unbounded, and every distinct one it
+/// produces becomes a distinct series that never stops accumulating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetricAttribute<'a> {
+    /// The dimension's name, owned by the metric contract.
+    pub key: &'static str,
+    /// The dimension's value for this observation.
+    pub value: &'a str,
+}
+
+impl<'a> MetricAttribute<'a> {
+    /// Builds one dimension of a metric observation.
+    pub fn new(key: &'static str, value: &'a str) -> Self {
+        Self { key, value }
+    }
+}
+
 /// Observability port - the domain contract for capturing runtime behavior.
 ///
 /// This trait defines **what** can be observed, not **how** it is stored
@@ -179,6 +214,29 @@ impl Level {
 ///
 /// The trait itself is stateless. Determinism is ensured by the data
 /// carried in `SemanticEvent` (correlation_id, actor_id, lifecycle_state).
+///
+/// # Compatibility
+///
+/// Two source-breaking changes were made to the metric surface, and both are
+/// deliberate rather than incidental:
+///
+/// - [`metric_with_attributes`] is **required**, and [`metric`] became a default
+///   that delegates to it. An implementor that previously defined only `metric`
+///   must now define `metric_with_attributes` instead. The default was pointed
+///   this way on purpose: with it reversed, every implementor written before
+///   dimensions existed would keep compiling and keep discarding them.
+/// - [`metric`]'s `name` narrowed from `&str` to `&'static str`. A metric name is
+///   a stable part of the contract, known when the code is written; a name
+///   computed at runtime is what folding a dimension into it looks like, and this
+///   makes that unrepresentable. Dimensional values live in [`MetricAttribute`],
+///   which borrows precisely because they are not static.
+///
+/// Both break only out-of-tree implementors and callers; every in-tree call site
+/// already passed a `'static` name. Anything depending on this crate across a
+/// release boundary needs the two edits above.
+///
+/// [`metric`]: Observability::metric
+/// [`metric_with_attributes`]: Observability::metric_with_attributes
 pub trait Observability: Send + Sync {
     /// Record a semantic event.
     ///
@@ -189,16 +247,221 @@ pub trait Observability: Send + Sync {
     /// blocking isolation — see the trait's "Non-blocking" contract above.
     fn trace(&self, event: SemanticEvent);
 
-    /// Record a metric value.
+    /// Record a metric value carrying its dimensions.
+    ///
+    /// This is the method implementors must provide. [`metric`] delegates here
+    /// with no attributes, so an implementor cannot claim to support metrics
+    /// while silently discarding the dimensions a caller supplied — which is the
+    /// failure this direction of defaulting exists to prevent. Had the default
+    /// gone the other way, every implementor written before dimensions existed
+    /// would keep compiling and keep dropping them.
+    ///
+    /// # Why dimensions are not folded into the name
+    ///
+    /// A closed set of values can be encoded in the name without much harm; an
+    /// open one cannot. Folding an application-defined value moves cardinality
+    /// out of the attributes and into the name space, producing one series name
+    /// per value, breaking aggregation across them and leaving a dashboard that
+    /// has to enumerate names it cannot know in advance.
+    ///
+    /// # Contract for implementors
+    ///
+    /// Attributes are borrowed for the duration of the call only. An
+    /// implementor MUST consume or copy what it needs before returning and MUST
+    /// NOT retain the references — the caller is free to build them on its own
+    /// stack frame, and typically does.
+    ///
+    /// [`metric`]: Observability::metric
+    fn metric_with_attributes(
+        &self,
+        name: &'static str,
+        value: f64,
+        attributes: &[MetricAttribute<'_>],
+    );
+
+    /// Record a metric value with no dimensions.
+    ///
+    /// A convenience over [`metric_with_attributes`] for the signals that carry
+    /// none, so those call sites do not have to spell out an empty slice.
     ///
     /// Metrics are named, numeric observations (e.g. "request.duration",
     /// "queue.depth").
-    fn metric(&self, name: &str, value: f64);
+    ///
+    /// [`metric_with_attributes`]: Observability::metric_with_attributes
+    fn metric(&self, name: &'static str, value: f64) {
+        self.metric_with_attributes(name, value, &[]);
+    }
 
     /// Record a log entry.
     ///
     /// Log entries carry a severity level and a human-readable message.
     fn log(&self, level: Level, message: &str);
+}
+
+#[cfg(test)]
+mod metric_attribute_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// One observation as it arrived: name, value, and the dimensions it carried.
+    ///
+    /// The attribute values are owned rather than borrowed on purpose — copying
+    /// them here is what proves the implementor did not need to retain the
+    /// caller's references.
+    type RecordedCall = (&'static str, f64, Vec<(&'static str, String)>);
+
+    /// Records what actually reached the required method.
+    ///
+    /// It deliberately implements **only** `metric_with_attributes`, because that
+    /// is the whole claim under test: an implementor written this way must still
+    /// serve callers that go through `metric`.
+    #[derive(Default)]
+    struct Recorder {
+        calls: Mutex<Vec<RecordedCall>>,
+    }
+
+    impl Observability for Recorder {
+        fn trace(&self, _event: SemanticEvent) {}
+        fn metric_with_attributes(
+            &self,
+            name: &'static str,
+            value: f64,
+            attributes: &[MetricAttribute<'_>],
+        ) {
+            self.calls.lock().unwrap().push((
+                name,
+                value,
+                attributes
+                    .iter()
+                    .map(|a| (a.key, a.value.to_string()))
+                    .collect(),
+            ));
+        }
+        fn log(&self, _level: Level, _message: &str) {}
+    }
+
+    /// An attribute keeps the contract's key and the caller's value apart.
+    ///
+    /// Asserted as two separate fields rather than as one formatted string,
+    /// because a swap of the two is exactly the mistake this type exists to make
+    /// impossible to express silently.
+    #[test]
+    fn an_attribute_carries_a_contract_key_and_a_runtime_value() {
+        let aggregate_type = String::from("User");
+        let attribute = MetricAttribute::new("aggregate_type", &aggregate_type);
+
+        assert_eq!(
+            attribute.key, "aggregate_type",
+            "the key names the dimension"
+        );
+        assert_eq!(attribute.value, "User", "the value is this observation's");
+    }
+
+    /// `metric` reaches the required method carrying no dimensions.
+    ///
+    /// This is the direction of the default, and it is the load-bearing part: an
+    /// implementor cannot satisfy the trait by writing `metric` alone, so it
+    /// cannot accept dimensions and quietly drop them.
+    #[test]
+    fn metric_delegates_to_the_attributed_method_with_none() {
+        let recorder = Recorder::default();
+
+        recorder.metric("idempotency.purge.rows", 7.0);
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one call reached the required method");
+        assert_eq!(
+            calls[0].0, "idempotency.purge.rows",
+            "the name is unchanged"
+        );
+        assert_eq!(calls[0].1, 7.0, "the value is unchanged");
+        assert!(
+            calls[0].2.is_empty(),
+            "a metric with no dimensions arrives with none, not with a placeholder: {:?}",
+            calls[0].2
+        );
+    }
+
+    /// Dimensions arrive whole, in the order given, keys and values unswapped.
+    ///
+    /// Two attributes rather than one, and neither value equal to the other's
+    /// key, so a transposition anywhere in the path fails rather than producing a
+    /// coincidentally identical record.
+    #[test]
+    fn attributes_arrive_in_order_with_keys_and_values_unswapped() {
+        let recorder = Recorder::default();
+        let aggregate_type = String::from("TenantOrganization");
+
+        recorder.metric_with_attributes(
+            "idempotency.receipt.outcome",
+            1.0,
+            &[
+                MetricAttribute::new("outcome", "confirmed"),
+                MetricAttribute::new("aggregate_type", &aggregate_type),
+            ],
+        );
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].2,
+            vec![
+                ("outcome", "confirmed".to_string()),
+                ("aggregate_type", "TenantOrganization".to_string()),
+            ],
+            "both dimensions arrive, in order, each key still paired with its own value"
+        );
+    }
+
+    /// The name stays one stable series regardless of what the dimensions carry.
+    ///
+    /// This is the property folding a value into the name would destroy: two
+    /// observations differing only by dimension must remain the same metric, or
+    /// nothing downstream can aggregate across them.
+    #[test]
+    fn the_name_is_one_stable_series_across_differing_dimensions() {
+        let recorder = Recorder::default();
+
+        for aggregate in ["User", "TenantOrganization"] {
+            recorder.metric_with_attributes(
+                "idempotency.receipt.outcome",
+                1.0,
+                &[MetricAttribute::new("aggregate_type", aggregate)],
+            );
+        }
+
+        let calls = recorder.calls.lock().unwrap();
+        let names: Vec<_> = calls.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec!["idempotency.receipt.outcome", "idempotency.receipt.outcome"],
+            "the dimension varies, the series name does not"
+        );
+    }
+
+    /// A borrowed value outliving nothing: the implementor copies during the call.
+    ///
+    /// The attribute borrows from a local that is dropped immediately after, which
+    /// only compiles and only holds if the recorder took what it needed while the
+    /// call was running rather than retaining the reference.
+    #[test]
+    fn a_value_borrowed_from_a_temporary_survives_as_recorded_data() {
+        let recorder = Recorder::default();
+        {
+            let scoped = String::from("Order");
+            recorder.metric_with_attributes(
+                "idempotency.receipt.outcome",
+                1.0,
+                &[MetricAttribute::new("aggregate_type", &scoped)],
+            );
+        }
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].2,
+            vec![("aggregate_type", "Order".to_string())],
+            "the implementor copied the value rather than retaining the borrow"
+        );
+    }
 }
 
 #[cfg(test)]

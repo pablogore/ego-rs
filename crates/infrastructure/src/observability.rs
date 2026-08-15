@@ -2,7 +2,7 @@
 //!
 //! Provides `NoopObservability` for production when observability is disabled.
 
-use ego_domain::{Level, Observability, SemanticEvent};
+use ego_domain::{Level, MetricAttribute, Observability, SemanticEvent};
 
 /// A no-op implementation of [`Observability`] that discards all events.
 ///
@@ -12,7 +12,13 @@ pub struct NoopObservability;
 
 impl Observability for NoopObservability {
     fn trace(&self, _event: SemanticEvent) {}
-    fn metric(&self, _name: &str, _value: f64) {}
+    fn metric_with_attributes(
+        &self,
+        _name: &'static str,
+        _value: f64,
+        _attributes: &[MetricAttribute<'_>],
+    ) {
+    }
     fn log(&self, _level: Level, _message: &str) {}
 }
 
