@@ -1095,11 +1095,16 @@ impl RuntimeInner {
             Ok(()) => {}
             Err(ReservationError::StaleOwner) => {
                 // AD-10's `idempotency.lease.stale_owner`, whose attribute names the
-                // operation that hit it. The name carries `complete` because that is
-                // the only one of the three the runtime ever calls: nothing invokes
-                // `renew` or `abandon`, so neither can return `StaleOwner` and neither
-                // has a value to emit. The amendment recording that lands with the
-                // last metrics slice, where the whole table is in view.
+                // operation that hit it. `complete` is the only value, and **AD-10d
+                // withdrew the other two** rather than leaving them owed: nothing
+                // invokes `renew` or `abandon`, so neither can return `StaleOwner`
+                // and neither has anything to count.
+                //
+                // Neither is a wire left unconnected. `renew` needs a renewal policy;
+                // `abandon` needs a safe-abandonment policy, and that one is delicate
+                // — if a commit may have landed and only the response was lost,
+                // releasing the key early admits the re-execution this whole design
+                // exists to prevent. AD-10d carries the reasoning.
                 //
                 // A counter and not just the existing operator event: this is the
                 // signal a rate alert fires on. `record_completion_lost` below emits a
