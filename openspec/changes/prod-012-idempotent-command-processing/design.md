@@ -1007,7 +1007,7 @@ reservation store itself, which is where the two intervals are separable.
 | `idempotency.key.rejected` | counter | `reason` = `missing` \| `invalid` \| `unreadable` (AD-10b), `carrier` |
 | `idempotency.reservation.outcome` | counter | `outcome` = `fresh` \| `taken_over` \| `owned_in_progress` \| `other_in_progress` \| `succeeded` \| `conflict` |
 | `idempotency.lease.event` | counter | `event` = `acquired` \| `taken_over` (AD-10c) |
-| `idempotency.lease.stale_owner` | counter | `operation` = `renew` \| `complete` \| `abandon` |
+| `idempotency.lease.stale_owner` | counter | `operation` = `complete` (AD-10d) |
 | `idempotency.receipt.outcome` | counter | `outcome` = `confirmed` \| `already_applied` \| `conflict`, `aggregate_type` |
 | `idempotency.purge.rows` | counter | — |
 | `idempotency.purge.batch_duration` | histogram | — |
@@ -1117,6 +1117,59 @@ long-dead lease from one of a lease that lapsed a second ago.
 policy is introduced, `renewed` becomes emittable and this row must be widened again.
 If a reaper is introduced that materialises expiries as events of their own, the same
 applies to `expired`. Until one of those exists, the table describes the system.
+
+#### AD-10d — `lease.stale_owner` withdraws `renew` and `abandon`
+
+**Amends the signal table above, which originally specified `operation` = `renew` |
+`complete` | `abandon`.** The row becomes:
+
+| Signal | Kind | Attributes |
+|---|---|---|
+| `idempotency.lease.stale_owner` | counter | `operation` = `complete` |
+
+Same ground as AD-10c, and the cleaner half of it: these are not transitions the
+runtime observes late, they are calls the runtime never makes. `StaleOwner` is a
+result of a mutating call, so an operation nobody invokes cannot produce one — the
+withdrawn values name counters that could only ever read zero.
+
+| Value | Situation today | What emitting it would require first |
+|---|---|---|
+| `renew` | The runtime never renews a lease | A renewal policy |
+| `abandon` | The runtime never releases a reservation early | A **safe abandonment** policy |
+| `complete` | Exists, and genuinely produces `StaleOwner` | Instrumentation only |
+
+**`renew`** is the straightforward case, and AD-10c already established it:
+`OperationReservationStore::renew` has no runtime invoker, and emitting the value
+requires first introducing renewal — a change to how leases are held.
+
+**`abandon` looks like missing wiring and is not.** The call exists on the port and
+has no runtime invoker either. Releasing a reservation early after a failure is not
+a wire to connect; it is a policy with a hard question at its centre, and the
+runtime would have to answer at least: which errors permit abandonment; whether the
+failure happened before or after any durable effect; whether there is uncertainty
+about whether the commit landed; whether another node may immediately re-execute;
+whether holding the reservation until the lease lapses is safer; and what to do
+about partial responses or ambiguous external effects.
+
+The reason this is delicate rather than merely unwritten: **in an idempotency
+design, "the operation failed" does not imply "it is safe to release the key".** If
+the commit may have succeeded and only the response was lost, abandoning the
+reservation would admit exactly the re-execution PROD-012 exists to prevent.
+Holding until expiry is the conservative default, and it is the one in force.
+Choosing otherwise is an execution-and-recovery decision, not an observability one.
+
+**Why `abandon` is not left in the table as "specified, not yet emitted".** That
+would leave B7.10 and B7.11 conceptually incomplete against a value the system
+cannot produce, and it would blur two separate roadmaps: AD-10 exists to observe
+behaviour that happens, while renewal and safe abandonment are prospective changes
+to what the runtime does. A table that lists both cannot be satisfied by
+instrumentation alone, and closing it would require either fabricating a signal or
+declaring the table permanently unmet.
+
+**Reopening condition.** If a renewal policy or a safe-abandonment policy is
+designed, that change widens this row again **and carries its own instrumentation
+in the same unit of work** — the value and the behaviour that produces it arrive
+together, never separately.
 
 ## Data Flow — Happy Path
 
