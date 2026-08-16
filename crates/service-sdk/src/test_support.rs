@@ -59,6 +59,16 @@ impl RecordingObservability {
             .collect()
     }
 
+    /// Whole records — kind, name, value and dimensions.
+    ///
+    /// Needed wherever the assertion is about attributes: `metrics()` projects a
+    /// name and a value, which was enough while every dimension was folded into
+    /// the name and is exactly what stops being enough once they are not.
+    #[allow(dead_code)] // not every internal unit test asserts on metrics
+    pub(crate) fn records(&self) -> Vec<RecordedMetric> {
+        self.metrics.lock().unwrap().clone()
+    }
+
     /// Every recorded metric as `(name, value)`, in call order.
     #[allow(dead_code)] // not every internal unit test asserts on metrics
     pub(crate) fn metrics(&self) -> Vec<(String, f64)> {

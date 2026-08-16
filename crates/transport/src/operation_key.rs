@@ -30,25 +30,40 @@ use async_trait::async_trait;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use ego_domain::operation::OperationKey;
+use ego_domain::MetricAttribute;
 use ego_service_sdk::idempotency::{resolve_operation_key, OperationKeyRejection};
 
 use crate::error::TransportError;
 use crate::idempotency::HeaderCarrier;
 use crate::state::AppState;
 
-/// The static metric name each rejection folds into.
+/// AD-10's `reason` and `carrier` for one rejection.
 ///
-/// Three names, one per rejection. `Unreadable` gets its own rather than being folded
-/// into `invalid`, even though both end as the same status code: the rejection type
-/// keeps the two apart on purpose — no `OperationKeyError` describes a value that never
-/// became a string — and collapsing them here would discard exactly the distinction it
-/// was split to preserve. An operator seeing `unreadable` is looking at a transport or
-/// encoding problem; `invalid` is a client sending a malformed key.
-fn key_rejected_metric(rejection: &OperationKeyRejection) -> &'static str {
+/// Three reasons, one per rejection. `unreadable` is its own value rather than being
+/// folded into `invalid`, even though both end as the same status code: the rejection
+/// type keeps the two apart on purpose — no `OperationKeyError` describes a value that
+/// never became a string — and collapsing them here would discard exactly the
+/// distinction it was split to preserve. An operator seeing `unreadable` is looking at
+/// a transport or encoding problem; `invalid` is a client sending a malformed key
+/// (AD-10b).
+///
+/// The carrier is **read from the rejection**, never re-derived from the request. It
+/// was set from `OperationKeyCarrier::carrier_name` when the rejection was built — a
+/// fixed string naming a stable location, `"http:Idempotency-Key"`, and never the
+/// value found there. Deriving it again here would create a second place for the two
+/// to disagree, and the one that matters is what the rejection actually witnessed.
+///
+/// Both are `&'static str`, which is what keeps them admissible as dimensions: each
+/// is drawn from a set fixed at compile time, where the raw key is caller-supplied
+/// and unbounded.
+///
+/// Exhaustive with no wildcard: a fourth rejection added upstream breaks the build
+/// rather than being reported as whichever arm happened to be last.
+fn key_rejected_attributes(rejection: &OperationKeyRejection) -> (&'static str, &'static str) {
     match rejection {
-        OperationKeyRejection::Missing { .. } => "idempotency.key.rejected.missing",
-        OperationKeyRejection::Invalid { .. } => "idempotency.key.rejected.invalid",
-        OperationKeyRejection::Unreadable { .. } => "idempotency.key.rejected.unreadable",
+        OperationKeyRejection::Missing { carrier } => ("missing", carrier),
+        OperationKeyRejection::Invalid { carrier, .. } => ("invalid", carrier),
+        OperationKeyRejection::Unreadable { carrier } => ("unreadable", carrier),
     }
 }
 
@@ -88,22 +103,20 @@ where
                 // `resolve_operation_key` returns it and the mapping below discards it,
                 // so a counter anywhere downstream would have nothing left to count.
                 //
-                // The reason is still folded into the name, and that is now a
-                // migration debt rather than a limit of the port: the port expresses
-                // dimensions, and this call site has not been moved onto them yet.
-                // The move happens with the rest of the already-emitted signals, in
-                // one slice, so the folded and dimensional forms do not coexist
-                // across a release. The variants are a closed enum, and the match is
-                // exhaustive with no wildcard so a fourth rejection added upstream
-                // breaks the build rather than being counted as whichever arm
-                // happened to be last.
-                //
-                // `carrier` is not emitted at all today. It stays available on the
-                // rejection, and becomes a dimension in that same slice — folding it
-                // into the name was never an option, since it multiplies against the
-                // reason and grows with adapters rather than being closed.
+                // One name, two dimensions. `carrier` could never have been folded
+                // into the name — it multiplies against the reason and grows with
+                // adapters rather than being closed — so before the port carried
+                // attributes it was simply not emitted at all. It is now.
                 if let Some(obs) = state.runtime.observability() {
-                    obs.counter(key_rejected_metric(&rejection), 1.0, &[]);
+                    let (reason, carrier) = key_rejected_attributes(&rejection);
+                    obs.counter(
+                        "idempotency.key.rejected",
+                        1.0,
+                        &[
+                            MetricAttribute::new("reason", reason),
+                            MetricAttribute::new("carrier", carrier),
+                        ],
+                    );
                 }
                 TransportError::BadRequest
             })

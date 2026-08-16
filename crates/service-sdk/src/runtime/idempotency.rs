@@ -14,6 +14,7 @@ use ego_domain::operation::{
     ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::time::Clock;
+use ego_domain::MetricAttribute;
 
 /// Runtime-configured idempotency enforcement policy.
 ///
@@ -442,35 +443,28 @@ pub fn decode_stored_response<T: serde::de::DeserializeOwned>(
         .map_err(|_| ReservationRejection::StoredResponseIncompatible)
 }
 
-/// The static metric names AD-10's `outcome` values fold into.
+/// AD-10's `outcome` value for one reservation result.
 ///
-/// # Why the value is in the name
+/// One counter name with a dimension, which is the shape AD-10's table always
+/// specified. It could not be expressed until the port carried attributes, so the
+/// six values were folded into six names in the meantime; this is the migration
+/// back, and the folded names are gone rather than emitted alongside.
 ///
-/// AD-10 specifies `idempotency.reservation.outcome` as one counter with an
-/// `outcome` attribute. When this was written the port had **no attribute
-/// parameter**, so that shape was not expressible, and every value in the
-/// attribute is a bounded enum — six variants, fixed by [`ReservationOutcome`] —
-/// so folding it into the name preserved the information without inventing an
-/// attribute API.
-///
-/// The port now expresses attributes and kinds, so the folded names here are
-/// migration debt rather than a limit: this function is replaced by the counter
-/// carrying a real `outcome` attribute, in the slice that migrates the
-/// already-emitted signals.
+/// Every value is a variant of [`ReservationOutcome`], so the set is closed by the
+/// enum rather than by convention — which is what makes it admissible as a
+/// dimension at all.
 ///
 /// Exhaustive with no wildcard, deliberately. A seventh outcome added upstream must
-/// break this match rather than be silently counted as whichever arm happened to be
+/// break this match rather than be silently reported as whichever arm happened to be
 /// last, which is the same reason the dispatch match below has none.
-fn outcome_metric(outcome: &ReservationOutcome) -> &'static str {
+fn outcome_value(outcome: &ReservationOutcome) -> &'static str {
     match outcome {
-        ReservationOutcome::Fresh(_) => "idempotency.reservation.outcome.fresh",
-        ReservationOutcome::TakenOver(_) => "idempotency.reservation.outcome.taken_over",
-        ReservationOutcome::OwnedInProgress(_) => {
-            "idempotency.reservation.outcome.owned_in_progress"
-        }
-        ReservationOutcome::OtherInProgress => "idempotency.reservation.outcome.other_in_progress",
-        ReservationOutcome::Succeeded(_) => "idempotency.reservation.outcome.succeeded",
-        ReservationOutcome::Conflict => "idempotency.reservation.outcome.conflict",
+        ReservationOutcome::Fresh(_) => "fresh",
+        ReservationOutcome::TakenOver(_) => "taken_over",
+        ReservationOutcome::OwnedInProgress(_) => "owned_in_progress",
+        ReservationOutcome::OtherInProgress => "other_in_progress",
+        ReservationOutcome::Succeeded(_) => "succeeded",
+        ReservationOutcome::Conflict => "conflict",
     }
 }
 
@@ -492,10 +486,10 @@ fn outcome_metric(outcome: &ReservationOutcome) -> &'static str {
 /// reopening it.
 ///
 /// `None` for every other outcome: those observe no lease change at all.
-fn lease_event_metric(outcome: &ReservationOutcome) -> Option<&'static str> {
+fn lease_event_value(outcome: &ReservationOutcome) -> Option<&'static str> {
     match outcome {
-        ReservationOutcome::Fresh(_) => Some("idempotency.lease.event.acquired"),
-        ReservationOutcome::TakenOver(_) => Some("idempotency.lease.event.taken_over"),
+        ReservationOutcome::Fresh(_) => Some("acquired"),
+        ReservationOutcome::TakenOver(_) => Some("taken_over"),
         ReservationOutcome::OwnedInProgress(_)
         | ReservationOutcome::OtherInProgress
         | ReservationOutcome::Succeeded(_)
@@ -545,9 +539,17 @@ impl ReservationConfig {
         // `Proceed`, so a caller reading the decision cannot tell them apart, and
         // both the outcome counter and the lease event need to.
         if let Some(obs) = observability {
-            obs.counter(outcome_metric(&outcome), 1.0, &[]);
-            if let Some(event) = lease_event_metric(&outcome) {
-                obs.counter(event, 1.0, &[]);
+            obs.counter(
+                "idempotency.reservation.outcome",
+                1.0,
+                &[MetricAttribute::new("outcome", outcome_value(&outcome))],
+            );
+            if let Some(event) = lease_event_value(&outcome) {
+                obs.counter(
+                    "idempotency.lease.event",
+                    1.0,
+                    &[MetricAttribute::new("event", event)],
+                );
             }
         }
 
@@ -655,8 +657,19 @@ mod reserve_mapping_tests {
         }
     }
 
+    /// One emission, projected to what AD-10 fixes: name, and its dimensions.
+    ///
+    /// The kind is checked separately, once, rather than repeated in every row of
+    /// the table below — it is the same for all of them.
+    /// One expected emission: a metric name and its `(key, value)` dimensions.
+    type ExpectedEmission<'a> = (&'a str, Vec<(&'a str, &'a str)>);
+
+    fn shape(m: &ego_testkit::RecordedMetric) -> (String, Vec<(String, String)>) {
+        (m.name.clone(), m.attributes.clone())
+    }
+
     /// Drives one `reserve` against a scripted outcome and returns what was counted.
-    async fn metrics_for(outcome: ReservationOutcome) -> Vec<(String, f64)> {
+    async fn records_for(outcome: ReservationOutcome) -> Vec<ego_testkit::RecordedMetric> {
         let store = ScriptedStore::new(Ok(outcome));
         let config = ReservationConfig::new(
             store,
@@ -670,63 +683,133 @@ mod reserve_mapping_tests {
         let _ = config
             .reserve(None, key(), OperationFingerprint::new("fp"), Some(&as_port))
             .await;
-        obs.metrics()
+        obs.records()
     }
 
-    /// Each of the six outcomes counts under its own static name, and the two that
-    /// change lease ownership also count a lease event.
+    /// Each of the six outcomes counts under **one** name carrying its own
+    /// `outcome`, and the two that change lease ownership also count a lease event.
     ///
-    /// The table is written out rather than derived from `outcome_metric`, which
-    /// would be circular: a mutation renaming a metric would rename the expectation
-    /// with it. Every name here is a literal a dashboard would be configured with.
+    /// The table is written out rather than derived from `outcome_value`, which
+    /// would be circular: a mutation renaming a value would rename the expectation
+    /// with it. Every string here is a literal a dashboard would be configured with.
+    ///
+    /// Name *and* dimensions are compared together. Comparing names alone was
+    /// sufficient while every value was folded into the name, and is exactly what
+    /// stops being sufficient now: six outcomes that all emit
+    /// `idempotency.reservation.outcome` are indistinguishable by name.
     #[tokio::test]
-    async fn each_outcome_counts_under_its_own_static_name() {
-        let cases: Vec<(ReservationOutcome, Vec<&str>)> = vec![
+    async fn each_outcome_counts_under_one_name_carrying_its_own_dimension() {
+        let cases: Vec<(ReservationOutcome, Vec<ExpectedEmission<'_>>)> = vec![
             (
                 ReservationOutcome::Fresh(lease_with(0)),
                 vec![
-                    "idempotency.reservation.outcome.fresh",
-                    "idempotency.lease.event.acquired",
+                    (
+                        "idempotency.reservation.outcome",
+                        vec![("outcome", "fresh")],
+                    ),
+                    ("idempotency.lease.event", vec![("event", "acquired")]),
                 ],
             ),
             (
                 ReservationOutcome::TakenOver(lease_with(1)),
                 vec![
-                    "idempotency.reservation.outcome.taken_over",
-                    "idempotency.lease.event.taken_over",
+                    (
+                        "idempotency.reservation.outcome",
+                        vec![("outcome", "taken_over")],
+                    ),
+                    ("idempotency.lease.event", vec![("event", "taken_over")]),
                 ],
             ),
             (
                 ReservationOutcome::OwnedInProgress(lease_with(0)),
-                vec!["idempotency.reservation.outcome.owned_in_progress"],
+                vec![(
+                    "idempotency.reservation.outcome",
+                    vec![("outcome", "owned_in_progress")],
+                )],
             ),
             (
                 ReservationOutcome::OtherInProgress,
-                vec!["idempotency.reservation.outcome.other_in_progress"],
+                vec![(
+                    "idempotency.reservation.outcome",
+                    vec![("outcome", "other_in_progress")],
+                )],
             ),
             (
                 ReservationOutcome::Succeeded(StoredServiceResponse::new(b"x".to_vec())),
-                vec!["idempotency.reservation.outcome.succeeded"],
+                vec![(
+                    "idempotency.reservation.outcome",
+                    vec![("outcome", "succeeded")],
+                )],
             ),
             (
                 ReservationOutcome::Conflict,
-                vec!["idempotency.reservation.outcome.conflict"],
+                vec![(
+                    "idempotency.reservation.outcome",
+                    vec![("outcome", "conflict")],
+                )],
             ),
         ];
 
         for (outcome, expected) in cases {
             let label = format!("{outcome:?}");
-            let recorded = metrics_for(outcome).await;
-            let names: Vec<String> = recorded.iter().map(|(n, _)| n.clone()).collect();
-            assert_eq!(
-                names,
-                expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                "wrong counters for {label}"
-            );
-            for (name, value) in &recorded {
+            let recorded = records_for(outcome).await;
+            let observed: Vec<_> = recorded.iter().map(shape).collect();
+            let want: Vec<(String, Vec<(String, String)>)> = expected
+                .iter()
+                .map(|(name, attrs)| {
+                    (
+                        name.to_string(),
+                        attrs
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(observed, want, "wrong counters for {label}");
+            for m in &recorded {
                 assert_eq!(
-                    *value, 1.0,
-                    "{name} is a counter increment, so each emission is exactly one"
+                    (m.kind, m.value),
+                    (ego_domain::MetricKind::Counter, 1.0),
+                    "{} is a counter increment, so each emission is exactly one",
+                    m.name
+                );
+            }
+        }
+    }
+
+    /// No folded name survives the migration.
+    ///
+    /// The old shape encoded the value in the name, so the failure this guards is a
+    /// call site left behind — emitting `idempotency.reservation.outcome.fresh`
+    /// beside the new one, or instead of it. Either way a dashboard sees two series
+    /// where there is one event, and no assertion above would notice: they compare
+    /// what was emitted, not what must never be.
+    #[tokio::test]
+    async fn no_outcome_emits_a_folded_name() {
+        for outcome in [
+            ReservationOutcome::Fresh(lease_with(0)),
+            ReservationOutcome::TakenOver(lease_with(1)),
+            ReservationOutcome::OwnedInProgress(lease_with(0)),
+            ReservationOutcome::OtherInProgress,
+            ReservationOutcome::Succeeded(StoredServiceResponse::new(b"x".to_vec())),
+            ReservationOutcome::Conflict,
+        ] {
+            let label = format!("{outcome:?}");
+            let recorded = records_for(outcome).await;
+            for m in &recorded {
+                assert!(
+                    m.name == "idempotency.reservation.outcome"
+                        || m.name == "idempotency.lease.event",
+                    "{label} emitted {}, but the value belongs in a dimension and the \
+                     folded names are gone",
+                    m.name
+                );
+                assert!(
+                    !m.attributes.is_empty(),
+                    "{label} emitted {} with no dimensions, which is what a call site \
+                     left on the old method looks like",
+                    m.name
                 );
             }
         }
@@ -747,11 +830,9 @@ mod reserve_mapping_tests {
             ReservationOutcome::Conflict,
         ] {
             let label = format!("{outcome:?}");
-            let recorded = metrics_for(outcome).await;
+            let recorded = records_for(outcome).await;
             assert!(
-                !recorded
-                    .iter()
-                    .any(|(name, _)| name.starts_with("idempotency.lease.event")),
+                !recorded.iter().any(|m| m.name == "idempotency.lease.event"),
                 "{label} changes no lease, so it must count no lease event: {recorded:?}"
             );
         }
