@@ -2421,6 +2421,8 @@ dependencies = [
  "kit-config",
  "kitlogger",
  "kitlogger-log-domain",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "persistent-entity",
  "security-jwt",
  "serde",
