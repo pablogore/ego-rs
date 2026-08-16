@@ -28,7 +28,9 @@ use ego_domain::event::DomainEvent;
 use ego_domain::operation::OperationFingerprint;
 use ego_domain::operation::OperationKeyHash;
 use ego_domain::operation::ReservationError;
-use ego_domain::{Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer};
+use ego_domain::{
+    MetricAttribute, Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer,
+};
 use ego_runtime::effects::RuntimeEffectAcceptor;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{
@@ -1111,7 +1113,11 @@ impl RuntimeInner {
                 // semantic event carrying the operator action, which is what somebody
                 // reads *after* being paged — the two are not substitutes.
                 if let Some(obs) = &self.observability {
-                    obs.counter("idempotency.lease.stale_owner.complete", 1.0, &[]);
+                    obs.counter(
+                        "idempotency.lease.stale_owner",
+                        1.0,
+                        &[MetricAttribute::new("operation", "complete")],
+                    );
                 }
                 self.record_completion_lost(
                     "stale_owner",
@@ -2711,25 +2717,60 @@ mod tests {
     }
 
     /// A completion the store refuses as `StaleOwner` counts
-    /// `idempotency.lease.stale_owner.complete`.
+    /// `idempotency.lease.stale_owner` carrying `operation = complete`.
     ///
     /// This is the signal a rate alert fires on. Without it a lease configured too
     /// short is invisible in aggregate: each individual case emits an operator event,
     /// but nothing says "this is happening a hundred times an hour", which is the
     /// difference between a curiosity and a misconfiguration.
+    ///
+    /// The whole record is compared. `complete` is the only admissible value of
+    /// `operation` (AD-10d), so a name-only assertion would pass with the dimension
+    /// missing entirely — which is exactly what a call site left on the old folded
+    /// name would produce.
     #[tokio::test]
     async fn a_stale_completion_counts_the_stale_owner_metric() {
         let obs = Arc::new(crate::test_support::RecordingObservability::new());
         metrics_for_a_stale_completion(obs.clone()).await;
 
-        let names = obs.metric_names();
+        let stale: Vec<_> = obs
+            .records()
+            .into_iter()
+            .filter(|m| m.name == "idempotency.lease.stale_owner")
+            .collect();
         assert_eq!(
-            names
-                .iter()
-                .filter(|n| *n == "idempotency.lease.stale_owner.complete")
-                .count(),
+            stale.len(),
             1,
-            "a discarded completion counts exactly once, or a rate is not a rate: {names:?}"
+            "a discarded completion counts exactly once, or a rate is not a rate: {:?}",
+            obs.metric_names()
+        );
+        assert_eq!(
+            (stale[0].kind, stale[0].value, stale[0].attributes.clone()),
+            (
+                ego_domain::MetricKind::Counter,
+                1.0,
+                vec![("operation".to_string(), "complete".to_string())]
+            ),
+            "one counter increment carrying the operation that hit the stale owner"
+        );
+    }
+
+    /// No folded `stale_owner` name survives the migration.
+    ///
+    /// The value used to live in the name, so the failure this guards is a call site
+    /// left behind — which the assertion above cannot see, because it filters for
+    /// the new name and a stale emitter simply would not appear.
+    #[tokio::test]
+    async fn a_stale_completion_emits_no_folded_name() {
+        let obs = Arc::new(crate::test_support::RecordingObservability::new());
+        metrics_for_a_stale_completion(obs.clone()).await;
+
+        let names = obs.metric_names();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with("idempotency.lease.stale_owner.")),
+            "the operation belongs in a dimension; no name may carry it: {names:?}"
         );
     }
 

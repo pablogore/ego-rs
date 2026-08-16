@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::Request;
+use ego_domain::MetricKind;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_service_sdk::runtime::{IdempotencyEnforcementMode, RuntimeBuilder};
 use ego_transport::state::AppState;
@@ -220,20 +221,16 @@ impl RecordingObservability {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
+    /// Whole records, so `reason` and `carrier` are compared and not just the name.
+    fn records(&self) -> Vec<RecordedMetric> {
+        self.metrics.lock().expect("not poisoned").clone()
+    }
     fn names(&self) -> Vec<String> {
         self.metrics
             .lock()
             .expect("not poisoned")
             .iter()
             .map(|m| m.name.clone())
-            .collect()
-    }
-    fn values(&self) -> Vec<f64> {
-        self.metrics
-            .lock()
-            .expect("not poisoned")
-            .iter()
-            .map(|m| m.value)
             .collect()
     }
 }
@@ -290,7 +287,47 @@ async fn extract_instrumented(
     (result, obs)
 }
 
-/// A missing key under `MandatoryKey` counts `…rejected.missing`, once.
+/// The carrier every rejection here reports.
+///
+/// Written out as a literal **on purpose**, not for want of an accessor. Asking
+/// `HeaderCarrier::carrier_name()` for it would rename both sides of the assertion
+/// at once, so renaming the location this transport reports would pass silently.
+/// A literal makes that rename fail here, which is what forces a deliberate change
+/// to be acknowledged rather than absorbed.
+///
+/// It is not the guard against the *wiring* going wrong — that the dimension comes
+/// from the rejection rather than being re-derived is pinned separately, by a
+/// mutation that replaces it with a plausible constant.
+const HTTP_CARRIER: &str = "http:Idempotency-Key";
+
+/// One emission, whole: every field AD-10 fixes for this signal.
+///
+/// The kind is included deliberately. Projecting only name, value and dimensions
+/// leaves `counter` → `gauge` undetectable — same name, same `1.0`, same
+/// attributes — which would leave one row of AD-10 partly unproven in the very
+/// slice that moved it onto the typed port.
+fn rejection_shape(m: &RecordedMetric) -> (MetricKind, String, f64, Vec<(String, String)>) {
+    (m.kind, m.name.clone(), m.value, m.attributes.clone())
+}
+
+/// The single record a rejection must produce, for a given reason.
+///
+/// Spelled out whole so an assertion cannot pass with any one part right and
+/// another missing — a call site left on the pre-migration shape, a dimension
+/// dropped, or the wrong aggregation exported.
+fn expected_rejection(reason: &str) -> (MetricKind, String, f64, Vec<(String, String)>) {
+    (
+        MetricKind::Counter,
+        "idempotency.key.rejected".to_string(),
+        1.0,
+        vec![
+            ("reason".to_string(), reason.to_string()),
+            ("carrier".to_string(), HTTP_CARRIER.to_string()),
+        ],
+    )
+}
+
+/// A missing key under `MandatoryKey` counts one rejection, once.
 #[tokio::test]
 async fn a_missing_key_counts_the_missing_rejection() {
     let (result, obs) = extract_instrumented(IdempotencyEnforcementMode::MandatoryKey, None).await;
@@ -299,11 +336,13 @@ async fn a_missing_key_counts_the_missing_rejection() {
         "a missing key is refused under MandatoryKey"
     );
     assert_eq!(
-        obs.names(),
-        vec!["idempotency.key.rejected.missing".to_string()],
-        "exactly one counter, naming the reason"
+        obs.records()
+            .iter()
+            .map(rejection_shape)
+            .collect::<Vec<_>>(),
+        vec![expected_rejection("missing")],
+        "exactly one counter, carrying the reason and the carrier that reported it"
     );
-    assert_eq!(obs.values(), vec![1.0], "a counter increment is one");
 }
 
 /// A malformed key counts `…rejected.invalid`, under either mode.
@@ -321,8 +360,11 @@ async fn a_malformed_key_counts_the_invalid_rejection_under_both_modes() {
         let (result, obs) = extract_instrumented(mode, Some("   ")).await;
         assert!(result.is_err(), "{mode:?} refuses a whitespace-only key");
         assert_eq!(
-            obs.names(),
-            vec!["idempotency.key.rejected.invalid".to_string()],
+            obs.records()
+                .iter()
+                .map(rejection_shape)
+                .collect::<Vec<_>>(),
+            vec![expected_rejection("invalid")],
             "{mode:?} must count the invalid rejection"
         );
     }
@@ -373,14 +415,12 @@ async fn a_header_that_is_not_text_counts_the_unreadable_rejection_under_both_mo
         let (result, obs) = extract_instrumented_raw_header(mode, &[0xff, 0xfe]).await;
         assert!(result.is_err(), "{mode:?} refuses a key that is not text");
         assert_eq!(
-            obs.names(),
-            vec!["idempotency.key.rejected.unreadable".to_string()],
+            obs.records()
+                .iter()
+                .map(rejection_shape)
+                .collect::<Vec<_>>(),
+            vec![expected_rejection("unreadable")],
             "{mode:?}: an unreadable value is its own reason, not an invalid string"
-        );
-        assert_eq!(
-            obs.values(),
-            vec![1.0],
-            "{mode:?}: a counter increment is one"
         );
     }
 }
@@ -438,4 +478,145 @@ async fn an_uninstrumented_extractor_behaves_identically() {
     assert!(extract(IdempotencyEnforcementMode::Compatibility, None)
         .await
         .is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// AD-10 redaction: the raw key reaches no dimension
+// ---------------------------------------------------------------------------
+
+/// A value no other string in this file could produce by accident.
+///
+/// Shaped like something a client would really send — a business identifier — so
+/// the scan below is looking for the kind of value the redaction rule exists to
+/// keep out, not for a placeholder.
+const CANARY: &str = "customer-4417-invoice-2026-03-canary";
+
+/// A key that carries the canary **and** is genuinely refused.
+///
+/// `OperationKey::parse` rejects exactly two shapes: empty-after-trim, and longer
+/// than the maximum. Only the second can also carry a recognisable value, so the
+/// canary is padded past the limit — a key that is rejected *while containing the
+/// thing that must not leak* is the only arrangement that makes the scan mean
+/// anything. Trimmed padding would simply be accepted, and the test would assert
+/// redaction on a request that produced no rejection at all.
+fn over_long_key_carrying_the_canary() -> String {
+    format!("{CANARY}{}", "x".repeat(4096))
+}
+
+/// The client's key appears in no metric this boundary emits.
+///
+/// Scanned across the whole record rather than one field: the name, the value, and
+/// **both halves of every attribute**. A key smuggled in as a dimension *key* is as
+/// unbounded as one smuggled in as a dimension value, and a check that only read
+/// values would miss it.
+///
+/// All three reasons are covered. `unreadable` matters most: it is the one that
+/// never produced an `OperationKeyError`, so it is the arm where a well-meaning
+/// "include the offending value for diagnostics" is most tempting and least
+/// constrained.
+///
+/// Since the typed-metric port landed, this is a rule to keep and test rather than
+/// something the types make unrepresentable — the port now carries attributes, so
+/// nothing structurally prevents the key from becoming one.
+#[tokio::test]
+async fn no_metric_carries_the_raw_operation_key() {
+    // `invalid`: a key that parses as text and fails validation, carrying the canary.
+    let (result, obs) = extract_instrumented(
+        IdempotencyEnforcementMode::MandatoryKey,
+        Some(&over_long_key_carrying_the_canary()),
+    )
+    .await;
+    assert!(result.is_err(), "an over-long key is refused");
+
+    let recorded = obs.records();
+    assert!(
+        !recorded.is_empty(),
+        "the scan is only meaningful if something was emitted"
+    );
+    for m in &recorded {
+        let rendered = format!("{m:?}");
+        assert!(
+            !rendered.contains(CANARY),
+            "the client-supplied key must reach no name, no value, and neither half \
+             of any dimension: {rendered}"
+        );
+    }
+}
+
+/// And the same for a value that never became a string.
+#[tokio::test]
+async fn an_unreadable_value_reaches_no_dimension_either() {
+    let mut bytes = CANARY.as_bytes().to_vec();
+    // Not UTF-8, so the carrier reports `Unreadable` — while the bytes still
+    // contain the canary, which is what makes the scan meaningful.
+    bytes.push(0xff);
+
+    let (result, obs) =
+        extract_instrumented_raw_header(IdempotencyEnforcementMode::MandatoryKey, &bytes).await;
+    assert!(result.is_err(), "a value that is not text is refused");
+
+    let recorded = obs.records();
+    assert_eq!(
+        recorded.iter().map(rejection_shape).collect::<Vec<_>>(),
+        vec![expected_rejection("unreadable")],
+        "only the reason and the carrier are reported"
+    );
+    for m in &recorded {
+        let rendered = format!("{m:?}");
+        assert!(
+            !rendered.contains(CANARY),
+            "an unreadable value is still client input and reaches no dimension: {rendered}"
+        );
+    }
+}
+
+/// The carrier names a location, never what was found there.
+///
+/// This is the property that makes `carrier` admissible as a dimension at all: it
+/// is drawn from a fixed set of transport locations, so its cardinality is bounded
+/// by how many carriers exist rather than by how many requests arrive.
+#[tokio::test]
+async fn the_carrier_names_the_location_and_not_the_value() {
+    let (_, obs) = extract_instrumented(
+        IdempotencyEnforcementMode::MandatoryKey,
+        Some(&over_long_key_carrying_the_canary()),
+    )
+    .await;
+
+    let carriers: Vec<String> = obs
+        .records()
+        .iter()
+        .flat_map(|m| m.attributes.clone())
+        .filter(|(k, _)| k == "carrier")
+        .map(|(_, v)| v)
+        .collect();
+
+    assert_eq!(
+        carriers,
+        vec![HTTP_CARRIER.to_string()],
+        "the carrier is the stable name of the header consulted, not its contents"
+    );
+}
+
+/// No folded name survives the migration.
+///
+/// The reason used to be encoded in the name, so this guards a call site left
+/// behind — which the positive assertions cannot see, since they compare what was
+/// emitted rather than what must never be.
+#[tokio::test]
+async fn no_rejection_emits_a_folded_name() {
+    let cases = [
+        (IdempotencyEnforcementMode::MandatoryKey, None),
+        (IdempotencyEnforcementMode::MandatoryKey, Some("   ")),
+        (IdempotencyEnforcementMode::Compatibility, Some("   ")),
+    ];
+    for (mode, header) in cases {
+        let (_, obs) = extract_instrumented(mode, header).await;
+        let names = obs.names();
+        assert!(
+            names.iter().all(|n| n == "idempotency.key.rejected"),
+            "{mode:?} with {header:?}: the reason belongs in a dimension, so no name \
+             may carry it: {names:?}"
+        );
+    }
 }
