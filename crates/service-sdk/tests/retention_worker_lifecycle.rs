@@ -13,8 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use ego_domain::operation::{
-    OperationFingerprint, OperationKey, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    OldestCompleted, OperationFingerprint, OperationKey, OperationReservationStore, OwnerFence,
+    OwnerId, ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_service_sdk::runtime::{
     IdempotencyEnforcementMode, RetentionPolicy, RetentionPolicyError, RuntimeBuilder,
@@ -35,6 +35,9 @@ struct RecordingStore {
     inner: InMemoryOperationReservationStore,
     purges: Mutex<Vec<(DateTime<Utc>, usize)>>,
     calls: AtomicUsize,
+    /// The purge count observed at each `oldest_completed` call, which is what
+    /// makes "queried after the purge" checkable rather than assumed.
+    oldest_queries: Mutex<Vec<usize>>,
 }
 
 impl RecordingStore {
@@ -43,6 +46,7 @@ impl RecordingStore {
             inner,
             purges: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
+            oldest_queries: Mutex::new(Vec::new()),
         })
     }
     fn purges(&self) -> Vec<(DateTime<Utc>, usize)> {
@@ -50,6 +54,10 @@ impl RecordingStore {
     }
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+    /// How many purges had completed at each `oldest_completed` call.
+    fn oldest_queries(&self) -> Vec<usize> {
+        self.oldest_queries.lock().expect("not poisoned").clone()
     }
 }
 
@@ -82,6 +90,22 @@ impl OperationReservationStore for RecordingStore {
             .expect("not poisoned")
             .push((cutoff, batch));
         self.inner.purge_completed_before(cutoff, batch).await
+    }
+    /// Delegated, never inherited.
+    ///
+    /// The port's default answers `Unsupported`, and taking it here would hide a
+    /// capability the inner store really has. Every gauge assertion in this file
+    /// would then pass while proving nothing: the worker would correctly emit no
+    /// sample, and the test would correctly observe none.
+    ///
+    /// The call is also counted, so the "queried after the purge" ordering is a
+    /// recorded fact rather than an inference from the value.
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        self.oldest_queries
+            .lock()
+            .expect("not poisoned")
+            .push(self.calls.load(Ordering::SeqCst));
+        self.inner.oldest_completed().await
     }
     async fn probe(&self) -> Result<(), ReservationError> {
         self.inner.probe().await
@@ -813,6 +837,16 @@ impl RecordingObservability {
     fn names(&self) -> Vec<String> {
         self.metrics().into_iter().map(|(n, _)| n).collect()
     }
+    /// Whole records, so kind and attributes are compared and not only the value.
+    fn records_of(&self, name: &str) -> Vec<RecordedMetric> {
+        self.metrics
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter(|m| m.name == name)
+            .cloned()
+            .collect()
+    }
     fn values_of(&self, name: &str) -> Vec<f64> {
         self.metrics()
             .into_iter()
@@ -1026,4 +1060,315 @@ async fn an_uninstrumented_worker_still_purges_and_counts_nothing() {
         "the purge happens without instrumentation"
     );
     let _ = runtime.shutdown_async().await;
+}
+
+// ---------------------------------------------------------------------------
+// AD-10: idempotency.purge.oldest_completed_age
+// ---------------------------------------------------------------------------
+
+/// Completes one reservation at the clock's current instant.
+///
+/// Separate from `stage_eligible` because the point here is the opposite: these
+/// rows must **survive** the purge, so they are staged inside the retention
+/// window and the clock is advanced deliberately between them.
+async fn complete_one(inner: &InMemoryOperationReservationStore, clock: &TestClock, key: &str) {
+    use ego_domain::Clock as _;
+    let now = clock.now();
+    let outcome = inner
+        .reserve(ReserveRequest {
+            tenant: None,
+            operation_key: OperationKey::parse(key).expect("valid"),
+            fingerprint: OperationFingerprint::new("fp"),
+            owner_id: OwnerId::new("seeder"),
+            lease_until: now + chrono::Duration::seconds(30),
+        })
+        .await
+        .expect("a fresh reservation");
+    let lease = match outcome {
+        ReservationOutcome::Fresh(lease) => lease,
+        other => panic!("expected Fresh, got {other:?}"),
+    };
+    inner
+        .complete(
+            &OwnerFence {
+                operation_id: lease.operation_id.clone(),
+                owner_id: lease.owner_id.clone(),
+                fencing_token: lease.fencing_token,
+            },
+            StoredServiceResponse::new(b"done".to_vec()),
+        )
+        .await
+        .expect("completion");
+}
+
+/// The gauge reports the age of the **oldest** surviving completion, in seconds,
+/// measured against the injected clock.
+///
+/// Two rows at different instants, so a store returning the newest instead of the
+/// oldest produces a different number rather than the same one. The ages are 120s
+/// and 60s and neither is zero or one, so a hard-coded value fails too.
+///
+/// The whole record is compared, not just the value: `Gauge` and not `Counter`,
+/// the literal name, and no attributes — this row of AD-10's table carries none.
+#[tokio::test]
+async fn the_gauge_reports_the_age_of_the_oldest_surviving_completion() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+
+    // The older row, which is the one the gauge must describe.
+    complete_one(&inner, &clock, "op-old").await;
+    clock.advance(chrono::Duration::seconds(60));
+    complete_one(&inner, &clock, "op-new").await;
+    clock.advance(chrono::Duration::seconds(60));
+    // Retention is 300s and the oldest row is 120s old, so nothing is eligible:
+    // whatever the gauge reports is backlog that survived the purge.
+
+    let store = RecordingStore::wrapping(inner);
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.oldest_completed_age").await;
+    let _ = runtime.shutdown_async().await;
+
+    let records = obs.records_of("idempotency.purge.oldest_completed_age");
+    assert_eq!(
+        records
+            .first()
+            .map(|r| (r.kind, r.value, r.attributes.clone())),
+        Some((ego_domain::MetricKind::Gauge, 120.0, Vec::new())),
+        "the oldest surviving completion is 120s old on the injected clock: a gauge, \
+         not a counter, carrying no dimensions — got {records:?}"
+    );
+}
+
+/// A cleared backlog emits no sample at all.
+///
+/// `Empty` is a real answer, and the honest gauge reading for it is absence. A
+/// `0.0` would claim the oldest completed reservation was written this instant,
+/// which is the opposite of what an empty backlog means.
+#[tokio::test]
+async fn an_empty_backlog_emits_no_sample() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+    stage_eligible(&inner, &clock, 3).await;
+
+    let store = RecordingStore::wrapping(inner);
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    // The purge itself is the signal that a full tick ran, gauge included.
+    wait_for_a_metric(&obs, "idempotency.purge.rows").await;
+    let _ = runtime.shutdown_async().await;
+
+    assert!(
+        obs.values_of("idempotency.purge.oldest_completed_age")
+            .is_empty(),
+        "every staged row was purged, so there is no oldest completion and no age to \
+         report: {:?}",
+        obs.values_of("idempotency.purge.oldest_completed_age")
+    );
+}
+
+/// A store that does not offer the query emits no sample.
+///
+/// This double inherits the port's default deliberately — it is the twenty
+/// fixtures that have no ordered scan to offer, and the gauge must stay silent
+/// for them rather than reporting a number nobody computed.
+struct UnsupportingStore {
+    inner: InMemoryOperationReservationStore,
+    purges: AtomicUsize,
+}
+
+#[async_trait]
+impl OperationReservationStore for UnsupportingStore {
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        self.inner.reserve(req).await
+    }
+    async fn renew(&self, f: &OwnerFence, until: DateTime<Utc>) -> Result<(), ReservationError> {
+        self.inner.renew(f, until).await
+    }
+    async fn complete(
+        &self,
+        f: &OwnerFence,
+        r: StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        self.inner.complete(f, r).await
+    }
+    async fn abandon(&self, f: &OwnerFence) -> Result<(), ReservationError> {
+        self.inner.abandon(f).await
+    }
+    async fn purge_completed_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch: usize,
+    ) -> Result<u64, ReservationError> {
+        self.purges.fetch_add(1, Ordering::SeqCst);
+        self.inner.purge_completed_before(cutoff, batch).await
+    }
+    // `oldest_completed` deliberately omitted: this is the default path.
+    async fn probe(&self) -> Result<(), ReservationError> {
+        self.inner.probe().await
+    }
+}
+
+#[tokio::test]
+async fn a_store_that_does_not_support_the_query_emits_no_sample() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+    complete_one(&inner, &clock, "op-survivor").await;
+    clock.advance(chrono::Duration::seconds(120));
+
+    let store = Arc::new(UnsupportingStore {
+        inner,
+        purges: AtomicUsize::new(0),
+    });
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.batch_duration").await;
+    let _ = runtime.shutdown_async().await;
+
+    assert!(
+        obs.values_of("idempotency.purge.oldest_completed_age")
+            .is_empty(),
+        "the store answered Unsupported, so no age was determined and none may be \
+         reported — there is a surviving completion, which is what makes this \
+         different from the empty case: {:?}",
+        obs.values_of("idempotency.purge.oldest_completed_age")
+    );
+}
+
+/// A query that fails emits no sample and does not disturb the existing handling.
+struct FailingQueryStore {
+    inner: InMemoryOperationReservationStore,
+}
+
+#[async_trait]
+impl OperationReservationStore for FailingQueryStore {
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        self.inner.reserve(req).await
+    }
+    async fn renew(&self, f: &OwnerFence, until: DateTime<Utc>) -> Result<(), ReservationError> {
+        self.inner.renew(f, until).await
+    }
+    async fn complete(
+        &self,
+        f: &OwnerFence,
+        r: StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        self.inner.complete(f, r).await
+    }
+    async fn abandon(&self, f: &OwnerFence) -> Result<(), ReservationError> {
+        self.inner.abandon(f).await
+    }
+    async fn purge_completed_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch: usize,
+    ) -> Result<u64, ReservationError> {
+        self.inner.purge_completed_before(cutoff, batch).await
+    }
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        Err(ReservationError::Backend("the backlog query failed".into()))
+    }
+    async fn probe(&self) -> Result<(), ReservationError> {
+        self.inner.probe().await
+    }
+}
+
+#[tokio::test]
+async fn a_failing_backlog_query_emits_no_sample_and_does_not_stop_the_worker() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+    complete_one(&inner, &clock, "op-survivor").await;
+    clock.advance(chrono::Duration::seconds(120));
+
+    let store = Arc::new(FailingQueryStore { inner });
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.batch_duration").await;
+    let _ = runtime.shutdown_async().await;
+
+    assert!(
+        obs.values_of("idempotency.purge.oldest_completed_age")
+            .is_empty(),
+        "a failed query determined no age, so it may report none: {:?}",
+        obs.values_of("idempotency.purge.oldest_completed_age")
+    );
+    assert!(
+        !obs.values_of("idempotency.purge.batch_duration").is_empty(),
+        "the rest of the tick is unaffected — the purge still ran and still reported"
+    );
+}
+
+/// The backlog is queried after the purge, never before.
+///
+/// Asserted from the store's own recording rather than inferred from the value: a
+/// query issued first would describe the rows the batch was about to delete, and
+/// on a healthy deployment would report a stale age forever.
+#[tokio::test]
+async fn the_backlog_is_queried_after_the_purge_not_before() {
+    let clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+    let inner = InMemoryOperationReservationStore::new(clock.clone());
+    complete_one(&inner, &clock, "op-survivor").await;
+    clock.advance(chrono::Duration::seconds(120));
+
+    let store = RecordingStore::wrapping(inner);
+    let obs = RecordingObservability::new();
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.oldest_completed_age").await;
+    let _ = runtime.shutdown_async().await;
+
+    let queries = store.oldest_queries();
+    assert!(
+        queries.first().copied().is_some_and(|purges| purges >= 1),
+        "the first backlog query must see at least one completed purge; saw {queries:?}"
+    );
 }

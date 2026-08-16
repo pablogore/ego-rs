@@ -52,8 +52,8 @@ use sqlx::{PgPool, Row};
 
 use ego_domain::context::TenantId;
 use ego_domain::operation::{
-    FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, ReservationError,
-    ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    FencingToken, Lease, OldestCompleted, OperationId, OperationReservationStore, OwnerFence,
+    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::Clock;
 use std::sync::Arc;
@@ -498,6 +498,40 @@ impl OperationReservationStore for PostgresOperationReservationStore {
         .map_err(storage)?;
 
         Ok(deleted.rows_affected())
+    }
+
+    /// `MIN(completed_at)` over the completed rows that remain.
+    ///
+    /// Supported, so it never answers `Unsupported`: this store owns an ordered
+    /// index-backed column and the query is the one thing it is uniquely able to
+    /// answer cheaply.
+    ///
+    /// `MIN` over an empty set is SQL `NULL`, which is [`OldestCompleted::Empty`]
+    /// — a real answer meaning the backlog is clear, and deliberately not the
+    /// same value as "this adapter cannot tell you".
+    ///
+    /// The same `state = 'completed'` predicate as the purge above, for the same
+    /// reason: the guarantee is stated in terms of state, so an in-progress
+    /// reservation is not backlog however long it has been running.
+    ///
+    /// Returns the timestamp, never an age. Computing an age here would need a
+    /// second `now` — the database's — which no caller's injected clock can
+    /// position, and would put time arithmetic in a SQL adapter.
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        let row = sqlx::query(
+            r#"SELECT MIN(completed_at) AS oldest
+               FROM operation_reservations
+               WHERE state = 'completed'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
+
+        let oldest: Option<DateTime<Utc>> = row.try_get("oldest").map_err(storage)?;
+        Ok(match oldest {
+            Some(at) => OldestCompleted::At(at),
+            None => OldestCompleted::Empty,
+        })
     }
 
     async fn probe(&self) -> Result<(), ReservationError> {

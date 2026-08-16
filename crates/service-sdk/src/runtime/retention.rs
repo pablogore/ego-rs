@@ -28,7 +28,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ego_domain::operation::OperationReservationStore;
+use ego_domain::operation::{OldestCompleted, OperationReservationStore};
 use ego_domain::{Clock, Observability, SpanAttributes, SpanOutcome, TraceContext, Tracer};
 
 use super::runtime_builder::OpenSpan;
@@ -210,6 +210,39 @@ impl RetentionWorker {
                     );
                     if let Ok(rows) = &purged {
                         obs.counter("idempotency.purge.rows", *rows as f64, &[]);
+                    }
+
+                    // AD-10's `idempotency.purge.oldest_completed_age`, a gauge.
+                    //
+                    // Queried **after** the purge, on purpose: the question it
+                    // answers is how old the backlog that *remains* is. Asked
+                    // first, it would describe rows this batch was about to
+                    // delete, and would keep reporting a stale age forever on a
+                    // deployment whose retention is working perfectly.
+                    //
+                    // The age is computed here rather than by the store: the
+                    // store knows `completed_at`, this worker owns the clock, and
+                    // the same injected clock that positioned `cutoff` above must
+                    // position this — otherwise a test could place a row's age
+                    // freely and then read it back against wall time.
+                    //
+                    // A sample goes out for exactly one of the four answers.
+                    // `Empty` and `Unsupported` both stay silent, and are still
+                    // kept apart by the port: an absent gauge is honest for both,
+                    // where a `0.0` would claim the oldest completed reservation
+                    // has just been written. An error is left to the existing
+                    // handling below and adds no sample of its own.
+                    match store.oldest_completed().await {
+                        Ok(OldestCompleted::At(completed_at)) => {
+                            let age = clock.now() - completed_at;
+                            obs.gauge(
+                                "idempotency.purge.oldest_completed_age",
+                                age.num_milliseconds() as f64 / 1_000.0,
+                                &[],
+                            );
+                        }
+                        Ok(OldestCompleted::Empty) | Ok(OldestCompleted::Unsupported) => {}
+                        Err(_) => {}
                     }
                 }
 
