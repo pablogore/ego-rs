@@ -227,6 +227,83 @@ pub struct BuiltRuntime {
 /// `ReadSideHandles::spawn` requires a running Tokio runtime, so the
 /// caller (`main.rs`) decides when to start the background poller.
 pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+    build_runtime_observed(config, None)
+}
+
+/// Every entity runtime this app owns, built from one observability sink.
+///
+/// This type exists so the sink cannot reach one aggregate and miss another: a
+/// caller receives all of them or none, from the single function below.
+pub struct ObservedEntityRuntimes {
+    /// The `TenantOrganization` aggregate's runtime.
+    pub org: Arc<
+        persistent_entity::runtime::EntityRuntime<crate::domain::tenant_org::OrganizationEnsured>,
+    >,
+    /// The `User` aggregate's runtime.
+    pub user: Arc<persistent_entity::runtime::EntityRuntime<crate::domain::user::UserRegistered>>,
+}
+
+/// **The one place a sink is handed to the entity half of the system.**
+///
+/// Production calls this, and so does the acceptance test — deliberately the
+/// same function, because the failure worth guarding is a *host* that forgets
+/// one half, and a test that rebuilt the wiring itself could only ever catch a
+/// mistake in its own fixture.
+///
+/// The handoff cannot be deferred. `EntityRuntime::with_observability` consumes
+/// `self`, a host registers the result as an `Arc`, and
+/// `Runtime::observability()` only exists once the SDK runtime is already built.
+/// So the sink is passed here, before either runtime is finished, or the actors
+/// these spawn never report at all — and nothing says so, because the SDK half
+/// keeps working.
+pub fn compose_entity_runtimes(
+    observability: Option<Arc<dyn ego_domain::Observability>>,
+) -> ObservedEntityRuntimes {
+    // AD-4: two independent EntityRuntimes, one per aggregate. Both get the
+    // sink, or whichever misses it goes dark on its own.
+    ObservedEntityRuntimes {
+        org: Arc::new(observed_entity_runtime(observability.clone())),
+        user: Arc::new(observed_entity_runtime(observability)),
+    }
+}
+
+/// One entity runtime, carrying the sink if there is one.
+///
+/// Generic rather than a closure: each aggregate has its own event type, so a
+/// closure would be monomorphised to whichever it was first called with — and
+/// the second aggregate would not compile, which is a better failure than the
+/// alternative but not one worth arranging on purpose.
+fn observed_entity_runtime<E>(
+    observability: Option<Arc<dyn ego_domain::Observability>>,
+) -> persistent_entity::runtime::EntityRuntime<E>
+where
+    E: ego_domain::DomainEvent
+        + Clone
+        + serde::de::DeserializeOwned
+        + serde::Serialize
+        + Send
+        + Sync
+        + 'static,
+{
+    let builder = EntityRuntimeBuilder::<E>::new();
+    match observability {
+        Some(sink) => builder.with_observability(sink),
+        None => builder,
+    }
+    .build()
+}
+
+/// [`build_runtime`], with an observability sink threaded through **both** halves.
+///
+/// The sink goes to `App::builder().observability(...)` for the SDK's own
+/// signals and, through [`compose_entity_runtimes`], to every entity runtime.
+/// Wiring only the first is the silent failure this signature exists to make
+/// hard: the SDK's metrics keep flowing while `idempotency.receipt.outcome`
+/// disappears.
+pub fn build_runtime_observed(
+    config: &AppConfig,
+    observability: Option<Arc<dyn ego_domain::Observability>>,
+) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
 
     let resolver: Arc<dyn KeyResolver> = Arc::new(LocalKeyResolver::new(
@@ -264,9 +341,10 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
     let settings = ConfigurationProvider::from_value(serde_json::to_value(map)?).logging()?;
     let logger = build_logger(&settings)?;
 
-    // AD-4: two independent EntityRuntimes, one per aggregate.
-    let org_runtime = Arc::new(EntityRuntimeBuilder::new().build());
-    let user_runtime = Arc::new(EntityRuntimeBuilder::new().build());
+    let ObservedEntityRuntimes {
+        org: org_runtime,
+        user: user_runtime,
+    } = compose_entity_runtimes(observability.clone());
 
     // UsersByTenant read-side wiring (CORE-005's real engine, not
     // ego-service-sdk's resolve_projection DI mechanism): the sink and the
@@ -299,6 +377,10 @@ pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::er
             ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
         )
         .security(authn.clone(), authz);
+    // The same sink the entity runtimes were given, for the SDK's own signals.
+    if let Some(sink) = observability {
+        builder = builder.observability(sink);
+    }
     // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
     // query-side `UsersByTenantStore` — distinct from the untouched read-side
     // *engine* path above (`ReadSideHandles`/`TagSchedulerImpl::spawn`,
