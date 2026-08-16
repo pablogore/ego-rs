@@ -32,6 +32,31 @@ use chrono::{DateTime, Utc};
 use crate::context::TenantId;
 use crate::operation::key::{OperationFingerprint, OperationKey};
 
+/// What a store can say about the oldest completed reservation it still holds.
+///
+/// Three states rather than an `Option`, because `None` would merge two answers
+/// an operator reads differently: "this store cannot answer" and "this store
+/// answered, and there is nothing completed". The first is a gap in visibility;
+/// the second is a fact about the backlog. Collapsing them would make an
+/// unimplemented adapter indistinguishable from a healthy, fully-purged one.
+///
+/// Deliberately a *timestamp*, not an age. The store knows `completed_at`; the
+/// caller owns the clock. Returning an age would put time arithmetic inside a
+/// SQL adapter and introduce a second source of "now" — one the caller's
+/// injected clock could not position, which is what makes the age testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldestCompleted {
+    /// This adapter does not offer the query.
+    ///
+    /// Not a failure and not an empty result — an honest "I don't provide
+    /// this". A store returning it is not obliged to explain why.
+    Unsupported,
+    /// The query is supported, and no completed reservation exists.
+    Empty,
+    /// When the oldest completed reservation still held was completed.
+    At(DateTime<Utc>),
+}
+
 /// The capability port for reserving, renewing, completing, abandoning, and
 /// purging operation-scoped reservations.
 ///
@@ -94,6 +119,31 @@ pub trait OperationReservationStore: Send + Sync {
         cutoff: DateTime<Utc>,
         batch: usize,
     ) -> Result<u64, ReservationError>;
+
+    /// Reports when the oldest completed reservation still held was completed.
+    ///
+    /// Read-only. This answers a question about the **backlog that remains**, so
+    /// a caller measuring retention health queries it *after* a purge, not
+    /// before: asked first, it would describe rows the batch is about to delete.
+    ///
+    /// # Why this defaults, when the metric port's attributes did not
+    ///
+    /// The default returns [`OldestCompleted::Unsupported`], and that is a
+    /// different situation from the one that made `Observability`'s attributed
+    /// method required. There, an implementor was handed data it already had and
+    /// could silently drop it. Here, an implementor is asked to *answer a query*,
+    /// and a store may genuinely have no efficient way to — an in-memory double
+    /// built for one test, an adapter over a backend with no ordered scan.
+    /// `Unsupported` says so without pretending the backlog is empty and without
+    /// discarding anything the caller supplied.
+    ///
+    /// A wrapper that delegates to an inner store MUST forward this rather than
+    /// inherit the default. Inheriting it hides a capability the inner store
+    /// really has, and the symptom is a gauge that silently stops being reported
+    /// once a wrapper is introduced.
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        Ok(OldestCompleted::Unsupported)
+    }
 
     /// Reports whether the backing store is reachable right now.
     ///
@@ -364,6 +414,76 @@ mod tests {
 
     fn ts(hour: u32) -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 1, 1, hour, 0, 0).unwrap()
+    }
+
+    /// A store that does not override the query answers `Unsupported`.
+    ///
+    /// Asserted against a bare implementor rather than assumed from the source,
+    /// because this default is the whole reason twenty fixtures did not have to
+    /// invent a capability they do not have.
+    #[tokio::test]
+    async fn a_store_that_does_not_override_the_query_answers_unsupported() {
+        struct Bare;
+
+        #[async_trait]
+        impl OperationReservationStore for Bare {
+            async fn reserve(
+                &self,
+                _req: ReserveRequest,
+            ) -> Result<ReservationOutcome, ReservationError> {
+                unreachable!("this fixture exists only to exercise the default")
+            }
+            async fn renew(
+                &self,
+                _fence: &OwnerFence,
+                _until: DateTime<Utc>,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn complete(
+                &self,
+                _fence: &OwnerFence,
+                _response: StoredServiceResponse,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn purge_completed_before(
+                &self,
+                _cutoff: DateTime<Utc>,
+                _batch: usize,
+            ) -> Result<u64, ReservationError> {
+                unreachable!()
+            }
+            async fn probe(&self) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+        }
+
+        assert_eq!(
+            Bare.oldest_completed().await,
+            Ok(OldestCompleted::Unsupported),
+            "the default must say it does not offer the query — never that the \
+             backlog is empty, which is a claim this store has not earned"
+        );
+    }
+
+    /// `Unsupported` and `Empty` are not the same value.
+    ///
+    /// They produce the same gauge behaviour — no sample — so no test of an
+    /// emitter can tell them apart. The distinction is the port's, and this is
+    /// where it is held: one says the adapter cannot look, the other says it
+    /// looked and the backlog is clear.
+    #[test]
+    fn an_unsupported_answer_is_not_an_empty_one() {
+        assert_ne!(
+            OldestCompleted::Unsupported,
+            OldestCompleted::Empty,
+            "collapsing these would make an unimplemented adapter indistinguishable \
+             from a healthy, fully-purged one"
+        );
     }
 
     #[test]

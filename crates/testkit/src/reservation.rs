@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ego_domain::operation::{
-    FencingToken, Lease, OperationId, OperationReservationStore, OwnerFence, OwnerId,
-    ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    FencingToken, Lease, OldestCompleted, OperationId, OperationReservationStore, OwnerFence,
+    OwnerId, ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::Clock;
 
@@ -327,6 +327,33 @@ impl OperationReservationStore for InMemoryOperationReservationStore {
         Ok(eligible.len() as u64)
     }
 
+    /// A real implementation, not the `Unsupported` default.
+    ///
+    /// This double is what the shared conformance harness and the retention
+    /// worker's tests run against, so inheriting the default would make every
+    /// test of the gauge vacuous — the worker would correctly emit nothing, and
+    /// the test would correctly observe nothing, while proving neither.
+    ///
+    /// `Empty` when no completed reservation is held: a genuine answer about the
+    /// backlog, distinct from this store being unable to give one.
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        let records = self
+            .records
+            .lock()
+            .expect("reservation store mutex poisoned");
+        let oldest = records
+            .values()
+            .filter_map(|record| match &record.state {
+                RecordState::Completed { completed_at, .. } => Some(*completed_at),
+                _ => None,
+            })
+            .min();
+        Ok(match oldest {
+            Some(at) => OldestCompleted::At(at),
+            None => OldestCompleted::Empty,
+        })
+    }
+
     async fn probe(&self) -> Result<(), ReservationError> {
         // A map in this process cannot become unreachable: if the caller is
         // running, so is the store. There is nothing to check and nothing that
@@ -480,6 +507,113 @@ mod tests {
         assert!(
             matches!(after, ReservationOutcome::TakenOver(_)),
             "the reservation must still be seizable, got {after:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod oldest_completed_contract {
+    use std::sync::Arc;
+
+    use chrono::{Duration, TimeZone, Utc};
+    use ego_domain::operation::{
+        OldestCompleted, OperationFingerprint, OperationKey, OperationReservationStore, OwnerFence,
+        OwnerId, ReservationOutcome, ReserveRequest, StoredServiceResponse,
+    };
+    use ego_domain::Clock as _;
+
+    use super::{InMemoryOperationReservationStore, TestClock};
+
+    fn epoch() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    async fn complete(store: &InMemoryOperationReservationStore, clock: &TestClock, key: &str) {
+        let outcome = store
+            .reserve(ReserveRequest {
+                tenant: None,
+                operation_key: OperationKey::parse(key).expect("a valid key"),
+                fingerprint: OperationFingerprint::new("fp"),
+                owner_id: OwnerId::new("owner"),
+                lease_until: clock.now() + Duration::seconds(30),
+            })
+            .await
+            .expect("a fresh reservation");
+        let lease = match outcome {
+            ReservationOutcome::Fresh(lease) => lease,
+            other => panic!("expected Fresh, got {other:?}"),
+        };
+        store
+            .complete(
+                &OwnerFence {
+                    operation_id: lease.operation_id.clone(),
+                    owner_id: lease.owner_id.clone(),
+                    fencing_token: lease.fencing_token,
+                },
+                StoredServiceResponse::new(b"done".to_vec()),
+            )
+            .await
+            .expect("completion");
+    }
+
+    /// A store that supports the query and holds nothing answers `Empty`.
+    ///
+    /// The distinction from `Unsupported` is invisible to any emitter — both
+    /// produce no gauge sample — so it can only be held here, at the port. This
+    /// store *can* look; it looked; the backlog is clear.
+    #[tokio::test]
+    async fn an_empty_store_answers_empty_and_never_unsupported() {
+        let clock = Arc::new(TestClock::new(epoch()));
+        let store = InMemoryOperationReservationStore::new(clock);
+
+        assert_eq!(
+            store.oldest_completed().await,
+            Ok(OldestCompleted::Empty),
+            "this store supports the query, so an empty backlog is a real answer — \
+             reporting Unsupported would claim it cannot look"
+        );
+    }
+
+    /// An in-progress reservation is not backlog, however long it has been running.
+    ///
+    /// Same predicate the purge uses: the guarantee is stated in terms of state.
+    #[tokio::test]
+    async fn an_in_progress_reservation_is_not_an_oldest_completion() {
+        let clock = Arc::new(TestClock::new(epoch()));
+        let store = InMemoryOperationReservationStore::new(clock.clone());
+        store
+            .reserve(ReserveRequest {
+                tenant: None,
+                operation_key: OperationKey::parse("op-running").expect("a valid key"),
+                fingerprint: OperationFingerprint::new("fp"),
+                owner_id: OwnerId::new("owner"),
+                lease_until: clock.now() + Duration::seconds(30),
+            })
+            .await
+            .expect("a fresh reservation");
+
+        assert_eq!(
+            store.oldest_completed().await,
+            Ok(OldestCompleted::Empty),
+            "nothing has completed, so there is no oldest completion to report"
+        );
+    }
+
+    /// The answer is the earliest `completed_at`, not the latest.
+    #[tokio::test]
+    async fn the_answer_is_the_earliest_completion() {
+        let clock = Arc::new(TestClock::new(epoch()));
+        let store = InMemoryOperationReservationStore::new(clock.clone());
+
+        complete(&store, &clock, "op-first").await;
+        let first = clock.now();
+        clock.advance(Duration::seconds(60));
+        complete(&store, &clock, "op-second").await;
+
+        assert_eq!(
+            store.oldest_completed().await,
+            Ok(OldestCompleted::At(first)),
+            "two completions exist; the oldest is the earlier one"
         );
     }
 }
