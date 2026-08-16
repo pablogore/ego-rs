@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
 use ego_domain::operation::{AggregateOutcome, OperationReceipt};
+use ego_domain::{MetricAttribute, Observability};
 use tokio::sync::watch;
 
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
@@ -62,6 +63,11 @@ pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     pub(crate) event_sender: SchedulerEventSender,
     /// Passivation signal that fires when the actor should stop.
     pub(crate) signal: Sig,
+    /// Where this actor reports what its receipt gate decided (AD-10's
+    /// `idempotency.receipt.outcome`). `None` when the host wired none, in which
+    /// case every path below behaves exactly as it did before the gate was
+    /// instrumented — the counter is the only thing that disappears.
+    pub(crate) observability: Option<Arc<dyn Observability>>,
     pub(crate) _phantom: PhantomData<(C, S)>,
 }
 
@@ -78,6 +84,37 @@ where
     fn transition(&mut self, state: EntityState) {
         let _ = self.lifecycle.transition_to(state);
         let _ = self.tx.send(state);
+    }
+
+    /// AD-10's `idempotency.receipt.outcome`, from the four places the receipt
+    /// gate reaches a verdict.
+    ///
+    /// `aggregate_type` is read from this actor's own registered identity, never
+    /// from anything a caller supplied. That is what makes it admissible as a
+    /// dimension at all: it is bounded by the set of registered entity types,
+    /// where client input is unbounded and would multiply time series without
+    /// limit.
+    ///
+    /// The operation key is deliberately not a parameter here. It is
+    /// client-supplied and unbounded, so it is a span attribute only and never a
+    /// metric one — a rule this signature keeps by giving the key no way in,
+    /// rather than by filtering it out further down.
+    ///
+    /// `outcome` is `&'static str` because its three values are fixed by this
+    /// contract; a runtime-computed value is what folding a dimension into a
+    /// name looks like, and there is nothing here that could produce one.
+    fn count_receipt_outcome(&self, outcome: &'static str) {
+        let Some(observability) = &self.observability else {
+            return;
+        };
+        observability.counter(
+            "idempotency.receipt.outcome",
+            1.0,
+            &[
+                MetricAttribute::new("outcome", outcome),
+                MetricAttribute::new("aggregate_type", self.entity_id.aggregate_type()),
+            ],
+        );
     }
 
     /// Runs recovery, then the command loop, then passivation; drains mailbox on recovery failure.
@@ -247,6 +284,7 @@ where
                     // is written, and no effect is accepted a second time. The
                     // outcome travels as durable evidence, never as a rebuilt
                     // result: see `CommandResult::Replayed`.
+                    self.count_receipt_outcome("already_applied");
                     let result: CommandResult<E, S> = CommandResult::Replayed {
                         outcome: receipt.outcome().clone(),
                     };
@@ -259,6 +297,7 @@ where
                     // permanently, and `handle_command` is never reached:
                     // executing it would let one caller's key drive another
                     // caller's command.
+                    self.count_receipt_outcome("conflict");
                     let _ = reply.send(Err(crate::error::EntityError::OperationConflict {
                         operation_key: key.as_str().to_string(),
                     }));
@@ -279,6 +318,11 @@ where
             .identity
             .as_ref()
             .map(|i| (i.key().clone(), i.fingerprint().clone()));
+        // Captured before `identity` is consumed below. The events path's
+        // `persist_result` covers both the receipt-writing and the plain-append
+        // branch, so without this the success arm could not tell a confirmed
+        // receipt from a command that never had one to confirm.
+        let confirms_a_receipt = identity.is_some();
 
         match handler_result {
             Ok(events) if events.is_empty() => {
@@ -311,6 +355,9 @@ where
                         let _ = reply.send(Err(crate::error::EntityError::PersistenceError(e)));
                         return;
                     }
+                    // After the write, never before: a receipt counted ahead of
+                    // its commit would report operations that never landed.
+                    self.count_receipt_outcome("confirmed");
                 }
 
                 let result: CommandResult<E, S> = CommandResult::NoEvents {
@@ -372,6 +419,12 @@ where
 
                 match persist_result {
                     Ok(new_version) => {
+                        // Guarded, not unconditional: the `None` branch above
+                        // appends without a receipt, and counting there would
+                        // report confirmations for commands that never had one.
+                        if confirms_a_receipt {
+                            self.count_receipt_outcome("confirmed");
+                        }
                         let state = match self
                             .entity_handler
                             .apply_events(&current_state, &events)
@@ -734,6 +787,7 @@ mod tests {
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(PanicOnBoomHandler),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         };
@@ -927,6 +981,7 @@ mod tests {
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(EffectEmittingHandler),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         }
@@ -1225,6 +1280,7 @@ mod tests {
                 seen_identity: seen.clone(),
             }),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         };
@@ -1289,6 +1345,7 @@ mod tests {
                 seen_identity: seen.clone(),
             }),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         };

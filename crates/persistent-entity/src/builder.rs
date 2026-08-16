@@ -14,6 +14,7 @@ use crate::scheduler::Scheduler;
 use crate::scheduler_event::{event_bus_channel_with_config, SchedulerEventBusConfig};
 use crate::scheduler_policy::RoundRobinPolicy;
 use crate::snapshot::{PeriodicSnapshotStrategy, SnapshotStrategy};
+use ego_domain::Observability;
 
 /// Rounds `d` up to the nearest whole second — never down. Used only for
 /// `RuntimeConfig.passivation_timeout_secs`'s own whole-seconds
@@ -60,6 +61,11 @@ pub struct EntityRuntimeBuilder<
     /// spawned actors keep the zero-cost, fail-closed-if-effects-described
     /// behavior unless a host opts in via [`Self::with_effect_acceptor`].
     effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    /// Optional observability sink, threaded to every actor this runtime
+    /// spawns. `None` by default — an actor without one takes exactly the path
+    /// it took before this existed and pays for no observation it does not
+    /// make.
+    observability: Option<Arc<dyn Observability>>,
 }
 
 impl<
@@ -86,6 +92,7 @@ impl<
             event_store: None,
             snapshot_store: None,
             effect_acceptor: None,
+            observability: None,
         }
     }
 
@@ -209,6 +216,46 @@ impl<
         self
     }
 
+    /// Wires an [`Observability`] into every actor this runtime spawns.
+    ///
+    /// Without it, an actor's own `observability` field stays `None` and the
+    /// receipt gate emits nothing — the same shape `with_effect_acceptor` has,
+    /// and for the same reason: a capability the deployment did not ask for
+    /// costs it nothing.
+    ///
+    /// # This must be called before the runtime is shared
+    ///
+    /// There is no retroactive path. A host registers an entity runtime as
+    /// `Arc<EntityRuntime<_>>`, and
+    /// [`crate::runtime::EntityRuntime::with_observability`] consumes `self`, so
+    /// once that `Arc` exists nothing can add a sink to the runtime inside it.
+    /// Reaching for `ego_service_sdk::Runtime::observability()` does not help
+    /// either: that accessor exists only on a **built** `Runtime`, by which point
+    /// every entity runtime it holds has already been constructed.
+    ///
+    /// The host therefore keeps one sink and hands it to both builders:
+    ///
+    /// ```ignore
+    /// let observability: Arc<dyn Observability> = Arc::new(/* ... */);
+    ///
+    /// let entity_runtime = EntityRuntimeBuilder::<UserEvent>::new()
+    ///     .with_observability(observability.clone())
+    ///     .build();
+    ///
+    /// let runtime = RuntimeBuilder::new()
+    ///     .with_observability(observability)
+    ///     .with_entity::<User>(Arc::new(entity_runtime))?
+    ///     .build();
+    /// ```
+    ///
+    /// Wiring only the `RuntimeBuilder` is the failure worth naming: the
+    /// reservation and purge signals appear, `idempotency.receipt.outcome` does
+    /// not, and nothing reports that half the instrumentation is dark.
+    pub fn with_observability(mut self, observability: Arc<dyn Observability>) -> Self {
+        self.observability = Some(observability);
+        self
+    }
+
     pub fn build(self) -> EntityRuntime<E> {
         let publisher = self
             .publisher
@@ -258,7 +305,7 @@ impl<
         // whose `passivation_timeout_secs: u64` silently truncates any
         // sub-second value to zero (see `EntityRuntime`'s
         // `passivation_timeout` field doc comment).
-        EntityRuntime::new_with_passivation_timeout(
+        let runtime = EntityRuntime::new_with_passivation_timeout(
             registry.clone(),
             Arc::new(Scheduler::new(
                 registry.clone(),
@@ -272,7 +319,11 @@ impl<
             event_sender,
             self.effect_acceptor,
             self.passivation_timeout,
-        )
+        );
+        match self.observability {
+            Some(observability) => runtime.with_observability(observability),
+            None => runtime,
+        }
     }
 }
 
