@@ -47,6 +47,19 @@
 //! would also accept the child merely failing, which proves nothing about crash
 //! recovery.
 //!
+//! # Unix only, and behind a feature
+//!
+//! Declared `#[cfg(unix)]` where the module is named. Reading a signal from an
+//! exit status is `std::os::unix`, and the signal *is* the evidence — accepting
+//! any non-zero exit elsewhere would keep this compiling while throwing the
+//! guarantee away.
+//!
+//! The interruption itself lives behind the reference app's
+//! `crash-test-failpoint` feature, which is off by default and enabled only by
+//! this workspace's dependency on that crate. Without it the composition root
+//! reads no environment and compiles no aborting implementation, so an ordinary
+//! host cannot be pushed into aborting mid-request by an inherited variable.
+//!
 //! # No container of its own
 //!
 //! It takes a database from `ego_integration_tests::isolated_database`, like every

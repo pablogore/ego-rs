@@ -44,6 +44,16 @@
 mod infrastructure {
     mod concurrent_replicas_postgres;
     mod conflict_from_postgres;
+    /// Unix only, structurally rather than by accident.
+    ///
+    /// The scenario's whole point is that the child dies by **SIGABRT**, and
+    /// reading a signal from an exit status is `std::os::unix`. Degrading it
+    /// elsewhere to "any non-zero exit" would keep the test compiling and throw
+    /// away the guarantee: a child that merely panicked, failed an assertion or
+    /// could not find its database would satisfy it, and none of those is a
+    /// crash. A scenario that cannot be expressed on a platform is better absent
+    /// there than present and hollow.
+    #[cfg(unix)]
     mod dual_aggregate_crash_recovery_postgres;
     mod durable_entity_progress_postgres;
     mod fencing_window_postgres;
