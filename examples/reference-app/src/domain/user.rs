@@ -33,6 +33,35 @@ pub struct UserRegistered {
 }
 
 impl UserRegistered {
+    /// Rebuilds a stored event from its payload and the envelope timestamp.
+    ///
+    /// See [`crate::domain::tenant_org::OrganizationEnsured::from_stored`] — the
+    /// same split, for the same reason: the payload is business data, and
+    /// `occurred_at` is envelope metadata the store keeps in its own column.
+    pub fn from_stored(
+        payload: Value,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<Self, ego_domain::persistence::PersistenceError> {
+        let field = |name: &str| -> Result<String, ego_domain::persistence::PersistenceError> {
+            payload
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ego_domain::persistence::PersistenceError::Internal(format!(
+                        "a stored user event is missing `{name}`"
+                    ))
+                })
+        };
+        Ok(Self {
+            user_id: field("user_id")?,
+            email: field("email")?,
+            tenant_id: field("tenant_id")?,
+            occurred_at,
+            payload,
+        })
+    }
+
     fn new(user_id: String, email: String, tenant_id: String, occurred_at: DateTime<Utc>) -> Self {
         let payload = serde_json::json!({
             "user_id": user_id,

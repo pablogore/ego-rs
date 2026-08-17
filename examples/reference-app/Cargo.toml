@@ -19,6 +19,9 @@ security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
 ego-scheduler = { path = "../../crates/ego-scheduler" }
 ego-persistence = { path = "../../crates/persistence" }
+# The host owns the pool: it opens Postgres, runs migrations, and refuses to
+# start without them. Nothing downstream degrades to memory on failure.
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 ego-service-sdk = { path = "../../crates/service-sdk" }
 ego-service-sdk-macros = { path = "../../crates/service-sdk-macros" }
 ego-transport = { path = "../../crates/transport" }

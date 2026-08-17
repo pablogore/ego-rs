@@ -32,7 +32,24 @@ struct EventRow {
 
 /// PostgreSQL event store backed by a PgPool.
 ///
-/// Requires a deserializer function to reconstruct events from stored JSON.
+/// Requires a deserializer function to reconstruct events from what was stored.
+///
+/// # The deserializer is handed the envelope, not only the payload
+///
+/// It receives `(event_type, payload, occurred_at)`. The timestamp is the row's
+/// `created_at`, which `append` writes from `event.occurred_at()` — so it is
+/// when the event *happened*, never when it was read back, and never `now()`.
+///
+/// It is a parameter because `DomainEvent::payload()` is the event's **business
+/// data** and `occurred_at` is **envelope metadata**: this store already
+/// persists the latter in its own column, and an earlier signature simply threw
+/// it away at read time, leaving every caller to synthesise a timestamp and
+/// silently rewrite history on each replay.
+///
+/// Duplicating it into the payload instead would create two sources of truth for
+/// one instant — the column and a JSON field, free to diverge — and would make
+/// every domain compensate for an infrastructure limitation by changing its own
+/// persisted format.
 pub struct PostgreSQLEventStore<E, F> {
     pool: PgPool,
     deserialize: F,
@@ -102,7 +119,9 @@ impl<E, F> PostgreSQLEventStore<E, F> {
 impl<E, F> EventStore<E> for PostgreSQLEventStore<E, F>
 where
     E: DomainEvent + Clone + Send + Sync + 'static,
-    F: Fn(&str, serde_json::Value) -> Result<E, PersistenceError> + Send + Sync,
+    F: Fn(&str, serde_json::Value, chrono::DateTime<chrono::Utc>) -> Result<E, PersistenceError>
+        + Send
+        + Sync,
 {
     async fn append(
         &self,
@@ -261,7 +280,7 @@ where
         let events: Result<Vec<StoredEvent<E>>, PersistenceError> = rows
             .into_iter()
             .map(|row| {
-                let event = (self.deserialize)(&row.event_type, row.payload)?;
+                let event = (self.deserialize)(&row.event_type, row.payload, row.created_at)?;
                 let stored = StoredEvent::without_correlation(event);
                 // A stored key was validated on the way in, so failing to parse it
                 // on the way out means the row was written by something that did

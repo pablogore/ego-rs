@@ -34,17 +34,34 @@
 
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig, BuiltRuntime};
+use reference_app::{build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores};
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
+
+    // The host owns the pool, the migrations, and the decision to start at all.
+    //
+    // Every one of these steps is fail-closed. A Postgres that cannot be
+    // reached, migrations that will not apply, or a store that refuses to open
+    // stops the process here — none of them degrades to an in-memory store.
+    // That fallback is exactly what made a restart lose every confirmed receipt,
+    // and it is now unreachable by omission: `build_runtime_with` takes the
+    // stores it will use.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.database.max_connections)
+        .connect(&config.database.url)
+        .await?;
+    ego_persistence::postgres::migrations::run(&pool).await?;
+    let stores = EntityEventStores::open(pool).await?;
+
     let BuiltRuntime {
         app,
         authn,
         read_side: read_side_handles,
-    } = build_runtime(&config)?;
+        ..
+    } = build_runtime_with(&config, stores, None)?;
 
     let query = read_side_handles.query.clone();
     let read_side_runtime = read_side_handles.spawn();

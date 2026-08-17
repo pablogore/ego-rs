@@ -68,7 +68,7 @@ use reference_app::application::{
 use reference_app::ports::http::build_router;
 use reference_app::read_side::{ReadSideSink, SharedReadSideStore};
 use reference_app::{
-    build_runtime, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
+    build_runtime_in_memory, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -274,7 +274,7 @@ fn app(
         authn,
         read_side: read_side_handles,
         ..
-    } = build_runtime(&AppConfig::default()).expect("build_runtime succeeds");
+    } = build_runtime_in_memory(&AppConfig::default()).expect("build_runtime succeeds");
 
     // The user runtime carries the effect acceptor, so a committed
     // `UserRegistered` has somewhere for its welcome-email effect to be accepted.

@@ -18,7 +18,7 @@ use axum::Router;
 use ego_domain::TraceContext;
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig, BuiltRuntime};
+use reference_app::{build_runtime_in_memory, AppConfig, BuiltRuntime};
 use support::make_token;
 use tower::ServiceExt;
 
@@ -28,7 +28,8 @@ fn app() -> Router {
         app,
         authn,
         read_side: read_side_handles,
-    } = build_runtime(&config).expect("build_runtime succeeds");
+        ..
+    } = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     let state = AppState::new(app.resolver(), authn);
     build_router(state, read_side_handles.query.clone())
 }

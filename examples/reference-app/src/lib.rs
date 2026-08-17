@@ -46,6 +46,7 @@ pub mod ports;
 pub mod providers;
 pub mod read_side;
 
+use ego_domain::persistence::EventStore;
 use ego_domain::{Clock, ConfigError, SystemClock, Validate};
 use ego_persistence::DatabaseConfig;
 use ego_scheduler::event_bus::EventBusConfig;
@@ -197,6 +198,19 @@ pub struct BuiltRuntime {
     pub app: App,
     pub authn: Arc<dyn AuthenticationProvider>,
     pub read_side: ReadSideHandles,
+    /// The entity runtimes this build composed, as it composed them.
+    ///
+    /// A read-only view, not a second registration: these are the same `Arc`s
+    /// the services were handed. It exists because only `UserEntity` is
+    /// resolvable through DI — `RegisterUserImpl` holds the organization runtime
+    /// by hand — so without it there is no way to observe what
+    /// [`build_runtime_with`] actually gave each aggregate.
+    ///
+    /// That mattered: a durability test that reached for `compose_entity_runtimes`
+    /// directly would still pass if `build_runtime_with` ignored the stores it
+    /// was handed and composed in-memory ones. Reading them back from here is
+    /// what closes that gap without changing DI to suit a test.
+    pub entities: ObservedEntityRuntimes,
 }
 
 /// Host -> AppConfig -> service construction -> `App::builder()` pipeline
@@ -226,8 +240,21 @@ pub struct BuiltRuntime {
 /// sync call (safe from `tests/pipeline.rs`'s non-Tokio tests); only
 /// `ReadSideHandles::spawn` requires a running Tokio runtime, so the
 /// caller (`main.rs`) decides when to start the background poller.
-pub fn build_runtime(config: &AppConfig) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    build_runtime_observed(config, None)
+/// Builds the app over **in-memory** event stores.
+///
+/// The name says so because the alternative misled: this was `build_runtime`,
+/// the most natural name in the module, and a host reaching for it got volatile
+/// persistence without asking. Nothing it writes survives the process — every
+/// event and every confirmed receipt is gone on restart — so a deployment that
+/// arrived here would look durable and silently lose the progress receipts exist
+/// to record.
+///
+/// For a real deployment use [`build_runtime_with`], which takes the stores it
+/// will use and therefore cannot be reached by omission.
+pub fn build_runtime_in_memory(
+    config: &AppConfig,
+) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+    build_runtime_observed_in_memory(config, None)
 }
 
 /// Every entity runtime this app owns, built from one observability sink.
@@ -241,6 +268,75 @@ pub struct ObservedEntityRuntimes {
     >,
     /// The `User` aggregate's runtime.
     pub user: Arc<persistent_entity::runtime::EntityRuntime<crate::domain::user::UserRegistered>>,
+}
+
+/// The durable event stores this app's aggregates write through.
+///
+/// Two typed instances over **one shared pool**. They are distinct types because
+/// each is parameterised by its aggregate's event, not because they are separate
+/// backends: same pool, same tables, same transactions. A pool per aggregate
+/// would double the connection budget and buy nothing, since the two never need
+/// to be isolated from each other.
+///
+/// This type exists so the choice of backing store is **stated**, never defaulted.
+/// Before it, `compose_entity_runtimes` silently accepted
+/// `EntityRuntimeBuilder`'s in-memory default, which meant every event and every
+/// receipt lived in process memory — and a restart lost the durable progress the
+/// receipts exist to record.
+pub struct EntityEventStores {
+    /// Where `TenantOrganization` writes.
+    pub org: Arc<dyn EventStore<crate::domain::tenant_org::OrganizationEnsured> + Send + Sync>,
+    /// Where `User` writes.
+    pub user: Arc<dyn EventStore<crate::domain::user::UserRegistered> + Send + Sync>,
+}
+
+impl EntityEventStores {
+    /// Opens both stores against one shared pool.
+    ///
+    /// The host has already opened the pool and applied the migrations; this
+    /// only binds the two typed views onto it. Opening is fallible on purpose —
+    /// `PostgreSQLEventStore::open` refuses while any row is missing its
+    /// aggregate type, and that refusal must stop startup rather than be
+    /// swallowed into a memory-backed fallback.
+    pub async fn open(
+        pool: sqlx::PgPool,
+    ) -> Result<Self, ego_domain::persistence::PersistenceError> {
+        let org = ego_persistence::postgres::event_store::PostgreSQLEventStore::open(
+            pool.clone(),
+            |_aggregate_type: &str,
+             value: serde_json::Value,
+             occurred_at: chrono::DateTime<chrono::Utc>| {
+                crate::domain::tenant_org::OrganizationEnsured::from_stored(value, occurred_at)
+            },
+        )
+        .await?;
+        let user = ego_persistence::postgres::event_store::PostgreSQLEventStore::open(
+            pool,
+            |_aggregate_type: &str,
+             value: serde_json::Value,
+             occurred_at: chrono::DateTime<chrono::Utc>| {
+                crate::domain::user::UserRegistered::from_stored(value, occurred_at)
+            },
+        )
+        .await?;
+        Ok(Self {
+            org: Arc::new(org),
+            user: Arc::new(user),
+        })
+    }
+
+    /// In-memory stores, for tests and local development that genuinely want them.
+    ///
+    /// Spelled out at every call site rather than reachable by omission. Nothing
+    /// written through these survives the process, so a composition root that
+    /// arrived here by default would look durable and lose every receipt on
+    /// restart — which is the failure this whole slice exists to remove.
+    pub fn in_memory() -> Self {
+        Self {
+            org: Arc::new(ego_infrastructure::persistence::in_memory::InMemoryEventStore::new()),
+            user: Arc::new(ego_infrastructure::persistence::in_memory::InMemoryEventStore::new()),
+        }
+    }
 }
 
 /// **The one place a sink is handed to the entity half of the system.**
@@ -257,13 +353,15 @@ pub struct ObservedEntityRuntimes {
 /// these spawn never report at all — and nothing says so, because the SDK half
 /// keeps working.
 pub fn compose_entity_runtimes(
+    stores: EntityEventStores,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> ObservedEntityRuntimes {
     // AD-4: two independent EntityRuntimes, one per aggregate. Both get the
-    // sink, or whichever misses it goes dark on its own.
+    // sink, or whichever misses it goes dark on its own — and both get their
+    // store explicitly, so neither can fall back to memory by omission.
     ObservedEntityRuntimes {
-        org: Arc::new(observed_entity_runtime(observability.clone())),
-        user: Arc::new(observed_entity_runtime(observability)),
+        org: Arc::new(observed_entity_runtime(stores.org, observability.clone())),
+        user: Arc::new(observed_entity_runtime(stores.user, observability)),
     }
 }
 
@@ -274,6 +372,7 @@ pub fn compose_entity_runtimes(
 /// the second aggregate would not compile, which is a better failure than the
 /// alternative but not one worth arranging on purpose.
 fn observed_entity_runtime<E>(
+    event_store: Arc<dyn EventStore<E> + Send + Sync>,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> persistent_entity::runtime::EntityRuntime<E>
 where
@@ -285,7 +384,7 @@ where
         + Sync
         + 'static,
 {
-    let builder = EntityRuntimeBuilder::<E>::new();
+    let builder = EntityRuntimeBuilder::<E>::new().with_event_store(event_store);
     match observability {
         Some(sink) => builder.with_observability(sink),
         None => builder,
@@ -293,15 +392,32 @@ where
     .build()
 }
 
-/// [`build_runtime`], with an observability sink threaded through **both** halves.
+/// [`build_runtime_in_memory`], with an observability sink threaded through
+/// **both** halves.
 ///
 /// The sink goes to `App::builder().observability(...)` for the SDK's own
 /// signals and, through [`compose_entity_runtimes`], to every entity runtime.
 /// Wiring only the first is the silent failure this signature exists to make
 /// hard: the SDK's metrics keep flowing while `idempotency.receipt.outcome`
 /// disappears.
-pub fn build_runtime_observed(
+/// [`build_runtime_in_memory`], with an observability sink threaded through both
+/// halves. Volatile for the same reason, and named for it.
+pub fn build_runtime_observed_in_memory(
     config: &AppConfig,
+    observability: Option<Arc<dyn ego_domain::Observability>>,
+) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+    build_runtime_with(config, EntityEventStores::in_memory(), observability)
+}
+
+/// [`build_runtime_observed_in_memory`], over event stores the caller chose.
+///
+/// The production entry point. `main` opens a pool, applies the migrations, and
+/// hands the durable stores here — so a Postgres that cannot be reached stops
+/// startup instead of degrading to memory. Callers that genuinely want in-memory
+/// stores say so by passing [`EntityEventStores::in_memory`].
+pub fn build_runtime_with(
+    config: &AppConfig,
+    stores: EntityEventStores,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
@@ -344,7 +460,13 @@ pub fn build_runtime_observed(
     let ObservedEntityRuntimes {
         org: org_runtime,
         user: user_runtime,
-    } = compose_entity_runtimes(observability.clone());
+    } = compose_entity_runtimes(stores, observability.clone());
+    // Kept so the caller can see what this build composed; the services below
+    // get the same `Arc`s.
+    let composed = ObservedEntityRuntimes {
+        org: org_runtime.clone(),
+        user: user_runtime.clone(),
+    };
 
     // UsersByTenant read-side wiring (CORE-005's real engine, not
     // ego-service-sdk's resolve_projection DI mechanism): the sink and the
@@ -413,5 +535,6 @@ pub fn build_runtime_observed(
         app: builder.build()?,
         authn,
         read_side: read_side_handles,
+        entities: composed,
     })
 }
