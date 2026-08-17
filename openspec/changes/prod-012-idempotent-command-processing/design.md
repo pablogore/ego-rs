@@ -1332,6 +1332,15 @@ as the systemwide comparison, the unit-of-work offsets and the absent-stream
 report: two implementors diverged because the shared harness asserted nothing
 about the thing that differed.
 
+**How B4.7b closes it, normatively: structural exhaustiveness, not a dynamic
+assertion.** The harness destructures a loaded `StoredEvent` with **no `..`**, so
+a future field breaks its compilation until someone states how that field must be
+verified. This is required rather than preferred, because no runtime check can
+discover a new field in Rust — a round-trip assertion compares only what it was
+written to look at, and would stay green over exactly the kind of silent addition
+that produced this debt. `..` in that destructuring would defeat the guarantee and
+must not appear.
+
 **Reopening condition.** Durable event correlation returns **only** as an
 end-to-end slice that carries `ServiceContext::correlation_id` through to every
 `StoredEvent`, persists it in every store, and pins it with the shared conformance

@@ -330,7 +330,9 @@ unchanged, which is the point of stopping here.
 - [x] B4.5e GREEN **(enabling, behaviour-preserving)**: `resolve_tenant` moves to `crates/domain/src/persistence/tenant.rs`. It had been copied into four adapters — the PostgreSQL module and three in-memory ones — and B4.5c needed a fifth call site, so copying again would have knowingly worsened a duplication that already existed four times. The four copies were compared before consolidating: two textual variants differing only in `match` arm order, semantically identical. The rule is a domain statement about what a tenant identifier means, not an implementation detail of any adapter.
 - [x] B4.6 RED/GREEN: `crates/domain/src/persistence/stored_event.rs` unit tests pin what that file can pin — that neither constructor attaches an operation key, that attaching one leaves the other fields alone, and that attaching twice keeps the last rather than refusing or accumulating. The **round trip through storage** is not provable there and is asserted by the shared conformance harness instead, against all three implementations: a key attached to one event in a batch comes back exactly, and the event appended beside it does not acquire one. Both write paths are covered, since the direct append and the unit of work bind it through separate code.
 - [x] B4.7 GREEN: migration `009_add_operation_key_to_events.sql` adds a nullable `operation_key VARCHAR(255)`, and **both** Postgres write paths bind it — the direct append and the unit of work, which write through separate code. `load` reads it back and parses it, surfacing an unparseable stored value as an error rather than returning the event as though it had no operation behind it. A dedicated column rather than a generic `metadata` blob: the operation is a first-class identity here, not incidental annotation, and a JSON blob would be unqueryable without expression indexes while inviting anything at all to be dumped in. Deliberately unindexed — nothing queries events by operation key, and an index for a query that does not exist costs every write to serve none.
-- [x] B4.7a **(debt found in B4, resolved by withdrawal)**: `StoredEvent::correlation_id` behaved differently per store and the shared contract pinned neither behaviour. **Neither behaviour becomes normative — the field is withdrawn. See AD-13.**
+- [~] B4.7a **WITHDRAWN — superseded by AD-13 and B4.7b.** `StoredEvent::correlation_id` behaved differently per store and the shared contract pinned neither behaviour. **Neither becomes normative — the field is withdrawn. See AD-13.**
+
+      Not `[x]`: this task's own criterion was to decide the contract *and* correct the implementation. AD-13 makes the decision; the removal is B4.7b and has not happened. Marking it done would claim work that was superseded rather than performed — the same standard applied to E1.2.
 
       The audit that decided it, all measured rather than assumed:
 
@@ -349,7 +351,18 @@ unchanged, which is the point of stopping here.
 
 - [ ] B4.7b Implementation: remove `StoredEvent::correlation_id` and `StoredEvent::new`, whose only parameter beyond the event is that field — the two constructors collapse into one. No accessor to remove; it was a public field. Update the 24 `without_correlation` call sites across 8 files, the single read (its own test), and three prose references: the type's doc comment and two lines in `persistence/mod.rs`'s module map, which would otherwise describe a field that no longer exists. `SemanticEvent::correlation_id` in `observability.rs` shares the name and is a different type — leave it alone.
 
-      **The harness gap is fixed in the same slice, not left behind.** `crates/testkit/src/event_store.rs` builds 13 fixtures and calls `StoredEvent::new` zero times, so it could never have detected a difference in a field it does not populate — the same shape as the systemwide comparison, the unit-of-work offsets and the absent-stream report. Removing the field closes this instance; the harness must gain an assertion that every field a `StoredEvent` carries survives a round trip, so the *next* field added cannot diverge silently.
+      **The harness gap is fixed in the same slice, not left behind** — the removal and the prevention of another divergence are one contractual repair. `crates/testkit/src/event_store.rs` builds 13 fixtures and calls `StoredEvent::new` zero times, so it could never have detected a difference in a field it does not populate — the same shape as the systemwide comparison, the unit-of-work offsets and the absent-stream report.
+
+      The fix is **structural exhaustiveness, not a dynamic assertion**. The harness destructures a loaded event with no `..`:
+
+      ```rust
+      let StoredEvent {
+          event,
+          operation_key,
+      } = loaded_event;
+      ```
+
+      A future field then **breaks the harness's compilation** until someone states how it must be verified. This matters because no runtime assertion can discover a new field in Rust: a round-trip check can only compare what it was written to look at, so it would stay green over exactly the kind of silent addition that produced this debt. `..` would defeat it entirely and must not appear here.
 
       Acceptance: no reference to `correlation_id` survives on `StoredEvent` or any store, both workspaces build and their gates pass, and the round-trip assertion fails if a store drops any remaining field.
 - [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
