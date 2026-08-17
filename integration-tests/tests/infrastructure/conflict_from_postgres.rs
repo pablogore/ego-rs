@@ -91,7 +91,7 @@
 //! container would run identically without one, which is the definition of a test
 //! that does not belong in this suite.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,7 +108,7 @@ use ego_domain::operation::{
     ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::time::SystemClock;
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::isolated_database;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::{
@@ -128,8 +128,6 @@ use reference_app::{
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 use tower::ServiceExt;
 
 const KEY: &str = "op-conflict-under-test";
@@ -310,9 +308,6 @@ async fn migrated_pool(url: &str) -> PgPool {
         .connect(url)
         .await
         .expect("the container accepts connections");
-    migrations::run(&pool)
-        .await
-        .expect("the real migrations apply — including the reservations table");
     pool
 }
 
@@ -339,18 +334,12 @@ async fn stored_row(pool: &PgPool) -> (String, String, Option<DateTime<Utc>>, Op
 
 #[tokio::test]
 async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothing() {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
+    // This test's own database, cloned from the run's already-migrated
+    // template. No container starts here and no migration runs; the guard is
+    // held for the test's life because dropping it releases the
+    // connection-budget permit.
+    let db = isolated_database().await;
+    let url = db.url().to_string();
     let pool = migrated_pool(&url).await;
 
     let store = CountingStore::wrapping(PostgresOperationReservationStore::new(
@@ -536,4 +525,9 @@ async fn a_different_payload_under_a_completed_key_is_refused_and_changes_nothin
         "spelled out rather than only compared to the earlier read, so this holds \
          even if the first read had itself returned something unexpected"
     );
+
+    // The database, and every pool taken from it, released here rather than
+    // left for the runner's container teardown — the semaphore counts live
+    // databases, and that is only true if they are actually dropped.
+    db.close().await;
 }

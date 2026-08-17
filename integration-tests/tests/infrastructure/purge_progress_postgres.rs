@@ -44,7 +44,7 @@
 //! finishing inside it is the guarantee, and exceeding it is the failure the
 //! pre-existing query produced.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
@@ -53,12 +53,10 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use ego_domain::operation::OperationReservationStore;
 use ego_domain::time::SystemClock;
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::isolated_database;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 /// Fixed, so a failure is reproducible and nothing depends on when the suite ran.
 fn t0() -> DateTime<Utc> {
@@ -116,26 +114,16 @@ async fn surviving_keys(pool: &PgPool) -> Vec<String> {
 
 #[tokio::test]
 async fn a_purge_fills_its_batch_from_unlocked_rows_instead_of_waiting() {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
-
+    // This test's own database, cloned from the run's already-migrated
+    // template. No container starts here and no migration runs; the guard is
+    // held for the test's life because dropping it releases the
+    // connection-budget permit.
+    let db = isolated_database().await;
+    let url = db.url().to_string();
     // Separate pools: the store must never be starved of a connection by the
     // transaction the test uses to hold the lock.
     let store_pool = connect(&url).await;
     let test_pool = connect(&url).await;
-    migrations::run(&store_pool)
-        .await
-        .expect("the real migrations apply");
 
     let store = PostgresOperationReservationStore::new(store_pool.clone(), Arc::new(SystemClock));
 
@@ -229,4 +217,9 @@ async fn a_purge_fills_its_batch_from_unlocked_rows_instead_of_waiting() {
         vec!["op-ineligible".to_string()],
         "only the row that was never eligible remains"
     );
+
+    // The database, and every pool taken from it, released here rather than
+    // left for the runner's container teardown — the semaphore counts live
+    // databases, and that is only true if they are actually dropped.
+    db.close().await;
 }

@@ -1,0 +1,169 @@
+//! The runner that owns the run's PostgreSQL.
+//!
+//! ```console
+//! cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+//! ```
+//!
+//! # Why a runner exists, and why it is not hypothetical complexity
+//!
+//! Issue #275 requires one shared PostgreSQL per run, migrations applied once, and
+//! per-test isolation. Collapsing the eight test files into one target delivered
+//! all three — and then could not clean up after itself.
+//!
+//! A test binary has no suite-level teardown. Holding the container in a
+//! process-wide cell means its async `Drop` runs at process exit, when no Tokio
+//! runtime is left to drive it: **three consecutive runs left three containers
+//! behind**, where the old container-per-file shape had leaked none, because each
+//! of those guards dropped inside a live runtime. testcontainers' `watchdog`
+//! feature did not close it either — it handles signals, not ordinary exit.
+//!
+//! That is a concrete responsibility libtest cannot express, not a preference. So
+//! it lives here: this process starts the container, prepares the template, runs
+//! the suite as a child, and destroys the container **while its own runtime is
+//! still alive**.
+//!
+//! # What it does not own
+//!
+//! Per-test isolation stays in the tests. Each one still clones its own database
+//! from the template and closes its own pools; the runner never reaches into a
+//! test's state. It provisions and reclaims, and nothing else.
+//!
+//! # The exit code is the suite's
+//!
+//! Propagated exactly, including on failure — a runner that swallowed a failing
+//! suite would be worse than no runner. The container is destroyed on both paths
+//! before that code is returned.
+
+use std::process::ExitCode;
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Executor, PgPool};
+use testcontainers::runners::AsyncRunner;
+use testcontainers::ImageExt;
+use testcontainers_modules::postgres::Postgres;
+
+const TEMPLATE: &str = "ego_template";
+const HOST_VAR: &str = "EGO_IT_PG_HOST";
+const PORT_VAR: &str = "EGO_IT_PG_PORT";
+
+async fn connect(url: &str) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .connect(url)
+        .await
+        .expect("the container accepts connections")
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let started = std::time::Instant::now();
+
+    let container = Postgres::default()
+        .with_tag("16")
+        .start()
+        .await
+        .expect("a PostgreSQL container starts");
+    let host = container.get_host().await.expect("a host").to_string();
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("the mapped port");
+    let provisioned = started.elapsed();
+
+    // The template is created and migrated exactly once, here. Both connections
+    // are closed before the suite runs: PostgreSQL refuses
+    // `CREATE DATABASE ... TEMPLATE t` while any session is connected to `t`, so
+    // a pool left open would make every clone in every test fail.
+    let admin = connect(&format!(
+        "postgres://postgres:postgres@{host}:{port}/postgres"
+    ))
+    .await;
+    admin
+        .execute(format!("CREATE DATABASE {TEMPLATE}").as_str())
+        .await
+        .expect("the template database is created");
+    admin.close().await;
+
+    let template = connect(&format!(
+        "postgres://postgres:postgres@{host}:{port}/{TEMPLATE}"
+    ))
+    .await;
+    ego_persistence::postgres::migrations::run(&template)
+        .await
+        .expect("the real migrations apply to the template");
+    template.close().await;
+    let migrated = started.elapsed();
+
+    // The suite, as a child process, told only where PostgreSQL is.
+    //
+    // `cargo test` rather than the compiled binary directly: the target may need
+    // rebuilding, and reproducing cargo's target resolution here would be a
+    // second place for it to drift.
+    //
+    // It costs, and the cost is measured rather than guessed: a freshness check
+    // over this workspace's dependency graph is ~9.5s even with nothing to do, and
+    // this run pays it twice — once for the outer `cargo run`, once here. Total
+    // wall clock is ~22s against an 11.4s baseline, of which container start is
+    // ~1.8s and the tests themselves ~2s. Well inside #275's five-minute budget,
+    // and the obvious follow-up is to locate the built test binary via
+    // `--message-format=json` and exec it, paying the check once.
+    //
+    // The result is kept, never unwrapped. An earlier version wrote
+    // `.expect("the suite starts")`, which meant a child that could not be
+    // spawned at all — a missing toolchain, an exhausted process table — panicked
+    // straight past the reclamation below. The one path the runner exists to
+    // guarantee was the one path that skipped it.
+    let outcome = std::process::Command::new(env!("CARGO"))
+        .args([
+            "test",
+            "--manifest-path",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+            "--test",
+            "infrastructure",
+        ])
+        .env(HOST_VAR, &host)
+        .env(PORT_VAR, port.to_string())
+        .status();
+    let ran = started.elapsed();
+
+    // Destroyed here, inside a live runtime — the whole reason this process
+    // exists. Reached on **every** path: the suite passing, the suite failing, and
+    // the suite never starting. Awaited rather than left to `Drop` so a failure to
+    // reclaim is visible rather than silent.
+    let reclaimed = container.rm().await;
+
+    // Visible and bounded, as #275 asks: the budget is a completion criterion,
+    // so a run that does not report its cost cannot be checked against it.
+    eprintln!(
+        "\n[integration-tests] provisioned in {:.2}s · template migrated at {:.2}s · \
+         suite finished at {:.2}s · reclaimed at {:.2}s",
+        provisioned.as_secs_f64(),
+        migrated.as_secs_f64(),
+        ran.as_secs_f64(),
+        started.elapsed().as_secs_f64(),
+    );
+
+    // Reclamation is reported before the suite's verdict, and never in place of
+    // it: a container left behind is the runner's own failure, and hiding it
+    // behind a green suite would make the invariant unobservable.
+    if let Err(e) = reclaimed {
+        eprintln!("[integration-tests] FAILED to reclaim the container: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // Exactly the suite's outcome. `ExitCode::FAILURE` for a signal-terminated
+    // child, which has no code of its own but is certainly not success, and for a
+    // child that never started — reported here rather than panicked above, so the
+    // container was reclaimed first.
+    match outcome {
+        Ok(status) => match status.code() {
+            Some(0) => ExitCode::SUCCESS,
+            Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            None => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("[integration-tests] the suite could not be started: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}

@@ -67,7 +67,7 @@
 //! that into a loud failure instead of a green run over a window that was never
 //! opened. See `wait_until_contender_is_blocked` for the specifics.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
@@ -78,13 +78,11 @@ use ego_domain::operation::{
     OperationFingerprint, OperationKey, OperationReservationStore, OwnerId, ReservationOutcome,
     ReserveRequest,
 };
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::isolated_database;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use ego_testkit::TestClock;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 const KEY: &str = "op-fencing-window-under-test";
 
@@ -171,27 +169,17 @@ async fn owner_token_lease(pool: &PgPool) -> (String, i64, chrono::DateTime<Utc>
 
 #[tokio::test]
 async fn a_takeover_waiting_on_the_row_lock_rechecks_the_lease_it_finds_not_the_one_it_read() {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
-
+    // This test's own database, cloned from the run's already-migrated
+    // template. No container starts here and no migration runs; the guard is
+    // held for the test's life because dropping it releases the
+    // connection-budget permit.
+    let db = isolated_database().await;
+    let url = db.url().to_string();
     // Two pools on purpose. The store owns one; the test drives the blocking
     // transaction and the lock observation through another, so the contender can
     // never be starved of a connection by the test's own bookkeeping.
     let store_pool = connect(&url, 4).await;
     let test_pool = connect(&url, 4).await;
-    migrations::run(&store_pool)
-        .await
-        .expect("the real migrations apply");
 
     let t0 = Utc::now();
     let clock = Arc::new(TestClock::new(t0));
@@ -302,4 +290,9 @@ async fn a_takeover_waiting_on_the_row_lock_rechecks_the_lease_it_finds_not_the_
         lease_until, renewed_until,
         "and the renewed lease stands, unshortened by the attempt"
     );
+
+    // The database, and every pool taken from it, released here rather than
+    // left for the runner's container teardown — the semaphore counts live
+    // databases, and that is only true if they are actually dropped.
+    db.close().await;
 }

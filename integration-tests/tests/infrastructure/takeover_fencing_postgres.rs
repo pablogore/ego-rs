@@ -27,7 +27,7 @@
 //! refusal, the completion and the durable state are steps of a single
 //! guarantee, not four separable cases.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
@@ -38,12 +38,10 @@ use ego_domain::operation::{
     ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
 use ego_domain::time::Clock;
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::isolated_database;
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 /// A clock the test moves by hand.
 ///
@@ -106,26 +104,17 @@ async fn migrated_pool(url: &str) -> PgPool {
         .connect(url)
         .await
         .expect("the container accepts connections");
-    migrations::run(&pool)
-        .await
-        .expect("the real migrations apply — including the reservations table");
     pool
 }
 
 #[tokio::test]
 async fn a_taken_over_lease_locks_out_its_previous_owner_and_keeps_only_the_takers_answer() {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
+    // This test's own database, cloned from the run's already-migrated
+    // template. No container starts here and no migration runs; the guard is
+    // held for the test's life because dropping it releases the
+    // connection-budget permit.
+    let db = isolated_database().await;
+    let url = db.url().to_string();
     let pool = migrated_pool(&url).await;
 
     let t0 = Utc::now();
@@ -259,4 +248,9 @@ async fn a_taken_over_lease_locks_out_its_previous_owner_and_keeps_only_the_take
          written nothing — a refusal that still overwrote the response would \
          serve a dead owner's result to every later replay"
     );
+
+    // The database, and every pool taken from it, released here rather than
+    // left for the runner's container teardown — the semaphore counts live
+    // databases, and that is only true if they are actually dropped.
+    db.close().await;
 }

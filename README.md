@@ -28,7 +28,7 @@ requirement, not a convenience: CC-R11 (No Infrastructure Dependency) and UT-R4
 Coverage that genuinely needs a real database or socket will live in `integration-tests/`
 — outside the root Cargo workspace, inside this repository, as an independent Cargo
 workspace that the root neither compiles nor runs. It is invoked explicitly with
-`cargo test --manifest-path integration-tests/Cargo.toml`. That workspace does not
+`cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`. That workspace does not
 exist yet: until issue #275 closes, those invariants remain unverified.
 `docs/integration-test-backlog.md` records every such property and what it must
 assert, so that work is deferred rather than lost.
