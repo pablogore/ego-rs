@@ -1171,6 +1171,77 @@ designed, that change widens this row again **and carries its own instrumentatio
 in the same unit of work** — the value and the behaviour that produces it arrive
 together, never separately.
 
+### AD-12 — No additional recovery coordinator is required
+
+**Amends E1, which specified a RED scenario (E1.1) followed by an implementation
+slice (E1.2) to "wire `RegisterUserImpl`'s recovery path".** E1.2 is
+**withdrawn as superseded by evidence**. There is no recovery path left to wire.
+
+A dual-aggregate operation has a window where one half is durable and the other
+does not exist: after `TenantOrganization`'s receipt is confirmed and before the
+`User` command is sent. E1.1 crosses that window for real — a child process dies
+by SIGABRT inside it — and a retry resumes the operation correctly with no code
+written for that purpose.
+
+Recovery is not a component here. It is the **composition** of five guarantees
+that were each designed and verified separately, and never before observed
+working together:
+
+1. **Takeover of the expired lease** — a replica whose clock has passed
+   `lease_until` may displace the dead owner's reservation.
+2. **A rising fencing token** — the displacement advances the token rather than
+   resetting it, which is what makes the new holder distinguishable from a fresh
+   acquisition of a key nobody held.
+3. **Durable per-aggregate receipts** — the confirmed half's receipt survives the
+   process that wrote it, because it is a row rather than in-memory state.
+4. **The receipt gate ahead of the handler** — a matching confirmed receipt is
+   answered *without running the command*, so the confirmed half is not
+   re-executed.
+5. **One operation identity carried to both aggregates** — both steps are told
+   the same identity the reservation accepted, which is what lets the second step
+   be recovered after the first already completed rather than treated as a
+   different operation.
+
+Remove any one and the scenario fails. That is the claim, and it is the claim
+E1.1's mutation battery tests: eight mutations, each breaking one of these,
+each killed by an assertion naming the guarantee it broke.
+
+**Two layers answer a repeat, and they are not interchangeable.** This is the
+part that was not previously written down anywhere:
+
+- A retry whose reservation is an **expired lease** takes over and reaches the
+  aggregates, where the receipts decide per half. This is *resumption*: the
+  confirmed half counts `already_applied`, the missing half runs and counts
+  `confirmed`.
+- A retry whose reservation is a **completed operation** never reaches the
+  aggregates at all. The guard replays the stored response and the service body
+  does not run. This is *replay*, and no receipt outcome is counted because no
+  receipt is consulted.
+
+Both are proven in E1.1. Conflating them is easy and wrong: the first needs the
+receipts, the second needs only the reservation.
+
+**Why E1.2 is withdrawn rather than marked done.** Marking it complete would
+claim work that was never performed and would attribute this behaviour to a slice
+that wrote no code. It would also hide the actual finding — that the guarantees
+compose — behind a checkbox, and the next person to touch any of the five would
+have no record of what depends on them. Reconverting E1.2 into some other task to
+keep the pair symmetric would be worse: a slice invented to preserve a shape is
+not a requirement.
+
+**Reopening condition.** E1.2 reappears if either:
+
+- any of the five guarantees above changes — in particular if takeover stops
+  advancing the fencing token, if receipts stop being durable or stop gating the
+  handler, or if the operation identity stops reaching both aggregates; or
+- a multi-aggregate case arises that **cannot** be resumed by receipts and
+  takeover alone — for example a step whose effect is not idempotent and not
+  receipt-guarded, or an ordering constraint between aggregates that a partial
+  state cannot satisfy.
+
+Either would mean recovery no longer emerges from composition, and a coordinator
+would then be a real requirement rather than an assumed one.
+
 ## Data Flow — Happy Path
 
 ```
