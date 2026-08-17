@@ -127,8 +127,9 @@ async fn the_sdk_and_an_entity_runtime_reach_the_same_backend() {
     // through `compose_entity_runtimes`, to every entity runtime. Building
     // either half here instead would prove only that a fixture can be written
     // correctly.
-    let built = reference_app::build_runtime_observed(&AppConfig::default(), Some(observability))
-        .expect("the reference app builds");
+    let built =
+        reference_app::build_runtime_observed_in_memory(&AppConfig::default(), Some(observability))
+            .expect("the reference app builds");
 
     // --- provoke the SDK signal -------------------------------------------
     // Through the real HTTP extractor, over the state the built app resolves.
@@ -201,9 +202,11 @@ async fn wiring_only_the_sdk_silently_loses_the_entity_signal() {
     // the sink. Expressed by calling the production functions separately —
     // which is exactly what a host does when it forgets `build_runtime_observed`
     // and assembles the two halves by hand.
-    let built = reference_app::build_runtime_observed(&AppConfig::default(), Some(observability))
-        .expect("the reference app builds");
-    let unobserved = reference_app::compose_entity_runtimes(None);
+    let built =
+        reference_app::build_runtime_observed_in_memory(&AppConfig::default(), Some(observability))
+            .expect("the reference app builds");
+    let unobserved =
+        reference_app::compose_entity_runtimes(reference_app::EntityEventStores::in_memory(), None);
 
     provoke_a_key_rejection(&built).await;
     send_a_registration_to(&unobserved).await;

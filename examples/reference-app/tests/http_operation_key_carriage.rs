@@ -32,7 +32,7 @@ use reference_app::application::{
     RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserTag,
 };
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig, BuiltRuntime};
+use reference_app::{build_runtime_in_memory, AppConfig, BuiltRuntime};
 use support::make_token;
 use tower::ServiceExt;
 
@@ -137,7 +137,7 @@ fn app_recording_under(
         authn,
         read_side: read_side_handles,
         ..
-    } = build_runtime(&AppConfig::default()).expect("build_runtime succeeds");
+    } = build_runtime_in_memory(&AppConfig::default()).expect("build_runtime succeeds");
 
     let service: Arc<dyn RegisterUser> = Arc::new(KeyRecordingRegister { seen });
     let mut builder = RuntimeBuilder::new().with_idempotency_enforcement_mode(mode);

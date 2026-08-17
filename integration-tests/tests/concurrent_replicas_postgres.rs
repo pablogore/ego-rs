@@ -93,7 +93,7 @@ use reference_app::application::{
 };
 use reference_app::ports::http::build_router;
 use reference_app::{
-    build_runtime, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
+    build_runtime_in_memory, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -258,7 +258,7 @@ fn replica(
         authn,
         read_side: read_side_handles,
         ..
-    } = build_runtime(&AppConfig::default()).expect("build_runtime succeeds");
+    } = build_runtime_in_memory(&AppConfig::default()).expect("build_runtime succeeds");
 
     let real: Arc<dyn RegisterUser> = Arc::new(RegisterUserImpl::new(
         Arc::new(EntityRuntimeBuilder::new().build()),

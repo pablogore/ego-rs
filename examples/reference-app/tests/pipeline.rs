@@ -3,7 +3,7 @@
 
 use ego_domain::Validate;
 use reference_app::read_side::UsersByTenantStore;
-use reference_app::{build_runtime, AppConfig};
+use reference_app::{build_runtime_in_memory, AppConfig};
 
 #[test]
 fn valid_app_config_passes_validate_and_builds_runtime() {
@@ -14,7 +14,7 @@ fn valid_app_config_passes_validate_and_builds_runtime() {
         "default AppConfig should be valid"
     );
 
-    let runtime = build_runtime(&config);
+    let runtime = build_runtime_in_memory(&config);
     assert!(
         runtime.is_ok(),
         "build_runtime should construct services from a valid AppConfig"
@@ -36,7 +36,7 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
     // build_runtime calls config.validate() before constructing any service
     // (see lib.rs `build_runtime` — `config.validate()?` is the first line),
     // so the same invalid config must fail the pipeline the same way.
-    let pipeline_err = build_runtime(&config);
+    let pipeline_err = build_runtime_in_memory(&config);
     assert!(
         pipeline_err.is_err(),
         "build_runtime must return Err before constructing any service"
@@ -54,7 +54,7 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
 fn build_runtime_registers_the_read_model_as_a_resolvable_projection() {
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config).expect("build_runtime succeeds");
+    let runtime = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     assert!(
         runtime
             .app
@@ -75,7 +75,7 @@ fn build_runtime_registers_the_user_entity_runtime_as_resolvable() {
 
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config).expect("build_runtime succeeds");
+    let runtime = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     assert!(
         runtime.app.resolve_entity::<UserEntity>().is_ok(),
         "UserEntity's runtime must be resolvable via the entity DI path after build"
@@ -232,7 +232,7 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
 fn build_runtime_wires_real_kit_config_output() {
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config);
+    let runtime = build_runtime_in_memory(&config);
     assert!(
         runtime.is_ok(),
         "build_runtime should materialize configuration through the real kit-config \

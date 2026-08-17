@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime, AppConfig, BuiltRuntime};
+use reference_app::{build_runtime_in_memory, AppConfig, BuiltRuntime};
 use support::make_token;
 use tower::ServiceExt;
 
@@ -23,7 +23,8 @@ fn app() -> Router {
         app,
         authn,
         read_side: read_side_handles,
-    } = build_runtime(&config).expect("build_runtime succeeds");
+        ..
+    } = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     // Router-level tests never call `App::start()` — no effect executor is
     // registered in this reference app, and `App::resolver()` is callable
     // before starting (request-time resolution never depended on it).
@@ -174,7 +175,8 @@ async fn users_by_tenant_same_tenant_returns_200_with_that_tenants_real_data() {
         app,
         authn,
         read_side: read_side_handles,
-    } = build_runtime(&config).expect("build_runtime succeeds");
+        ..
+    } = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     let state = AppState::new(app.resolver(), authn);
     let query = read_side_handles.query.clone();
     let router = build_router(state, query.clone());
