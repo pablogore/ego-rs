@@ -34,7 +34,9 @@
 
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores};
+use reference_app::{
+    build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, IdempotencyWiring,
+};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -61,7 +63,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         authn,
         read_side: read_side_handles,
         ..
-    } = build_runtime_with(&config, stores, None)?;
+    } = build_runtime_with(
+        &config,
+        stores,
+        // Chosen visibly, and it is the weaker posture: requests with no
+        // operation key are admitted. This service has not adopted enforcement
+        // yet, and adopting it means naming a durable reservation store, an owner
+        // for this replica, a lease length, and a clock — a decision with a
+        // migration behind it, not a default to inherit.
+        IdempotencyWiring::Compatibility,
+        None,
+    )?;
 
     let query = read_side_handles.query.clone();
     let read_side_runtime = read_side_handles.spawn();

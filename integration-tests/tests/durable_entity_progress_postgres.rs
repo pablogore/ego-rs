@@ -119,7 +119,13 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
     // DI, because only `UserEntity` is registered — `RegisterUserImpl` holds the
     // organization runtime by hand — so resolution would reach one aggregate and
     // not the other, and this claim is about both.
-    reference_app::build_runtime_with(&AppConfig::default(), stores, None)
+    reference_app::build_runtime_with(
+        &AppConfig::default(),
+        stores,
+        // E0's claim is about the event stores; the reservation posture is E1's.
+        reference_app::IdempotencyWiring::Compatibility,
+        None,
+    )
         .expect("the reference app builds")
         .entities
 }
