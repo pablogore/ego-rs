@@ -44,6 +44,7 @@
 mod infrastructure {
     mod concurrent_replicas_postgres;
     mod conflict_from_postgres;
+    mod dual_aggregate_crash_recovery_postgres;
     mod durable_entity_progress_postgres;
     mod fencing_window_postgres;
     mod oldest_completed_postgres;

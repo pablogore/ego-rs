@@ -168,6 +168,30 @@ pub struct RegisterUserImpl {
     /// `RegisterUserImpl::new(...)` call site keeps compiling unchanged;
     /// `build_runtime` wires a real sink via `with_read_side_sink`.
     read_side_sink: Option<ReadSideSink>,
+    /// `None` in every ordinary build. See [`DualAggregateFailpoint`].
+    failpoint: Option<Arc<dyn DualAggregateFailpoint>>,
+}
+
+/// An interruption between this workflow's two halves, for tests that have to
+/// survive one.
+///
+/// The organization is ensured before the user is registered, and after the
+/// organization's receipt is confirmed there is a window where one half of the
+/// operation is durable and the other does not exist. A process that stops
+/// existing inside that window is the only failure recovery genuinely has to
+/// resume from, and no in-process error reproduces it: returning `Err` unwinds,
+/// which runs destructors and can release a lease on the way out.
+///
+/// The position is fixed by this trait's one method rather than passed in.
+/// A failpoint whose position is a parameter is a failpoint whose position can
+/// drift away from the invariant it was written to probe, leaving a test that
+/// reports crossing a boundary it never actually crossed.
+pub trait DualAggregateFailpoint: Send + Sync {
+    /// Called once, after the organization's event and receipt are durable and
+    /// before the user command is sent.
+    ///
+    /// An implementation is not expected to return.
+    fn after_org_receipt_confirmed(&self);
 }
 
 impl RegisterUserImpl {
@@ -181,7 +205,14 @@ impl RegisterUserImpl {
             user_runtime,
             observability,
             read_side_sink: None,
+            failpoint: None,
         }
+    }
+
+    /// Installs an interruption between the two aggregates.
+    pub fn with_failpoint(mut self, failpoint: Arc<dyn DualAggregateFailpoint>) -> Self {
+        self.failpoint = Some(failpoint);
+        self
     }
 
     /// Wires a `ReadSideSink` so successful writes also feed the
@@ -304,6 +335,17 @@ impl RegisterUser for RegisterUserImpl {
             // required; if it ever did, that read would be explicit and would
             // not be presented as this command's historical answer.
             CommandResult::Replayed { .. } => {}
+        }
+
+        // The boundary. Above this line the organization's event and receipt are
+        // durable; below it the user's do not exist yet. That asymmetry is what
+        // recovery has to resume from, and it is the only point in this operation
+        // where interrupting proves anything.
+        //
+        // `None` in production, so this is a null check and not a branch on
+        // configuration.
+        if let Some(failpoint) = &self.failpoint {
+            failpoint.after_org_receipt_confirmed();
         }
 
         // Then register the User. On failure here, the org write above is
