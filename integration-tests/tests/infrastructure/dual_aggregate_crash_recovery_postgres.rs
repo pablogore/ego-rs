@@ -6,11 +6,31 @@
 //! `PostgreSQLEventStore` and `PostgresOperationReservationStore` → real SQL
 //! against a real PostgreSQL, across **two operating-system processes**.
 //!
-//! # This slice is RED on purpose
+//! # This was written expecting to fail, and does not
 //!
-//! E1.1 fixes the expectation; E1.2 implements the behaviour that satisfies it.
-//! The assertion that fails today, and why, is stated at the end of the parent
-//! test rather than weakened to pass. See `WHAT IS STILL RED` there.
+//! E1.1 was scoped as the failing half of a pair: fix the expectation here,
+//! implement recovery in E1.2. The expectation passes against the current
+//! implementation instead — the receipt gate, the fenced lease and the
+//! per-aggregate receipts already compose into resumption, and nothing had ever
+//! driven them through a real crash to find out.
+//!
+//! Nothing was weakened to reach that. Three expectations changed, and it is
+//! worth being exact about which direction each moved:
+//!
+//! - **Corrected, narrower than it looks.** One required `200`; a successful
+//!   registration answers `201`. Nothing about recovery hangs on that number,
+//!   and a recovered operation returning a *different* status than a first
+//!   attempt would itself have been a defect.
+//! - **Corrected, and stronger as a result.** A third identical attempt was
+//!   expected to see both halves answer from their receipts. It sees neither:
+//!   the operation reservation holds the key as completed and replays its stored
+//!   response, so the service body never runs and no aggregate is consulted.
+//!   Two layers can answer a repeat, they sit above one another, and this test
+//!   is the only place both are observed within one operation.
+//! - **Strengthened, because a mutation proved it hollow.** See
+//!   [`ReceiptOutcomes`]: an event count cannot tell resumption apart from a
+//!   repeat the aggregate happened to absorb, and the original assertion claimed
+//!   it could.
 //!
 //! # Why two processes, and why `abort`
 //!
@@ -46,16 +66,15 @@ use ego_domain::operation::OwnerId;
 use ego_integration_tests::isolated_database;
 use ego_testkit::{TestClock, TestJwtBuilder};
 use ego_transport::AppState;
+use reference_app::ports::http::build_router;
 use reference_app::{
     build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, IdempotencyWiring,
     CRASH_FAILPOINT_VAR,
 };
-use reference_app::ports::http::build_router;
 use reference_app::{DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
 use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
-
 
 /// Set by the parent to put the child into child mode, and to tell it which
 /// database to use. Absent in an ordinary run, which is what makes the child test
@@ -91,6 +110,104 @@ const OWNER_B: &str = "replica-b-recovers";
 /// Short, so the recovery phase can position a clock past it without waiting.
 const LEASE: Duration = Duration::from_secs(30);
 
+/// What the reservation guard counts when it displaces an expired lease, and what
+/// it counts when it answers a key that already completed.
+///
+/// Both are measured values from `idempotency.reservation.outcome`, not guesses.
+/// They are named here because they are the layer *above* the per-aggregate
+/// receipts, and this test is the only place where both layers are observed in
+/// one operation: `taken_over` means the guard let the body run, `succeeded`
+/// means it answered instead of running it.
+const RESERVATION_ON_RECOVERY: &str = "taken_over";
+const RESERVATION_ON_REPLAY: &str = "succeeded";
+
+/// Every metric this process counted, as `(name, aggregate_type, outcome)`.
+///
+/// Read through [`Self::receipts`] and [`Self::reservations`], which are the two
+/// layers this test needs to tell apart.
+///
+/// # Why counting events is not enough
+///
+/// A measured mutation forced this. Breaking the receipt gate outright — making
+/// a matching confirmed receipt read as a miss, so the handler runs again — left
+/// the organization's event count at exactly one, and the test stayed green.
+///
+/// The reason is that `TenantOrgCommand::Ensure` is idempotent in the *domain*:
+/// an organization that already exists yields `NoEvents`. So "no second
+/// organization event" is guaranteed twice over, and an event count cannot say
+/// which guarantee produced it. Asserting only the count would have claimed the
+/// receipt prevented a re-execution that the aggregate would have refused
+/// anyway.
+///
+/// The two mechanisms differ in exactly one observable way: the receipt gate
+/// answers **without running the handler** and counts `already_applied`, while
+/// domain idempotency runs the handler and counts `confirmed`. That counter is
+/// therefore the only thing here that distinguishes resumption from a repeat
+/// that happened to be harmless.
+#[derive(Default)]
+struct ReceiptOutcomes(std::sync::Mutex<Vec<(String, String, String)>>);
+
+impl ReceiptOutcomes {
+    /// Every `(aggregate_type, outcome)` the receipt gate counted.
+    fn receipts(&self) -> Vec<(String, String)> {
+        self.filtered("idempotency.receipt.outcome")
+            .into_iter()
+            .map(|(_, aggregate, outcome)| (aggregate, outcome))
+            .collect()
+    }
+
+    /// Every `outcome` the reservation guard counted.
+    ///
+    /// Recorded so an *empty* [`Self::receipts`] can be asserted against positive
+    /// evidence that this recorder was live. On its own, "nothing was counted" is
+    /// also what an unwired recorder reports, and an assertion that cannot tell
+    /// those apart proves nothing.
+    fn reservations(&self) -> Vec<String> {
+        self.filtered("idempotency.reservation.outcome")
+            .into_iter()
+            .map(|(_, _, outcome)| outcome)
+            .collect()
+    }
+
+    fn filtered(&self, name: &str) -> Vec<(String, String, String)> {
+        let mut seen: Vec<_> = self
+            .0
+            .lock()
+            .expect("no test panicked while holding this")
+            .iter()
+            .filter(|(recorded, _, _)| recorded == name)
+            .cloned()
+            .collect();
+        seen.sort();
+        seen
+    }
+}
+
+impl ego_domain::Observability for ReceiptOutcomes {
+    fn trace(&self, _event: ego_domain::SemanticEvent) {}
+
+    fn log(&self, _level: ego_domain::observability::Level, _message: &str) {}
+
+    fn record_metric(&self, observation: ego_domain::observability::MetricObservation<'_>) {
+        let value = |key: &str| {
+            observation
+                .attributes
+                .iter()
+                .find(|a| a.key == key)
+                .map(|a| a.value.to_string())
+                .unwrap_or_default()
+        };
+        self.0
+            .lock()
+            .expect("no test panicked while holding this")
+            .push((
+                observation.name.to_string(),
+                value("aggregate_type"),
+                value("outcome"),
+            ));
+    }
+}
+
 /// Builds the reference app through the **productive** composition root.
 ///
 /// Durable event stores, a durable reservation store, enforcement on, and the
@@ -101,6 +218,7 @@ async fn productive_app(
     url: &str,
     owner: &str,
     clock: Arc<dyn ego_domain::time::Clock>,
+    observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> BuiltRuntime {
     let pool = connect(url).await;
     let stores = EntityEventStores::open(pool.clone())
@@ -122,7 +240,7 @@ async fn productive_app(
             lease_duration: LEASE,
             clock,
         },
-        None,
+        observability,
     )
     .expect("the reference app builds")
 }
@@ -198,11 +316,13 @@ async fn receipt_count(pool: &PgPool, aggregate_type: &str) -> i64 {
 /// `(owner_b, token > 1)` is a takeover, and `(owner_b, 1)` would mean the row had
 /// been removed and re-created — recovery by forgetting, not by resuming.
 async fn reservation(pool: &PgPool) -> Option<(String, i64)> {
-    sqlx::query_as("SELECT owner_id, fencing_token FROM operation_reservations WHERE operation_key = $1")
-        .bind(KEY)
-        .fetch_optional(pool)
-        .await
-        .expect("the reservation reads back")
+    sqlx::query_as(
+        "SELECT owner_id, fencing_token FROM operation_reservations WHERE operation_key = $1",
+    )
+    .bind(KEY)
+    .fetch_optional(pool)
+    .await
+    .expect("the reservation reads back")
 }
 
 // --- the child --------------------------------------------------------------
@@ -221,7 +341,7 @@ async fn child_crashes_after_the_org_receipt_is_confirmed() {
 
     // Real time here: this process is about to die, and a positioned clock would
     // only describe a lease nobody outlives.
-    let built = productive_app(&url, OWNER_A, Arc::new(ego_domain::time::SystemClock)).await;
+    let built = productive_app(&url, OWNER_A, Arc::new(ego_domain::time::SystemClock), None).await;
 
     // The failpoint is installed by the composition root because the parent set
     // `CRASH_FAILPOINT_VAR`. This call does not return.
@@ -244,20 +364,19 @@ async fn a_crash_between_the_aggregates_is_recovered_by_takeover() {
     let pool = db.pool().await;
 
     // --- phase 1: a real crash, in a real other process ---------------------
-    let child = std::process::Command::new(
-        std::env::current_exe().expect("this test binary has a path"),
-    )
-    .args([
-        "--exact",
-        "infrastructure::dual_aggregate_crash_recovery_postgres::\
+    let child =
+        std::process::Command::new(std::env::current_exe().expect("this test binary has a path"))
+            .args([
+                "--exact",
+                "infrastructure::dual_aggregate_crash_recovery_postgres::\
          child_crashes_after_the_org_receipt_is_confirmed",
-        "--nocapture",
-        "--test-threads=1",
-    ])
-    .env(CHILD_DB_URL, db.url())
-    .env(CRASH_FAILPOINT_VAR, "1")
-    .output()
-    .expect("the child process starts");
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_DB_URL, db.url())
+            .env(CRASH_FAILPOINT_VAR, "1")
+            .output()
+            .expect("the child process starts");
 
     // SIGABRT specifically, not merely non-zero.
     //
@@ -316,9 +435,18 @@ async fn a_crash_between_the_aggregates_is_recovered_by_takeover() {
     // The clock is positioned rather than waited for: a sleep standing in for
     // expiry is a condition nobody stated.
     let recovery_clock = Arc::new(TestClock::new(
-        Utc::now() + chrono::Duration::from_std(LEASE).expect("a small duration") + chrono::Duration::seconds(1),
+        Utc::now()
+            + chrono::Duration::from_std(LEASE).expect("a small duration")
+            + chrono::Duration::seconds(1),
     ));
-    let recovered = productive_app(db.url(), OWNER_B, recovery_clock).await;
+    let outcomes = Arc::new(ReceiptOutcomes::default());
+    let recovered = productive_app(
+        db.url(),
+        OWNER_B,
+        recovery_clock,
+        Some(outcomes.clone() as Arc<dyn ego_domain::Observability>),
+    )
+    .await;
     let status = attempt(recovered).await;
 
     // --- takeover, not a fresh acquisition ---------------------------------
@@ -349,11 +477,46 @@ async fn a_crash_between_the_aggregates_is_recovered_by_takeover() {
          registration returns, because a recovered operation is not a different \
          outcome"
     );
+    // Resumption, and specifically not a harmless repeat.
+    //
+    // This is the assertion that carries the guarantee. `already_applied` means
+    // the organization's confirmed receipt answered for it and its handler never
+    // ran; `confirmed` means the user's command did run and wrote its own
+    // receipt. An implementation that re-executed the organization would count
+    // `confirmed` twice, and every event count in this test would still be one —
+    // which is why the counts alone are not the proof.
+    assert_eq!(
+        outcomes.receipts(),
+        vec![
+            (
+                "tenant_organization".to_string(),
+                "already_applied".to_string()
+            ),
+            ("user".to_string(), "confirmed".to_string()),
+        ],
+        "the retry resumed: the organization was answered from its receipt \
+         without running, and only the missing half executed"
+    );
+
+    // The same takeover, seen one layer up.
+    //
+    // Independent of the fencing-token assertion above: that one reads the
+    // durable row, this one reads what the guard decided. A guard that had
+    // answered from a stored response instead would have counted `succeeded` and
+    // never reached the aggregates at all.
+    assert_eq!(
+        outcomes.reservations(),
+        vec![RESERVATION_ON_RECOVERY.to_string()],
+        "the guard displaced the dead owner's expired lease and let the body run"
+    );
+
     assert_eq!(
         event_count(&pool, "tenant_organization").await,
         1,
-        "the organization was NOT re-executed: its receipt was already confirmed, \
-         so a second event would mean the receipt was ignored"
+        "and no second organization event exists. Weaker than it looks, and \
+         deliberately stated that way: `Ensure` is idempotent in the domain too, \
+         so this count would hold even with the receipt ignored. The receipt claim \
+         lives in the assertion above"
     );
     assert_eq!(
         event_count(&pool, "user").await,
@@ -373,13 +536,54 @@ async fn a_crash_between_the_aggregates_is_recovered_by_takeover() {
     let third_clock = Arc::new(TestClock::new(
         Utc::now() + chrono::Duration::from_std(LEASE).expect("a small duration") * 2,
     ));
-    let again = productive_app(db.url(), OWNER_B, third_clock).await;
+    let replayed = Arc::new(ReceiptOutcomes::default());
+    let again = productive_app(
+        db.url(),
+        OWNER_B,
+        third_clock,
+        Some(replayed.clone() as Arc<dyn ego_domain::Observability>),
+    )
+    .await;
     let third = attempt(again).await;
+    // The reservation answered, and the aggregates were never reached.
+    //
+    // Positive evidence first, deliberately: the guard's own counter proves this
+    // recorder was live, so the empty receipt list below means "not consulted"
+    // rather than "not observed". An `is_empty` assertion with nothing to
+    // corroborate it would pass just as happily against an unwired recorder.
+    assert_eq!(
+        replayed.reservations(),
+        vec![RESERVATION_ON_REPLAY.to_string()],
+        "the reservation guard decided this attempt"
+    );
+    assert!(
+        replayed.receipts().is_empty(),
+        "and it decided above the aggregates: a completed operation is answered \
+         from the reservation's stored response, so neither entity is consulted \
+         and neither receipt gate runs. Counted {:?}",
+        replayed.receipts()
+    );
+
     assert_eq!(
         third,
         StatusCode::CREATED,
         "a further retry still succeeds, with the same status"
     );
+    // Neither aggregate is reached at all — and that is the *stronger* outcome,
+    // not a missing one.
+    //
+    // This assertion originally required both halves to count `already_applied`,
+    // and it failed with an empty list. The reason is that two layers can answer
+    // a repeat, and they sit above one another: the operation reservation now
+    // holds this key in a completed state with a stored response, so the guard
+    // replays that response and the service body never runs. The per-aggregate
+    // receipts are the layer *below*, and they are what the recovery attempt
+    // needed, because the reservation there was an expired lease rather than a
+    // completed operation.
+    //
+    // So the recovery attempt reaching the aggregates and this attempt not
+    // reaching them are the same design seen from two states, and asserting an
+    // empty list is what distinguishes them.
     assert_eq!(
         (
             event_count(&pool, "tenant_organization").await,
