@@ -1202,9 +1202,39 @@ working together:
    be recovered after the first already completed rather than treated as a
    different operation.
 
-Remove any one and the scenario fails. That is the claim, and it is the claim
-E1.1's mutation battery tests: eight mutations, each breaking one of these,
-each killed by an assertion naming the guarantee it broke.
+**What the scenario proves, and what it does not.** These two must not be
+collapsed, so they are stated separately.
+
+E1.1 **observes the composition** of all five: a crash between the aggregates is
+resumed, end to end, through the productive composition root. That the five are
+each *necessary* is an architectural conclusion drawn from how the mechanism is
+built — it is not, and does not claim to be, a mutation result for each one.
+
+The battery **directly mutates three** of them, and each mutation is killed by an
+assertion naming the guarantee it broke:
+
+| Guarantee | Directly mutated? | Evidence |
+|---|---|---|
+| Rising fencing token | **yes** | reset to `initial()` on takeover → the token-advance assertion fails |
+| Receipt gate ahead of the handler | **yes** | a matching confirmed receipt read as a miss → `already_applied` is not counted |
+| One identity to both aggregates | **yes** | the user step given no identity → the resumption assertion fails |
+| Takeover of the expired lease | no | observed, not mutated: the durable row's owner changes from the dead replica to the recovering one |
+| Durable per-aggregate receipts | no | observed, not mutated: a *different process* reads the receipt the crashed one wrote |
+
+The remaining five mutations do not target a guarantee at all. Two move the
+failpoint off the boundary and one downgrades `abort()` to `panic!()` — these
+establish that the crash is real and lands where it is claimed to, without which
+every other assertion would be measuring the wrong scenario. Two more break the
+completed-reservation path, which is what separates *replay* from *resumption*
+below.
+
+So the honest form of the claim is: the scenario observes the composition of the
+five guarantees; the battery mutates three of them directly, and additionally
+validates the real boundary of the crash and the distinction between resumption
+and replay. Two guarantees rest on observation rather than mutation, and a later
+slice that wanted mutation coverage for them would have to remove takeover
+outright and make a receipt non-durable — both larger changes than a single-point
+mutation.
 
 **Two layers answer a repeat, and they are not interchangeable.** This is the
 part that was not previously written down anywhere:
