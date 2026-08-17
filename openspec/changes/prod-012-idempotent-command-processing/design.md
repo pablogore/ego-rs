@@ -1272,6 +1272,86 @@ not a requirement.
 Either would mean recovery no longer emerges from composition, and a coordinator
 would then be a real requirement rather than an assumed one.
 
+### AD-13 — `StoredEvent::correlation_id` is withdrawn
+
+**Amends B4.7a, which recorded the field as behaving differently per store and left
+open which behaviour the contract should require.** Neither. The field is
+withdrawn.
+
+**The deciding fact is not that PostgreSQL drops it.** It is that **the productive
+system never produces it.** `StoredEvent::new` is the only constructor that can
+set a correlation id, and it has exactly two call sites — both inside the type's
+own unit tests. Every productive path constructs through
+`StoredEvent::without_correlation`. Nothing in `crates/`, `examples/` or
+`integration-tests/` ever hands a `Some(_)` to a store.
+
+Making it durable now would add a column and a contract clause to transport
+**absence**, forever. That converts an empty promise into permanent debt, which is
+the same failure AD-10c refused: instrumentation for a value the system does not
+generate.
+
+**The in-memory stores preserved it by accident, and that does not define the
+contract.** Both keep whole `StoredEvent` values — `stream.extend(events)` and
+`stream.push(event)` — so the field survives as a side effect of how they store,
+not because either implements a promise. A behaviour nobody wrote is not a
+specification.
+
+**PostgreSQL is not losing a real signal.** It never receives one. Its `INSERT`
+has no `correlation_id` column to bind and its load reconstructs through
+`without_correlation`; both are consistent with the only input that ever arrives.
+
+**No migration, and no empty column.** The `events` table has never had a
+`correlation_id` column across all eight migrations, and none is added here.
+Adding one would mean shipping schema whose every row is `NULL` by construction.
+
+**`ServiceContext::correlation_id` is unaffected, and is the correlation that
+actually exists.** It is set, read, and propagated across service boundaries. What
+this amendment refuses is the *claim* that it also correlates events: nothing
+bridges the two, and no file in the codebase mentions both. Two fields sharing a
+name were mistaken for one capability.
+
+**This is a deliberate public breaking change.** The field is removed, and with it
+`StoredEvent::new`, whose only parameter beyond the event *is* the correlation id
+— once the field goes, `new` and `without_correlation` collapse into one
+constructor. There is no accessor to remove; it was a public field. Measured
+blast radius: 2 `StoredEvent::new` call sites, 24 `without_correlation` call sites
+across 8 files, **one** read of the field (its own test), and three prose
+references — the type's own doc comment and two lines in `persistence/mod.rs`'s
+module map — which must go with it so the map does not describe a field that no
+longer exists.
+
+An earlier count here said two reads. The second was
+`SemanticEvent::correlation_id` in `observability.rs`, a different type that shares
+the name; it is not affected.
+
+**Why the conformance harness did not catch the divergence, which is the part
+worth fixing regardless.** `crates/testkit/src/event_store.rs` builds 13 fixtures,
+all through `without_correlation`, and calls `StoredEvent::new` zero times. It
+could not have detected a difference in a field it never populates. The same shape
+as the systemwide comparison, the unit-of-work offsets and the absent-stream
+report: two implementors diverged because the shared harness asserted nothing
+about the thing that differed.
+
+**How B4.7b closes it, normatively: structural exhaustiveness, not a dynamic
+assertion.** The harness destructures a loaded `StoredEvent` with **no `..`**, so
+a future field breaks its compilation until someone states how that field must be
+verified. This is required rather than preferred, because no runtime check can
+discover a new field in Rust — a round-trip assertion compares only what it was
+written to look at, and would stay green over exactly the kind of silent addition
+that produced this debt. `..` in that destructuring would defeat the guarantee and
+must not appear.
+
+**Reopening condition.** Durable event correlation returns **only** as an
+end-to-end slice that carries `ServiceContext::correlation_id` through to every
+`StoredEvent`, persists it in every store, and pins it with the shared conformance
+harness. The producer, the contract and the storage arrive **together** — the same
+rule AD-10c and AD-10d hold to.
+
+That slice does not belong to PROD-012. Carrying correlation from a request into
+durable history is event provenance, a different capability from duplicate
+suppression, and widening this change to cover it would mean designing provenance
+inside an idempotency campaign.
+
 ## Data Flow — Happy Path
 
 ```

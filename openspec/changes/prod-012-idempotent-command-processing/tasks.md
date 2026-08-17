@@ -330,7 +330,41 @@ unchanged, which is the point of stopping here.
 - [x] B4.5e GREEN **(enabling, behaviour-preserving)**: `resolve_tenant` moves to `crates/domain/src/persistence/tenant.rs`. It had been copied into four adapters — the PostgreSQL module and three in-memory ones — and B4.5c needed a fifth call site, so copying again would have knowingly worsened a duplication that already existed four times. The four copies were compared before consolidating: two textual variants differing only in `match` arm order, semantically identical. The rule is a domain statement about what a tenant identifier means, not an implementation detail of any adapter.
 - [x] B4.6 RED/GREEN: `crates/domain/src/persistence/stored_event.rs` unit tests pin what that file can pin — that neither constructor attaches an operation key, that attaching one leaves the other fields alone, and that attaching twice keeps the last rather than refusing or accumulating. The **round trip through storage** is not provable there and is asserted by the shared conformance harness instead, against all three implementations: a key attached to one event in a batch comes back exactly, and the event appended beside it does not acquire one. Both write paths are covered, since the direct append and the unit of work bind it through separate code.
 - [x] B4.7 GREEN: migration `009_add_operation_key_to_events.sql` adds a nullable `operation_key VARCHAR(255)`, and **both** Postgres write paths bind it — the direct append and the unit of work, which write through separate code. `load` reads it back and parses it, surfacing an unparseable stored value as an error rather than returning the event as though it had no operation behind it. A dedicated column rather than a generic `metadata` blob: the operation is a first-class identity here, not incidental annotation, and a JSON blob would be unqueryable without expression indexes while inviting anything at all to be dumped in. Deliberately unindexed — nothing queries events by operation key, and an index for a query that does not exist costs every write to serve none.
-- [ ] B4.7a **(debt found here, not fixed here)**: `StoredEvent::correlation_id` behaves differently per store and the shared contract pins neither behaviour. The in-memory implementations return whole `StoredEvent` values, so it survives them; the PostgreSQL implementation neither binds it on insert nor reconstructs it on load, so it is dropped there. The conformance harness makes no assertion about it, which is why the two diverged without anything failing — the same shape as the systemwide comparison, the unit-of-work offsets and the absent-stream report. Closing it means deciding what the contract should require and then making the durable store meet it, which changes what an existing setter observably does. Now documented on the type as store-dependent rather than described as universally discarded.
+- [~] B4.7a **WITHDRAWN — superseded by AD-13 and B4.7b.** `StoredEvent::correlation_id` behaved differently per store and the shared contract pinned neither behaviour. **Neither becomes normative — the field is withdrawn. See AD-13.**
+
+      Not `[x]`: this task's own criterion was to decide the contract *and* correct the implementation. AD-13 makes the decision; the removal is B4.7b and has not happened. Marking it done would claim work that was superseded rather than performed — the same standard applied to E1.2.
+
+      The audit that decided it, all measured rather than assumed:
+
+      | Store | `append` | `load` | Survives? |
+      |---|---|---|---|
+      | `InMemoryEventStore` (infrastructure) | `stream.extend(events)` | returns the stored values | yes, verbatim |
+      | `InMemoryEventStore` (persistent-entity) | `stream.push(event)` | returns the stored values | yes, verbatim |
+      | `PostgreSQLEventStore` | `INSERT` has no such column | `without_correlation(event)` | no |
+      | `PostgresEventStoreUnitOfWork` | the same `INSERT` | — | no |
+
+      **The deciding fact is not the divergence.** `StoredEvent::new` — the only constructor that can set a correlation id — has exactly **two call sites, both inside the type's own unit tests**. No productive code in `crates/`, `examples/` or `integration-tests/` ever supplies one. Persisting it would add schema and contract to transport absence forever.
+
+      Two corrections to this task's own earlier text, both worth recording. First, the in-memory stores preserve the field **by accident** — they keep whole `StoredEvent` values — which is not a specification. Second, `persistent-entity/src/persistence.rs` also constructs through `without_correlation`, but that is a *facade* receiving raw `&[E]` with no correlation id to carry, not a store discarding one; conflating them would have meant fixing the wrong place. Also unstated before: the `events` table has **never** had a `correlation_id` column across all eight migrations, so making it durable needs a migration, not just a bind.
+
+      `ServiceContext::correlation_id` is untouched and remains the correlation that exists — set, read and propagated across services. Nothing bridges it to events; no file in the codebase mentions both.
+
+- [ ] B4.7b Implementation: remove `StoredEvent::correlation_id` and `StoredEvent::new`, whose only parameter beyond the event is that field — the two constructors collapse into one. No accessor to remove; it was a public field. Update the 24 `without_correlation` call sites across 8 files, the single read (its own test), and three prose references: the type's doc comment and two lines in `persistence/mod.rs`'s module map, which would otherwise describe a field that no longer exists. `SemanticEvent::correlation_id` in `observability.rs` shares the name and is a different type — leave it alone.
+
+      **The harness gap is fixed in the same slice, not left behind** — the removal and the prevention of another divergence are one contractual repair. `crates/testkit/src/event_store.rs` builds 13 fixtures and calls `StoredEvent::new` zero times, so it could never have detected a difference in a field it does not populate — the same shape as the systemwide comparison, the unit-of-work offsets and the absent-stream report.
+
+      The fix is **structural exhaustiveness, not a dynamic assertion**. The harness destructures a loaded event with no `..`:
+
+      ```rust
+      let StoredEvent {
+          event,
+          operation_key,
+      } = loaded_event;
+      ```
+
+      A future field then **breaks the harness's compilation** until someone states how it must be verified. This matters because no runtime assertion can discover a new field in Rust: a round-trip check can only compare what it was written to look at, so it would stay green over exactly the kind of silent addition that produced this debt. `..` would defeat it entirely and must not appear here.
+
+      Acceptance: no reference to `correlation_id` survives on `StoredEvent` or any store, both workspaces build and their gates pass, and the round-trip assertion fails if a store drops any remaining field.
 - [x] B4.8 Update every existing `EventStore` caller (`EntityActor`, in-memory persistence adapter) for the new async signature; run full `cargo test --workspace` to catch ripple. **Run, not skipped**: 112 suites, 1 540 passed, 0 failed, 0 ignored, exit 0. This is the one task in the change whose text names that command, and it names it because a trait change of this shape is exactly what ripples somewhere nobody thought to look — a per-crate selection would have been the reviewer choosing which crates could break.
 
 ### Phase B5: Per-Aggregate `operation_receipts` (needs A2, A3, B4)
@@ -918,7 +952,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Thirteen tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock), **B4.7a** (`StoredEvent::correlation_id` diverges between the in-memory and PostgreSQL stores, and the shared contract pins neither behaviour — found during B4, deliberately not fixed there), **B5.8** (extend the schema-index assertion to the `operation_receipts` pair), and the three **DOC** items. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Thirteen tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock), **B4.7b** (remove `StoredEvent::correlation_id` — B4.7a's divergence is resolved by withdrawal, AD-13, and this is the implementation), **B5.8** (extend the schema-index assertion to the `operation_receipts` pair), and the three **DOC** items. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 
