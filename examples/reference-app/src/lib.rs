@@ -80,6 +80,57 @@ use crate::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore};
 /// with `ProviderUnavailable`. Lengthened to well above that 32-byte floor.
 pub const DEV_SIGNING_KEY: &[u8] = b"reference-app-development-signing-key-not-for-prod";
 
+/// Set to any value to make this process abort between the two halves of a
+/// `register` operation. Unset installs nothing.
+///
+/// Only exists under the `crash-test-failpoint` feature, which is off by
+/// default. An earlier version of this compiled unconditionally, and that was a
+/// defect rather than a cautious default: any ordinary host that *inherited*
+/// this variable — a CI environment, an exported shell, a container image built
+/// from one — would have aborted mid-`register`. `None` by default does not help
+/// when the environment can flip it, and describing that as "no new behaviour in
+/// production" was simply wrong.
+///
+/// Read exactly once, at the composition root: a workflow that consulted the
+/// environment itself would carry a second, invisible input.
+#[cfg(feature = "crash-test-failpoint")]
+pub const CRASH_FAILPOINT_VAR: &str = "EGO_IT_CRASH_AFTER_ORG_RECEIPT";
+
+/// The failpoint this process was asked to install, if any.
+#[cfg(feature = "crash-test-failpoint")]
+fn aborting_failpoint() -> Option<Arc<dyn crate::application::DualAggregateFailpoint>> {
+    if std::env::var(CRASH_FAILPOINT_VAR).is_err() {
+        return None;
+    }
+
+    struct Abort;
+    impl crate::application::DualAggregateFailpoint for Abort {
+        /// `abort`, deliberately — not `panic!` and not `exit`.
+        ///
+        /// SIGABRT stops the process where it stands: nothing unwinds, no
+        /// destructor runs, no pool closes and no lease is abandoned on the way
+        /// out. A panic would unwind and leave a tidier partial state than any
+        /// real crash leaves, so recovery would be tested against a situation
+        /// that cannot happen.
+        fn after_org_receipt_confirmed(&self) {
+            std::process::abort();
+        }
+    }
+
+    Some(Arc::new(Abort))
+}
+
+/// Always `None`, and it reads nothing to decide that.
+///
+/// The ordinary build: no environment is consulted, and no aborting
+/// implementation is compiled for anything to construct. The seam in
+/// `RegisterUser` stays exactly where it is — what disappears is any way to
+/// reach it from outside the process.
+#[cfg(not(feature = "crash-test-failpoint"))]
+fn aborting_failpoint() -> Option<Arc<dyn crate::application::DualAggregateFailpoint>> {
+    None
+}
+
 /// Cross-domain rule threshold (illustrative — see design.md "Validation").
 /// A single subtree's own `validate()` cannot see this: it is a policy that
 /// only makes sense once `runtime` and `database` are both known.
@@ -521,10 +572,15 @@ pub fn build_runtime_with(
     let read_side_sink = ReadSideSink::new(read_side_store.clone());
     let read_side_handles = ReadSideHandles::new(read_side_store).with_logger(logger.clone());
 
-    let register_user = Arc::new(
-        RegisterUserImpl::new(org_runtime, user_runtime.clone(), None)
-            .with_read_side_sink(read_side_sink),
-    );
+    let register_user = RegisterUserImpl::new(org_runtime, user_runtime.clone(), None)
+        .with_read_side_sink(read_side_sink);
+    // Installed here, at the composition root, or not at all. The service itself
+    // reads no environment: a workflow that decided mid-operation whether to
+    // survive would be a different workflow under test than the one shipped.
+    let register_user = Arc::new(match aborting_failpoint() {
+        Some(failpoint) => register_user.with_failpoint(failpoint),
+        None => register_user,
+    });
 
     let mut builder = App::builder()
         // This service has not adopted operation-key enforcement yet, and says so.

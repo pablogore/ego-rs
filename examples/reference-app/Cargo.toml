@@ -4,6 +4,23 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Lets a build install the crash failpoint `RegisterUser` exposes, and nothing
+# else. **Off by default, and it must stay off by default.**
+#
+# The trait and the `Option` field are always compiled: they are an ordinary
+# explicit dependency, `None` in every build, and a null check at the call site.
+# What this feature guards is the *activator* — the environment variable that
+# turns that `None` into a process abort. Without the feature the composition
+# root does not read the variable and the aborting implementation does not exist
+# to be constructed, so no ordinary host can be pushed into aborting mid-request
+# by an inherited variable.
+#
+# Only `integration-tests` enables it. That crate is a separate workspace rather
+# than a member of this one, so Cargo's feature unification cannot carry it back
+# into any build of this workspace.
+crash-test-failpoint = []
+
 [dependencies]
 async-trait = "0.1"
 axum = "0.7"
