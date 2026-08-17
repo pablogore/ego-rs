@@ -66,7 +66,7 @@ Chain strategy: hybrid
 | B6 | `#[idempotent]` marker + slot-3 codegen + reference-app wiring — closes bug | PR 11 | `cargo test -p service-sdk-macros -p reference-app` | `examples/reference-app/tests/e2e_register.rs` | Set `IdempotencyEnforcementMode::Compatibility` — kill switch, no revert |
 | B7a | Split retention + purge job + concurrency safety + worker ownership | PR 12 | `cargo test -p integration-tests purge` | Testcontainers, 2 concurrent workers | Disable purge worker registration; rows persist harmlessly |
 | B7b | Observability (AD-10 spans/counters) | PR 13 | `cargo test -p service-sdk -p runtime idempotency_observability` | N/A — unit assertions on span/metric emission | Revert; no data impact |
-| E1 | `RegisterUserImpl` dual-aggregate recovery E2E | PR 14 | `cargo test -p reference-app --test register_user_partial_failure` | Kill-after-org-command scenario, real actor restart | Revert test + wiring glue only |
+| E1 | `RegisterUserImpl` dual-aggregate recovery E2E | PR 14 | `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite` | Real child process killed by SIGABRT between the aggregates; retry as a different owner past the lease | Revert the test; no wiring to revert (AD-12) |
 | DOC | README PG14 floor, spec/design cross-links, ROADMAP update | PR 15 | N/A (docs) | N/A | Revert doc commit |
 
 ---
@@ -896,8 +896,29 @@ unchanged, which is the point of stopping here.
 
 ### Phase E1: Dual-Aggregate Recovery E2E (needs B6, B7 complete)
 
-- [ ] E1.1 RED: `examples/reference-app/tests/register_user_partial_failure.rs` (existing hook, per user.rs comment) — kill the process after the `TenantOrganization` receipt confirms but before the `User` command executes; retry via lease takeover; assert org no-ops, user executes, zero duplicated `UserRegistered` events (D6 explicit non-promise; reference-service spec scenario).
-- [ ] E1.2 GREEN: wire `RegisterUserImpl`'s recovery path so both aggregates are addressed under the one operation key/reservation (§9 non-atomicity honored explicitly, not silently).
+- [x] E1.1 Acceptance: a real crash between the two aggregates is recovered by takeover. `integration-tests/tests/infrastructure/dual_aggregate_crash_recovery_postgres.rs` — a child process dies by **SIGABRT** after the `TenantOrganization` receipt confirms and before the `User` command is sent; the parent proves the partial durable state, then retries as a different owner with a clock past the lease.
+
+      Landed as an acceptance test rather than the specified RED/GREEN pair, because **the expected scenario passes with no new recovery logic** — see AD-12. Written to fail, and it does not.
+
+      Two findings from writing it, both worth keeping:
+
+      **The event-count assertion was a vacuous green.** Asserting "no second `OrganizationEnsured` event" was measured to survive a mutation that breaks the receipt gate outright, because `TenantOrgCommand::Ensure` is idempotent in the *domain* too — an existing org yields `NoEvents`. The count is guaranteed twice over and cannot say which guarantee produced it. What distinguishes them is `idempotency.receipt.outcome`: the gate answers **without running the handler** and counts `already_applied`, while domain idempotency runs it and counts `confirmed`. The test now asserts `[(tenant_organization, already_applied), (user, confirmed)]`, and the count stays with its message saying out loud that it is the weaker claim.
+
+      **A third identical attempt exercises a different layer.** It counts no receipt outcome at all: the reservation holds the key as completed and replays its stored response, so the service body never runs. Asserted against positive evidence from the guard's own counter first, because "nothing was counted" is also what an unwired recorder reports.
+
+      Eight mutations, eight killed, six distinct killing assertions. One declared coverage limit: the empty-receipts assertion is never the first to fail, since `ReservationOutcome::Succeeded`'s label and its `Replay` decision derive from the same match arm.
+
+      The interruption is an explicit dependency (`DualAggregateFailpoint`, one method fixing its own position) behind the reference app's `crash-test-failpoint` feature, **off by default**. An earlier version read the environment unconditionally, which meant an inherited variable could abort an ordinary host mid-`register` — fixed, and verified by measuring the artifact: the variable's name appears 0 times in `libreference_app.rlib` with default features and 3 times with the feature on. Unix-only by `#[cfg(unix)]`, because the signal *is* the evidence.
+
+- [~] E1.2 **WITHDRAWN — superseded by evidence (AD-12).** Not implemented, and not implementable as specified: there is no recovery path left to wire. Recovery is the composition of takeover on an expired lease, a rising fencing token, durable per-aggregate receipts, the receipt gate ahead of the handler, and one operation identity carried to both aggregates. E1.1 **observes that composition** end to end; its mutation battery **directly mutates three** of the five — the fencing token's advance, the receipt gate, and the shared operation identity — and additionally validates the real boundary of the crash and the distinction between resumption and replay. That all five are necessary is an architectural conclusion, not a per-guarantee mutation result: takeover and receipt durability are observed rather than mutated (the durable row changes owner; a different process reads the receipt the crashed one wrote). AD-12 states which is which.
+
+      Deliberately **not** marked complete: that would claim work never performed and attribute the behaviour to a slice that wrote no code. Deliberately not reconverted into another task either — a slice invented to preserve a RED/GREEN shape is not a requirement.
+
+      Reopens if any of those five guarantees changes, or if a multi-aggregate case arises that cannot be resumed by receipts and takeover alone. AD-12 states both conditions.
+
+      **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
+
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Thirteen tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock), **B4.7a** (`StoredEvent::correlation_id` diverges between the in-memory and PostgreSQL stores, and the shared contract pins neither behaviour — found during B4, deliberately not fixed there), **B5.8** (extend the schema-index assertion to the `operation_receipts` pair), and the three **DOC** items. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 
@@ -943,7 +964,7 @@ B4 ──▶ B5
 | Two Guarantees, Named Separately | B7.1, B7.5, DOC.3 |
 | Fingerprint Determines Replay vs. Conflict | B2.8, B2.9, B5.4, B6.7 |
 | Split Retention and Safe Purge | B7.1–B7.7 |
-| The Dual-Aggregate Write Is Not Promised Atomic | E1.1, E1.2 |
+| The Dual-Aggregate Write Is Not Promised Atomic | E1.1 (E1.2 withdrawn — AD-12) |
 | OperationKey Is Distinct From IdempotencyKey | B1.1–B1.3 |
 | Cross-Tenant Replay Is Prohibited | B7.8, B7.9 |
 
@@ -988,7 +1009,7 @@ B4 ──▶ B5
 | Requirement | Task(s) |
 |---|---|
 | Retried RegisterUser Produces Exactly One UserRegistered Event | B0.1, B0.2, B6.9, B6.10 |
-| Dual-Aggregate Recovery After Mid-Operation Process Death | E1.1, E1.2 |
+| Dual-Aggregate Recovery After Mid-Operation Process Death | E1.1 (E1.2 withdrawn — AD-12) |
 
 
 ### `testkit` delta
