@@ -467,6 +467,57 @@ impl AppBuilder {
         self
     }
 
+    /// Adopts operation-key enforcement, with everything a lease needs to behave.
+    ///
+    /// One method rather than four forwards, because these four are not four
+    /// settings. A store with no clock cannot compute a lease expiry; an owner
+    /// with no store means nothing; a lease length without a clock is unusable.
+    /// Exposed separately they would let a host assemble combinations most of
+    /// which are incoherent — enforcement declared with no store, a store with no
+    /// owner, an owner with no clock — and each of those looks configured while
+    /// guaranteeing nothing.
+    ///
+    /// So the facade's surface is a **complete** configuration. It delegates to
+    /// [`RuntimeBuilder`]'s individual setters internally, where the pieces are
+    /// separate for the builder's own reasons; what a host can express is the
+    /// whole thing or none of it.
+    ///
+    /// # The parameters, and why each is a host decision
+    ///
+    /// - `store`: where reservations are held. Durable, or enforcement is
+    ///   decorative — an in-memory store makes the build succeed and the
+    ///   deployment look adopted while surviving nothing.
+    /// - `owner_id`: who this runtime reserves as. A takeover is *this* owner
+    ///   displacing *that* one, so two replicas sharing an id could not displace
+    ///   each other at all.
+    /// - `lease_duration`: how long a lease is held before another owner may take
+    ///   it. Must exceed the longest a legitimate execution can take; a shorter
+    ///   one permits two owners to run the same operation at once, which is a
+    ///   correctness problem rather than a tuning preference.
+    /// - `clock`: what expiry is measured against. One source, so a worker
+    ///   reading wall time cannot disagree with a store reading an injected
+    ///   clock — under test, or under skew.
+    ///
+    /// The alternative to calling this is
+    /// [`Self::idempotency_enforcement_mode`] with the compatibility variant,
+    /// which is how a deployment states it has not adopted enforcement yet.
+    pub fn enforced_idempotency(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+        owner_id: ego_domain::operation::OwnerId,
+        lease_duration: std::time::Duration,
+        clock: Arc<dyn ego_domain::time::Clock>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::MandatoryKey)
+            .with_operation_reservation_store(store)
+            .with_reservation_owner_id(owner_id)
+            .with_reservation_lease_duration(lease_duration)
+            .with_reservation_clock(clock);
+        self
+    }
+
     /// Registers an external-effect executor — thin delegation to
     /// [`RuntimeBuilder::register_effect_executor`] (review F1). This is
     /// what makes [`App::start`] actually have effects to start:
@@ -1228,6 +1279,229 @@ mod tests {
         assert!(
             second_ran.load(Ordering::SeqCst),
             "the second participant must still run despite the first one failing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod enforced_idempotency_wiring {
+    //! Every piece of an enforced posture arrives, not just the mode.
+    //!
+    //! Before [`AppBuilder::enforced_idempotency`], the facade forwarded the
+    //! enforcement mode and the store and stopped: `owner_id`, `lease_duration`
+    //! and `clock` lived on [`RuntimeBuilder`] with no route through it. A host
+    //! adopting enforcement got a store with no identity, no lease and no clock,
+    //! and a test needing those had to reach past the facade and build a runtime
+    //! the host would never build.
+    //!
+    //! So these follow the pieces individually. It is not enough that enforcement
+    //! is *on*: a forward silently dropped is invisible from outside until a lease
+    //! misbehaves in production, or until a takeover cannot name whose lease it is
+    //! taking.
+    //!
+    //! Read back through the crate's own accessors rather than by driving a
+    //! reservation. What is under test is the configuration the host assembled,
+    //! and that is exactly what these expose — a scripted store would add a
+    //! moving part between the claim and the evidence.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ego_domain::operation::{
+        OperationReservationStore, OwnerFence, OwnerId, ReservationError, ReservationOutcome,
+        ReserveRequest, StoredServiceResponse,
+    };
+    use ego_domain::time::Clock;
+
+    use super::*;
+    use crate::runtime::IdempotencyEnforcementMode;
+
+    const OWNER: &str = "replica-under-test";
+    /// Deliberately not a round number, so a default or a dropped forward differs.
+    const LEASE: Duration = Duration::from_secs(97);
+
+    /// Frozen years in the past, so an expiry computed from wall time is far away
+    /// rather than close enough to pass.
+    struct FrozenClock;
+
+    impl FrozenClock {
+        fn instant() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2021, 3, 14, 15, 9, 26).unwrap()
+        }
+    }
+
+    impl Clock for FrozenClock {
+        fn now(&self) -> DateTime<Utc> {
+            Self::instant()
+        }
+    }
+
+    /// Exists to be registered. Nothing here calls it.
+    struct InertStore;
+
+    #[async_trait]
+    impl OperationReservationStore for InertStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            unreachable!("this fixture is registered, never driven")
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _until: DateTime<Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn purge_completed_before(
+            &self,
+            _cutoff: DateTime<Utc>,
+            _batch: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!()
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    fn enforced_app() -> App {
+        App::builder()
+            .enforced_idempotency(
+                Arc::new(InertStore),
+                OwnerId::new(OWNER),
+                LEASE,
+                Arc::new(FrozenClock),
+            )
+            .build()
+            .expect("a complete enforced configuration builds")
+    }
+
+    /// One call turns enforcement on **and** gives it somewhere to reserve.
+    ///
+    /// Both halves together, because the runtime refuses to build with one and not
+    /// the other — so a test asserting only the mode could not tell a complete
+    /// configuration from a rejected one.
+    #[test]
+    fn one_call_adopts_enforcement_and_registers_a_store() {
+        let app = enforced_app();
+
+        assert_eq!(
+            app.runtime.idempotency_enforcement_mode(),
+            IdempotencyEnforcementMode::MandatoryKey,
+            "an enforced host refuses a request carrying no operation key"
+        );
+        assert!(
+            app.runtime.inner().reservation().is_some(),
+            "and it has somewhere to reserve — enforcement with no store is the \
+             configuration that looks adopted and guarantees nothing"
+        );
+    }
+
+    /// The owner the host named is the owner the runtime reserves as.
+    ///
+    /// The piece E1 cannot do without: a takeover is one owner displacing another,
+    /// so an owner dropped between the facade and the config makes "this
+    /// reservation still belongs to owner A" unassertable — and leaves two
+    /// replicas unable to displace each other in production.
+    #[test]
+    fn the_owner_the_host_named_reaches_the_reservation_config() {
+        let app = enforced_app();
+        let reservation = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .clone();
+
+        assert_eq!(
+            reservation.owner_id().as_str(),
+            OWNER,
+            "the runtime must reserve as the owner the host configured"
+        );
+    }
+
+    /// The lease and the clock together determine the expiry.
+    ///
+    /// Asserted as the exact arithmetic rather than as "some future instant":
+    /// that sum is the whole content of both settings. A dropped duration would
+    /// still produce a plausible timestamp from the clock alone, and a dropped
+    /// clock would produce one from wall time.
+    #[test]
+    fn the_lease_and_the_clock_determine_the_expiry() {
+        let app = enforced_app();
+        let reservation = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .clone();
+
+        assert_eq!(
+            reservation.lease_until(),
+            FrozenClock::instant()
+                + chrono::Duration::from_std(LEASE).expect("a small duration converts"),
+            "the expiry is the configured lease measured from the configured clock"
+        );
+    }
+
+    /// The injected clock is the one measured from, not wall time.
+    ///
+    /// Separate from the assertion above because that one would also pass if both
+    /// the clock and the lease were dropped and something else produced the same
+    /// sum. This pins the direction: the instant is years in the past, so wall
+    /// time cannot land near it.
+    #[test]
+    fn the_expiry_derives_from_the_injected_clock_not_wall_time() {
+        let app = enforced_app();
+        let expiry = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .lease_until();
+
+        assert!(
+            expiry < Utc::now() - chrono::Duration::days(365),
+            "an expiry computed from wall time would be near now; this must derive \
+             from the injected clock: {expiry}"
+        );
+    }
+
+    /// The compatibility posture registers no store at all.
+    ///
+    /// The negative control. Without it, a change that made every host enforce
+    /// would satisfy every assertion above, and the honest "not adopted yet"
+    /// declaration would have quietly stopped existing.
+    #[test]
+    fn the_compatibility_posture_adopts_nothing() {
+        let app = App::builder()
+            .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build()
+            .expect("a compatibility host builds");
+
+        assert_eq!(
+            app.runtime.idempotency_enforcement_mode(),
+            IdempotencyEnforcementMode::Compatibility,
+            "a deployment still in transition keeps admitting keyless requests"
+        );
+        assert!(
+            app.runtime.inner().reservation().is_none(),
+            "and registers no store — an in-memory stand-in would make it look \
+             adopted while surviving nothing"
         );
     }
 }

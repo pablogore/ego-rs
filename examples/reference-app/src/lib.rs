@@ -339,6 +339,46 @@ impl EntityEventStores {
     }
 }
 
+/// Which idempotency posture this host runs under.
+///
+/// Named for the contract each carries, not for the decision's status. An earlier
+/// draft called the first variant `Deferred`, which said something about the
+/// roadmap and nothing about what the host receives — a reader had to go looking
+/// to find out that requests without an operation key are admitted.
+///
+/// There is deliberately no third state. Enforcement declared with nothing behind
+/// it is the configuration that looks guarded and guarantees nothing, and the
+/// runtime already refuses it at build time; this type makes it unrepresentable
+/// rather than merely rejected.
+pub enum IdempotencyWiring {
+    /// Requests with no operation key are **admitted**.
+    ///
+    /// The bounded compatibility posture, for a deployment still in transition.
+    /// No reservation store is registered — deliberately, because registering an
+    /// in-memory one would make the build succeed and the deployment look adopted
+    /// while giving no durability at all.
+    Compatibility,
+    /// Enforcement is on, with everything a lease needs.
+    ///
+    /// The four travel together because they are not four settings: a store with
+    /// no clock cannot compute a lease expiry, an owner with no store means
+    /// nothing, and a lease length without a clock is unusable. Carried as one
+    /// variant, a host cannot assemble `store` without `owner`, `owner` without
+    /// `clock`, or enforcement without a lease.
+    Enforced {
+        /// Where reservations are held. Durable, or enforcement is decorative.
+        store: Arc<dyn ego_domain::operation::OperationReservationStore>,
+        /// Who this runtime reserves as. Two replicas must not share one, or
+        /// neither can take the other's lease over.
+        owner_id: ego_domain::operation::OwnerId,
+        /// How long a lease is held before another owner may take it over. Must
+        /// exceed the longest a legitimate execution can take.
+        lease_duration: std::time::Duration,
+        /// The clock expiry is measured against.
+        clock: Arc<dyn Clock>,
+    },
+}
+
 /// **The one place a sink is handed to the entity half of the system.**
 ///
 /// Production calls this, and so does the acceptance test — deliberately the
@@ -406,7 +446,12 @@ pub fn build_runtime_observed_in_memory(
     config: &AppConfig,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    build_runtime_with(config, EntityEventStores::in_memory(), observability)
+    build_runtime_with(
+        config,
+        EntityEventStores::in_memory(),
+        IdempotencyWiring::Compatibility,
+        observability,
+    )
 }
 
 /// [`build_runtime_observed_in_memory`], over event stores the caller chose.
@@ -418,6 +463,7 @@ pub fn build_runtime_observed_in_memory(
 pub fn build_runtime_with(
     config: &AppConfig,
     stores: EntityEventStores,
+    idempotency: IdempotencyWiring,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
@@ -489,16 +535,24 @@ pub fn build_runtime_with(
         // reserve one cannot keep the promise. Declaring `Compatibility` is how a
         // deployment states it is still in transition.
         //
-        // Deliberately not registered here: the in-memory reservation store. It would
-        // make the build succeed and would make this look adopted while giving no
-        // durability at all — a configuration that appears productive and is not is
-        // worse than an honest declaration that enforcement is off. Adopting it means
-        // registering the durable store, which is a separate decision with a
-        // migration behind it.
-        .idempotency_enforcement_mode(
-            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
-        )
         .security(authn.clone(), authz);
+    // Which posture this host runs under is the caller's, not this function's.
+    //
+    // What has not changed is why an in-memory reservation store is never a
+    // stand-in for the durable one: it would make the build succeed and the
+    // deployment look adopted while surviving nothing. `Compatibility` registers
+    // no store at all, which is the honest shape of "not adopted yet".
+    builder = match idempotency {
+        IdempotencyWiring::Compatibility => builder.idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        ),
+        IdempotencyWiring::Enforced {
+            store,
+            owner_id,
+            lease_duration,
+            clock,
+        } => builder.enforced_idempotency(store, owner_id, lease_duration, clock),
+    };
     // The same sink the entity runtimes were given, for the SDK's own signals.
     if let Some(sink) = observability {
         builder = builder.observability(sink);
