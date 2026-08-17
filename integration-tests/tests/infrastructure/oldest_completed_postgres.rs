@@ -24,7 +24,7 @@
 //! Here the difference is directly observable, which is the point of the port
 //! carrying three states rather than an `Option`.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
@@ -32,24 +32,13 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use ego_domain::operation::{OldestCompleted, OperationReservationStore};
 use ego_domain::time::SystemClock;
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::{isolated_database, IsolatedDatabase};
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 /// Fixed, so a failure is reproducible and nothing depends on when the suite ran.
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
-}
-
-async fn connect(url: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(4)
-        .connect(url)
-        .await
-        .expect("the container accepts connections")
 }
 
 /// Inserts one completed reservation with an exact `completed_at`.
@@ -94,29 +83,23 @@ async fn in_progress_row(pool: &PgPool, key: &str, lease_until: DateTime<Utc>) {
     .expect("the row inserts");
 }
 
-async fn fresh_store() -> (PostgresOperationReservationStore, PgPool, impl Sized) {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
-    let pool = connect(&url).await;
-    migrations::run(&pool).await.expect("the migrations apply");
+/// A store over this test's own database, that database's pool, and the guard.
+///
+/// The guard is returned rather than dropped here: it owns the connection-budget
+/// permit, so releasing it early would let another test take the slot while this
+/// one is still using its database.
+async fn fresh_store() -> (PostgresOperationReservationStore, PgPool, IsolatedDatabase) {
+    let db = isolated_database().await;
+    // Through the guard, so `close()` closes it without the test tracking it.
+    let pool = db.pool().await;
     let store = PostgresOperationReservationStore::new(pool.clone(), Arc::new(SystemClock));
-    (store, pool, container)
+    (store, pool, db)
 }
 
 /// An empty table answers `Empty` — a real answer, not `Unsupported`.
 #[tokio::test]
 async fn an_empty_table_answers_empty_and_never_unsupported() {
-    let (store, _pool, _container) = fresh_store().await;
+    let (store, _pool, db) = fresh_store().await;
 
     assert_eq!(
         store.oldest_completed().await,
@@ -124,6 +107,10 @@ async fn an_empty_table_answers_empty_and_never_unsupported() {
         "this adapter supports the query, so an empty table is a statement about the \
          backlog — reporting Unsupported would claim it cannot look"
     );
+
+    // Released here: the semaphore counts live databases, so a guard
+    // left to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// The answer is the earliest `completed_at`, not the latest.
@@ -133,7 +120,7 @@ async fn an_empty_table_answers_empty_and_never_unsupported() {
 /// first. `MAX` instead of `MIN` returns `t0 + 3600s` and fails here.
 #[tokio::test]
 async fn the_answer_is_the_earliest_completion_not_the_latest() {
-    let (store, pool, _container) = fresh_store().await;
+    let (store, pool, db) = fresh_store().await;
 
     completed_row(&pool, "op-middle", t0() + Duration::seconds(1_800)).await;
     completed_row(&pool, "op-newest", t0() + Duration::seconds(3_600)).await;
@@ -144,6 +131,10 @@ async fn the_answer_is_the_earliest_completion_not_the_latest() {
         Ok(OldestCompleted::At(t0())),
         "three completions exist and the aggregate must return the earliest"
     );
+
+    // Released here: the semaphore counts live databases, so a guard
+    // left to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// An in-progress reservation is not backlog, however old.
@@ -152,7 +143,7 @@ async fn the_answer_is_the_earliest_completion_not_the_latest() {
 /// what keeps it out — the same predicate the purge uses, for the same reason.
 #[tokio::test]
 async fn an_in_progress_reservation_is_never_the_oldest_completion() {
-    let (store, pool, _container) = fresh_store().await;
+    let (store, pool, db) = fresh_store().await;
 
     in_progress_row(&pool, "op-running", t0() + Duration::seconds(3_600)).await;
 
@@ -170,6 +161,10 @@ async fn an_in_progress_reservation_is_never_the_oldest_completion() {
         Ok(OldestCompleted::At(t0() + Duration::seconds(600))),
         "the completed row is the answer; the in-progress one is still excluded"
     );
+
+    // Released here: the semaphore counts live databases, so a guard
+    // left to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// After a purge removes the oldest rows, the answer moves forward.
@@ -179,7 +174,7 @@ async fn an_in_progress_reservation_is_never_the_oldest_completion() {
 /// name a row the batch was about to delete.
 #[tokio::test]
 async fn the_answer_advances_once_the_oldest_rows_are_purged() {
-    let (store, pool, _container) = fresh_store().await;
+    let (store, pool, db) = fresh_store().await;
 
     completed_row(&pool, "op-a", t0()).await;
     completed_row(&pool, "op-b", t0() + Duration::seconds(600)).await;
@@ -203,6 +198,10 @@ async fn the_answer_advances_once_the_oldest_rows_are_purged() {
         "the remaining backlog is what survived, so the age an operator reads \
          describes rows that are still there"
     );
+
+    // Released here: the semaphore counts live databases, so a guard
+    // left to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// The `state = 'completed'` predicate is defensive, and the schema is why.
@@ -224,7 +223,7 @@ async fn the_answer_advances_once_the_oldest_rows_are_purged() {
 /// clause someone could then delete as redundant.
 #[tokio::test]
 async fn the_schema_forbids_the_row_that_would_make_the_state_predicate_matter() {
-    let (_store, pool, _container) = fresh_store().await;
+    let (_store, pool, db) = fresh_store().await;
 
     let refused = sqlx::query(
         r#"INSERT INTO operation_reservations
@@ -249,4 +248,8 @@ async fn the_schema_forbids_the_row_that_would_make_the_state_predicate_matter()
         "the refusal must come from the table's own CHECK, not from something \
          incidental: {error}"
     );
+
+    // Released here: the semaphore counts live databases, so a guard
+    // left to the container teardown would make that count a fiction.
+    db.close().await;
 }

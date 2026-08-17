@@ -8,8 +8,21 @@ root keeps building and testing with no Docker:
 
 ```bash
 cargo test --workspace                                   # root; hermetic, never touches this
-cargo test --manifest-path integration-tests/Cargo.toml  # this suite, explicit and opt-in
+cargo run --manifest-path integration-tests/Cargo.toml \
+    --bin run-suite                                      # this suite, explicit and opt-in
 ```
+
+**The suite is started by its runner, not by `cargo test`.** The runner owns the
+run's PostgreSQL: it starts one container, creates and migrates the template
+database, runs the single test target, and destroys the container while its own
+Tokio runtime is still alive — then exits with exactly the suite's code.
+
+That last step is why the runner exists. A test binary has no suite-level
+teardown, so a container held in a process-wide cell has its async `Drop` run at
+process exit with no runtime left to drive it: three consecutive runs left three
+containers behind. `cargo test` on this workspace still works as a way to reach
+the target, but without the runner there is no PostgreSQL, and the suite says so
+with the command that would have worked.
 
 ## Admission rules
 
@@ -164,5 +177,12 @@ Requires a reachable Docker daemon:
 ```bash
 colima start                                             # or Docker Desktop
 export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
-cargo test --manifest-path integration-tests/Cargo.toml
+cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+```
+
+The runner reports its own timings, so the budget is observable rather than
+claimed:
+
+```text
+[integration-tests] provisioned in 1.82s · template migrated at 2.28s · suite finished at 15.9s · reclaimed at 16.2s
 ```

@@ -78,7 +78,7 @@ invariants stay versioned alongside the code they cover.
 
 `cargo test --workspace` keeps running with no Docker and never compiles or runs that
 directory; the suite is invoked explicitly with
-`cargo test --manifest-path integration-tests/Cargo.toml`. Nothing here may be
+`cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`. Nothing here may be
 reconstructed inside the **root workspace** — that is what re-breaks the constitution.
 Nothing here belongs in another repository either.
 

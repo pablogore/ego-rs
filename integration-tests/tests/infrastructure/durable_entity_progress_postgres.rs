@@ -33,14 +33,14 @@
 //! other — exactly what happened with observability, where the SDK half reported
 //! normally while the entity half was silent.
 //!
-//! Run: `cargo test --manifest-path integration-tests/Cargo.toml`.
+//! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
 
 use chrono::Utc;
 use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
-use ego_persistence::postgres::migrations;
+use ego_integration_tests::{isolated_database, IsolatedDatabase};
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::persistent_entity::CommandResult;
@@ -51,8 +51,6 @@ use reference_app::domain::user::{UserCommand, UserEntity, UserRegistered, UserS
 use reference_app::{AppConfig, EntityEventStores};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 const ORG_TYPE: &str = "tenant_organization";
 const USER_TYPE: &str = "user";
@@ -67,23 +65,15 @@ async fn connect(url: &str) -> PgPool {
         .expect("the container accepts connections")
 }
 
-/// A container, and a URL anyone can open their own pool against.
-async fn postgres() -> (impl Sized, String) {
-    let container = Postgres::default()
-        .start()
-        .await
-        .expect("a PostgreSQL container starts");
-    let url = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("a host"),
-        container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the mapped port"),
-    );
-    let pool = connect(&url).await;
-    migrations::run(&pool).await.expect("the migrations apply");
-    (container, url)
+/// This test's own database, and a URL anyone can open their own pool against.
+///
+/// The database is cloned from the run's already-migrated template, so nothing
+/// here starts a container or applies a migration. The guard must be held for the
+/// test's life: dropping it releases the connection-budget permit.
+async fn postgres() -> (IsolatedDatabase, String) {
+    let db = isolated_database().await;
+    let url = db.url().to_string();
+    (db, url)
 }
 
 /// The identity both passes carry — the same operation, retried.
@@ -126,8 +116,8 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
         reference_app::IdempotencyWiring::Compatibility,
         None,
     )
-        .expect("the reference app builds")
-        .entities
+    .expect("the reference app builds")
+    .entities
 }
 
 /// A committed write, whichever shape the runtime reports it as.
@@ -195,7 +185,7 @@ async fn ensure_org(url: &str) -> CommandResult<OrganizationEnsured, TenantOrgSt
 /// The organization's progress survives the runtime that wrote it.
 #[tokio::test]
 async fn an_organization_receipt_outlives_the_runtime_that_confirmed_it() {
-    let (_container, url) = postgres().await;
+    let (db, url) = postgres().await;
     let pool = connect(&url).await;
 
     let first = ensure_org(&url).await;
@@ -228,6 +218,10 @@ async fn an_organization_receipt_outlives_the_runtime_that_confirmed_it() {
         (1, 1),
         "still exactly one event and one receipt: the replay wrote nothing"
     );
+
+    // Released here: the semaphore counts live databases, so a guard left
+    // to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// The same, for `User` — the second typed store.
@@ -237,7 +231,7 @@ async fn an_organization_receipt_outlives_the_runtime_that_confirmed_it() {
 /// `User` still writing to memory.
 #[tokio::test]
 async fn a_user_receipt_outlives_the_runtime_that_confirmed_it() {
-    let (_container, url) = postgres().await;
+    let (db, url) = postgres().await;
     let pool = connect(&url).await;
 
     let register = |url: String| async move {
@@ -279,6 +273,10 @@ async fn a_user_receipt_outlives_the_runtime_that_confirmed_it() {
         (1, 1),
         "exactly one UserRegistered and one confirmed receipt survive both passes"
     );
+
+    // Released here: the semaphore counts live databases, so a guard left
+    // to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 /// The two aggregates keep separate receipts under one operation key.
@@ -289,7 +287,7 @@ async fn a_user_receipt_outlives_the_runtime_that_confirmed_it() {
 /// exist, and recovery would have nothing to decide from.
 #[tokio::test]
 async fn each_aggregate_keeps_its_own_receipt_under_one_operation_key() {
-    let (_container, url) = postgres().await;
+    let (db, url) = postgres().await;
     let pool = connect(&url).await;
 
     let _ = ensure_org(&url).await;
@@ -342,6 +340,10 @@ async fn each_aggregate_keeps_its_own_receipt_under_one_operation_key() {
         "both aggregates now hold their own confirmed receipt under one operation \
          key — neither overwrote nor blocked the other"
     );
+
+    // Released here: the semaphore counts live databases, so a guard left
+    // to the container teardown would make that count a fiction.
+    db.close().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +376,7 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
     use ego_domain::event::DomainEvent;
     use ego_domain::persistence::StoredEvent;
 
-    let (_container, url) = postgres().await;
+    let (db, url) = postgres().await;
 
     let happened_at = Utc
         .with_ymd_and_hms(2021, 3, 14, 15, 9, 26)
@@ -400,7 +402,13 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
         );
         stores
             .org
-            .append(ORG_TYPE, TENANT, None, 0, vec![StoredEvent::without_correlation(org)])
+            .append(
+                ORG_TYPE,
+                TENANT,
+                None,
+                0,
+                vec![StoredEvent::without_correlation(org)],
+            )
             .await
             .expect("the organization event appends");
 
@@ -415,7 +423,13 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
         .expect("the user event rebuilds");
         stores
             .user
-            .append(USER_TYPE, "u1", None, 0, vec![StoredEvent::without_correlation(user)])
+            .append(
+                USER_TYPE,
+                "u1",
+                None,
+                0,
+                vec![StoredEvent::without_correlation(user)],
+            )
             .await
             .expect("the user event appends");
         // Both stores and their pool are dropped here.
@@ -447,4 +461,8 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
         happened_at,
         "and so must the user event — two factories, two chances to drop it"
     );
+
+    // Released here: the semaphore counts live databases, so a guard left
+    // to the container teardown would make that count a fiction.
+    db.close().await;
 }
