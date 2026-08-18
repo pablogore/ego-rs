@@ -343,7 +343,7 @@ unchanged, which is the point of stopping here.
       | `PostgreSQLEventStore` | `INSERT` has no such column | `without_correlation(event)` | no |
       | `PostgresEventStoreUnitOfWork` | the same `INSERT` | — | no |
 
-      **The deciding fact is not the divergence.** `StoredEvent::new` — the only constructor that can set a correlation id — has exactly **two call sites, both inside the type's own unit tests**. No productive code in `crates/`, `examples/` or `integration-tests/` ever supplies one. Persisting it would add schema and contract to transport absence forever.
+      **The deciding fact is not the divergence.** At the time of that audit, `StoredEvent::new` — then the only constructor that could set a correlation id — had exactly **two call sites, both inside the type's own unit tests**. No productive code in `crates/`, `examples/` or `integration-tests/` ever supplied one. Persisting it would add schema and contract to transport absence forever.
 
       Two corrections to this task's own earlier text, both worth recording, and both describing the state measured during the audit that preceded #323. First, the in-memory stores preserved the field **by accident** — they kept whole `StoredEvent` values — which is not a specification. Second, `persistent-entity/src/persistence.rs` also constructed through `without_correlation`, but that is a *facade* receiving raw `&[E]` with no correlation id to carry, not a store discarding one; conflating them would have meant fixing the wrong place. Also unstated before: the `events` table has **never** had a `correlation_id` column across all eight migrations, so making it durable needs a migration, not just a bind.
 
