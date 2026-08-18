@@ -277,12 +277,30 @@ async fn every_registered_table_has_a_complete_uniqueness_pair() {
     db.close().await;
 }
 
-/// For every registered table, the two predicates partition it: complementary, so
-/// no row escapes and no row is covered twice.
+/// For every registered table, the pair's own predicates partition it:
+/// complementary, so no row escapes and no row is covered twice.
 ///
-/// Asserted against the server rather than by reading the predicates, because
-/// "these two strings look like opposites" is a claim about text. This evaluates
-/// them over a table populated with both kinds of row and counts.
+/// # The predicates are the catalog's, not this file's
+///
+/// Load-bearing, and an earlier version of this test got it wrong in a way worth
+/// recording. It hardcoded `tenant_id IS NOT NULL` and `tenant_id IS NULL` into
+/// the `FILTER` clauses. Those two conditions are exhaustive and mutually
+/// exclusive *by definition* — `IS NULL` is two-valued and never yields UNKNOWN —
+/// so `tenant_half + systemwide_half == total` and an overlap of `0` were
+/// tautologies. They held for any table with a `tenant_id` column, including one
+/// carrying no indexes at all, while the doc comment claimed the check ran
+/// "against the server rather than by reading the predicates". It did neither: no
+/// catalog value ever reached the query.
+///
+/// The tell was already in the evidence. The mutation battery attributed every
+/// detection to the other two tests and none to this one, which is what an inert
+/// assertion looks like from the outside.
+///
+/// So the predicates are now read from `pg_get_expr` for this table's two named
+/// indexes and substituted back into the query. A half whose predicate stops
+/// being the complement of the other's changes the counts: two identical
+/// predicates make the overlap non-zero, and a predicate narrower than the
+/// partition leaves rows under neither, so the halves no longer sum to the total.
 #[tokio::test]
 async fn the_two_predicates_cover_every_registered_table_with_no_gap_and_no_overlap() {
     let db = isolated_database().await;
@@ -298,14 +316,43 @@ async fn the_two_predicates_cover_every_registered_table_with_no_gap_and_no_over
             });
         }
 
-        // The table name comes from the const registry above, never from input; it
-        // cannot be bound as a parameter because it is an identifier, not a value.
+        // What the server says this table's two halves are actually partial over.
+        let shapes = index_shapes(&pool, pair.table).await;
+        let predicate_of = |name: &str| -> String {
+            let shape = shapes
+                .iter()
+                .find(|shape| shape.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "table `{}` is missing the index `{name}`, so there is no predicate to \
+                         partition it by. Present: {:?}",
+                        pair.table,
+                        shapes.iter().map(|s| &s.name).collect::<Vec<_>>()
+                    )
+                });
+            // A total index reports no predicate. Substituting the empty string
+            // would produce `FILTER (WHERE )` — a syntax error rather than a
+            // failed assertion, which reports the wrong thing.
+            assert!(
+                !shape.predicate.is_empty(),
+                "`{name}` is not a partial index, so it cannot be one half of a \
+                 predicate-partitioned pair"
+            );
+            shape.predicate.clone()
+        };
+        let tenant_predicate = predicate_of(pair.tenant_half.0);
+        let systemwide_predicate = predicate_of(pair.systemwide_half.0);
+
+        // Only the table name and the two catalog-read predicates are interpolated;
+        // all three come from the server or the const registry, never from input.
+        // None can be bound as a parameter: a table name is an identifier and a
+        // predicate is an expression, not a value.
         let (total, tenant_half, systemwide_half, both): (i64, i64, i64, i64) =
             sqlx::query_as(&format!(
                 "SELECT COUNT(*), \
-                        COUNT(*) FILTER (WHERE tenant_id IS NOT NULL), \
-                        COUNT(*) FILTER (WHERE tenant_id IS NULL), \
-                        COUNT(*) FILTER (WHERE tenant_id IS NOT NULL AND tenant_id IS NULL) \
+                        COUNT(*) FILTER (WHERE {tenant_predicate}), \
+                        COUNT(*) FILTER (WHERE {systemwide_predicate}), \
+                        COUNT(*) FILTER (WHERE ({tenant_predicate}) AND ({systemwide_predicate})) \
                  FROM {}",
                 pair.table
             ))
@@ -326,14 +373,16 @@ async fn the_two_predicates_cover_every_registered_table_with_no_gap_and_no_over
         assert_eq!(
             tenant_half + systemwide_half,
             total,
-            "every row in `{}` must fall under exactly one of the two predicates — a row \
-             under neither would be a row no index constrains",
+            "every row in `{}` must fall under exactly one of its pair's predicates, \
+             `{tenant_predicate}` and `{systemwide_predicate}` — a row under neither is a \
+             row no index constrains",
             pair.table
         );
         assert_eq!(
             both, 0,
-            "no row in `{}` may fall under both predicates, or the two indexes would be \
-             enforcing overlapping claims about the same rows",
+            "no row in `{}` may fall under both `{tenant_predicate}` and \
+             `{systemwide_predicate}`, or the two indexes would be enforcing overlapping \
+             claims about the same rows",
             pair.table
         );
     }

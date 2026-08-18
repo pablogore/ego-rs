@@ -414,9 +414,11 @@ unchanged, which is the point of stopping here.
       | systemwide half removed only | 101 | 2 | registry: missing `ux_operation_receipts_identity_systemwide`; discovery: lopsided pair |
       | two tenant-half columns transposed | 101 | 1 | registry: exact column order |
       | tenant half made non-unique | 101 | 2 | registry: must be UNIQUE; discovery: lopsided pair, the half having dropped out of the `indisunique` filter |
-      | systemwide predicate flipped to `IS NOT NULL` | 101 | 2 | registry: exact partial predicate; discovery: lopsided pair |
+      | systemwide predicate flipped to `IS NOT NULL` | 101 | 3 | registry: exact partial predicate; discovery: lopsided pair; complementarity: non-zero overlap |
 
-      Unmutated, the suite is green at 20 tests (exit 0) — the 17 that preceded this slice plus these three. The transposed-columns mutation fails one test rather than two deliberately: a transposed pair is still a *complete* pair, so lopsidedness is not the defect there and discovery is correct to stay green.
+      Unmutated, the suite is green at 20 tests (exit 0) — the 17 that preceded this slice plus these three. The transposed-columns mutation fails one test rather than three deliberately: a transposed pair is still a *complete* pair with complementary predicates, so neither lopsidedness nor the partition is the defect there, and both of those tests are correct to stay green.
+
+      **One correction was applied during review, and the matrix above is what caught it.** The complementarity test originally hardcoded `tenant_id IS NOT NULL` and `tenant_id IS NULL` into its `FILTER` clauses. Those are exhaustive and mutually exclusive by definition, so its two partition assertions were tautologies that held for any table with a `tenant_id` column — including one with no indexes at all — while its doc comment claimed the check ran against the server rather than by reading the predicates. The evidence was already visible here: an earlier version of this matrix attributed every detection to the registry and discovery tests and **none** to the complementarity test, which is exactly what an inert assertion looks like from outside. The predicates are now read from `pg_get_expr` for the table's two named indexes and substituted back into the query, which is why the predicate-flip row now reports three failures instead of two.
 
       One thing the reconstruction states that the original could not: the runner provisions PostgreSQL 16, while the declared floor of 14 is the entire reason the two-index strategy exists. The assertions pin the strategy rather than the server, and read no version-specific catalog column, so they mean the same thing on either.
 
