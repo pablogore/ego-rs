@@ -131,7 +131,27 @@ struct ExpectedPair {
     systemwide_half: (&'static str, &'static [&'static str]),
     /// A legal row with a tenant, then a legal row without one, with distinct
     /// identities so neither half of the pair refuses them.
+    ///
+    /// Each is filed twice by [`every_half_refuses_a_real_duplicate`], so it must
+    /// be re-runnable and must collide with itself.
     probes: (&'static str, &'static str),
+    /// Key columns knowingly nullable, and therefore knowingly outside the
+    /// guarantee.
+    ///
+    /// A NULL in a unique index's key does not collide, so a nullable key column
+    /// silently exempts every row that leaves it NULL. That is invisible to every
+    /// shape assertion in this file — the column list, order, uniqueness and
+    /// predicate are all unchanged by nullability — which is why it is declared
+    /// here and checked rather than left to be discovered.
+    ///
+    /// Empty for both operation tables. `events.aggregate_type` is listed because
+    /// migration 007 makes it nullable *deliberately*: rows written before the
+    /// type was split out carry no value, and the operator backfill described in
+    /// that migration is what makes it mandatory. Until then, two systemwide
+    /// `events` rows with a NULL type and the same id and version genuinely do not
+    /// collide. Recording that here states a known limit of the guarantee; leaving
+    /// it out would let this file imply a protection the schema does not yet give.
+    nullable_keys: &'static [&'static str],
 }
 
 /// The registry of tables that must carry a complete pair.
@@ -160,6 +180,7 @@ const EXPECTED_PAIRS: &[ExpectedPair] = &[
                (aggregate_type, aggregate_id, tenant_id, version, event_type, payload) \
              VALUES ('order', 'probe-systemwide', NULL, 1, 'Probed', '{}'::jsonb)",
         ),
+        nullable_keys: &["aggregate_type"],
     },
     ExpectedPair {
         table: "operation_reservations",
@@ -181,6 +202,7 @@ const EXPECTED_PAIRS: &[ExpectedPair] = &[
                 lease_until, state) \
              VALUES (NULL, 'probe-systemwide', 'fp', 'owner', 1, NOW(), 'in_progress')",
         ),
+        nullable_keys: &[],
     },
     ExpectedPair {
         table: "operation_receipts",
@@ -207,6 +229,7 @@ const EXPECTED_PAIRS: &[ExpectedPair] = &[
                 outcome_kind) \
              VALUES (NULL, 'order', 'probe', 'probe-systemwide', 'fp', 'no_events')",
         ),
+        nullable_keys: &[],
     },
 ];
 
@@ -226,7 +249,23 @@ type CatalogRow = (
 
 /// One row of the discovery sweep: table name, index name, the partial predicate,
 /// and the ordered key elements.
-type DiscoveryRow = (String, String, Option<String>, Option<Vec<String>>);
+type DiscoveryRow = (String, String, String, Option<String>, Option<Vec<String>>);
+
+/// A table, identified the way a multi-schema sweep has to identify one.
+///
+/// # A bare table name is not an identity
+///
+/// The sweep spans every namespace on the search path, so two entirely different
+/// tables can share a `relname`. Keying by that name alone merged them, and the
+/// merger passed: `schema_a.orders` carrying only a tenant half and
+/// `schema_b.orders` carrying only a systemwide half became one `orders` entry
+/// with both halves present, so two incomplete tables looked like one complete
+/// pair. It also weakened the non-vacuity anchor, which a same-named table in any
+/// other schema could satisfy on a registered table's behalf.
+///
+/// The namespace is part of the key for that reason, and every diagnostic below is
+/// schema-qualified so a failure names the table that actually has the defect.
+type TableId = (String, String);
 
 const TENANT_PREDICATE: &str = "(tenant_id IS NOT NULL)";
 const SYSTEMWIDE_PREDICATE: &str = "(tenant_id IS NULL)";
@@ -296,6 +335,67 @@ const CATALOG_COLUMNS: &str = "c.relname, \
        WHERE k.ord > i.indnkeyatts), \
      i.indexprs IS NOT NULL, \
      pg_get_indexdef(i.indexrelid)";
+
+/// The namespaces an unqualified table name could resolve to on this connection.
+///
+/// # Measured, because `public` was an assumption
+///
+/// The discovery sweep used to filter `n.nspname = 'public'`. Nothing established
+/// that, and it is not a property of this suite: the migrations create their
+/// objects in whatever `current_schema()` happens to be, which is decided by the
+/// connection's `search_path` — a database, role or session setting, none of which
+/// this file controls.
+///
+/// Hardcoding it had a concrete cost beyond tidiness. A table carrying a lopsided
+/// pair in any *other* schema on the search path was invisible to the sweep, so
+/// discovery reported success without having looked at it. The registered tables
+/// happen to live in `public`, so the non-vacuity anchor stayed satisfied and
+/// nothing complained.
+///
+/// So the scope is read from the server. `current_schemas(false)` returns exactly
+/// the resolvable namespaces in resolution order, with the implicit `pg_catalog`
+/// excluded — which is what "where could a framework table be" actually means.
+///
+/// The measurement is also asserted rather than merely used: an empty search path
+/// would make the sweep match nothing and every check below vacuous.
+async fn search_path_scope(pool: &PgPool) -> Vec<String> {
+    let (current, scope): (String, Vec<String>) =
+        sqlx::query_as("SELECT current_schema(), current_schemas(false)")
+            .fetch_one(pool)
+            .await
+            .expect("the server reports its own schema resolution order");
+
+    assert!(
+        !scope.is_empty(),
+        "the connection resolves no schemas at all, so the discovery sweep below would \
+         match nothing and pass over an empty result"
+    );
+    assert!(
+        scope.contains(&current),
+        "`current_schema()` is `{current}` but the resolvable set is {scope:?}; the sweep \
+         would then exclude the very schema this suite's own tables were created in"
+    );
+
+    scope
+}
+
+/// The namespace an unqualified `table` actually resolves to on this connection.
+///
+/// Resolved through `regclass`, so it follows exactly the same search-path rules
+/// the migrations followed when they created the object — rather than assuming the
+/// answer and rather than repeating the resolution by hand.
+async fn effective_schema(pool: &PgPool, table: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT n.nspname::text \
+           FROM pg_class c \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE c.oid = $1::regclass",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("`{table}` must resolve to exactly one namespace: {e}"))
+}
 
 /// Every index on `table`, with its ordered key elements, `INCLUDE` payload,
 /// uniqueness and partial predicate, read from the catalog.
@@ -529,6 +629,178 @@ async fn the_two_predicates_cover_every_registered_table_with_no_gap_and_no_over
     db.close().await;
 }
 
+/// PostgreSQL's `unique_violation`.
+const UNIQUE_VIOLATION: &str = "23505";
+
+/// Every half of every registered pair actually **refuses** a duplicate.
+///
+/// # Why shape assertions are not enough on their own
+///
+/// Everything above reads the catalog. That establishes what the server has been
+/// told to enforce, which is not the same claim as the server enforcing it. An
+/// index can carry the right name, the right unique flag, the right keys in the
+/// right order and the right predicate, and still constrain nothing — the
+/// textbook case being a build left behind by a failed
+/// `CREATE INDEX CONCURRENTLY`, which stays in `pg_index` looking correct while
+/// `indisvalid` is false. Nothing a column list can be compared against
+/// distinguishes that from a working index.
+///
+/// So this provokes the collision instead of describing it: file a row, file the
+/// same identity again, and require `23505`. Both partitions of all three tables,
+/// because a duplicate refused under one predicate says nothing about the other —
+/// the behavioural suites elsewhere run under a single tenant and load exactly one
+/// half.
+///
+/// # What the systemwide `events` probe does and does not prove
+///
+/// It files a concrete `aggregate_type`, which is the identity the framework
+/// actually writes, and proves that identity collides. It does **not** prove
+/// systemwide uniqueness for a row whose `aggregate_type` is NULL: that column is
+/// deliberately nullable until the operator backfill described in migration 007
+/// runs, and NULLs do not collide in a unique index. That is a property of the
+/// schema's migration state, not a gap this test can close by asserting harder,
+/// and pretending otherwise here would put a false claim in a file whose whole
+/// purpose is to stop exactly that.
+#[tokio::test]
+async fn every_half_refuses_a_real_duplicate() {
+    let db = isolated_database().await;
+    let pool = db.pool().await;
+
+    for pair in EXPECTED_PAIRS {
+        // A nullable key column exempts every row that leaves it NULL, because a
+        // NULL never collides. No shape assertion can see this: the column list,
+        // its order, the uniqueness flag and the predicate are all identical either
+        // way. So the reach of the guarantee is measured here, and any column
+        // outside the registry's declared exceptions must be NOT NULL.
+        // The discriminator is excluded, and not as a convenience: its nullness is
+        // the thing the two predicates partition on. `tenant_id` is nullable by
+        // design, and the tenant half's own `tenant_id IS NOT NULL` guarantees that
+        // no row inside that index leaves it NULL — so its nullability cannot
+        // exempt anything there. The systemwide half must not key on it at all,
+        // which is asserted separately by the discovery test. Every *other* key
+        // column has no such predicate protecting it.
+        let mut keys: Vec<&str> = pair
+            .tenant_half
+            .1
+            .iter()
+            .chain(pair.systemwide_half.1)
+            .copied()
+            .filter(|column| *column != TENANCY_DISCRIMINATOR)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let nullable: Vec<String> = sqlx::query_scalar(
+            "SELECT a.attname::text \
+               FROM pg_attribute a \
+              WHERE a.attrelid = $1::regclass \
+                AND a.attname = ANY($2) \
+                AND a.attnum > 0 \
+                AND NOT a.attisdropped \
+                AND NOT a.attnotnull \
+              ORDER BY a.attname",
+        )
+        .bind(pair.table)
+        .bind(&keys)
+        .fetch_all(&pool)
+        .await
+        .expect("column nullability is readable");
+
+        // Compared in BOTH directions, because this registry is presented as an
+        // exact description of how far the guarantee reaches.
+        //
+        // One direction catches a column that became nullable without being
+        // declared. The other catches the opposite and less obvious rot: a
+        // migration that makes a declared column NOT NULL retires the exception,
+        // and a one-directional check would stay green while `nullable_keys` went
+        // on asserting a limitation that no longer exists. A stale exception is
+        // worse than none — it tells a reader the schema is weaker than it is, and
+        // it would silently absorb the column becoming nullable again later.
+        let mut declared: Vec<&str> = pair.nullable_keys.to_vec();
+        declared.sort_unstable();
+        let actual: Vec<&str> = nullable.iter().map(String::as_str).collect();
+
+        let undeclared: Vec<&&str> = actual
+            .iter()
+            .filter(|column| !declared.contains(column))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "in `{}` these key columns are nullable and not declared as such: \
+             {undeclared:?}. A NULL in a unique index's key does not collide, so every row \
+             leaving one of these NULL is exempt from the identity this pair is supposed to \
+             enforce — and nothing about the index's shape changes, so every assertion above \
+             still passes. Either make the column NOT NULL or declare it in \
+             `nullable_keys` with the reason. All nullable keys found: {actual:?}",
+            pair.table
+        );
+
+        let retired: Vec<&&str> = declared
+            .iter()
+            .filter(|column| !actual.contains(column))
+            .collect();
+        assert!(
+            retired.is_empty(),
+            "in `{}` these columns are declared in `nullable_keys` but are NOT NULL: \
+             {retired:?}. The declaration is stale, so this file is advertising a hole in \
+             the guarantee that the schema has since closed. Remove them from \
+             `nullable_keys` — leaving the entry there would also silently absorb the \
+             column becoming nullable again. Actually nullable: {actual:?}",
+            pair.table
+        );
+
+        assert_eq!(
+            actual, declared,
+            "in `{}` the nullable key columns and the declared exceptions must be exactly \
+             the same set, so the registry stays a description of the schema rather than a \
+             wish about it",
+            pair.table
+        );
+
+        for (scope, insert) in [("tenant", pair.probes.0), ("systemwide", pair.probes.1)] {
+            // The first filing establishes the row exists, so the second one is
+            // colliding with something real rather than failing for its own reasons.
+            sqlx::query(insert)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "the {scope} row must file into `{}`: {e}\n\n{insert}",
+                        pair.table
+                    )
+                });
+
+            match sqlx::query(insert).execute(&pool).await {
+                Ok(_) => panic!(
+                    "filing the same {scope} identity into `{}` twice succeeded, so that \
+                     half enforces nothing. The catalog assertions above passed, which is \
+                     precisely why they are not sufficient on their own.\n\n{insert}",
+                    pair.table
+                ),
+                Err(error) => {
+                    let code = error
+                        .as_database_error()
+                        .and_then(|db| db.code())
+                        .map(|code| code.to_string())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        code,
+                        UNIQUE_VIOLATION,
+                        "the duplicate {scope} identity in `{table}` was refused, but not by \
+                         uniqueness: SQLSTATE {code:?} rather than {UNIQUE_VIOLATION}. A \
+                         refusal for some other reason — a check constraint, a not-null, a \
+                         trigger — would satisfy a test that only asked whether the insert \
+                         failed, while the index this file exists to pin could be absent. \
+                         Error: {error}",
+                        table = pair.table
+                    );
+                }
+            }
+        }
+    }
+
+    db.close().await;
+}
+
 /// One half of a pair as discovery finds it, before anything is known about
 /// whether it has a partner.
 #[derive(Debug)]
@@ -661,8 +933,13 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     let db = isolated_database().await;
     let pool = db.pool().await;
 
+    // The namespaces this connection actually resolves unqualified names in,
+    // measured rather than assumed. See `search_path_scope`.
+    let scope = search_path_scope(&pool).await;
+
     let rows: Vec<DiscoveryRow> = sqlx::query_as(
-        "SELECT t.relname, \
+        "SELECT n.nspname, \
+                t.relname, \
                 c.relname, \
                 pg_get_expr(i.indpred, i.indrelid), \
                 (SELECT array_agg(CASE WHEN k.attnum = 0 THEN '(expression)' \
@@ -677,24 +954,62 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
          JOIN pg_namespace n ON n.oid = t.relnamespace \
          WHERE i.indisunique \
            AND i.indpred IS NOT NULL \
-           AND n.nspname = 'public' \
+           AND n.nspname = ANY($1) \
            AND pg_get_expr(i.indpred, i.indrelid) LIKE '%tenant_id IS%NULL%' \
-         ORDER BY t.relname, c.relname",
+         ORDER BY n.nspname, t.relname, c.relname",
     )
+    .bind(&scope)
     .fetch_all(&pool)
     .await
     .expect("the index catalog must be queryable");
 
-    let mut tables: BTreeMap<String, Vec<DiscoveredHalf>> = BTreeMap::new();
-    for (table, index, predicate, keys) in rows {
-        tables.entry(table).or_default().push(DiscoveredHalf {
-            index,
-            predicate: predicate.unwrap_or_default(),
-            keys: keys.unwrap_or_default(),
-        });
+    // Keyed by (schema, table): see `TableId` for what keying by name alone let
+    // through.
+    let mut tables: BTreeMap<TableId, Vec<DiscoveredHalf>> = BTreeMap::new();
+    for (schema, table, index, predicate, keys) in rows {
+        tables
+            .entry((schema, table))
+            .or_default()
+            .push(DiscoveredHalf {
+                index,
+                predicate: predicate.unwrap_or_default(),
+                keys: keys.unwrap_or_default(),
+            });
     }
 
-    for (table, found) in &tables {
+    for ((schema, bare), found) in &tables {
+        let table = format!("{schema}.{bare}");
+        let table = table.as_str();
+        // Nothing the sweep admitted may fall between the two classifications.
+        //
+        // The sweep is a `LIKE` over the rendered predicate; the classification
+        // below is exact string equality. An earlier version let anything that
+        // matched the first and neither of the second vanish silently — a partial
+        // unique index over, say, `tenant_id IS NOT NULL AND state = 'x'`
+        // mentions the discriminator, constrains only part of a partition, and was
+        // simply dropped on the floor. A table with a good pair beside such an
+        // index passed with the index unexamined.
+        //
+        // A predicate this file cannot classify is a predicate this file cannot
+        // reason about, so it fails here rather than being ignored.
+        let unclassified: Vec<String> = found
+            .iter()
+            .filter(|half| {
+                half.predicate != TENANT_PREDICATE && half.predicate != SYSTEMWIDE_PREDICATE
+            })
+            .map(DiscoveredHalf::describe)
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "table `{table}` carries a partial unique index whose predicate mentions \
+             `{TENANCY_DISCRIMINATOR}` but is neither `{TENANT_PREDICATE}` nor \
+             `{SYSTEMWIDE_PREDICATE}`: {unclassified:?}. Such an index constrains some \
+             subset of a tenancy partition, which this file has no way to reason about — and \
+             silently ignoring it would leave whatever it half-protects unaccounted for. \
+             Either it belongs to the pair and must carry the exact predicate, or it is a \
+             different kind of index and must not mention the discriminator"
+        );
+
         let tenant_halves: Vec<&DiscoveredHalf> = found
             .iter()
             .filter(|half| half.predicate == TENANT_PREDICATE)
@@ -777,13 +1092,22 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     //
     // Anchored to the registry rather than to one table, so a discovery query that
     // regressed into matching only some pairs is caught too.
+    // Resolved per table rather than assumed, and matched on (schema, table): a
+    // same-named table in another namespace must not be able to satisfy this on a
+    // registered table's behalf.
     for pair in EXPECTED_PAIRS {
+        let schema = effective_schema(&pool, pair.table).await;
+        let key = (schema.clone(), pair.table.to_string());
         assert!(
-            tables.contains_key(pair.table),
-            "the discovery query found no pair on `{}`, so it is not matching what it \
-             claims to. Found pairs on: {:?}",
+            tables.contains_key(&key),
+            "the discovery query found no pair on `{schema}.{}` — the namespace that name \
+             actually resolves to on this connection — so it is not matching what it claims \
+             to. Found pairs on: {:?}",
             pair.table,
-            tables.keys().collect::<Vec<_>>()
+            tables
+                .keys()
+                .map(|(s, t)| format!("{s}.{t}"))
+                .collect::<Vec<_>>()
         );
     }
 
