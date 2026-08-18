@@ -249,7 +249,23 @@ type CatalogRow = (
 
 /// One row of the discovery sweep: table name, index name, the partial predicate,
 /// and the ordered key elements.
-type DiscoveryRow = (String, String, Option<String>, Option<Vec<String>>);
+type DiscoveryRow = (String, String, String, Option<String>, Option<Vec<String>>);
+
+/// A table, identified the way a multi-schema sweep has to identify one.
+///
+/// # A bare table name is not an identity
+///
+/// The sweep spans every namespace on the search path, so two entirely different
+/// tables can share a `relname`. Keying by that name alone merged them, and the
+/// merger passed: `schema_a.orders` carrying only a tenant half and
+/// `schema_b.orders` carrying only a systemwide half became one `orders` entry
+/// with both halves present, so two incomplete tables looked like one complete
+/// pair. It also weakened the non-vacuity anchor, which a same-named table in any
+/// other schema could satisfy on a registered table's behalf.
+///
+/// The namespace is part of the key for that reason, and every diagnostic below is
+/// schema-qualified so a failure names the table that actually has the defect.
+type TableId = (String, String);
 
 const TENANT_PREDICATE: &str = "(tenant_id IS NOT NULL)";
 const SYSTEMWIDE_PREDICATE: &str = "(tenant_id IS NULL)";
@@ -361,6 +377,24 @@ async fn search_path_scope(pool: &PgPool) -> Vec<String> {
     );
 
     scope
+}
+
+/// The namespace an unqualified `table` actually resolves to on this connection.
+///
+/// Resolved through `regclass`, so it follows exactly the same search-path rules
+/// the migrations followed when they created the object — rather than assuming the
+/// answer and rather than repeating the resolution by hand.
+async fn effective_schema(pool: &PgPool, table: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT n.nspname::text \
+           FROM pg_class c \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE c.oid = $1::regclass",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("`{table}` must resolve to exactly one namespace: {e}"))
 }
 
 /// Every index on `table`, with its ordered key elements, `INCLUDE` payload,
@@ -671,9 +705,23 @@ async fn every_half_refuses_a_real_duplicate() {
         .await
         .expect("column nullability is readable");
 
-        let undeclared: Vec<&String> = nullable
+        // Compared in BOTH directions, because this registry is presented as an
+        // exact description of how far the guarantee reaches.
+        //
+        // One direction catches a column that became nullable without being
+        // declared. The other catches the opposite and less obvious rot: a
+        // migration that makes a declared column NOT NULL retires the exception,
+        // and a one-directional check would stay green while `nullable_keys` went
+        // on asserting a limitation that no longer exists. A stale exception is
+        // worse than none — it tells a reader the schema is weaker than it is, and
+        // it would silently absorb the column becoming nullable again later.
+        let mut declared: Vec<&str> = pair.nullable_keys.to_vec();
+        declared.sort_unstable();
+        let actual: Vec<&str> = nullable.iter().map(String::as_str).collect();
+
+        let undeclared: Vec<&&str> = actual
             .iter()
-            .filter(|column| !pair.nullable_keys.contains(&column.as_str()))
+            .filter(|column| !declared.contains(column))
             .collect();
         assert!(
             undeclared.is_empty(),
@@ -682,7 +730,29 @@ async fn every_half_refuses_a_real_duplicate() {
              leaving one of these NULL is exempt from the identity this pair is supposed to \
              enforce — and nothing about the index's shape changes, so every assertion above \
              still passes. Either make the column NOT NULL or declare it in \
-             `nullable_keys` with the reason. All nullable keys found: {nullable:?}",
+             `nullable_keys` with the reason. All nullable keys found: {actual:?}",
+            pair.table
+        );
+
+        let retired: Vec<&&str> = declared
+            .iter()
+            .filter(|column| !actual.contains(column))
+            .collect();
+        assert!(
+            retired.is_empty(),
+            "in `{}` these columns are declared in `nullable_keys` but are NOT NULL: \
+             {retired:?}. The declaration is stale, so this file is advertising a hole in \
+             the guarantee that the schema has since closed. Remove them from \
+             `nullable_keys` — leaving the entry there would also silently absorb the \
+             column becoming nullable again. Actually nullable: {actual:?}",
+            pair.table
+        );
+
+        assert_eq!(
+            actual, declared,
+            "in `{}` the nullable key columns and the declared exceptions must be exactly \
+             the same set, so the registry stays a description of the schema rather than a \
+             wish about it",
             pair.table
         );
 
@@ -868,7 +938,8 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     let scope = search_path_scope(&pool).await;
 
     let rows: Vec<DiscoveryRow> = sqlx::query_as(
-        "SELECT t.relname, \
+        "SELECT n.nspname, \
+                t.relname, \
                 c.relname, \
                 pg_get_expr(i.indpred, i.indrelid), \
                 (SELECT array_agg(CASE WHEN k.attnum = 0 THEN '(expression)' \
@@ -892,16 +963,23 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     .await
     .expect("the index catalog must be queryable");
 
-    let mut tables: BTreeMap<String, Vec<DiscoveredHalf>> = BTreeMap::new();
-    for (table, index, predicate, keys) in rows {
-        tables.entry(table).or_default().push(DiscoveredHalf {
-            index,
-            predicate: predicate.unwrap_or_default(),
-            keys: keys.unwrap_or_default(),
-        });
+    // Keyed by (schema, table): see `TableId` for what keying by name alone let
+    // through.
+    let mut tables: BTreeMap<TableId, Vec<DiscoveredHalf>> = BTreeMap::new();
+    for (schema, table, index, predicate, keys) in rows {
+        tables
+            .entry((schema, table))
+            .or_default()
+            .push(DiscoveredHalf {
+                index,
+                predicate: predicate.unwrap_or_default(),
+                keys: keys.unwrap_or_default(),
+            });
     }
 
-    for (table, found) in &tables {
+    for ((schema, bare), found) in &tables {
+        let table = format!("{schema}.{bare}");
+        let table = table.as_str();
         // Nothing the sweep admitted may fall between the two classifications.
         //
         // The sweep is a `LIKE` over the rendered predicate; the classification
@@ -1014,13 +1092,22 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     //
     // Anchored to the registry rather than to one table, so a discovery query that
     // regressed into matching only some pairs is caught too.
+    // Resolved per table rather than assumed, and matched on (schema, table): a
+    // same-named table in another namespace must not be able to satisfy this on a
+    // registered table's behalf.
     for pair in EXPECTED_PAIRS {
+        let schema = effective_schema(&pool, pair.table).await;
+        let key = (schema.clone(), pair.table.to_string());
         assert!(
-            tables.contains_key(pair.table),
-            "the discovery query found no pair on `{}`, so it is not matching what it \
-             claims to. Found pairs on: {:?}",
+            tables.contains_key(&key),
+            "the discovery query found no pair on `{schema}.{}` — the namespace that name \
+             actually resolves to on this connection — so it is not matching what it claims \
+             to. Found pairs on: {:?}",
             pair.table,
-            tables.keys().collect::<Vec<_>>()
+            tables
+                .keys()
+                .map(|(s, t)| format!("{s}.{t}"))
+                .collect::<Vec<_>>()
         );
     }
 
