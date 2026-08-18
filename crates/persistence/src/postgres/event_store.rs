@@ -281,7 +281,7 @@ where
             .into_iter()
             .map(|row| {
                 let event = (self.deserialize)(&row.event_type, row.payload, row.created_at)?;
-                let stored = StoredEvent::without_correlation(event);
+                let stored = StoredEvent::new(event);
                 // A stored key was validated on the way in, so failing to parse it
                 // on the way out means the row was written by something that did
                 // not go through `OperationKey`. Surfacing that rather than

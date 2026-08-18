@@ -402,13 +402,7 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
         );
         stores
             .org
-            .append(
-                ORG_TYPE,
-                TENANT,
-                None,
-                0,
-                vec![StoredEvent::without_correlation(org)],
-            )
+            .append(ORG_TYPE, TENANT, None, 0, vec![StoredEvent::new(org)])
             .await
             .expect("the organization event appends");
 
@@ -423,13 +417,7 @@ async fn the_instant_an_event_happened_survives_append_and_load() {
         .expect("the user event rebuilds");
         stores
             .user
-            .append(
-                USER_TYPE,
-                "u1",
-                None,
-                0,
-                vec![StoredEvent::without_correlation(user)],
-            )
+            .append(USER_TYPE, "u1", None, 0, vec![StoredEvent::new(user)])
             .await
             .expect("the user event appends");
         // Both stores and their pool are dropped here.

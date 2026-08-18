@@ -128,15 +128,9 @@ async fn a_reader_never_sees_committed_events_without_their_receipt() {
             .begin()
             .await
             .expect("opening a unit of work succeeds");
-        uow.append(
-            TYPE,
-            &id,
-            TENANT,
-            0,
-            vec![StoredEvent::without_correlation(Marked::new())],
-        )
-        .await
-        .expect("staging one event succeeds");
+        uow.append(TYPE, &id, TENANT, 0, vec![StoredEvent::new(Marked::new())])
+            .await
+            .expect("staging one event succeeds");
         uow.confirm_receipt(&receipt_for(&id))
             .await
             .expect("confirming its receipt succeeds");

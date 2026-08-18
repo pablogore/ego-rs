@@ -82,8 +82,8 @@ where
             tenant,
             0,
             vec![
-                StoredEvent::without_correlation(make_event("First")),
-                StoredEvent::without_correlation(make_event("Second")),
+                StoredEvent::new(make_event("First")),
+                StoredEvent::new(make_event("Second")),
             ],
         )
         .await
@@ -116,7 +116,7 @@ where
             "stale",
             tenant,
             0,
-            vec![StoredEvent::without_correlation(make_event("Only"))],
+            vec![StoredEvent::new(make_event("Only"))],
         )
         .await
         .expect("the first append must succeed");
@@ -127,7 +127,7 @@ where
             "stale",
             tenant,
             0,
-            vec![StoredEvent::without_correlation(make_event("Duplicate"))],
+            vec![StoredEvent::new(make_event("Duplicate"))],
         )
         .await;
     match stale {
@@ -171,7 +171,7 @@ where
             "shared-identity",
             None,
             0,
-            vec![StoredEvent::without_correlation(make_event("Systemwide"))],
+            vec![StoredEvent::new(make_event("Systemwide"))],
         )
         .await
         .expect("a systemwide append at expected version 0 must succeed");
@@ -183,9 +183,7 @@ where
             "shared-identity",
             None,
             1,
-            vec![StoredEvent::without_correlation(make_event(
-                "SystemwideAgain",
-            ))],
+            vec![StoredEvent::new(make_event("SystemwideAgain"))],
         )
         .await
         .expect(
@@ -206,7 +204,7 @@ where
             "shared-identity",
             tenant,
             0,
-            vec![StoredEvent::without_correlation(make_event("Tenanted"))],
+            vec![StoredEvent::new(make_event("Tenanted"))],
         )
         .await
         .expect(
@@ -263,11 +261,10 @@ where
                 tenant,
                 0,
                 vec![
-                    StoredEvent::without_correlation(make_event("Keyed"))
-                        .with_operation_key(key.clone()),
+                    StoredEvent::new(make_event("Keyed")).with_operation_key(key.clone()),
                     // A second event in the same batch without a key, so the
                     // assertion cannot pass by attaching the key to everything.
-                    StoredEvent::without_correlation(make_event("Unkeyed")),
+                    StoredEvent::new(make_event("Unkeyed")),
                 ],
             )
             .await
@@ -286,6 +283,45 @@ where
         assert_eq!(
             loaded[1].operation_key, None,
             "an event appended without an operation key must not acquire one"
+        );
+
+        // --- Every field a `StoredEvent` carries is accounted for here --------
+        //
+        // The destructuring below has **no `..`**, deliberately. Adding a field to
+        // `StoredEvent` breaks this line, and whoever adds it has to come here and
+        // say how storage must treat it before the workspace compiles again.
+        //
+        // A runtime assertion cannot do this job. It compares only what it was
+        // written to look at, so a new field would sail past it and the harness
+        // would stay green while two implementations quietly disagreed — which is
+        // exactly what happened to `correlation_id`: the in-memory stores kept it
+        // because they store whole values, PostgreSQL dropped it because its
+        // `INSERT` had no column, nothing in the contract required either, and no
+        // test failed for the entire time the two disagreed.
+        //
+        // Rust cannot discover a field for us. Structural exhaustiveness is the
+        // only mechanism that makes the omission impossible rather than unlikely.
+        let StoredEvent {
+            event,
+            operation_key,
+        } = loaded
+            .into_iter()
+            .next()
+            .expect("the first loaded event, already asserted to exist");
+
+        // Both bindings are then used, so this cannot decay into a shape check that
+        // ignores what came back.
+        assert_eq!(
+            event.event_type(),
+            "Keyed",
+            "the payload must survive the round trip"
+        );
+        assert_eq!(
+            operation_key.as_ref(),
+            Some(&key),
+            "and so must the operation key, read here through the destructuring \
+             rather than by field access, so this assertion and the exhaustiveness \
+             gate above cannot drift apart"
         );
     }
 
@@ -307,7 +343,7 @@ where
                 "abandoned",
                 tenant,
                 0,
-                vec![StoredEvent::without_correlation(make_event("Staged"))],
+                vec![StoredEvent::new(make_event("Staged"))],
             )
             .await
             .expect("appending inside a unit of work must succeed");
@@ -354,8 +390,8 @@ where
         tenant,
         0,
         vec![
-            StoredEvent::without_correlation(make_event("One")).with_operation_key(uow_key.clone()),
-            StoredEvent::without_correlation(make_event("Two")),
+            StoredEvent::new(make_event("One")).with_operation_key(uow_key.clone()),
+            StoredEvent::new(make_event("Two")),
         ],
     )
     .await
@@ -369,7 +405,7 @@ where
             "committed-uow",
             tenant,
             2,
-            vec![StoredEvent::without_correlation(make_event("Three"))],
+            vec![StoredEvent::new(make_event("Three"))],
         )
         .await
         .expect("a second append in the same unit of work must see the first one's version");

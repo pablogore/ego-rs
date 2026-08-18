@@ -12,7 +12,7 @@
 //! | `event_store` | `EventStore<E>` — append and load domain events; `EventStoreUnitOfWork<E>` — a span in which appends share one fate |
 //! | `repository` | `Repository<A>` — save, load, and delete aggregates |
 //! | `snapshot` | `Snapshot` — save and load aggregate state snapshots |
-//! | `stored_event` | `StoredEvent<E>` — event wrapper with optional correlation_id |
+//! | `stored_event` | `StoredEvent<E>` — event wrapper carrying an optional operation key |
 
 /// Persistence error types.
 pub mod error;
@@ -29,7 +29,7 @@ pub mod repository;
 /// Aggregate snapshot contract — save and load state snapshots.
 pub mod snapshot;
 
-/// Event wrapper with optional correlation_id.
+/// Event wrapper carrying an optional operation key.
 pub mod stored_event;
 
 pub use error::PersistenceError;
