@@ -45,6 +45,55 @@ impl OperationKeyCarrier for HeaderCarrier<'_> {
     }
 }
 
+/// The metadata key the gRPC carrier reads the raw operation key from.
+///
+/// Lowercase deliberately: gRPC transmits metadata keys over HTTP/2, which
+/// lowercases every name on the wire, and tonic classifies a key as binary
+/// purely by a `-bin` suffix. Without that suffix this is an *ASCII* key, so
+/// the value arrives as `MetadataValue<Ascii>` and stays readable as text —
+/// which is what lets this adapter answer the same three states as HTTP.
+#[cfg(feature = "grpc")]
+pub const IDEMPOTENCY_KEY_METADATA: &str = "idempotency-key";
+
+/// Wraps tonic's `MetadataMap` so the shared extraction contract can read the
+/// `idempotency-key` metadata entry, exactly as [`HeaderCarrier`] does for an
+/// HTTP header. Same newtype-over-a-borrowed-map shape, same three answers,
+/// no protocol-specific rule of its own.
+#[cfg(feature = "grpc")]
+pub struct GrpcMetadataCarrier<'a>(pub &'a tonic::metadata::MetadataMap);
+
+#[cfg(feature = "grpc")]
+impl OperationKeyCarrier for GrpcMetadataCarrier<'_> {
+    /// Structurally identical to [`HeaderCarrier::raw_operation_key`], and
+    /// that is the point rather than a coincidence: the two adapters differ
+    /// only in which map they read, never in what the three answers mean.
+    ///
+    /// `get` is the ASCII accessor. It returns `None` for a binary (`-bin`)
+    /// key, so reading through it is what keeps a missing key and a
+    /// wrongly-typed key from being told apart here — neither is this
+    /// adapter's business, and [`IDEMPOTENCY_KEY_METADATA`] is ASCII by
+    /// construction.
+    ///
+    /// A value that cannot be read as text is reported as **unreadable**, not
+    /// as absent. That distinction survives here for the same reason it does
+    /// over HTTP: an absent key is admissible under the compatibility variant,
+    /// so collapsing the two would silently disable the guarantee for exactly
+    /// the requests most likely to come from a broken client.
+    fn raw_operation_key(&self) -> RawOperationKey<'_> {
+        match self.0.get(IDEMPOTENCY_KEY_METADATA) {
+            None => RawOperationKey::Absent,
+            Some(value) => match value.to_str() {
+                Ok(raw) => RawOperationKey::Present(raw),
+                Err(_) => RawOperationKey::Unreadable,
+            },
+        }
+    }
+
+    fn carrier_name(&self) -> &'static str {
+        "grpc:idempotency-key"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

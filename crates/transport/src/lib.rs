@@ -17,6 +17,8 @@ pub mod state;
 
 pub use config::GrpcServerConfig;
 pub use error::TransportError;
+#[cfg(feature = "grpc")]
+pub use idempotency::GrpcMetadataCarrier;
 pub use idempotency::HeaderCarrier;
 pub use operation_key::OperationKeyExtractor;
 pub use propagation::TraceContextExtractor;
