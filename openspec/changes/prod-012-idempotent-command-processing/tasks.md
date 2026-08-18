@@ -323,15 +323,93 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       The implementation is structurally identical to the HTTP carrier — same
       newtype over a borrowed map, same three answers, no rule of its own. It reads
       through the ASCII accessor, which is what lets a value survive as text at all.
-- [ ] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
+- [x] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
       valid key, an invalid key and an unreadable value, HTTP and gRPC resolve to the
       **identical** outcome under both enforcement modes. Any divergence is a defect
       in whichever adapter differs, never a protocol-specific rule.
-- [ ] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
+
+      **Amendment — this task did not originally norm duplicates, and now it does.**
+      As written above, B1.13 enumerated four arrivals: absent, valid, invalid,
+      unreadable. Nothing in it said how many times the key may arrive. That was not
+      an oversight the implementation quietly corrected — it was a gap, and the
+      behaviour that filled it was chosen deliberately here rather than inherited
+      from what the code happened to do. Recorded as an amendment so nobody later
+      reads the enumeration above and concludes duplicates were always specified.
+
+      **What the gap actually was.** Both `HeaderMap::get` and `MetadataMap::get`
+      return only the *first* value under a name. Measured, not assumed: a location
+      holding `op-A` and `op-B` returned `Some("op-A")` on both transports, with
+      `get_all` seeing both. So a request carrying two different keys was admitted
+      under whichever arrived first, on both adapters, silently. First-value-wins was
+      never decided; it was the accessor's default leaking through.
+
+      **The norm this task now carries:** the location must hold **exactly one
+      non-coalesced entry**. Anything else is `Ambiguous` and is rejected under both
+      enforcement modes, exactly as `Unreadable` is — the caller did supply keys, so
+      the missing-key policy does not apply to them.
+
+      **Three separate concerns, deliberately not merged:**
+
+      | Concern | Question it answers | Where it is decided |
+      |---|---|---|
+      | Multiplicity | how many entries arrived | message structure — the carrier, by counting |
+      | Coalescence | does one entry already read as several | wire representation — the carrier, by reading |
+      | Validity | is this string a usable key | the domain, in `OperationKey::parse` |
+
+      Coalescence needs its own mechanism because no count can see it. An
+      intermediary may fold repeated occurrences of a field into one
+      comma-separated value, and that arrives as exactly one entry. Measured:
+      `OperationKey::parse("op-A, op-B")` returns `Ok`. `OperationKey` has no
+      grammar — it rejects only empty/whitespace-only strings and values over 255
+      bytes — so the folded pair would otherwise have become a perfectly valid key
+      that no client ever sent.
+
+      **Why the transport declares it and not the domain.** Forbidding the separator
+      in `OperationKey` was considered and rejected: it would narrow a type that
+      deliberately promises opacity, breaking any legitimate key that contains a
+      comma, and `ego-domain` is publishable. The comma is HTTP's list separator and
+      gRPC ASCII metadata's too, so a folded value is an artefact of the wire
+      encoding — the same kind of judgement `Unreadable` already is, and the carrier
+      is where that knowledge belongs. The cost is stated plainly: a key containing a
+      comma stays constructible in-process and is rejected when it arrives over the
+      network.
+
+      **Ordering inside the classifier is load-bearing.** Multiplicity is settled
+      before any value is read. A readable entry followed by an unreadable one is
+      therefore `Ambiguous` — disqualified for being two entries — and the second
+      value is never examined. Reporting it `Unreadable` would be right by accident
+      and would stop being right the moment the unreadable entry arrived first; both
+      orderings are pinned by tests on both adapters precisely so that mistake is
+      detectable.
+
+      **Accepted risk — this is a backward-incompatible narrowing, and it was taken
+      knowingly.** A single entry whose value contains a comma used to resolve to
+      `Present` on both transports. It now resolves to `Ambiguous`, which rejects
+      under both enforcement modes and surfaces as `TransportError::BadRequest`. Any
+      client already sending a composite key that contains a comma — a tenant/order
+      pair is the ordinary way that happens — goes from succeeding to a hard 400 on
+      a path that previously worked.
+
+      The operational shape of that is worth stating rather than leaving to be
+      discovered. 400 is not a retryable status, so a client retry loop abandons the
+      command instead of degrading. `Compatibility` offers no admission path: it
+      loosens the *missing*-key policy only, and a supplied-but-unusable key was
+      never in its scope. Once such traffic is failing, the only mitigation is a code
+      rollback — nothing here is staged behind a flag, and no shadow mode emits the
+      classification without acting on it.
+
+      That cost was on the table when the transport-side rule was chosen over
+      narrowing `OperationKey` itself, and it was accepted rather than overlooked.
+      Recorded here so a later reader finds a decision with its price attached, not a
+      surprise. Reopens if a client is found relying on separator-bearing keys, in
+      which case the options are a shadow mode that classifies without rejecting, or
+      admitting coalesced values under `Compatibility` — both larger than this slice
+      and neither started here.
+- [x] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
       the crate provides "no gRPC transport" while already exporting
       `GrpcServerConfig`. The charter is stale relative to its own contents and will
       be more so after B1.12.
-- [ ] B1.15 RED/GREEN: assert no protocol type crosses the boundary — no `axum`,
+- [x] B1.15 RED/GREEN: assert no protocol type crosses the boundary — no `axum`,
       `HeaderMap`, `tonic` or `MetadataMap` symbol appears in `ego-domain`,
       `persistent-entity`, or the reservation and receipt surfaces. A grep-style
       structural test, so the neutrality is enforced rather than trusted.
@@ -348,10 +426,16 @@ behind a feature nothing builds rots silently: it stops compiling and nobody lea
 until someone enables the feature months later. The default build does not cover it,
 and `cargo check --workspace --all-targets` does not enable non-default features.
 
-- [ ] B1.16 GREEN: exercise both feature states as part of this slice's own gate —
+- [x] B1.16 GREEN: exercise both feature states as part of this slice's own gate —
       the default build and `--features grpc` — and record both commands in the
       slice's evidence. A feature that is only ever verified by the person who wrote
       it is not verified.
+
+      Both states are gated, and the isolation is asserted by *count* rather than by
+      a search tool's exit status — a search that finds nothing exits non-zero, so
+      treating that status as a result would invert its meaning. The `--features grpc`
+      graph is the positive control: without it, "tonic appears zero times" would be
+      indistinguishable from a command that failed to run.
 
 Two further transports are explicitly **not** in this change: Kafka record headers,
 and any real gRPC server binding. Both would consume the same carrier contract
@@ -1084,7 +1168,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Seven tasks remain unchecked outside E1: four in **B1** (the cross-adapter equivalence work and the neutrality, doc and feature-coverage items, B1.13–B1.16) and the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. B1.11–B1.12 are closed — the gRPC metadata carrier exists behind the `grpc` feature and passes the same conformance harness HTTP does. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Three tasks remain unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 

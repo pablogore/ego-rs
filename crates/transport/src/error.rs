@@ -93,7 +93,7 @@ impl From<ServiceError> for TransportError {
 }
 
 impl From<OperationKeyRejection> for TransportError {
-    /// A missing, invalid or unreadable `Idempotency-Key` are all
+    /// A missing, invalid, unreadable or ambiguous `Idempotency-Key` are all
     /// caller-supplied input that failed a rule before any handler ran — the
     /// same category `ServiceError::Validation` and
     /// `SecurityError::InvalidAccessRequest` already map to. None is a resource
@@ -102,15 +102,22 @@ impl From<OperationKeyRejection> for TransportError {
     /// (`Unauthorized`/`Forbidden`), so `BadRequest` is the closest existing
     /// category rather than a new one.
     ///
-    /// They collapse to one status deliberately: the three reasons are kept
+    /// They collapse to one status deliberately: the four reasons are kept
     /// distinct upstream so the rejection can say *which* rule failed in a
     /// diagnostic, but a client cannot act differently on them, and splitting
     /// the status would leak how the key was judged.
+    ///
+    /// `Ambiguous` collapses here too, and that is worth stating rather than
+    /// assuming. It is tempting to read several supplied keys as a conflict,
+    /// but nothing has been reserved or compared yet — the request never
+    /// carried one usable key to begin with, which makes it malformed input
+    /// like the rest.
     fn from(err: OperationKeyRejection) -> Self {
         match err {
             OperationKeyRejection::Missing { .. } => TransportError::BadRequest,
             OperationKeyRejection::Invalid { .. } => TransportError::BadRequest,
             OperationKeyRejection::Unreadable { .. } => TransportError::BadRequest,
+            OperationKeyRejection::Ambiguous { .. } => TransportError::BadRequest,
         }
     }
 }

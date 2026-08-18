@@ -27,5 +27,17 @@ fn header_carrier_conforms_to_the_shared_extraction_contract() {
     );
     let unreadable_key = HeaderCarrier(&unreadable_headers);
 
-    assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
+    // What a duplicate looks like on this transport: HTTP lets one header name
+    // appear as many times as a client cares to send it, so two entries under
+    // `Idempotency-Key` is a well-formed request that simply cannot be answered.
+    // `append` is what builds it — `insert` replaces, which would quietly reduce
+    // the fixture back to the single-value case it exists to escape. Both values
+    // are deliberately valid keys: nothing is wrong with either one, and the
+    // request is unusable all the same.
+    let mut ambiguous_headers = HeaderMap::new();
+    ambiguous_headers.append("Idempotency-Key", "op-first".parse().unwrap());
+    ambiguous_headers.append("Idempotency-Key", "op-second".parse().unwrap());
+    let ambiguous_key = HeaderCarrier(&ambiguous_headers);
+
+    assert_carrier_conformance(&with_key, &without_key, &unreadable_key, &ambiguous_key);
 }

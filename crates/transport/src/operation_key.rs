@@ -39,13 +39,20 @@ use crate::state::AppState;
 
 /// AD-10's `reason` and `carrier` for one rejection.
 ///
-/// Three reasons, one per rejection. `unreadable` is its own value rather than being
+/// Four reasons, one per rejection. `unreadable` is its own value rather than being
 /// folded into `invalid`, even though both end as the same status code: the rejection
 /// type keeps the two apart on purpose — no `OperationKeyError` describes a value that
 /// never became a string — and collapsing them here would discard exactly the
 /// distinction it was split to preserve. An operator seeing `unreadable` is looking at
 /// a transport or encoding problem; `invalid` is a client sending a malformed key
 /// (AD-10b).
+///
+/// `ambiguous` is separate for the same reason and points somewhere else again: the
+/// caller supplied several keys at one location, or one value that already reads as
+/// several. Nothing about it need be malformed, so reporting it as `invalid` would
+/// send an operator looking at the key's contents when the defect is how many of them
+/// arrived — which is far more often a proxy coalescing or replaying a header than a
+/// client bug.
 ///
 /// The carrier is **read from the rejection**, never re-derived from the request. It
 /// was set from `OperationKeyCarrier::carrier_name` when the rejection was built — a
@@ -57,13 +64,15 @@ use crate::state::AppState;
 /// is drawn from a set fixed at compile time, where the raw key is caller-supplied
 /// and unbounded.
 ///
-/// Exhaustive with no wildcard: a fourth rejection added upstream breaks the build
-/// rather than being reported as whichever arm happened to be last.
+/// Exhaustive with no wildcard: a further rejection added upstream breaks the build
+/// rather than being reported as whichever arm happened to be last. That gate has
+/// already done its job once — `ambiguous` arrived this way — so it stays.
 fn key_rejected_attributes(rejection: &OperationKeyRejection) -> (&'static str, &'static str) {
     match rejection {
         OperationKeyRejection::Missing { carrier } => ("missing", carrier),
         OperationKeyRejection::Invalid { carrier, .. } => ("invalid", carrier),
         OperationKeyRejection::Unreadable { carrier } => ("unreadable", carrier),
+        OperationKeyRejection::Ambiguous { carrier } => ("ambiguous", carrier),
     }
 }
 

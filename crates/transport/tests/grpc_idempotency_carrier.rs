@@ -55,7 +55,25 @@ fn grpc_metadata_carrier_conforms_to_the_shared_extraction_contract() {
     );
     let unreadable_key = GrpcMetadataCarrier(&unreadable_metadata);
 
-    assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
+    // What a duplicate looks like on this transport: gRPC metadata is a
+    // multimap, so a client can send the same key twice without breaking any
+    // rule of the protocol — the request is well formed and still unanswerable.
+    // `append` is what builds it — `insert` replaces, which would quietly reduce
+    // the fixture back to the single-value case it exists to escape. Both values
+    // are deliberately valid keys: the defect is that there are two of them, not
+    // that either is wrong.
+    let mut ambiguous_metadata = MetadataMap::new();
+    ambiguous_metadata.append(
+        WIRE_KEY,
+        AsciiMetadataValue::try_from("op-first").expect("`op-first` is a valid ASCII value"),
+    );
+    ambiguous_metadata.append(
+        WIRE_KEY,
+        AsciiMetadataValue::try_from("op-second").expect("`op-second` is a valid ASCII value"),
+    );
+    let ambiguous_key = GrpcMetadataCarrier(&ambiguous_metadata);
+
+    assert_carrier_conformance(&with_key, &without_key, &unreadable_key, &ambiguous_key);
 }
 
 /// The premise the unreadable case rests on, enforced rather than assumed: the
