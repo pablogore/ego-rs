@@ -1279,11 +1279,11 @@ open which behaviour the contract should require.** Neither. The field is
 withdrawn.
 
 **The deciding fact is not that PostgreSQL drops it.** It is that **the productive
-system never produces it.** `StoredEvent::new` is the only constructor that can
-set a correlation id, and it has exactly two call sites — both inside the type's
-own unit tests. Every productive path constructs through
-`StoredEvent::without_correlation`. Nothing in `crates/`, `examples/` or
-`integration-tests/` ever hands a `Some(_)` to a store.
+system never produces it.** At the time of this decision the two-argument
+`StoredEvent::new` was the only constructor that could set a correlation id, and it
+had exactly two call sites — both inside the type's own unit tests. Every
+productive path constructed through `StoredEvent::without_correlation`. Nothing in
+`crates/`, `examples/` or `integration-tests/` ever handed a `Some(_)` to a store.
 
 Making it durable now would add a column and a contract clause to transport
 **absence**, forever. That converts an empty promise into permanent debt, which is
@@ -1292,13 +1292,14 @@ generate.
 
 **The in-memory stores preserved it by accident, and that does not define the
 contract.** Both keep whole `StoredEvent` values — `stream.extend(events)` and
-`stream.push(event)` — so the field survives as a side effect of how they store,
-not because either implements a promise. A behaviour nobody wrote is not a
+`stream.push(event)` — so the field survived as a side effect of how they store,
+not because either implemented a promise. A behaviour nobody wrote is not a
 specification.
 
 **PostgreSQL is not losing a real signal.** It never receives one. Its `INSERT`
-has no `correlation_id` column to bind and its load reconstructs through
-`without_correlation`; both are consistent with the only input that ever arrives.
+has no `correlation_id` column to bind, and at the time its load reconstructed
+through the then-existing `without_correlation`; both are consistent with the only
+input that ever arrives.
 
 **No migration, and no empty column.** The `events` table has never had a
 `correlation_id` column across all eight migrations, and none is added here.
@@ -1311,26 +1312,28 @@ bridges the two, and no file in the codebase mentions both. Two fields sharing a
 name were mistaken for one capability.
 
 **This is a deliberate public breaking change.** The field is removed, and with it
-`StoredEvent::new`, whose only parameter beyond the event *is* the correlation id
-— once the field goes, `new` and `without_correlation` collapse into one
-constructor. There is no accessor to remove; it was a public field. Measured
-blast radius: 2 `StoredEvent::new` call sites, 24 `without_correlation` call sites
-across 8 files, **one** read of the field (its own test), and three prose
-references — the type's own doc comment and two lines in `persistence/mod.rs`'s
-module map — which must go with it so the map does not describe a field that no
-longer exists.
+the two-argument constructor whose only parameter beyond the event *is* the
+correlation id. `StoredEvent::new` itself is **not** removed — once the field goes,
+the two-argument `new` and `without_correlation` collapse into the single
+`StoredEvent::new(event)`, so `without_correlation` disappears as a name while
+construction keeps happening through `new`. There is no accessor to remove; it was
+a public field. Measured blast radius at the time: 2 two-argument
+`StoredEvent::new` call sites, 24 `without_correlation` call sites across 8 files,
+**one** read of the field (its own test), and three prose references — the type's
+own doc comment and two lines in `persistence/mod.rs`'s module map — which must go
+with it so the map does not describe a field that no longer exists.
 
 An earlier count here said two reads. The second was
 `SemanticEvent::correlation_id` in `observability.rs`, a different type that shares
 the name; it is not affected.
 
 **Why the conformance harness did not catch the divergence, which is the part
-worth fixing regardless.** `crates/testkit/src/event_store.rs` builds 13 fixtures,
-all through `without_correlation`, and calls `StoredEvent::new` zero times. It
-could not have detected a difference in a field it never populates. The same shape
-as the systemwide comparison, the unit-of-work offsets and the absent-stream
-report: two implementors diverged because the shared harness asserted nothing
-about the thing that differed.
+worth fixing regardless.** Before this slice, `crates/testkit/src/event_store.rs`
+built 13 fixtures and called the then-existing two-argument `StoredEvent::new` zero
+times; every fixture used `without_correlation`, so the harness could not exercise
+the field. The same shape as the systemwide comparison, the unit-of-work offsets
+and the absent-stream report: two implementors diverged because the shared harness
+asserted nothing about the thing that differed.
 
 **How B4.7b closes it, normatively: structural exhaustiveness, not a dynamic
 assertion.** The harness destructures a loaded `StoredEvent` with **no `..`**, so
