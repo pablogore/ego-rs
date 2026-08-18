@@ -282,13 +282,47 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
 > tests. Binding it to a real server belongs to whichever change introduces that
 > transport.
 
-- [ ] B1.11 RED: conformance test for a gRPC metadata carrier, driven by the **same**
+- [x] B1.11 RED: conformance test for a gRPC metadata carrier, driven by the **same**
       three-state harness HTTP already passes — no protocol-specific harness, no
       relaxed variant. Includes a real non-ASCII/non-UTF-8 metadata value so the
       unreadable state is exercised on this transport too.
-- [ ] B1.12 GREEN: implement `GrpcMetadataCarrier` reading `idempotency-key` from
+
+      `crates/transport/tests/grpc_idempotency_carrier.rs` calls
+      `ego_testkit::assert_carrier_conformance`, the same generic function
+      `HeaderCarrier` is judged by. No gRPC-flavoured harness was written and the
+      shared one needed no generalisation: it is already library code generic over
+      `C: OperationKeyCarrier` and imports nothing from any transport.
+
+      **The unreadable state is genuinely representable here, measured rather than
+      assumed.** tonic classifies a metadata key as binary purely by a `-bin`
+      suffix, so `idempotency-key` is ASCII-typed and its value arrives as
+      `MetadataValue<Ascii>`. The safe constructor `AsciiMetadataValue::try_from`
+      admits any byte in `32..=255` except 127, while `to_str` admits only visible
+      ASCII, `32..=126`. `[0xff, 0xfe]` therefore constructs successfully and then
+      fails to read — the same two-step `HeaderValue` gives HTTP. Verified by
+      compiling and running against the resolved tonic 0.14.6 before any code was
+      written, so the third state is exercised on this transport for the same
+      reason it is on HTTP, not by a weaker stand-in. No `unsafe`, no `-bin` key,
+      no fabricated carrier.
+
+      The fixtures are built from a wire-key literal rather than from the carrier's
+      own constant. Building them from the constant made the suite move with the
+      carrier: a mutation renaming the key survived, because both sides agreed on
+      the new name while no real client could reach it. `the_constant_is_pinned_to_the_wire_key`
+      is now the one place that knows both.
+- [x] B1.12 GREEN: implement `GrpcMetadataCarrier` reading `idempotency-key` from
       `tonic::metadata::MetadataMap`, reporting `Absent`, `Present` or `Unreadable`.
-      **Placement decision required before starting** — see the note below.
+
+      **Placement, as decided below:** `crates/transport/src/idempotency.rs`,
+      beside `HeaderCarrier`, with `tonic` optional behind a `grpc` feature. The
+      crate declares no `default` feature set, so an HTTP-only build never compiles
+      tonic; `tonic` is taken with `default-features = false`, which keeps it to its
+      metadata core rather than dragging in a router, an HTTP/2 server and a second
+      axum major that a metadata carrier has no use for.
+
+      The implementation is structurally identical to the HTTP carrier — same
+      newtype over a borrowed map, same three answers, no rule of its own. It reads
+      through the ASCII accessor, which is what lets a value survive as text at all.
 - [ ] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
       valid key, an invalid key and an unreadable value, HTTP and gRPC resolve to the
       **identical** outcome under both enforcement modes. Any divergence is a defect
@@ -1050,7 +1084,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Nine tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16) and the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Seven tasks remain unchecked outside E1: four in **B1** (the cross-adapter equivalence work and the neutrality, doc and feature-coverage items, B1.13–B1.16) and the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. B1.11–B1.12 are closed — the gRPC metadata carrier exists behind the `grpc` feature and passes the same conformance harness HTTP does. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 
