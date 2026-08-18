@@ -231,6 +231,9 @@ type DiscoveryRow = (String, String, Option<String>, Option<Vec<String>>);
 const TENANT_PREDICATE: &str = "(tenant_id IS NOT NULL)";
 const SYSTEMWIDE_PREDICATE: &str = "(tenant_id IS NULL)";
 
+/// The column whose nullness distinguishes the two partitions.
+const TENANCY_DISCRIMINATOR: &str = "tenant_id";
+
 /// Stands in for a key that is an expression rather than a plain column.
 ///
 /// An expression key has no name to report, so it needs a placeholder that
@@ -536,19 +539,84 @@ struct DiscoveredHalf {
 }
 
 impl DiscoveredHalf {
-    /// The identity this half enforces, with the tenancy discriminator removed so
-    /// the two halves become comparable.
+    /// The identity a **tenant** half enforces, or why it is not a well-formed
+    /// tenant half.
     ///
-    /// The systemwide half omits `tenant_id` because its predicate already fixes
-    /// that column to NULL for every row it contains. Dropping `tenant_id` from
-    /// the tenant half is therefore what puts both halves in the same terms — and
-    /// two halves are a genuine pair only if what remains is *identical*.
-    fn identity(&self) -> Vec<&str> {
-        self.keys
+    /// # Normalising both sides the same way was a false green
+    ///
+    /// An earlier version filtered `tenant_id` out of whichever half it was given.
+    /// That made two very different mistakes invisible, because both sides
+    /// normalised to the same list:
+    ///
+    /// ```sql
+    /// UNIQUE (tenant_id, aggregate_id) WHERE tenant_id IS NOT NULL;
+    /// UNIQUE (tenant_id, aggregate_id) WHERE tenant_id IS NULL;   -- accepted!
+    /// ```
+    ///
+    /// The systemwide half there keys on a column its own predicate fixes to NULL
+    /// for every row it contains — and PostgreSQL treats NULLs as **distinct** in
+    /// a unique index, so `(NULL, 'a')` and `(NULL, 'a')` do not collide.
+    /// Duplicate identities are permitted in the systemwide partition, which is
+    /// the exact failure this pair exists to prevent.
+    ///
+    /// The mirror mistake passed too: a tenant half with **no** `tenant_id` key
+    /// normalises identically, while enforcing one identity *globally across all
+    /// tenants* instead of once per tenant.
+    ///
+    /// So each side is now checked on its own terms. This one requires
+    /// `tenant_id` exactly once and in the leading position, and removes only
+    /// that position.
+    fn tenant_identity(&self) -> Result<Vec<&str>, String> {
+        let positions: Vec<usize> = self
+            .keys
             .iter()
-            .map(String::as_str)
-            .filter(|key| *key != "tenant_id")
-            .collect()
+            .enumerate()
+            .filter(|(_, key)| key.as_str() == TENANCY_DISCRIMINATOR)
+            .map(|(at, _)| at)
+            .collect();
+
+        match positions.as_slice() {
+            [0] => Ok(self.keys[1..].iter().map(String::as_str).collect()),
+            [] => Err(format!(
+                "the tenant half `{}` does not key on `{TENANCY_DISCRIMINATOR}` at all, so it \
+                 enforces its identity once globally rather than once per tenant — two \
+                 different tenants could not hold the same identity",
+                self.index
+            )),
+            [at] => Err(format!(
+                "the tenant half `{}` keys on `{TENANCY_DISCRIMINATOR}` at position {at} \
+                 rather than first. The leading position is normative: it is what lets the \
+                 index serve a per-tenant prefix lookup, and it is the position the \
+                 systemwide half's absence of the column corresponds to",
+                self.index
+            )),
+            many => Err(format!(
+                "the tenant half `{}` keys on `{TENANCY_DISCRIMINATOR}` {} times, at \
+                 positions {many:?}; there is no single discriminator to normalise away",
+                self.index,
+                many.len()
+            )),
+        }
+    }
+
+    /// The identity a **systemwide** half enforces, or why it is not a well-formed
+    /// systemwide half.
+    ///
+    /// It must not key on `tenant_id` at all — see [`Self::tenant_identity`] for
+    /// what accepting one costs.
+    fn systemwide_identity(&self) -> Result<Vec<&str>, String> {
+        if self.keys.iter().any(|key| key == TENANCY_DISCRIMINATOR) {
+            return Err(format!(
+                "the systemwide half `{}` keys on `{TENANCY_DISCRIMINATOR}`, which its own \
+                 predicate fixes to NULL for every row it contains. PostgreSQL treats NULLs \
+                 as distinct in a unique index, so including that column stops the index \
+                 colliding anything: duplicate identities are then permitted across the \
+                 whole systemwide partition, which is the failure this pair exists to \
+                 prevent",
+                self.index
+            ));
+        }
+        Ok(self.keys.iter().map(String::as_str).collect())
     }
 
     fn describe(&self) -> String {
@@ -583,9 +651,11 @@ impl DiscoveredHalf {
 /// precisely why discovery must catch it on the tables it does not — that is
 /// discovery's whole reason to exist.
 ///
-/// So halves are paired by [`DiscoveredHalf::identity`]: strip `tenant_id` from
-/// the tenant half and require what remains to equal the systemwide half's keys
-/// exactly.
+/// So halves are normalised per side — [`DiscoveredHalf::tenant_identity`] and
+/// [`DiscoveredHalf::systemwide_identity`], each rejecting what is malformed on
+/// its own terms — and then **every** half must have a counterpart with the same
+/// identity. Not "a pair exists somewhere on this table": that let one good pair
+/// hide every orphan beside it.
 #[tokio::test]
 async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     let db = isolated_database().await;
@@ -644,25 +714,57 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
              identities among tenant-less rows"
         );
 
-        // Present on both sides is not the same as coherent across them.
-        let matched = tenant_halves.iter().any(|tenant| {
-            systemwide_halves
-                .iter()
-                .any(|systemwide| tenant.identity() == systemwide.identity())
-        });
+        // Well-formedness before pairing. A half that is malformed on its own terms
+        // cannot be normalised into anything comparable, and pairing it would only
+        // hide the defect behind a mismatch report that names the wrong problem.
+        let mut tenant_identities: Vec<(String, Vec<&str>)> = Vec::new();
+        for half in &tenant_halves {
+            match half.tenant_identity() {
+                Ok(identity) => tenant_identities.push((half.describe(), identity)),
+                Err(why) => panic!("table `{table}`: {why}.\n  Half: {}", half.describe()),
+            }
+        }
+        let mut systemwide_identities: Vec<(String, Vec<&str>)> = Vec::new();
+        for half in &systemwide_halves {
+            match half.systemwide_identity() {
+                Ok(identity) => systemwide_identities.push((half.describe(), identity)),
+                Err(why) => panic!("table `{table}`: {why}.\n  Half: {}", half.describe()),
+            }
+        }
+
+        // Every half needs a counterpart, not merely some pair somewhere.
+        //
+        // An earlier version asked only whether *a* matching pair existed. One valid
+        // pair then satisfied it and hid every additional half — a table could carry
+        // `UNIQUE (tenant_id, operation_key) WHERE tenant_id IS NOT NULL` with no
+        // systemwide companion at all and still pass, while this test's own name
+        // promises no such half exists.
+        let unpaired_tenant: Vec<&String> = tenant_identities
+            .iter()
+            .filter(|(_, identity)| {
+                !systemwide_identities
+                    .iter()
+                    .any(|(_, other)| other == identity)
+            })
+            .map(|(described, _)| described)
+            .collect();
+        let unpaired_systemwide: Vec<&String> = systemwide_identities
+            .iter()
+            .filter(|(_, identity)| !tenant_identities.iter().any(|(_, other)| other == identity))
+            .map(|(described, _)| described)
+            .collect();
+
         assert!(
-            matched,
-            "table `{table}` has an index under each tenancy predicate, but no two of them \
-             guard the same identity, so nothing is enforced across both modes: \
-             {described:?}. Compared with `tenant_id` stripped from the tenant half — \
-             tenant candidates {:?} against systemwide candidates {:?}",
-            tenant_halves
+            unpaired_tenant.is_empty() && unpaired_systemwide.is_empty(),
+            "table `{table}` carries half of a tenancy pair with no counterpart guarding the \
+             same identity, so that identity is unconstrained in the other partition.\n  \
+             Tenant halves with no systemwide counterpart: {unpaired_tenant:?}\n  Systemwide \
+             halves with no tenant counterpart: {unpaired_systemwide:?}\n  All halves on this \
+             table: {described:?}\n  Normalised — tenant {:?} against systemwide {:?}",
+            tenant_identities.iter().map(|(_, i)| i).collect::<Vec<_>>(),
+            systemwide_identities
                 .iter()
-                .map(|h| h.identity())
-                .collect::<Vec<_>>(),
-            systemwide_halves
-                .iter()
-                .map(|h| h.identity())
+                .map(|(_, i)| i)
                 .collect::<Vec<_>>()
         );
     }
