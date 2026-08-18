@@ -169,16 +169,53 @@ B2 actually consumes: one common `Clock` to inject into the reservation store.
 
 Not required by B2 and not part of Block A. Recorded so it is not lost.
 
-- [ ] F1.1 RED: unit tests for `EffectRunner`'s due-claiming and retry-scheduling
-      paths driven by a fake clock, asserting scheduling decisions without
-      real elapsed time. Pure unit tests — no Docker, no containers, no real
-      external resource.
-- [ ] F1.2 GREEN: give `EffectRunner` an injected clock and route its two
-      production wall-clock reads through it —
-      `crates/runtime/src/effects/runner.rs:546` (`claim_due(Timestamp::now(), ..)`)
-      and `:1017` (`mark_retryable_with_retry(.., Timestamp::now())`). These are
-      the real untestable wall-clock reads in the effects subsystem; the store
-      never had any.
+- [x] F1.1 RED: unit tests for `DeliveryRunner`'s due-claiming and
+      retry-scheduling paths driven by a fake clock, asserting scheduling
+      decisions without real elapsed time. Pure unit tests — no Docker, no
+      containers, no real external resource.
+- [x] F1.2 GREEN: give `DeliveryRunner` an injected clock and route **all four**
+      of its production clock-dependent decisions through it.
+
+      **Measured premise correction.** This task previously claimed the runner
+      had exactly *two* production wall-clock reads, naming only
+      `claim_due(Timestamp::now(), ..)` and
+      `mark_retryable_with_retry(.., Timestamp::now())`, and asserted those were
+      "the real untestable wall-clock reads". That enumeration was an
+      undercount: it missed the `timestamp_after` helper, which read
+      `Utc::now()` itself and is the source of *both* `next_at` values the
+      retry subsystem computes. Measured against the code, production had
+      **three** syntactic clock reads feeding **four** distinct scheduling
+      decisions:
+
+      | # | Decision | Read via |
+      |---|----------|----------|
+      | 1 | the instant `reclaim_due` claims due effects at | `Timestamp::now()` |
+      | 2 | `next_at` of an ordinary retry (`retry_or_give_up`) | `timestamp_after` → `Utc::now()` |
+      | 3 | `next_at` of the successful-but-unconfirmed fallback (`finish_success`) | `timestamp_after` → `Utc::now()` |
+      | 4 | the immediate requeue instant after a shutdown cancellation (`requeue_without_charging_attempt`) | `Timestamp::now()` |
+
+      All four now route through an `Arc<dyn Clock>` held by the runner.
+      Decisions 1 and 4 read it through a private `now()` accessor;
+      `timestamp_after` takes the clock explicitly as a free function
+      parameter, so decisions 2 and 3 are injected at their shared source
+      rather than at two separate call sites, and the helper's saturation and
+      arithmetic contracts stay assertable against a controlled clock without
+      constructing a runner. The clock is a **required** constructor parameter
+      — there is no alternative constructor that defaults it, so it cannot be
+      silently forgotten. `RuntimeEffectAcceptor::new` is the production
+      composition root and supplies the single `Arc::new(SystemClock)`.
+
+      The original claim that "the store never had any" holds in the sense
+      that matters: every `EffectStateStore` operation receives `now` as a
+      parameter instead of reading a clock, so the port needed no injection.
+      The only wall-clock read in `store.rs` is `Timestamp::now()`'s own
+      constructor body, which is a value factory rather than a scheduling
+      decision, and which production runner code no longer calls.
+
+      `saturated_backoff_fallback`'s saturation semantics are preserved
+      unchanged: an unrepresentable backoff still saturates to a century rather
+      than degrading to an immediate retry, and changing the source of "now"
+      introduced no new overflow or panic path.
 
 Sized as its own unit because it touches the retry subsystem inside a file of
 roughly three thousand lines, which does not belong inside an unrelated slice.
@@ -1013,7 +1050,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Eleven tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock, F1.1–F1.2), and the three **DOC** items (DOC.1–DOC.3). E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Nine tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16) and the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 

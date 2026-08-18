@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ego_domain::time::SystemClock;
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
 use persistent_entity::effect_acceptor::{EffectAcceptanceError, EffectAcceptor};
 use thiserror::Error;
@@ -522,6 +523,7 @@ impl RuntimeEffectAcceptor {
             dedup,
             registry,
             config.retry,
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (deadline_tx, deadline_rx) = watch::channel(None);
@@ -1579,6 +1581,7 @@ mod tests {
             store as Arc<dyn EffectDedupStore>,
             Arc::new(ExecutorRegistry::new()),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let handle = EffectRuntimeHandle {
             shutdown,
@@ -2151,6 +2154,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (queue, receiver) = EffectQueue::bounded(4);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -2303,6 +2307,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (queue, receiver) = EffectQueue::bounded(4);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -2344,5 +2349,37 @@ mod tests {
                  final Result must reflect that, not a false Ok(())",
             );
         assert!(matches!(err, EffectRuntimeShutdownError::Timeout));
+    }
+
+    /// F1: the production composition root must wire the REAL system clock
+    /// into the delivery runner. `DeliveryRunner::new` takes the clock as a
+    /// required parameter, so it cannot be omitted — but nothing about
+    /// compiling proves *which* clock this root chose, which is what this
+    /// asserts.
+    ///
+    /// Asserted by bracketing rather than by a tolerance: the instant the
+    /// injected clock reports is sampled between two real `Utc::now()` reads,
+    /// so a genuine system clock necessarily falls inside the bracket, while
+    /// any fixed, offset, or otherwise substituted clock necessarily falls
+    /// outside it. No margin or approximation is involved.
+    #[test]
+    fn the_production_composition_root_injects_the_real_system_clock() {
+        let store = Arc::new(InMemoryEffectStore::new());
+        let acceptor = RuntimeEffectAcceptor::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store as Arc<dyn EffectDedupStore>,
+            Arc::new(ExecutorRegistry::new()),
+            DeliveryConfig::immediate(),
+        );
+
+        let before = chrono::Utc::now();
+        let observed = acceptor.runner.clock().now();
+        let after = chrono::Utc::now();
+
+        assert!(
+            observed >= before && observed <= after,
+            "the composition root must inject the real system clock: the observed instant \
+             {observed} must fall between {before} and {after}"
+        );
     }
 }
