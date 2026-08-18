@@ -394,7 +394,31 @@ unchanged, which is the point of stopping here.
       mutation that was skipped, so a later change to `commit`'s receiver is
       understood to be removing a check, not tidying a signature.
 - [x] B5.7a **(debt created by AD-3b, on already-merged code)**: `OperationReceipt` currently stores `ego_domain::operation::reservation::StoredResponse` — literally the reservation's type, imported across the two scopes AD-3b separates. Replace it with `AggregateOutcome`, rename the reservation's own to `StoredServiceResponse`, and rename migration `011`'s `response` column accordingly. This touches `crates/domain/src/operation/receipt.rs`, `011_create_operation_receipts.sql`, the Postgres adapter and the shared conformance harness — landed in `febeaaa`/`d5cd752` before the two scopes were distinguished. The two may share a byte representation; they share neither semantics nor ownership, and the shared name is how the scopes were merged in the first place.
-- [ ] B5.8 Update A3.4/A3.5's schema-index assertion to include the `operation_receipts` pair now that it exists.
+- [x] B5.8 Restore A3.4/A3.5's schema-index assertion and extend it to the `operation_receipts` pair.
+
+      **The target this task named no longer existed.** A3.4/A3.5's assertion lived in `crates/integration-tests/tests/schema_index_assertion.rs`, and `f8f5c37` (#274) deleted it wholesale along with the rest of that crate — every target that reached outside the process. So this was a reconstruction, not the edit the original wording ("update … to include the `operation_receipts` pair") presumed. Recorded because a reader checking the task against the tree would otherwise find nothing to update.
+
+      Rebuilt as `integration-tests/tests/infrastructure/schema_index_assertion.rs`, in the independent `integration-tests/` workspace that now owns infrastructure-backed tests, and registered as a module of the consolidated `integration-tests/tests/infrastructure.rs` target. It takes the run's single PostgreSQL from the runner (`cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`) and a migrated, empty database of its own from `ego_integration_tests::isolated_database()`. It starts no container and does not reinstate the deleted `start_pool()`.
+
+      **The registry went from one table to three.** The old version covered `events` alone, because the reservation and receipt tables did not exist when it was written. `EXPECTED_PAIRS` now pins `events`, `operation_reservations` and `operation_receipts`, asserting for each half the stable name, `indisunique`, the exact column list, the exact column order and the exact partial predicate — read from `pg_index`, `pg_class` and `pg_attribute`. The `unnest(i.indkey) WITH ORDINALITY` join is kept: without ordinality the column list comes back in join order and the ordering assertion would be vacuous rather than merely weaker.
+
+      **The catalog, not the migration text.** Nothing here reads a `.sql` file. Matching migration source would only prove a file says what it says; these queries ask the server what it is actually enforcing, which is what the stores depend on.
+
+      **Both A3.5 defences kept, because they catch opposite failures.** The explicit registry catches a table that should carry a pair and carries *no* index at all — invisible to discovery, since there is nothing to discover. Catalog discovery catches any table carrying only one half of a tenant/systemwide pair, including a table nobody registered. Discovery cannot pass vacuously: it asserts it found a pair on every registered table, so a query that silently matched nothing fails instead of reporting success over an empty map.
+
+      **Mutation evidence.** Each mutation was applied to `011_create_operation_receipts.sql`, with its anchor text proven to match exactly once before being applied, and the file restored afterwards and confirmed byte-identical by SHA-256 and `diff -q`. Exit codes are the runner's, captured rather than inferred from screen output.
+
+      | Mutation | Exit | Failed | Assertion that fired |
+      |---|---|---|---|
+      | both receipts indexes removed | 101 | 2 | registry: missing `ux_operation_receipts_identity_tenant`; discovery: the non-vacuity anchor |
+      | systemwide half removed only | 101 | 2 | registry: missing `ux_operation_receipts_identity_systemwide`; discovery: lopsided pair |
+      | two tenant-half columns transposed | 101 | 1 | registry: exact column order |
+      | tenant half made non-unique | 101 | 2 | registry: must be UNIQUE; discovery: lopsided pair, the half having dropped out of the `indisunique` filter |
+      | systemwide predicate flipped to `IS NOT NULL` | 101 | 2 | registry: exact partial predicate; discovery: lopsided pair |
+
+      Unmutated, the suite is green at 20 tests (exit 0) — the 17 that preceded this slice plus these three. The transposed-columns mutation fails one test rather than two deliberately: a transposed pair is still a *complete* pair, so lopsidedness is not the defect there and discovery is correct to stay green.
+
+      One thing the reconstruction states that the original could not: the runner provisions PostgreSQL 16, while the declared floor of 14 is the entire reason the two-index strategy exists. The assertions pin the strategy rather than the server, and read no version-specific catalog column, so they mean the same thing on either.
 
 ### Phase B6: `#[idempotent]` Marker + Slot-3 Wiring — Closes the Live Bug (needs B1, B2, B3, B5)
 
@@ -958,7 +982,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Twelve tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock, F1.1–F1.2), **B5.8** (extend the schema-index assertion to the `operation_receipts` pair), and the three **DOC** items (DOC.1–DOC.3). E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Eleven tasks remain unchecked outside E1: six in **B1** (the gRPC metadata carrier and the cross-adapter equivalence work, B1.11–B1.16), two in **F1** (`EffectRunner`'s injected clock, F1.1–F1.2), and the three **DOC** items (DOC.1–DOC.3). E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 

@@ -60,5 +60,9 @@ mod infrastructure {
     mod oldest_completed_postgres;
     mod purge_progress_postgres;
     mod replay_from_postgres;
+    /// Not named `*_postgres` like its neighbours, because it is not a scenario
+    /// traversing the framework at all: it reads PostgreSQL's own catalog and
+    /// asserts the shape of the indexes the other modules depend on.
+    mod schema_index_assertion;
     mod takeover_fencing_postgres;
 }
