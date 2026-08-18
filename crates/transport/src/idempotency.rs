@@ -12,16 +12,6 @@ use ego_service_sdk::idempotency::{OperationKeyCarrier, RawOperationKey};
 /// The header this carrier reads the raw operation key from.
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 
-/// The character both wire formats use to join several values of one field
-/// into a single entry.
-///
-/// An intermediary is allowed to fold repeated occurrences of a field into one
-/// comma-separated value, and some do it unasked. That folding is invisible to
-/// a count of entries: two keys arrive as one entry whose value already reads
-/// as two, so a carrier that only counted would hand the joined string on as a
-/// single key and the guarantee would rest on a value no client ever sent.
-const LIST_SEPARATOR: char = ',';
-
 /// Classifies what one location held, given its entries and a way to read one
 /// as text.
 ///
@@ -37,6 +27,21 @@ const LIST_SEPARATOR: char = ',';
 /// one, whatever the values happen to contain. So a location holding a
 /// readable value followed by an unreadable one is ambiguous — not unreadable
 /// — and it gets there without the second value ever being examined.
+///
+/// # A known gap this deliberately does not close
+///
+/// An intermediary may fold repeated occurrences of one field into a single
+/// comma-separated value, and that folding is invisible here: two keys arrive
+/// as one entry, so the count sees one and the joined string is handed on as a
+/// key. `OperationKey` will accept it — measured, not assumed: the type is
+/// deliberately opaque and rejects only empty or over-long strings — so such a
+/// request resolves under a key no client ever sent.
+///
+/// Catching it means reading the value and rejecting a separator, which is a
+/// backward-incompatible narrowing: a composite key that legitimately contains
+/// a comma would start failing with a non-retryable status on a path that
+/// previously worked. That is a decision with its own impact analysis, not a
+/// detail of this one, so the gap is recorded rather than closed here.
 fn classify_entries<'a, V: 'a>(
     mut entries: impl Iterator<Item = &'a V>,
     readable: impl Fn(&'a V) -> Option<&'a str>,
@@ -49,14 +54,6 @@ fn classify_entries<'a, V: 'a>(
     }
     match readable(only) {
         None => RawOperationKey::Unreadable,
-        // One entry that already reads as several. Reported as ambiguous
-        // rather than invalid because nothing here is malformed: each half may
-        // be a perfectly good key, and it is having two of them that leaves
-        // nothing to choose. `OperationKey` itself stays deliberately opaque —
-        // it admits any non-empty string within its length bound, commas
-        // included — so this is the transport declaring what its own encoding
-        // did, not the domain narrowing what a key may contain.
-        Some(raw) if raw.contains(LIST_SEPARATOR) => RawOperationKey::Ambiguous,
         Some(raw) => RawOperationKey::Present(raw),
     }
 }
@@ -268,29 +265,27 @@ mod tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// Cause two: one entry that an intermediary already folded. No count can
-    /// see this — there is exactly one entry — so it is caught by reading the
-    /// value and finding the separator in it.
+    /// The known gap, pinned as a gap rather than left to be rediscovered: a
+    /// value an intermediary already folded reads as ONE entry and resolves as
+    /// an ordinary key. Asserting the current behaviour is what makes closing
+    /// this later a visible, deliberate change rather than a silent one — and
+    /// the second assertion records why the domain cannot catch it either.
     #[test]
-    fn one_entry_holding_a_coalesced_pair_reports_as_ambiguous() {
+    fn a_coalesced_pair_currently_resolves_as_a_single_key() {
         let mut headers = HeaderMap::new();
         headers.insert(IDEMPOTENCY_KEY_HEADER, "op-A, op-B".parse().unwrap());
         let carrier = HeaderCarrier(&headers);
 
-        assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
-    }
-
-    /// The premise the coalescence rule rests on, enforced rather than assumed:
-    /// the domain itself would happily accept the folded value. `OperationKey`
-    /// is deliberately opaque — non-empty and within a length bound, nothing
-    /// more — so if the carrier did not classify this, the joined string would
-    /// become a perfectly valid key that no client ever sent.
-    #[test]
-    fn the_domain_would_accept_the_coalesced_value_which_is_why_the_carrier_must_not() {
+        assert_eq!(
+            carrier.raw_operation_key(),
+            RawOperationKey::Present("op-A, op-B"),
+            "coalesced values are deliberately out of scope here; closing this \
+             narrows what a key may be and needs its own impact analysis"
+        );
         assert!(
             ego_domain::operation::OperationKey::parse("op-A, op-B").is_ok(),
-            "OperationKey has no grammar forbidding the separator; the transport \
-             is the only place this can be caught"
+            "and the domain will not catch it either: OperationKey is opaque by \
+             design, rejecting only empty or over-long strings"
         );
     }
 
@@ -419,16 +414,20 @@ mod grpc_tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// Cause two: one entry an intermediary already folded. No count can see
-    /// this — there is exactly one entry — so it is caught by reading the one
-    /// value there is and finding the separator in it.
+    /// The same known gap on this transport, pinned identically. Both adapters
+    /// must be out of scope together — a gap closed on one and open on the
+    /// other is the divergence the equivalence test exists to prevent.
     #[test]
-    fn one_entry_holding_a_coalesced_pair_reports_as_ambiguous() {
+    fn a_coalesced_pair_currently_resolves_as_a_single_key() {
         let mut metadata = MetadataMap::new();
         metadata.insert(IDEMPOTENCY_KEY_METADATA, ascii("op-A, op-B"));
         let carrier = GrpcMetadataCarrier(&metadata);
 
-        assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
+        assert_eq!(
+            carrier.raw_operation_key(),
+            RawOperationKey::Present("op-A, op-B"),
+            "coalesced values are deliberately out of scope on both transports"
+        );
     }
 
     /// A single ordinary value stays present. Without this the rules above

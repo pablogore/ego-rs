@@ -344,35 +344,17 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       never decided; it was the accessor's default leaking through.
 
       **The norm this task now carries:** the location must hold **exactly one
-      non-coalesced entry**. Anything else is `Ambiguous` and is rejected under both
-      enforcement modes, exactly as `Unreadable` is — the caller did supply keys, so
-      the missing-key policy does not apply to them.
+      entry**. More than one is `Ambiguous` and is rejected under both enforcement
+      modes, exactly as `Unreadable` is — the caller did supply keys, so the
+      missing-key policy does not apply to them.
 
       **Three separate concerns, deliberately not merged:**
 
       | Concern | Question it answers | Where it is decided |
       |---|---|---|
       | Multiplicity | how many entries arrived | message structure — the carrier, by counting |
-      | Coalescence | does one entry already read as several | wire representation — the carrier, by reading |
+      | Coalescence | does one entry already read as several | wire representation — **open, see below** |
       | Validity | is this string a usable key | the domain, in `OperationKey::parse` |
-
-      Coalescence needs its own mechanism because no count can see it. An
-      intermediary may fold repeated occurrences of a field into one
-      comma-separated value, and that arrives as exactly one entry. Measured:
-      `OperationKey::parse("op-A, op-B")` returns `Ok`. `OperationKey` has no
-      grammar — it rejects only empty/whitespace-only strings and values over 255
-      bytes — so the folded pair would otherwise have become a perfectly valid key
-      that no client ever sent.
-
-      **Why the transport declares it and not the domain.** Forbidding the separator
-      in `OperationKey` was considered and rejected: it would narrow a type that
-      deliberately promises opacity, breaking any legitimate key that contains a
-      comma, and `ego-domain` is publishable. The comma is HTTP's list separator and
-      gRPC ASCII metadata's too, so a folded value is an artefact of the wire
-      encoding — the same kind of judgement `Unreadable` already is, and the carrier
-      is where that knowledge belongs. The cost is stated plainly: a key containing a
-      comma stays constructible in-process and is rejected when it arrives over the
-      network.
 
       **Ordering inside the classifier is load-bearing.** Multiplicity is settled
       before any value is read. A readable entry followed by an unreadable one is
@@ -382,29 +364,39 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       orderings are pinned by tests on both adapters precisely so that mistake is
       detectable.
 
-      **Accepted risk — this is a backward-incompatible narrowing, and it was taken
-      knowingly.** A single entry whose value contains a comma used to resolve to
-      `Present` on both transports. It now resolves to `Ambiguous`, which rejects
-      under both enforcement modes and surfaces as `TransportError::BadRequest`. Any
-      client already sending a composite key that contains a comma — a tenant/order
-      pair is the ordinary way that happens — goes from succeeding to a hard 400 on
-      a path that previously worked.
+      **Measured, open gap: coalesced duplicates.** An intermediary may fold
+      repeated occurrences of one field into a single comma-separated value. That
+      folding is invisible to a count — two keys arrive as **one** entry — so
+      multiplicity alone leaves this norm true only for duplicates that arrive
+      separately. Measured rather than assumed:
+      `OperationKey::parse("op-A, op-B")` returns `Ok`, because the type is
+      deliberately opaque and rejects only empty/whitespace-only strings and values
+      over 255 bytes. So a folded pair resolves today as an ordinary key that no
+      client ever sent.
 
-      The operational shape of that is worth stating rather than leaving to be
-      discovered. 400 is not a retryable status, so a client retry loop abandons the
-      command instead of degrading. `Compatibility` offers no admission path: it
-      loosens the *missing*-key policy only, and a supplied-but-unusable key was
-      never in its scope. Once such traffic is failing, the only mitigation is a code
-      rollback — nothing here is staged behind a flag, and no shadow mode emits the
-      classification without acting on it.
+      **A transport-side rule for it was implemented in this slice and then
+      withdrawn, deliberately.** Classifying a separator-bearing value as
+      `Ambiguous` closes the gap, and review established what it costs: a single
+      entry containing a comma went from resolving to a hard `BadRequest`. A
+      composite key such as a tenant/order pair is the ordinary shape that breaks.
+      400 is not retryable, so a client retry loop abandons the command instead of
+      degrading; `Compatibility` offers no admission path because it loosens only
+      the *missing*-key policy; nothing staged it behind a flag or a classify-only
+      mode, so once such traffic is failing the only mitigation is a code rollback.
 
-      That cost was on the table when the transport-side rule was chosen over
-      narrowing `OperationKey` itself, and it was accepted rather than overlooked.
-      Recorded here so a later reader finds a decision with its price attached, not a
-      surprise. Reopens if a client is found relying on separator-bearing keys, in
-      which case the options are a shadow mode that classifies without rejecting, or
-      admitting coalesced values under `Compatibility` — both larger than this slice
-      and neither started here.
+      Rather than ship a backward-incompatible narrowing inside a slice whose
+      subject is multiplicity, the rule was removed and the gap left open and
+      written down. Nothing that works today stops working. Closing it needs its
+      own impact analysis and its own slice, and the options that survived review
+      are a classify-only shadow mode, or admitting coalesced values under
+      `Compatibility` while multiplicity keeps rejecting under both modes.
+
+      The current behaviour is **pinned by tests on both adapters and in the
+      equivalence file**, asserting that a coalesced pair resolves as an ordinary
+      key. That is deliberate: a gap nobody asserts is a gap somebody closes by
+      accident, and the symmetry matters — closed on one transport and open on the
+      other is exactly the divergence B1.13 exists to prevent.
+
 - [x] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
       the crate provides "no gRPC transport" while already exporting
       `GrpcServerConfig`. The charter is stale relative to its own contents and will
