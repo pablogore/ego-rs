@@ -5,33 +5,21 @@ use crate::operation::OperationKey;
 /// Adds optional metadata to the raw event payload without constraining the event
 /// type itself.
 ///
-/// # Which of these fields storage actually carries
+/// # Every field here round-trips, by obligation
 ///
-/// `operation_key` round-trips everywhere. An adapter that persists a stored event
-/// must write it and return it on load, and the shared conformance harness
-/// requires that of every implementation, so the guarantee holds by obligation
-/// rather than by coincidence.
+/// `operation_key` is written and returned by every adapter, and the shared
+/// conformance harness requires that of each one — so the guarantee holds because
+/// something enforces it, not because the implementations happen to agree.
 ///
-/// `correlation_id` is **not** guaranteed, and what it does depends on the store.
-/// The in-memory implementations keep whole `StoredEvent` values, so it survives
-/// there. The PostgreSQL implementation neither writes it nor reconstructs it, so
-/// it is dropped there. Nothing in the shared contract requires either behaviour,
-/// which is why the two differ — a caller cannot rely on the field, and cannot
-/// rely on losing it.
-///
-/// That divergence is recorded as debt rather than fixed alongside the key: closing
-/// it means deciding what the contract should require and then making the durable
-/// store meet it, which changes what an existing setter observably does and needs
-/// its own verification.
+/// That obligation now covers the whole type. The harness destructures a loaded
+/// event **without `..`**, so adding a field here breaks its compilation until
+/// someone states how the new field must be verified. A field whose persistence
+/// nobody specified is exactly how `correlation_id` came to mean two different
+/// things in two stores, until it was withdrawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEvent<E> {
     /// The domain event payload.
     pub event: E,
-    /// Optional correlation identifier for tracing across service boundaries.
-    ///
-    /// **Persistence is store-dependent and unspecified** — kept by the in-memory
-    /// stores, dropped by PostgreSQL. See the type-level note.
-    pub correlation_id: Option<String>,
     /// The client-supplied operation this event was produced by, when there was
     /// one.
     ///
@@ -45,29 +33,26 @@ pub struct StoredEvent<E> {
 }
 
 impl<E> StoredEvent<E> {
-    /// Create a new stored event with the given payload and optional correlation id.
-    pub fn new(event: E, correlation_id: Option<String>) -> Self {
+    /// Wraps an event for storage.
+    ///
+    /// The only constructor. It previously took an `Option<String>` correlation id
+    /// alongside a `without_correlation` shorthand; with that field withdrawn,
+    /// the two collapsed into this one. The shorthand's name went with it
+    /// rather than being kept for the smaller diff: a name defined by a capability
+    /// that no longer exists sends a reader looking for a "with correlation"
+    /// variant there is nothing to find.
+    pub fn new(event: E) -> Self {
         StoredEvent {
             event,
-            correlation_id,
-            operation_key: None,
-        }
-    }
-
-    /// Create a stored event without a correlation id.
-    pub fn without_correlation(event: E) -> Self {
-        StoredEvent {
-            event,
-            correlation_id: None,
             operation_key: None,
         }
     }
 
     /// Attaches the operation this event was produced by.
     ///
-    /// A builder step rather than another constructor parameter: every existing
-    /// call site keeps compiling, and a caller that has no operation key does not
-    /// have to say so by passing `None` to a parameter it does not use.
+    /// A builder step rather than another constructor parameter: a caller that has
+    /// no operation key does not have to say so by passing `None` to a parameter it
+    /// does not use.
     pub fn with_operation_key(mut self, operation_key: OperationKey) -> Self {
         self.operation_key = Some(operation_key);
         self
@@ -84,22 +69,16 @@ mod tests {
     /// operation produced it, which is the fact a duplicate-suppression decision
     /// reads.
     #[test]
-    fn both_constructors_start_without_an_operation_key() {
-        assert_eq!(StoredEvent::without_correlation("e").operation_key, None);
-        assert_eq!(
-            StoredEvent::new("e", Some("corr".to_string())).operation_key,
-            None
-        );
+    fn a_new_stored_event_starts_without_an_operation_key() {
+        assert_eq!(StoredEvent::new("e").operation_key, None);
     }
 
     #[test]
-    fn attaching_an_operation_key_leaves_the_other_fields_alone() {
+    fn attaching_an_operation_key_leaves_the_payload_alone() {
         let key = OperationKey::parse("op-1").expect("valid");
-        let stored =
-            StoredEvent::new("e", Some("corr".to_string())).with_operation_key(key.clone());
+        let stored = StoredEvent::new("e").with_operation_key(key.clone());
 
         assert_eq!(stored.event, "e");
-        assert_eq!(stored.correlation_id, Some("corr".to_string()));
         assert_eq!(stored.operation_key, Some(key));
     }
 
@@ -112,7 +91,7 @@ mod tests {
     fn attaching_twice_keeps_the_last_key() {
         let first = OperationKey::parse("op-1").expect("valid");
         let second = OperationKey::parse("op-2").expect("valid");
-        let stored = StoredEvent::without_correlation("e")
+        let stored = StoredEvent::new("e")
             .with_operation_key(first)
             .with_operation_key(second.clone());
 

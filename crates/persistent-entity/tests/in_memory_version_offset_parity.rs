@@ -25,7 +25,7 @@ fn store() -> InMemoryEventStore<TestEvent> {
 
 fn events(count: usize) -> Vec<StoredEvent<TestEvent>> {
     (1..=count as u64)
-        .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
+        .map(|v| StoredEvent::new(TestEvent::Incremented(v)))
         .collect()
 }
 

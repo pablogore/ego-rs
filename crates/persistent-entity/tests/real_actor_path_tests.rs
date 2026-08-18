@@ -116,7 +116,7 @@ async fn test_recovery_replays_seeded_events() {
     let aggregate_id = "c-recovery";
     let tenant = Some("default");
     let events: Vec<StoredEvent<TestEvent>> = (1u64..=3)
-        .map(|v| StoredEvent::without_correlation(TestEvent::Incremented(v)))
+        .map(|v| StoredEvent::new(TestEvent::Incremented(v)))
         .collect();
     event_store
         .append(aggregate_type, aggregate_id, tenant, 0, events)

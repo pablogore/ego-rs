@@ -337,11 +337,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         version: u64,
         events: &[E],
     ) -> Result<u64, String> {
-        let stored: Vec<StoredEvent<E>> = events
-            .iter()
-            .cloned()
-            .map(StoredEvent::without_correlation)
-            .collect();
+        let stored: Vec<StoredEvent<E>> = events.iter().cloned().map(StoredEvent::new).collect();
 
         let new_version = {
             self.event_store
@@ -395,11 +391,7 @@ impl<E: DomainEvent + Clone + Send + Sync + 'static> PersistenceFacade<E> {
         events: &[E],
         receipt: &OperationReceipt,
     ) -> Result<u64, String> {
-        let stored: Vec<StoredEvent<E>> = events
-            .iter()
-            .cloned()
-            .map(StoredEvent::without_correlation)
-            .collect();
+        let stored: Vec<StoredEvent<E>> = events.iter().cloned().map(StoredEvent::new).collect();
 
         let mut uow = self.event_store.begin().await.map_err(|e| e.to_string())?;
 
