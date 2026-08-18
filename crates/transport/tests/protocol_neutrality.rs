@@ -84,15 +84,28 @@ const SCANNED_SURFACE_FILES: [&str; 4] = [
     "crates/persistence/src/postgres/event_store.rs",
 ];
 
+/// Ascends to the workspace root.
+///
+/// A `Cargo.toml` that exists but cannot be read is fatal rather than stepped
+/// over. This one fails *closed* rather than open — silently ascending past
+/// the real root lands somewhere the scanned crates do not exist, and the
+/// per-crate assertions then reject it loudly — but it is the same silent
+/// narrowing, and a file whose whole purpose is refusing to shrink its own
+/// universe should not model the opposite anywhere.
 fn workspace_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
     loop {
         let candidate = dir.join("Cargo.toml");
         if candidate.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&candidate) {
-                if content.contains("[workspace]") {
-                    return dir;
-                }
+            let content = std::fs::read_to_string(&candidate).unwrap_or_else(|err| {
+                panic!(
+                    "protocol_neutrality: could not read {} ({err}) while locating the \
+                     workspace root — refusing to guess by stepping over it",
+                    candidate.display()
+                )
+            });
+            if content.contains("[workspace]") {
+                return dir;
             }
         }
         if !dir.pop() {
@@ -106,11 +119,16 @@ fn workspace_root(start: &Path) -> PathBuf {
 
 /// Recursively collects every `.rs` file under `dir`.
 ///
-/// A directory that cannot be read is fatal rather than skipped. Returning
-/// quietly would drop a whole scan target while every assertion below still
-/// held — over the files that *were* read — and a guard that narrows its own
-/// scope on failure reports the property as intact precisely when it has
-/// stopped checking for it.
+/// Every failure here is fatal rather than skipped, and there are two of them:
+/// opening the directory, and materialising each entry while iterating it.
+/// Both narrow the set this guard asserts absence over, so both have to be
+/// loud — a guard that quietly shrinks its own scope on failure reports the
+/// property as intact precisely when it has stopped checking for it.
+///
+/// The second is the easier one to leave open, because `flatten()` reads as
+/// tidy iteration rather than as a decision to discard errors. It is a
+/// decision, and the wrong one here: an entry that could not be enumerated
+/// would vanish from the scan while every count below stayed healthy.
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).unwrap_or_else(|err| {
         panic!(
@@ -119,7 +137,15 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
             dir.display()
         )
     });
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| {
+            panic!(
+                "protocol_neutrality: could not enumerate an entry under {} ({err}) — \
+                 an entry that never materialised cannot be shown to be free of \
+                 protocol types, and dropping it would shrink the scan in silence",
+                dir.display()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             collect_rs_files(&path, out);
