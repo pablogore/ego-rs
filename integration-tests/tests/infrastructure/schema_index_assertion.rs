@@ -69,7 +69,26 @@
 //!   the registry. Only discovery finds it. A unique index over
 //!   `tenant_id IS NOT NULL` with no companion for the NULL partition silently
 //!   permits unlimited duplicates there, which is precisely the failure that
-//!   already occurred once in this schema.
+//!   already occurred once in this schema. Discovery pairs halves by the identity
+//!   they enforce, not merely by the predicate they carry — two indexes, one per
+//!   predicate, guarding *different* identities is not a pair.
+//!
+//! # What "exact columns" has to mean to be worth asserting
+//!
+//! Two ways a catalog read can report the expected column list while the index
+//! enforces something else, both closed here:
+//!
+//! - **An expression key.** `indkey` stores `0` for one, and `pg_attribute` has no
+//!   `attnum = 0`, so an inner join drops it silently. Appending
+//!   `lower(fingerprint)` to a pair half narrows the identity — two rows alike in
+//!   every registered column can then coexist — while the reported list is
+//!   unchanged. The join is outer, the element holds its position, and
+//!   `indexprs` is read as a second independent signal.
+//! - **`INCLUDE` payload.** `indkey` carries it after the keys, and only the first
+//!   `indnkeyatts` enforce uniqueness. Comparing the whole vector would fail on an
+//!   added `INCLUDE` column that changes nothing — the mirror mistake, a false red
+//!   instead of a false green. Keys and payload are separated and only keys are
+//!   compared.
 //!
 //! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
@@ -85,7 +104,18 @@ struct IndexShape {
     name: String,
     unique: bool,
     predicate: String,
-    columns: Vec<String>,
+    /// The key elements that enforce uniqueness, in index order. An expression
+    /// key appears as [`EXPRESSION_KEY`], holding its position rather than
+    /// vanishing.
+    key_columns: Vec<String>,
+    /// The non-key `INCLUDE` payload. Carried so a failure can say what is
+    /// present, never compared: it does not participate in uniqueness.
+    included_columns: Vec<String>,
+    /// Whether any key is an expression, read from `indexprs` independently of
+    /// the positional marker above.
+    has_expression_key: bool,
+    /// The server's own rendering of the index, for failure messages.
+    definition: String,
 }
 
 /// What a table's pair must look like for its identity to be unique per tenant
@@ -181,46 +211,129 @@ const EXPECTED_PAIRS: &[ExpectedPair] = &[
 ];
 
 /// One catalog row as `pg_index` yields it: index name, uniqueness, the partial
-/// predicate (absent for a total index) and the ordered column list (absent only
-/// if the index has no key columns, which cannot happen here).
-type CatalogRow = (String, bool, Option<String>, Option<Vec<String>>);
+/// predicate (absent for a total index), the ordered key elements, the ordered
+/// `INCLUDE` payload, whether any key is an expression, and the server's own
+/// rendering of the whole index.
+type CatalogRow = (
+    String,
+    bool,
+    Option<String>,
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    bool,
+    String,
+);
+
+/// One row of the discovery sweep: table name, index name, the partial predicate,
+/// and the ordered key elements.
+type DiscoveryRow = (String, String, Option<String>, Option<Vec<String>>);
 
 const TENANT_PREDICATE: &str = "(tenant_id IS NOT NULL)";
 const SYSTEMWIDE_PREDICATE: &str = "(tenant_id IS NULL)";
 
-/// Every index on `table`, with its ordered column list, uniqueness and partial
-/// predicate, read from the catalog.
+/// Stands in for a key that is an expression rather than a plain column.
 ///
-/// `indkey` holds the columns in index order, so `WITH ORDINALITY` is what
-/// preserves that order through the join to `pg_attribute` — without it the column
-/// list would come back in whatever order the join produced, and an assertion
-/// about ordering would be meaningless rather than merely weaker.
+/// An expression key has no name to report, so it needs a placeholder that
+/// occupies its position. Anything else silently shortens the key list, which is
+/// exactly the failure this constant exists to make impossible — see
+/// [`index_shapes`].
+const EXPRESSION_KEY: &str = "(expression)";
+
+/// The `SELECT` list shared by the two catalog queries.
+///
+/// # Why `LEFT JOIN`, and why this is not a stylistic choice
+///
+/// `indkey` stores **`0`** for a key that is an expression rather than a column.
+/// `pg_attribute` has no row with `attnum = 0` — real columns are positive and
+/// system columns negative — so an **inner** join drops that element without a
+/// trace, and `array_agg` never sees it. An earlier version of this file did
+/// exactly that, and the consequence was a false green rather than merely thin
+/// coverage:
+///
+/// ```sql
+/// CREATE UNIQUE INDEX ux_operation_receipts_identity_systemwide
+///     ON operation_receipts (aggregate_type, aggregate_id, operation_key,
+///                            lower(fingerprint))
+///     WHERE tenant_id IS NULL;
+/// ```
+///
+/// That index no longer enforces the required identity — two receipts identical
+/// in every registered column can coexist if `lower(fingerprint)` differs — and
+/// the old query still reported exactly `aggregate_type, aggregate_id,
+/// operation_key`, so the "exact columns" assertion passed while the guarantee
+/// this file exists to pin was gone.
+///
+/// So the join is outer, the expression element is preserved in position as
+/// [`EXPRESSION_KEY`], and `indexprs IS NOT NULL` is read as an independent
+/// signal. `pg_get_indexdef` comes along so a failure can show the real
+/// definition instead of a list with a hole in it.
+///
+/// # Key columns and `INCLUDE` are different things
+///
+/// `indkey` holds the `INCLUDE` payload after the key columns, and only the first
+/// `indnkeyatts` of them participate in uniqueness. Lumping them together
+/// compares a list that is partly irrelevant to the guarantee: adding
+/// `INCLUDE (fingerprint)` would have failed the column assertion while changing
+/// nothing about what the index enforces — a false red, the mirror of the false
+/// green above. They are split here and only the keys are compared.
+const CATALOG_COLUMNS: &str = "c.relname, \
+     i.indisunique, \
+     pg_get_expr(i.indpred, i.indrelid), \
+     (SELECT array_agg(CASE WHEN k.attnum = 0 THEN '(expression)' ELSE a.attname END \
+                       ORDER BY k.ord) \
+        FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) \
+        LEFT JOIN pg_attribute a \
+          ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+       WHERE k.ord <= i.indnkeyatts), \
+     (SELECT array_agg(CASE WHEN k.attnum = 0 THEN '(expression)' ELSE a.attname END \
+                       ORDER BY k.ord) \
+        FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) \
+        LEFT JOIN pg_attribute a \
+          ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+       WHERE k.ord > i.indnkeyatts), \
+     i.indexprs IS NOT NULL, \
+     pg_get_indexdef(i.indexrelid)";
+
+/// Every index on `table`, with its ordered key elements, `INCLUDE` payload,
+/// uniqueness and partial predicate, read from the catalog.
+///
+/// `indkey` holds the elements in index order, so `WITH ORDINALITY` is what
+/// preserves that order through the join to `pg_attribute` — without it the list
+/// would come back in whatever order the join produced, and an assertion about
+/// ordering would be meaningless rather than merely weaker.
 async fn index_shapes(pool: &PgPool, table: &str) -> Vec<IndexShape> {
-    let rows: Vec<CatalogRow> = sqlx::query_as(
-        "SELECT c.relname, \
-                i.indisunique, \
-                pg_get_expr(i.indpred, i.indrelid), \
-                (SELECT array_agg(a.attname ORDER BY k.ord) \
-                   FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) \
-                   JOIN pg_attribute a \
-                     ON a.attrelid = i.indrelid AND a.attnum = k.attnum) \
+    let rows: Vec<CatalogRow> = sqlx::query_as(&format!(
+        "SELECT {CATALOG_COLUMNS} \
          FROM pg_index i \
          JOIN pg_class c ON c.oid = i.indexrelid \
          WHERE i.indrelid = $1::regclass \
-         ORDER BY c.relname",
-    )
+         ORDER BY c.relname"
+    ))
     .bind(table)
     .fetch_all(pool)
     .await
     .expect("the index catalog must be queryable");
 
     rows.into_iter()
-        .map(|(name, unique, predicate, columns)| IndexShape {
-            name,
-            unique,
-            predicate: predicate.unwrap_or_default(),
-            columns: columns.unwrap_or_default(),
-        })
+        .map(
+            |(
+                name,
+                unique,
+                predicate,
+                key_columns,
+                included_columns,
+                has_expression_key,
+                definition,
+            )| IndexShape {
+                name,
+                unique,
+                predicate: predicate.unwrap_or_default(),
+                key_columns: key_columns.unwrap_or_default(),
+                included_columns: included_columns.unwrap_or_default(),
+                has_expression_key,
+                definition,
+            },
+        )
         .collect()
 }
 
@@ -258,11 +371,34 @@ async fn every_registered_table_has_a_complete_uniqueness_pair() {
                 "`{name}` must be UNIQUE — a non-unique index over the identity enforces \
                  nothing, which is exactly the state this schema was in before"
             );
+            // Before the column list, what kind of thing the keys are.
+            //
+            // An extra expression key narrows the identity without changing any
+            // registered column name: two rows identical in every column below can
+            // coexist when the expression differs. Asserted from `indexprs` and from
+            // the positional marker independently, because the first is the
+            // catalog's own answer and the second proves the key list was not
+            // silently shortened on its way here.
+            assert!(
+                !shape.has_expression_key,
+                "`{name}` must key on plain columns only. The catalog reports an expression \
+                 key, which constrains something no registered column names — so the \
+                 identity below is not the identity being enforced. Server definition:\n  {}",
+                shape.definition
+            );
+            assert!(
+                !shape.key_columns.iter().any(|c| c == EXPRESSION_KEY),
+                "`{name}` has an expression among its keys at a position the column list \
+                 cannot express. Server definition:\n  {}",
+                shape.definition
+            );
             assert_eq!(
-                shape.columns, columns,
-                "`{name}` must cover exactly these columns in exactly this order; order is \
+                shape.key_columns, columns,
+                "`{name}` must key on exactly these columns in exactly this order; order is \
                  part of the contract because it determines which prefix lookups the index \
-                 can serve"
+                 can serve. Non-key INCLUDE payload, which enforces nothing and is not \
+                 compared: {:?}. Server definition:\n  {}",
+                shape.included_columns, shape.definition
             );
             assert_eq!(
                 shape.predicate, predicate,
@@ -390,19 +526,81 @@ async fn the_two_predicates_cover_every_registered_table_with_no_gap_and_no_over
     db.close().await;
 }
 
+/// One half of a pair as discovery finds it, before anything is known about
+/// whether it has a partner.
+#[derive(Debug)]
+struct DiscoveredHalf {
+    index: String,
+    predicate: String,
+    keys: Vec<String>,
+}
+
+impl DiscoveredHalf {
+    /// The identity this half enforces, with the tenancy discriminator removed so
+    /// the two halves become comparable.
+    ///
+    /// The systemwide half omits `tenant_id` because its predicate already fixes
+    /// that column to NULL for every row it contains. Dropping `tenant_id` from
+    /// the tenant half is therefore what puts both halves in the same terms — and
+    /// two halves are a genuine pair only if what remains is *identical*.
+    fn identity(&self) -> Vec<&str> {
+        self.keys
+            .iter()
+            .map(String::as_str)
+            .filter(|key| *key != "tenant_id")
+            .collect()
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} over {} keying {:?}",
+            self.index, self.predicate, self.keys
+        )
+    }
+}
+
 /// Any table that carries one half of a tenant-partitioned uniqueness pair
-/// carries the other half too.
+/// carries a *matching* other half.
 ///
 /// This is the half of the contract the registry cannot express: it catches a
-/// table nobody thought to register that grew one lopsided index. See the module
-/// docs for why both defences are kept.
+/// table nobody thought to register. See the module docs for why both defences are
+/// kept.
+///
+/// # Matching, not merely present
+///
+/// An earlier version asked only whether some index existed under each predicate.
+/// That let a table pass whose two halves guard **different** identities:
+///
+/// ```sql
+/// UNIQUE (tenant_id, aggregate_id) WHERE tenant_id IS NOT NULL;
+/// UNIQUE (operation_key)           WHERE tenant_id IS NULL;
+/// ```
+///
+/// Two halves, one per predicate, and no coherent guarantee between them: the
+/// tenant partition constrains `aggregate_id` while the systemwide partition
+/// constrains `operation_key`, so neither identity is enforced across both
+/// tenancy modes. The registry catches that on the three tables it names, which is
+/// precisely why discovery must catch it on the tables it does not — that is
+/// discovery's whole reason to exist.
+///
+/// So halves are paired by [`DiscoveredHalf::identity`]: strip `tenant_id` from
+/// the tenant half and require what remains to equal the systemwide half's keys
+/// exactly.
 #[tokio::test]
 async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     let db = isolated_database().await;
     let pool = db.pool().await;
 
-    let halves: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT t.relname, c.relname, pg_get_expr(i.indpred, i.indrelid) \
+    let rows: Vec<DiscoveryRow> = sqlx::query_as(
+        "SELECT t.relname, \
+                c.relname, \
+                pg_get_expr(i.indpred, i.indrelid), \
+                (SELECT array_agg(CASE WHEN k.attnum = 0 THEN '(expression)' \
+                                       ELSE a.attname END ORDER BY k.ord) \
+                   FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                   LEFT JOIN pg_attribute a \
+                     ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                  WHERE k.ord <= i.indnkeyatts) \
          FROM pg_index i \
          JOIN pg_class c ON c.oid = i.indexrelid \
          JOIN pg_class t ON t.oid = i.indrelid \
@@ -417,23 +615,55 @@ async fn no_table_carries_a_lopsided_half_of_a_uniqueness_pair() {
     .await
     .expect("the index catalog must be queryable");
 
-    let mut tables: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (table, index, predicate) in halves {
-        tables
-            .entry(table)
-            .or_default()
-            .push(format!("{index} over {predicate}"));
+    let mut tables: BTreeMap<String, Vec<DiscoveredHalf>> = BTreeMap::new();
+    for (table, index, predicate, keys) in rows {
+        tables.entry(table).or_default().push(DiscoveredHalf {
+            index,
+            predicate: predicate.unwrap_or_default(),
+            keys: keys.unwrap_or_default(),
+        });
     }
 
     for (table, found) in &tables {
-        let has_tenant_half = found.iter().any(|f| f.contains(TENANT_PREDICATE));
-        let has_systemwide_half = found.iter().any(|f| f.contains(SYSTEMWIDE_PREDICATE));
+        let tenant_halves: Vec<&DiscoveredHalf> = found
+            .iter()
+            .filter(|half| half.predicate == TENANT_PREDICATE)
+            .collect();
+        let systemwide_halves: Vec<&DiscoveredHalf> = found
+            .iter()
+            .filter(|half| half.predicate == SYSTEMWIDE_PREDICATE)
+            .collect();
+
+        let described: Vec<String> = found.iter().map(DiscoveredHalf::describe).collect();
+
         assert!(
-            has_tenant_half && has_systemwide_half,
+            !tenant_halves.is_empty() && !systemwide_halves.is_empty(),
             "table `{table}` carries only part of a tenant-partitioned uniqueness pair: \
-             {found:?}. One half without the other leaves its complementary partition \
+             {described:?}. One half without the other leaves its complementary partition \
              unconstrained — for a missing NULL half that means unlimited duplicate \
              identities among tenant-less rows"
+        );
+
+        // Present on both sides is not the same as coherent across them.
+        let matched = tenant_halves.iter().any(|tenant| {
+            systemwide_halves
+                .iter()
+                .any(|systemwide| tenant.identity() == systemwide.identity())
+        });
+        assert!(
+            matched,
+            "table `{table}` has an index under each tenancy predicate, but no two of them \
+             guard the same identity, so nothing is enforced across both modes: \
+             {described:?}. Compared with `tenant_id` stripped from the tenant half — \
+             tenant candidates {:?} against systemwide candidates {:?}",
+            tenant_halves
+                .iter()
+                .map(|h| h.identity())
+                .collect::<Vec<_>>(),
+            systemwide_halves
+                .iter()
+                .map(|h| h.identity())
+                .collect::<Vec<_>>()
         );
     }
 
