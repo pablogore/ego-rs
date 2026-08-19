@@ -1101,6 +1101,79 @@ async fn complete_one(inner: &InMemoryOperationReservationStore, clock: &TestClo
         .expect("completion");
 }
 
+/// A completion stamped *ahead* of the observing clock reports `0.0`, never a
+/// negative age.
+///
+/// # The mechanism, which is not hypothetical
+///
+/// `completed_at` is stamped by whichever replica completed the reservation, from
+/// that replica's clock. The age is computed from the *reading* worker's clock. The
+/// design already accepts that those two can disagree, so a completion timestamped
+/// slightly ahead of the reader is a condition to handle.
+///
+/// Reproduced here by giving the store and the runtime two different clocks — which
+/// is exactly the shape of two replicas whose clocks have drifted apart, with the
+/// reader behind. The store stamps at `epoch + 20_000s`; the worker reads at
+/// `epoch + 10_000s`, so the unclamped subtraction is −10_000s.
+///
+/// # Why zero rather than the raw value
+///
+/// A negative sample reads as backlog from the future: it drags a min or average
+/// panel below zero and understates the backlog in the reassuring direction. Zero is
+/// the closest true statement available — "nothing older than now".
+///
+/// The clamp absorbs the skew. It does not correct or detect it: nothing here
+/// measures the disagreement, reports it, or touches the persisted timestamp.
+#[tokio::test]
+async fn a_completion_ahead_of_the_observing_clock_reports_zero_not_a_negative_age() {
+    // The store runs ahead of the worker, so what it stamps is in the reader's
+    // future.
+    let store_clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(20_000)));
+    let worker_clock = Arc::new(TestClock::new(epoch() + chrono::Duration::seconds(10_000)));
+
+    let inner = InMemoryOperationReservationStore::new(store_clock.clone());
+    complete_one(&inner, &store_clock, "op-from-the-future").await;
+
+    let store = RecordingStore::wrapping(inner);
+    let obs = RecordingObservability::new();
+    // Retention is 300s against the worker's clock, so its cutoff is
+    // `epoch + 9_700s` — well before the row's `completed_at`. Nothing is eligible,
+    // the row survives the purge, and the gauge therefore describes it.
+    let policy = RetentionPolicy::new(Duration::from_secs(300), Duration::from_millis(20), 7)
+        .expect("a valid policy");
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_operation_reservation_store(store.clone())
+        .with_reservation_clock(worker_clock.clone())
+        .with_retention_policy(policy)
+        .with_observability(obs.clone())
+        .build();
+    runtime.start_retention().await.expect("the worker starts");
+
+    wait_for_a_metric(&obs, "idempotency.purge.oldest_completed_age").await;
+    let _ = runtime.shutdown_async().await;
+
+    let records = obs.records_of("idempotency.purge.oldest_completed_age");
+    assert_eq!(
+        records
+            .first()
+            .map(|r| (r.kind, r.value, r.attributes.clone())),
+        Some((ego_domain::MetricKind::Gauge, 0.0, Vec::new())),
+        "a completion 10_000s ahead of the reader must report exactly 0.0 — got \
+         {records:?}"
+    );
+
+    // Stated separately from the equality above, because it is the property that
+    // matters and it must hold for every sample rather than only the first: no
+    // sample of this gauge is ever negative.
+    for record in &records {
+        assert!(
+            record.value >= 0.0,
+            "no sample of a backlog age may be negative, got {record:?}"
+        );
+    }
+}
+
 /// The gauge reports the age of the **oldest** surviving completion, in seconds,
 /// measured against the injected clock.
 ///
