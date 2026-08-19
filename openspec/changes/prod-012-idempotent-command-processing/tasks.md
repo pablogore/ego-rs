@@ -323,15 +323,79 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       The implementation is structurally identical to the HTTP carrier — same
       newtype over a borrowed map, same three answers, no rule of its own. It reads
       through the ASCII accessor, which is what lets a value survive as text at all.
-- [ ] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
+- [x] B1.13 RED/GREEN: equivalence test across both adapters — for an absent key, a
       valid key, an invalid key and an unreadable value, HTTP and gRPC resolve to the
       **identical** outcome under both enforcement modes. Any divergence is a defect
       in whichever adapter differs, never a protocol-specific rule.
-- [ ] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
+
+      The equivalence test is `crates/transport/tests/adapter_equivalence.rs`. It
+      covers exactly the four arrivals this task names — absent, valid, invalid,
+      unreadable — across both adapters and both enforcement modes, and asserts two
+      things per row rather than one: that HTTP and gRPC agree, **and** that what
+      they agree on is correct. Agreement alone would pass if both were identically
+      wrong, which is the most likely way it ever breaks.
+
+      **An amendment was attempted here and fully withdrawn. Recorded because the
+      attempt shaped the code that shipped, and because the reasoning is worth more
+      than the outcome.**
+
+      This task did not norm how many times a key may arrive, and measurement showed
+      the silence had teeth: `HeaderMap::get` and `MetadataMap::get` both return only
+      the first value, so a request carrying two *different* keys was admitted under
+      whichever arrived first, on both adapters, silently. First-value-wins was never
+      decided — it was the accessor's default leaking through.
+
+      Three successively narrower rules were written to close that, and each was
+      withdrawn under review for the same reason:
+
+      | Attempt | Withdrawn because |
+      |---|---|
+      | reject a coalesced (comma-bearing) value | a composite key containing a comma went from working to a hard 400 |
+      | reject any second entry | duplicated entries come from infrastructure, not broken clients; a retry wrapper that appends turns a transient fault into permanent command loss |
+      | reject only entries that disagree | an intermediary generating its own key value fails 100% of traffic on that path after deploy |
+
+      The common cost profile is what settles it, and it is the same one every time:
+      the rejection surfaces as a **non-retryable 400**;
+      `IdempotencyEnforcementMode::Compatibility` cannot admit it, because that
+      variant loosens only the *missing*-key policy; nothing stages the rule behind a
+      flag or a classify-only mode; so once such traffic is failing the only
+      mitigation is a code rollback. A slice whose subject is cross-adapter
+      equivalence is the wrong place to ship a backward-incompatible narrowing with
+      that profile, three times over.
+
+      **What that means for the contract.** `RawOperationKey` and
+      `OperationKeyRejection` briefly gained an `Ambiguous` variant, along with its
+      telemetry dimension, its status mapping, and a fourth conformance-harness
+      instance. With no rule producing it, the variant would have been dead surface
+      that every future implementor still had to satisfy, so all of it was reverted
+      too. The contract is back to three states.
+
+      **The gap is left open, measured, and asserted — not quietly dropped.** Both
+      transports read the location with a single-value accessor, so the first entry
+      wins and the rest are invisible. Coalescence is invisible in a second way:
+      an intermediary may fold repeated occurrences into one comma-separated value,
+      and `OperationKey::parse("op-A, op-B")` returns `Ok` — measured, because the
+      type is deliberately opaque, rejecting only empty/whitespace-only strings and
+      values over 255 bytes — so a folded pair resolves as a key no client sent, and
+      the domain will not catch it either.
+
+      `adapter_equivalence.rs` pins that current behaviour on both adapters. A gap
+      nobody asserts is a gap somebody closes by accident, and the symmetry is what
+      matters most: closed on one transport and open on the other is exactly the
+      divergence this task exists to prevent.
+
+      **Closing it needs its own slice and its own impact analysis.** The options
+      that survived review are a classify-only shadow mode that emits the
+      classification without acting on it, giving operators the traffic numbers
+      before anything is rejected; or admitting the undeterminable-key state under
+      `Compatibility`, which is the lever a deployment already has for tolerating
+      non-conformant callers. Both are larger than this slice and neither is started
+      here.
+- [x] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
       the crate provides "no gRPC transport" while already exporting
       `GrpcServerConfig`. The charter is stale relative to its own contents and will
       be more so after B1.12.
-- [ ] B1.15 RED/GREEN: assert no protocol type crosses the boundary — no `axum`,
+- [x] B1.15 RED/GREEN: assert no protocol type crosses the boundary — no `axum`,
       `HeaderMap`, `tonic` or `MetadataMap` symbol appears in `ego-domain`,
       `persistent-entity`, or the reservation and receipt surfaces. A grep-style
       structural test, so the neutrality is enforced rather than trusted.
@@ -348,10 +412,16 @@ behind a feature nothing builds rots silently: it stops compiling and nobody lea
 until someone enables the feature months later. The default build does not cover it,
 and `cargo check --workspace --all-targets` does not enable non-default features.
 
-- [ ] B1.16 GREEN: exercise both feature states as part of this slice's own gate —
+- [x] B1.16 GREEN: exercise both feature states as part of this slice's own gate —
       the default build and `--features grpc` — and record both commands in the
       slice's evidence. A feature that is only ever verified by the person who wrote
       it is not verified.
+
+      Both states are gated, and the isolation is asserted by *count* rather than by
+      a search tool's exit status — a search that finds nothing exits non-zero, so
+      treating that status as a result would invert its meaning. The `--features grpc`
+      graph is the positive control: without it, "tonic appears zero times" would be
+      indistinguishable from a command that failed to run.
 
 Two further transports are explicitly **not** in this change: Kafka record headers,
 and any real gRPC server binding. Both would consume the same carrier contract
@@ -1084,7 +1154,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Seven tasks remain unchecked outside E1: four in **B1** (the cross-adapter equivalence work and the neutrality, doc and feature-coverage items, B1.13–B1.16) and the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. B1.11–B1.12 are closed — the gRPC metadata carrier exists behind the `grpc` feature and passes the same conformance harness HTTP does. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Three tasks remain unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival this change norms identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. Duplicate and coalesced keys are a measured, asserted, deliberately open gap, not a closed one. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 
