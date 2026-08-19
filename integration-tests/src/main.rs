@@ -54,9 +54,51 @@ async fn connect(url: &str) -> PgPool {
         .expect("the container accepts connections")
 }
 
+/// Runs the hermetic ledger guard, before anything is provisioned.
+///
+/// It needs no container, so making it a precondition costs nothing and makes a
+/// drifted ledger fail in milliseconds instead of after a container start, a
+/// template clone and a full suite. It is also the one check here that can fail
+/// for a reason no amount of PostgreSQL would reveal: a test file that exists,
+/// is documented, and is registered nowhere runs never, and a suite that reports
+/// success without it is the failure this guard exists to catch.
+///
+/// Returns `false` when the guard fails or could not be started; the caller then
+/// exits without provisioning.
+fn ledger_is_consistent() -> bool {
+    match std::process::Command::new(env!("CARGO"))
+        .args([
+            "test",
+            "--manifest-path",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+            "--test",
+            "ledger",
+        ])
+        .status()
+    {
+        Ok(status) => status.success(),
+        // Same reasoning as the suite's own spawn below: a child that could not
+        // be started at all is a failure to report, never a check to skip.
+        Err(e) => {
+            eprintln!("[integration-tests] the ledger guard could not be started: {e}");
+            false
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let started = std::time::Instant::now();
+
+    // Before the container: nothing below can make a drifted ledger correct, and
+    // provisioning first would only make finding out slower.
+    if !ledger_is_consistent() {
+        eprintln!(
+            "\n[integration-tests] the ledger and the suite disagree — \
+             nothing was provisioned."
+        );
+        return ExitCode::FAILURE;
+    }
 
     let container = Postgres::default()
         .with_tag("16")
