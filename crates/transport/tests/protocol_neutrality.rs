@@ -290,3 +290,45 @@ fn idempotency_layers_carry_no_protocol_type() {
         root.display()
     );
 }
+
+// --- the detector itself, proved able to fire ------------------------------
+//
+// Everything above asserts an ABSENCE, and an absence assertion is only worth
+// what its detector is worth. `find_identifier` is called from nowhere else, so
+// if it ever returned `None` unconditionally — an inverted boundary predicate, a
+// wrong comparison, a refactor of the offset arithmetic — the guard would keep
+// passing and both vacuity backstops would keep reading healthy, because they
+// measure how much text was read, not whether reading it could ever fail.
+//
+// These two assertions are the cheapest sufficient coverage: one string that
+// must match, and one that must not. They are the positive control the absence
+// loop cannot supply for itself.
+
+#[test]
+fn the_detector_matches_a_genuine_occurrence() {
+    assert!(
+        find_identifier("use tonic::metadata::MetadataMap;", "tonic").is_some(),
+        "the matcher must find an identifier at a token boundary; if it cannot, \
+         every absence asserted above is asserted by something that never fires"
+    );
+    assert!(
+        find_identifier("let map: HeaderMap = HeaderMap::new();", "HeaderMap").is_some(),
+        "the right edge is deliberately open, so a longer identifier that starts \
+         with a scanned one must still match"
+    );
+}
+
+#[test]
+fn the_detector_skips_an_occurrence_embedded_in_a_longer_word() {
+    assert!(
+        find_identifier("the fencing token is monotonic", "tonic").is_none(),
+        "`monotonic` embeds `tonic` and is an ordinary English word both scanned \
+         crates use freely; matching it would make the guard unusable, which is \
+         the failure this boundary rule exists to prevent"
+    );
+    assert!(
+        find_identifier("Monotonic sequence counters", "tonic").is_none(),
+        "capitalised too, since the left-edge rule is about identifier characters \
+         rather than about one spelling"
+    );
+}
