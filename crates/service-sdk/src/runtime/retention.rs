@@ -234,10 +234,34 @@ impl RetentionWorker {
                     // handling below and adds no sample of its own.
                     match store.oldest_completed().await {
                         Ok(OldestCompleted::At(completed_at)) => {
+                            // Clamped at zero, and only here — the persisted
+                            // `completed_at` is untouched and the store's contract is
+                            // unchanged.
+                            //
+                            // The subtraction can go negative. `completed_at` is
+                            // stamped by whichever replica completed the reservation,
+                            // from that replica's clock; this age is computed from
+                            // *this* worker's. The design already accepts that those
+                            // two can disagree, so a completion timestamped slightly
+                            // ahead of the reader is a condition to handle rather than
+                            // an impossible state.
+                            //
+                            // What the clamp does is keep an accepted disagreement from
+                            // becoming a nonsense sample: a negative age reads as
+                            // backlog from the future, drags a min or average panel
+                            // below zero, and understates the backlog in the
+                            // reassuring direction. Zero says "nothing older than now",
+                            // which is the closest true statement available.
+                            //
+                            // It absorbs the skew; it does not correct or detect it.
+                            // Nothing here measures the disagreement, reports it, or
+                            // adjusts any stored value — distinguishing a genuinely
+                            // fresh backlog from a future timestamp would need its own
+                            // signal, and that is a separate decision.
                             let age = clock.now() - completed_at;
                             obs.gauge(
                                 "idempotency.purge.oldest_completed_age",
-                                age.num_milliseconds() as f64 / 1_000.0,
+                                age.num_milliseconds().max(0) as f64 / 1_000.0,
                                 &[],
                             );
                         }
