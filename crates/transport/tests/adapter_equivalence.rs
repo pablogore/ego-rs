@@ -228,10 +228,11 @@ fn an_unreadable_value_is_rejected_identically_on_both_adapters_under_both_modes
     }
 }
 
-/// Two entries: the message carried more than one key. Rejected on structure,
-/// before any value is read.
+/// Several entries that disagree: the message carried two different keys and
+/// there is no honest way to choose one. Entries that agree are a separate row
+/// and resolve, because agreement leaves nothing to guess.
 #[test]
-fn a_duplicated_key_is_rejected_identically_on_both_adapters_under_both_modes() {
+fn disagreeing_entries_are_rejected_identically_on_both_adapters_under_both_modes() {
     for mode in [
         IdempotencyEnforcementMode::MandatoryKey,
         IdempotencyEnforcementMode::Compatibility,
@@ -243,13 +244,13 @@ fn a_duplicated_key_is_rejected_identically_on_both_adapters_under_both_modes() 
             Outcome::Ambiguous,
         );
         assert_both_adapters_resolve_to(
-            "two entries with the identical value",
+            "two entries carrying the identical value",
             Arrival::TwoValues("op-A", "op-A"),
             mode,
-            Outcome::Ambiguous,
+            Outcome::Resolved("op-A".to_string()),
         );
-        // Ambiguous, not unreadable: it is disqualified for being two entries,
-        // and the second value is never examined on either transport.
+        // Ambiguous, not unreadable: an unreadable value cannot be shown equal
+        // to a readable one, so the entries disagree.
         assert_both_adapters_resolve_to(
             "a readable entry followed by an unreadable one",
             Arrival::ValueThenUnreadable("op-A"),

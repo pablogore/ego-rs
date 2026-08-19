@@ -343,26 +343,45 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       under whichever arrived first, on both adapters, silently. First-value-wins was
       never decided; it was the accessor's default leaking through.
 
-      **The norm this task now carries:** the location must hold **exactly one
-      entry**. More than one is `Ambiguous` and is rejected under both enforcement
-      modes, exactly as `Unreadable` is — the caller did supply keys, so the
-      missing-key policy does not apply to them.
+      **The norm this task now carries:** the location must resolve to **exactly
+      one key**. Several entries that all carry the same value resolve to it;
+      entries that disagree are `Ambiguous` and are rejected under both
+      enforcement modes, exactly as `Unreadable` is.
+
+      **Second amendment — "any duplicate" was too broad, and review was right.**
+      This slice first rejected *any* second entry, identical values included. That
+      was withdrawn for the same reason the coalescence rule was, and the argument
+      is worth recording rather than the conclusion alone. Duplicated entries are
+      routinely produced by **infrastructure**, not by broken clients: a proxy that
+      adds the header when the caller already set it, or a retry wrapper that
+      appends instead of replacing on each attempt. Under the second, "any
+      duplicate is ambiguous" is actively retry-hostile — attempt one fails
+      transiently, attempt two arrives carrying the same key twice, and a
+      non-retryable 400 converts a transient fault into permanent command loss.
+
+      Rejecting agreeing entries also asked for a guess where none exists: every
+      candidate is the same value. Ambiguity is now reserved for the case that has
+      no honest answer — entries that differ, where choosing one invents which key
+      the caller meant. An unreadable value among several counts as disagreement,
+      because equality cannot be established against something that never became
+      text. A **lone** unreadable value stays `Unreadable`: one entry arrived, and
+      what is wrong with it is its bytes, not its multiplicity.
+
+      **A property this slice previously claimed, now retired.** While the rule was
+      "any duplicate", multiplicity was settled before any value was read, and that
+      ordering was asserted. Comparing values requires reading them, so the claim no
+      longer holds and the prose asserting it is gone. What survives is the part
+      that still matters: a lone unreadable entry is `Unreadable` and never
+      `Ambiguous`, and both orderings of a readable/unreadable pair are pinned on
+      both adapters.
 
       **Three separate concerns, deliberately not merged:**
 
       | Concern | Question it answers | Where it is decided |
       |---|---|---|
-      | Multiplicity | how many entries arrived | message structure — the carrier, by counting |
+      | Agreement | do the entries name the same key | message content — the carrier, by comparing |
       | Coalescence | does one entry already read as several | wire representation — **open, see below** |
       | Validity | is this string a usable key | the domain, in `OperationKey::parse` |
-
-      **Ordering inside the classifier is load-bearing.** Multiplicity is settled
-      before any value is read. A readable entry followed by an unreadable one is
-      therefore `Ambiguous` — disqualified for being two entries — and the second
-      value is never examined. Reporting it `Unreadable` would be right by accident
-      and would stop being right the moment the unreadable entry arrived first; both
-      orderings are pinned by tests on both adapters precisely so that mistake is
-      detectable.
 
       **Measured, open gap: coalesced duplicates.** An intermediary may fold
       repeated occurrences of one field into a single comma-separated value. That

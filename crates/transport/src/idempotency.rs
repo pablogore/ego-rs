@@ -21,41 +21,61 @@ pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 /// "both adapters answer identically" a property of the code rather than of
 /// two authors having reached the same conclusion twice.
 ///
-/// Multiplicity is settled **before** any value is read, and that ordering is
-/// deliberate rather than incidental. A second entry is disqualifying on its
-/// own: the caller supplied several keys and there is no honest way to pick
-/// one, whatever the values happen to contain. So a location holding a
-/// readable value followed by an unreadable one is ambiguous — not unreadable
-/// — and it gets there without the second value ever being examined.
+/// # Several entries are ambiguous only when they disagree
+///
+/// More than one entry does not by itself mean the caller supplied two keys.
+/// Duplicated entries are routinely produced by infrastructure rather than by a
+/// broken client: a proxy that adds the header when the caller already set it,
+/// or a retry wrapper that appends instead of replacing on each attempt. The
+/// second of those is why "any duplicate is ambiguous" is actively harmful —
+/// attempt one fails transiently, attempt two arrives carrying the same key
+/// twice, and a rule that rejected it would convert a transient fault into
+/// permanent command loss on a non-retryable status.
+///
+/// So entries that all agree resolve to the one key they agree on. There is no
+/// guess to make: every candidate is the same value. Ambiguity is reserved for
+/// the case that genuinely has no honest answer — entries that differ, where
+/// choosing one would be inventing which key the caller meant. An unreadable
+/// value among several counts as disagreement, because equality cannot be
+/// established against something that never became text.
+///
+/// A lone unreadable value stays unreadable rather than ambiguous: one entry
+/// arrived, and what is wrong with it is its bytes, not its multiplicity.
 ///
 /// # A known gap this deliberately does not close
 ///
 /// An intermediary may fold repeated occurrences of one field into a single
 /// comma-separated value, and that folding is invisible here: two keys arrive
-/// as one entry, so the count sees one and the joined string is handed on as a
-/// key. `OperationKey` will accept it — measured, not assumed: the type is
-/// deliberately opaque and rejects only empty or over-long strings — so such a
-/// request resolves under a key no client ever sent.
+/// as one entry, so the joined string is handed on as a key. `OperationKey`
+/// will accept it — measured, not assumed: the type is deliberately opaque and
+/// rejects only empty or over-long strings — so such a request resolves under a
+/// key no client ever sent.
 ///
-/// Catching it means reading the value and rejecting a separator, which is a
-/// backward-incompatible narrowing: a composite key that legitimately contains
-/// a comma would start failing with a non-retryable status on a path that
-/// previously worked. That is a decision with its own impact analysis, not a
-/// detail of this one, so the gap is recorded rather than closed here.
+/// Catching it means rejecting a separator, which is a backward-incompatible
+/// narrowing: a composite key that legitimately contains a comma would start
+/// failing with a non-retryable status on a path that previously worked. That
+/// is a decision with its own impact analysis, not a detail of this one, so the
+/// gap is recorded rather than closed here.
 fn classify_entries<'a, V: 'a>(
     mut entries: impl Iterator<Item = &'a V>,
     readable: impl Fn(&'a V) -> Option<&'a str>,
 ) -> RawOperationKey<'a> {
-    let Some(only) = entries.next() else {
+    let Some(first) = entries.next() else {
         return RawOperationKey::Absent;
     };
-    if entries.next().is_some() {
-        return RawOperationKey::Ambiguous;
+    let Some(head) = readable(first) else {
+        return if entries.next().is_some() {
+            RawOperationKey::Ambiguous
+        } else {
+            RawOperationKey::Unreadable
+        };
+    };
+    for rest in entries {
+        if readable(rest) != Some(head) {
+            return RawOperationKey::Ambiguous;
+        }
     }
-    match readable(only) {
-        None => RawOperationKey::Unreadable,
-        Some(raw) => RawOperationKey::Present(raw),
-    }
+    RawOperationKey::Present(head)
 }
 
 /// Wraps axum's `HeaderMap` so the shared extraction contract can read the
@@ -213,19 +233,21 @@ mod tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// Two entries carrying the *identical* value are still ambiguous. The
-    /// policy is deliberately about how many keys arrived, not how many
-    /// distinct ones: comparing them would make the carrier reason about key
-    /// equality, which is the shared contract's business and not a
-    /// transport's.
+    /// Entries that all agree resolve to the key they agree on. This is the
+    /// shape a retry wrapper that appends rather than replaces produces, and
+    /// rejecting it would turn a transient fault into permanent command loss —
+    /// on a status the client cannot retry.
     #[test]
-    fn two_identical_entries_are_still_ambiguous() {
+    fn two_identical_entries_resolve_as_the_one_key_they_agree_on() {
         let mut headers = HeaderMap::new();
         headers.append(IDEMPOTENCY_KEY_HEADER, "op-A".parse().unwrap());
         headers.append(IDEMPOTENCY_KEY_HEADER, "op-A".parse().unwrap());
         let carrier = HeaderCarrier(&headers);
 
-        assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
+        assert_eq!(
+            carrier.raw_operation_key(),
+            RawOperationKey::Present("op-A")
+        );
     }
 
     /// A readable value followed by an unreadable one is **ambiguous**, and the
@@ -234,7 +256,7 @@ mod tests {
     /// unreadable it would be right by accident, and it would stop being right
     /// the moment the unreadable entry came first.
     #[test]
-    fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous_by_count() {
+    fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous() {
         let mut headers = HeaderMap::new();
         headers.append(IDEMPOTENCY_KEY_HEADER, "op-A".parse().unwrap());
         headers.append(
@@ -252,7 +274,7 @@ mod tests {
     /// wrong, and only having both cases makes the read-before-count ordering
     /// detectable at all.
     #[test]
-    fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous_by_count() {
+    fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous() {
         let mut headers = HeaderMap::new();
         headers.append(
             IDEMPOTENCY_KEY_HEADER,
@@ -370,18 +392,20 @@ mod grpc_tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// Identical values are still two keys. The policy is about how many
-    /// arrived, not how many distinct ones: comparing them would make the
-    /// carrier reason about key equality, which belongs to the shared contract
-    /// and not to a transport.
+    /// Entries that all agree resolve to the key they agree on, identically to
+    /// HTTP. A rule that differed here would make the guarantee depend on which
+    /// transport carried the request, which is the one thing it must not do.
     #[test]
-    fn two_identical_entries_are_still_ambiguous() {
+    fn two_identical_entries_resolve_as_the_one_key_they_agree_on() {
         let mut metadata = MetadataMap::new();
         metadata.append(IDEMPOTENCY_KEY_METADATA, ascii("op-A"));
         metadata.append(IDEMPOTENCY_KEY_METADATA, ascii("op-A"));
         let carrier = GrpcMetadataCarrier(&metadata);
 
-        assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
+        assert_eq!(
+            carrier.raw_operation_key(),
+            RawOperationKey::Present("op-A")
+        );
     }
 
     /// A readable entry followed by an unreadable one is **ambiguous**, and
@@ -389,7 +413,7 @@ mod grpc_tests {
     /// examined. Reporting it unreadable would be right by accident here and
     /// wrong the moment the unreadable entry arrived first.
     #[test]
-    fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous_by_count() {
+    fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous() {
         let mut metadata = MetadataMap::new();
         metadata.append(IDEMPOTENCY_KEY_METADATA, ascii("op-A"));
         metadata.append(IDEMPOTENCY_KEY_METADATA, unreadable());
@@ -404,7 +428,7 @@ mod grpc_tests {
     /// wrong, and only having both cases makes the read-before-count ordering
     /// detectable at all.
     #[test]
-    fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous_by_count() {
+    fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous() {
         let mut metadata = MetadataMap::new();
         metadata.append(IDEMPOTENCY_KEY_METADATA, unreadable());
         metadata.append(IDEMPOTENCY_KEY_METADATA, ascii("op-A"));
