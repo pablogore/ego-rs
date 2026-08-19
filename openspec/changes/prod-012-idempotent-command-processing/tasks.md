@@ -328,94 +328,69 @@ roughly three thousand lines, which does not belong inside an unrelated slice.
       **identical** outcome under both enforcement modes. Any divergence is a defect
       in whichever adapter differs, never a protocol-specific rule.
 
-      **Amendment — this task did not originally norm duplicates, and now it does.**
-      As written above, B1.13 enumerated four arrivals: absent, valid, invalid,
-      unreadable. Nothing in it said how many times the key may arrive. That was not
-      an oversight the implementation quietly corrected — it was a gap, and the
-      behaviour that filled it was chosen deliberately here rather than inherited
-      from what the code happened to do. Recorded as an amendment so nobody later
-      reads the enumeration above and concludes duplicates were always specified.
+      The equivalence test is `crates/transport/tests/adapter_equivalence.rs`. It
+      covers exactly the four arrivals this task names — absent, valid, invalid,
+      unreadable — across both adapters and both enforcement modes, and asserts two
+      things per row rather than one: that HTTP and gRPC agree, **and** that what
+      they agree on is correct. Agreement alone would pass if both were identically
+      wrong, which is the most likely way it ever breaks.
 
-      **What the gap actually was.** Both `HeaderMap::get` and `MetadataMap::get`
-      return only the *first* value under a name. Measured, not assumed: a location
-      holding `op-A` and `op-B` returned `Some("op-A")` on both transports, with
-      `get_all` seeing both. So a request carrying two different keys was admitted
-      under whichever arrived first, on both adapters, silently. First-value-wins was
-      never decided; it was the accessor's default leaking through.
+      **An amendment was attempted here and fully withdrawn. Recorded because the
+      attempt shaped the code that shipped, and because the reasoning is worth more
+      than the outcome.**
 
-      **The norm this task now carries:** the location must resolve to **exactly
-      one key**. Several entries that all carry the same value resolve to it;
-      entries that disagree are `Ambiguous` and are rejected under both
-      enforcement modes, exactly as `Unreadable` is.
+      This task did not norm how many times a key may arrive, and measurement showed
+      the silence had teeth: `HeaderMap::get` and `MetadataMap::get` both return only
+      the first value, so a request carrying two *different* keys was admitted under
+      whichever arrived first, on both adapters, silently. First-value-wins was never
+      decided — it was the accessor's default leaking through.
 
-      **Second amendment — "any duplicate" was too broad, and review was right.**
-      This slice first rejected *any* second entry, identical values included. That
-      was withdrawn for the same reason the coalescence rule was, and the argument
-      is worth recording rather than the conclusion alone. Duplicated entries are
-      routinely produced by **infrastructure**, not by broken clients: a proxy that
-      adds the header when the caller already set it, or a retry wrapper that
-      appends instead of replacing on each attempt. Under the second, "any
-      duplicate is ambiguous" is actively retry-hostile — attempt one fails
-      transiently, attempt two arrives carrying the same key twice, and a
-      non-retryable 400 converts a transient fault into permanent command loss.
+      Three successively narrower rules were written to close that, and each was
+      withdrawn under review for the same reason:
 
-      Rejecting agreeing entries also asked for a guess where none exists: every
-      candidate is the same value. Ambiguity is now reserved for the case that has
-      no honest answer — entries that differ, where choosing one invents which key
-      the caller meant. An unreadable value among several counts as disagreement,
-      because equality cannot be established against something that never became
-      text. A **lone** unreadable value stays `Unreadable`: one entry arrived, and
-      what is wrong with it is its bytes, not its multiplicity.
+      | Attempt | Withdrawn because |
+      |---|---|
+      | reject a coalesced (comma-bearing) value | a composite key containing a comma went from working to a hard 400 |
+      | reject any second entry | duplicated entries come from infrastructure, not broken clients; a retry wrapper that appends turns a transient fault into permanent command loss |
+      | reject only entries that disagree | an intermediary generating its own key value fails 100% of traffic on that path after deploy |
 
-      **A property this slice previously claimed, now retired.** While the rule was
-      "any duplicate", multiplicity was settled before any value was read, and that
-      ordering was asserted. Comparing values requires reading them, so the claim no
-      longer holds and the prose asserting it is gone. What survives is the part
-      that still matters: a lone unreadable entry is `Unreadable` and never
-      `Ambiguous`, and both orderings of a readable/unreadable pair are pinned on
-      both adapters.
+      The common cost profile is what settles it, and it is the same one every time:
+      the rejection surfaces as a **non-retryable 400**;
+      `IdempotencyEnforcementMode::Compatibility` cannot admit it, because that
+      variant loosens only the *missing*-key policy; nothing stages the rule behind a
+      flag or a classify-only mode; so once such traffic is failing the only
+      mitigation is a code rollback. A slice whose subject is cross-adapter
+      equivalence is the wrong place to ship a backward-incompatible narrowing with
+      that profile, three times over.
 
-      **Three separate concerns, deliberately not merged:**
+      **What that means for the contract.** `RawOperationKey` and
+      `OperationKeyRejection` briefly gained an `Ambiguous` variant, along with its
+      telemetry dimension, its status mapping, and a fourth conformance-harness
+      instance. With no rule producing it, the variant would have been dead surface
+      that every future implementor still had to satisfy, so all of it was reverted
+      too. The contract is back to three states.
 
-      | Concern | Question it answers | Where it is decided |
-      |---|---|---|
-      | Agreement | do the entries name the same key | message content — the carrier, by comparing |
-      | Coalescence | does one entry already read as several | wire representation — **open, see below** |
-      | Validity | is this string a usable key | the domain, in `OperationKey::parse` |
+      **The gap is left open, measured, and asserted — not quietly dropped.** Both
+      transports read the location with a single-value accessor, so the first entry
+      wins and the rest are invisible. Coalescence is invisible in a second way:
+      an intermediary may fold repeated occurrences into one comma-separated value,
+      and `OperationKey::parse("op-A, op-B")` returns `Ok` — measured, because the
+      type is deliberately opaque, rejecting only empty/whitespace-only strings and
+      values over 255 bytes — so a folded pair resolves as a key no client sent, and
+      the domain will not catch it either.
 
-      **Measured, open gap: coalesced duplicates.** An intermediary may fold
-      repeated occurrences of one field into a single comma-separated value. That
-      folding is invisible to a count — two keys arrive as **one** entry — so
-      multiplicity alone leaves this norm true only for duplicates that arrive
-      separately. Measured rather than assumed:
-      `OperationKey::parse("op-A, op-B")` returns `Ok`, because the type is
-      deliberately opaque and rejects only empty/whitespace-only strings and values
-      over 255 bytes. So a folded pair resolves today as an ordinary key that no
-      client ever sent.
+      `adapter_equivalence.rs` pins that current behaviour on both adapters. A gap
+      nobody asserts is a gap somebody closes by accident, and the symmetry is what
+      matters most: closed on one transport and open on the other is exactly the
+      divergence this task exists to prevent.
 
-      **A transport-side rule for it was implemented in this slice and then
-      withdrawn, deliberately.** Classifying a separator-bearing value as
-      `Ambiguous` closes the gap, and review established what it costs: a single
-      entry containing a comma went from resolving to a hard `BadRequest`. A
-      composite key such as a tenant/order pair is the ordinary shape that breaks.
-      400 is not retryable, so a client retry loop abandons the command instead of
-      degrading; `Compatibility` offers no admission path because it loosens only
-      the *missing*-key policy; nothing staged it behind a flag or a classify-only
-      mode, so once such traffic is failing the only mitigation is a code rollback.
-
-      Rather than ship a backward-incompatible narrowing inside a slice whose
-      subject is multiplicity, the rule was removed and the gap left open and
-      written down. Nothing that works today stops working. Closing it needs its
-      own impact analysis and its own slice, and the options that survived review
-      are a classify-only shadow mode, or admitting coalesced values under
-      `Compatibility` while multiplicity keeps rejecting under both modes.
-
-      The current behaviour is **pinned by tests on both adapters and in the
-      equivalence file**, asserting that a coalesced pair resolves as an ordinary
-      key. That is deliberate: a gap nobody asserts is a gap somebody closes by
-      accident, and the symmetry matters — closed on one transport and open on the
-      other is exactly the divergence B1.13 exists to prevent.
-
+      **Closing it needs its own slice and its own impact analysis.** The options
+      that survived review are a classify-only shadow mode that emits the
+      classification without acting on it, giving operators the traffic numbers
+      before anything is rejected; or admitting the undeterminable-key state under
+      `Compatibility`, which is the lever a deployment already has for tolerating
+      non-conformant callers. Both are larger than this slice and neither is started
+      here.
 - [x] B1.14 GREEN: correct `crates/transport/src/lib.rs`'s module doc, which claims
       the crate provides "no gRPC transport" while already exporting
       `GrpcServerConfig`. The charter is stale relative to its own contents and will
@@ -1179,7 +1154,7 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Three tasks remain unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Three tasks remain unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival this change norms identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. Duplicate and coalesced keys are a measured, asserted, deliberately open gap, not a closed one. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 

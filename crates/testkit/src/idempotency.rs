@@ -13,25 +13,25 @@ use ego_service_sdk::idempotency::{
 };
 use ego_service_sdk::runtime::IdempotencyEnforcementMode;
 
-/// Asserts that four instances of the same [`OperationKeyCarrier`]
-/// implementation — one carrying a valid raw key, one carrying none, one whose
-/// location holds something unreadable, and one whose location holds several
-/// entries at once — resolve through [`resolve_operation_key`] exactly as every
-/// other conforming carrier must, against the one shared policy table.
+/// Asserts that three instances of the same [`OperationKeyCarrier`]
+/// implementation — one carrying a valid raw key, one carrying none, and one
+/// whose location holds something unreadable — resolve through
+/// [`resolve_operation_key`] exactly as every other conforming carrier must,
+/// against the one shared policy table.
 ///
-/// An adapter's own integration test wires up all four instances of its
+/// An adapter's own integration test wires up all three instances of its
 /// carrier and passes them here — that is the entire conformance obligation. Nothing about a specific protocol is
 /// exercised beyond what [`OperationKeyCarrier`] itself already narrows to:
-/// one location reported as absent, present, unreadable, or ambiguous, plus one
-/// stable diagnostic name.
+/// one location reported as absent, present, or unreadable, plus one stable
+/// diagnostic name.
 ///
-/// # Why four carrier instances
+/// # Why three carrier instances
 ///
 /// The original sketch for this helper took a single carrier reference. One
 /// instance reports one fixed `raw_operation_key()` value, so it cannot
 /// exercise the policy table against the identical adapter — and the table has
-/// one row per state the contract admits. There are four such states, so
-/// four instances.
+/// one row per state the contract admits. There are three such states, so
+/// three instances.
 ///
 /// The third is not optional, and that is a deliberate trade. A carrier whose
 /// location physically cannot hold an unreadable value — one reading from a
@@ -40,14 +40,6 @@ use ego_service_sdk::runtime::IdempotencyEnforcementMode;
 /// let any adapter skip the case silently; a harness that can be satisfied
 /// without exercising a rule is how a contract quietly stops being enforced.
 /// Requiring it makes the gap visible at the call site instead.
-///
-/// The fourth is not optional for the same reason. A carrier whose location
-/// physically cannot hold more than one entry cannot supply an ambiguous
-/// instance either, and an opt-out for that case would let any adapter skip
-/// the duplicate rule in silence — while duplicates are precisely what an
-/// adapter reading a single value is least likely to have thought about.
-/// Requiring the instance forces each adapter to state, at its own call site,
-/// what a duplicate looks like on its transport.
 ///
 /// # Panics
 ///
@@ -60,7 +52,6 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(
     with_key: &C,
     without_key: &C,
     unreadable_key: &C,
-    ambiguous_key: &C,
 ) {
     let raw = match with_key.raw_operation_key() {
         RawOperationKey::Present(raw) => raw,
@@ -89,20 +80,11 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(
          exists to prevent, since an absent key is admissible under compatibility"
     );
 
-    assert_eq!(
-        RawOperationKey::Ambiguous,
-        ambiguous_key.raw_operation_key(),
-        "conformance precondition failed: `ambiguous_key` must report the location as \
-         holding several entries — reporting it present instead is the exact collapse \
-         this state exists to prevent, since the carrier would be guessing which of the \
-         supplied keys the caller meant"
-    );
-
     assert!(
         !with_key.carrier_name().is_empty(),
         "carrier_name() must be a non-empty diagnostic name"
     );
-    // All four instances must report the same name. The generic bound already
+    // All three instances must report the same name. The generic bound already
     // forces them to be the same type; this catches a name derived from
     // per-instance state instead of from the adapter itself, which would make
     // the diagnostic location depend on which request happened to be rejected.
@@ -115,12 +97,6 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(
     assert_eq!(
         with_key.carrier_name(),
         unreadable_key.carrier_name(),
-        "every instance of one carrier must report the identical name, so a \
-         rejection always names the same location"
-    );
-    assert_eq!(
-        with_key.carrier_name(),
-        ambiguous_key.carrier_name(),
         "every instance of one carrier must report the identical name, so a \
          rejection always names the same location"
     );
@@ -169,27 +145,6 @@ pub fn assert_carrier_conformance<C: OperationKeyCarrier>(
     );
 
     assert_eq!(
-        resolve_operation_key(ambiguous_key, IdempotencyEnforcementMode::MandatoryKey),
-        Err(OperationKeyRejection::Ambiguous {
-            carrier: ambiguous_key.carrier_name()
-        }),
-        "several keys at one location must be rejected under the default mandatory mode"
-    );
-    // Rejected under compatibility too, and for a reason the other rows do not
-    // cover: the caller supplied keys, so the missing-key policy has nothing to
-    // loosen here. Admitting the request would mean choosing one of the values,
-    // and that choice is a guess no mode makes safe — two different keys would
-    // pass as one, and a value nobody could read would vanish behind one that
-    // could.
-    assert_eq!(
-        resolve_operation_key(ambiguous_key, IdempotencyEnforcementMode::Compatibility),
-        Err(OperationKeyRejection::Ambiguous {
-            carrier: ambiguous_key.carrier_name()
-        }),
-        "several keys at one location must be rejected under compatibility mode as well"
-    );
-
-    assert_eq!(
         resolve_operation_key(without_key, IdempotencyEnforcementMode::Compatibility),
         Ok(None),
         "a missing key must be admitted only under the explicit compatibility mode"
@@ -235,13 +190,8 @@ mod tests {
             name: "fake:key",
         };
 
-        let ambiguous_key = FakeCarrier {
-            raw: RawOperationKey::Ambiguous,
-            name: "fake:key",
-        };
-
         // Must not panic — this is the "conforms" case.
-        assert_carrier_conformance(&with_key, &without_key, &unreadable_key, &ambiguous_key);
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
     }
 
     #[test]
@@ -263,17 +213,7 @@ mod tests {
             name: "fake:key",
         };
 
-        let ambiguous_key = FakeCarrier {
-            raw: RawOperationKey::Ambiguous,
-            name: "fake:key",
-        };
-
-        assert_carrier_conformance(
-            &with_key,
-            &mislabeled_without_key,
-            &unreadable_key,
-            &ambiguous_key,
-        );
+        assert_carrier_conformance(&with_key, &mislabeled_without_key, &unreadable_key);
     }
 
     /// Two instances of one carrier that disagree about their own name must fail
@@ -303,12 +243,7 @@ mod tests {
             name: with_key.name,
         };
 
-        let ambiguous_key = FakeCarrier {
-            raw: RawOperationKey::Ambiguous,
-            name: with_key.name,
-        };
-
-        assert_carrier_conformance(&with_key, &without_key, &unreadable_key, &ambiguous_key);
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
     }
 
     /// An empty name fails too: a rejection has to be able to say where the key
@@ -330,12 +265,7 @@ mod tests {
             name: with_key.name,
         };
 
-        let ambiguous_key = FakeCarrier {
-            raw: RawOperationKey::Ambiguous,
-            name: with_key.name,
-        };
-
-        assert_carrier_conformance(&with_key, &without_key, &unreadable_key, &ambiguous_key);
+        assert_carrier_conformance(&with_key, &without_key, &unreadable_key);
     }
 
     /// The precondition that makes the third state worth having: an instance
@@ -361,53 +291,6 @@ mod tests {
             name: "fake:key",
         };
 
-        let ambiguous_key = FakeCarrier {
-            raw: RawOperationKey::Ambiguous,
-            name: "fake:key",
-        };
-
-        assert_carrier_conformance(
-            &with_key,
-            &without_key,
-            &mislabeled_unreadable,
-            &ambiguous_key,
-        );
-    }
-
-    /// The precondition that makes the fourth state worth having: an instance
-    /// passed as ambiguous which actually reports a single present value must
-    /// fail conformance. That collapse is the one an adapter reaches for by
-    /// reflex — take the first entry and move on — and it is silent by
-    /// construction, because the value it hands back is a perfectly ordinary
-    /// readable key. Nothing downstream can tell that a second one was dropped,
-    /// so the harness has to catch it here or not at all.
-    #[test]
-    #[should_panic(expected = "`ambiguous_key` must report the location as holding several")]
-    fn an_ambiguous_instance_that_reports_present_fails_conformance() {
-        let with_key = FakeCarrier {
-            raw: RawOperationKey::Present("op-1"),
-            name: "fake:key",
-        };
-        let without_key = FakeCarrier {
-            raw: RawOperationKey::Absent,
-            name: "fake:key",
-        };
-        let unreadable_key = FakeCarrier {
-            raw: RawOperationKey::Unreadable,
-            name: "fake:key",
-        };
-        // Mislabeled: passed as the ambiguous instance, but it reports the first
-        // of its several values as though the caller had supplied only that one.
-        let mislabeled_ambiguous = FakeCarrier {
-            raw: RawOperationKey::Present("op-1"),
-            name: "fake:key",
-        };
-
-        assert_carrier_conformance(
-            &with_key,
-            &without_key,
-            &unreadable_key,
-            &mislabeled_ambiguous,
-        );
+        assert_carrier_conformance(&with_key, &without_key, &mislabeled_unreadable);
     }
 }

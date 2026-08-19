@@ -16,17 +16,11 @@ use crate::runtime::IdempotencyEnforcementMode;
 /// valid key is or what happens when one is absent.
 /// What a carrier found at its location.
 ///
-/// Four answers rather than two. A carrier that could only say "here is a
+/// Three answers rather than two. A carrier that could only say "here is a
 /// string" or "nothing" has to report an unreadable value as absent, and an
 /// absent key is admissible under the compatibility variant — so malformed
 /// input would silently disable the guarantee instead of being rejected for
 /// what it is. The third answer exists precisely so that cannot happen.
-///
-/// The fourth answers the mirror-image failure. A carrier that can only hand
-/// back one string has to choose one when its location held several, and any
-/// such choice is a guess about which key the caller meant. Reporting the
-/// multiplicity keeps that decision in the shared policy instead of leaving
-/// every adapter to resolve it quietly on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawOperationKey<'a> {
     /// The carrier's location held nothing.
@@ -39,19 +33,6 @@ pub enum RawOperationKey<'a> {
     /// simply unusable, and treating it as absent would let it through under
     /// the compatibility variant.
     Unreadable,
-    /// The location held more than one entry, so which of them the caller
-    /// meant is unknowable. Distinct from [`RawOperationKey::Present`] because
-    /// taking the first is a guess, and picking on the caller's behalf is not
-    /// a decision a carrier is entitled to make; distinct from
-    /// [`RawOperationKey::Unreadable`] because each individual value may be
-    /// perfectly readable — the defect is the multiplicity, not the bytes.
-    ///
-    /// Collapsing it into [`RawOperationKey::Present`] is the whole reason this
-    /// state exists: a request carrying two *different* keys would be admitted
-    /// under whichever one happened to come first, and a request whose first
-    /// value is readable and whose second is not would have the unreadable one
-    /// disappear entirely.
-    Ambiguous,
 }
 
 pub trait OperationKeyCarrier {
@@ -101,19 +82,6 @@ pub enum OperationKeyRejection {
         /// The carrier that reported the unreadable value.
         carrier: &'static str,
     },
-    /// More than one key was supplied at the same location.
-    ///
-    /// Never admitted under any mode, for the same reason as
-    /// [`OperationKeyRejection::Invalid`] and
-    /// [`OperationKeyRejection::Unreadable`]: the caller did supply keys, so
-    /// the missing-key policy does not apply to them. Kept separate from
-    /// `Unreadable` because nothing here need be malformed — each value may
-    /// read perfectly well, and it is having several of them that leaves no
-    /// honest way to choose one.
-    Ambiguous {
-        /// The carrier that reported more than one key.
-        carrier: &'static str,
-    },
 }
 
 /// The single place validation and missing-key policy live.
@@ -125,12 +93,10 @@ pub enum OperationKeyRejection {
 /// from diverging per protocol.
 ///
 /// A key present but failing validation is **always** rejected as
-/// [`OperationKeyRejection::Invalid`], a key present but unreadable is
-/// **always** rejected as [`OperationKeyRejection::Unreadable`], and several
-/// keys supplied at once are **always** rejected as
-/// [`OperationKeyRejection::Ambiguous`], regardless of `mode`.
-/// [`IdempotencyEnforcementMode::Compatibility`] bounds only what happens when
-/// a key is *absent*, never what counts as usable.
+/// [`OperationKeyRejection::Invalid`], and a key present but unreadable is
+/// **always** rejected as [`OperationKeyRejection::Unreadable`], regardless of
+/// `mode`. [`IdempotencyEnforcementMode::Compatibility`] bounds only what
+/// happens when a key is *absent*, never what counts as usable.
 pub fn resolve_operation_key(
     carrier: &dyn OperationKeyCarrier,
     mode: IdempotencyEnforcementMode,
@@ -144,14 +110,9 @@ pub fn resolve_operation_key(
                     source,
                 })
         }
-        // A supplied-but-unusable value is never admitted, and neither is a
-        // supplied-but-ambiguous one: one cannot be read, the other cannot be
-        // chosen between, and either way the caller did supply something. The
-        // mode governs only what happens when nothing was supplied at all.
+        // A supplied-but-unusable value is never admitted. The mode governs
+        // only what happens when nothing was supplied at all.
         RawOperationKey::Unreadable => Err(OperationKeyRejection::Unreadable {
-            carrier: carrier.carrier_name(),
-        }),
-        RawOperationKey::Ambiguous => Err(OperationKeyRejection::Ambiguous {
             carrier: carrier.carrier_name(),
         }),
         RawOperationKey::Absent => match mode {
@@ -318,47 +279,6 @@ mod tests {
         assert_eq!(
             resolved,
             Err(OperationKeyRejection::Unreadable {
-                carrier: "test:key"
-            })
-        );
-    }
-
-    /// Several keys at one location are rejected under the fail-closed default.
-    /// Every value may be readable and even valid, so nothing here is malformed
-    /// — what makes the request unusable is that no rule can say which key the
-    /// caller meant, and inventing one is the guess this rejection refuses.
-    #[test]
-    fn ambiguous_key_is_rejected_under_the_default_mandatory_mode() {
-        let carrier = TestCarrier {
-            raw: RawOperationKey::Ambiguous,
-        };
-
-        let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::MandatoryKey);
-
-        assert_eq!(
-            resolved,
-            Err(OperationKeyRejection::Ambiguous {
-                carrier: "test:key"
-            })
-        );
-    }
-
-    /// And rejected under compatibility too. That variant loosens what happens
-    /// when a caller sent *no* key; a caller who sent several sent keys, so
-    /// admitting the request would mean quietly picking one of them — the very
-    /// choice the state exists to keep an adapter from making, now made by the
-    /// shared policy instead.
-    #[test]
-    fn ambiguous_key_is_rejected_under_compatibility_mode_too() {
-        let carrier = TestCarrier {
-            raw: RawOperationKey::Ambiguous,
-        };
-
-        let resolved = resolve_operation_key(&carrier, IdempotencyEnforcementMode::Compatibility);
-
-        assert_eq!(
-            resolved,
-            Err(OperationKeyRejection::Ambiguous {
                 carrier: "test:key"
             })
         );

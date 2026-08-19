@@ -40,7 +40,6 @@ enum Outcome {
     Missing,
     Invalid,
     Unreadable,
-    Ambiguous,
 }
 
 fn outcome_of(carrier: &dyn OperationKeyCarrier, mode: IdempotencyEnforcementMode) -> Outcome {
@@ -50,7 +49,6 @@ fn outcome_of(carrier: &dyn OperationKeyCarrier, mode: IdempotencyEnforcementMod
         Err(OperationKeyRejection::Missing { .. }) => Outcome::Missing,
         Err(OperationKeyRejection::Invalid { .. }) => Outcome::Invalid,
         Err(OperationKeyRejection::Unreadable { .. }) => Outcome::Unreadable,
-        Err(OperationKeyRejection::Ambiguous { .. }) => Outcome::Ambiguous,
     }
 }
 
@@ -228,20 +226,32 @@ fn an_unreadable_value_is_rejected_identically_on_both_adapters_under_both_modes
     }
 }
 
-/// Several entries that disagree: the message carried two different keys and
-/// there is no honest way to choose one. Entries that agree are a separate row
-/// and resolve, because agreement leaves nothing to guess.
+/// Several entries under one name. Deliberately out of scope for this slice,
+/// and pinned as such on both transports: the location is read with a
+/// single-value accessor, so the first entry wins and the rest are invisible.
+///
+/// A rule was written for this and withdrawn under review. Rejecting a second
+/// entry meant a non-retryable 400 on a path that previously worked, with no
+/// admission path under either enforcement mode and nothing staged behind a
+/// flag — and duplicated entries are routinely produced by infrastructure
+/// rather than by broken clients, so an intermediary adding the header, or a
+/// retry wrapper appending instead of replacing, would have failed outright.
+///
+/// So the current behaviour is asserted rather than left unstated. A gap nobody
+/// asserts is a gap somebody closes by accident, and the symmetry is what
+/// matters most here: closed on one transport and open on the other is exactly
+/// the divergence this file exists to prevent.
 #[test]
-fn disagreeing_entries_are_rejected_identically_on_both_adapters_under_both_modes() {
+fn several_entries_currently_resolve_on_the_first_identically_on_both_adapters() {
     for mode in [
         IdempotencyEnforcementMode::MandatoryKey,
         IdempotencyEnforcementMode::Compatibility,
     ] {
         assert_both_adapters_resolve_to(
-            "two entries with different values",
+            "two entries carrying different values",
             Arrival::TwoValues("op-A", "op-B"),
             mode,
-            Outcome::Ambiguous,
+            Outcome::Resolved("op-A".to_string()),
         );
         assert_both_adapters_resolve_to(
             "two entries carrying the identical value",
@@ -249,13 +259,12 @@ fn disagreeing_entries_are_rejected_identically_on_both_adapters_under_both_mode
             mode,
             Outcome::Resolved("op-A".to_string()),
         );
-        // Ambiguous, not unreadable: an unreadable value cannot be shown equal
-        // to a readable one, so the entries disagree.
+        // The second value is genuinely invisible here, unreadable or not.
         assert_both_adapters_resolve_to(
             "a readable entry followed by an unreadable one",
             Arrival::ValueThenUnreadable("op-A"),
             mode,
-            Outcome::Ambiguous,
+            Outcome::Resolved("op-A".to_string()),
         );
     }
 }
@@ -282,11 +291,9 @@ fn a_coalesced_key_currently_resolves_identically_on_both_adapters() {
 
 /// The negative control for the whole file. Every row above asserts something
 /// is rejected or resolved; without this one, an adapter pair that rejected
-/// *everything* would satisfy most of them. What it pins specifically is that
-/// an ordinary single entry is **not swept up by the multiplicity rule** —
-/// one entry is one key, whatever the value happens to contain.
+/// *everything* would satisfy most of them.
 #[test]
-fn an_ordinary_single_key_is_not_swept_up_by_the_multiplicity_rule() {
+fn an_ordinary_single_key_resolves_on_both_adapters() {
     for mode in [
         IdempotencyEnforcementMode::MandatoryKey,
         IdempotencyEnforcementMode::Compatibility,
