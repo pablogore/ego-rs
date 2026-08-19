@@ -94,7 +94,14 @@ fn modules_on_disk() -> BTreeSet<String> {
 fn modules_registered() -> BTreeSet<String> {
     let source = std::fs::read_to_string(REGISTRATION)
         .unwrap_or_else(|e| panic!("the registration target must be readable: {e}"));
+    registered_modules(&source)
+}
 
+/// The parse behind [`modules_registered`], over text rather than a path.
+///
+/// Split out for the same reason as [`ledger_citations`]: a function that reads
+/// a fixed file can only ever be asserted against the current tree.
+fn registered_modules(source: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for line in source.lines() {
         let line = line.trim();
@@ -138,14 +145,30 @@ fn modules_registered() -> BTreeSet<String> {
 fn modules_in_ledger() -> BTreeSet<String> {
     let ledger = std::fs::read_to_string(README)
         .unwrap_or_else(|e| panic!("the ledger must be readable: {e}"));
+    ledger_citations(&ledger)
+}
 
+/// The parse behind [`modules_in_ledger`], over text rather than a path.
+///
+/// **This split is the point, not a tidy-up.** The anchoring is the load-bearing
+/// behaviour of this file, and while the parse read a fixed compile-time path it
+/// could not be exercised against anything but the current tree. Weakening it —
+/// dropping the table-row check, say — left every test in this target green,
+/// because the real README happens to satisfy both the strict and the loose rule
+/// for nine of its ten entries. The guard would have returned to the exact
+/// false-green state it was written to close, silently.
+///
+/// Taking `&str` makes the rule assertable against fixtures, which is what the
+/// tests at the bottom of this file do. A prose mutation table is a record of
+/// something someone ran once; these run every time.
+fn ledger_citations(markdown: &str) -> BTreeSet<String> {
     // Backticks are part of both delimiters: a Status cell writes the path as a
     // code span, and requiring that rejects a path mentioned in a row's prose.
     const OPEN: &str = "`tests/infrastructure/";
     const CLOSE: &str = ".rs`";
 
     let mut found = BTreeSet::new();
-    for line in ledger.lines() {
+    for line in markdown.lines() {
         if !line.trim_start().starts_with('|') {
             continue;
         }
@@ -268,4 +291,106 @@ fn the_comparison_is_not_vacuous() {
          tests by their `tests/infrastructure/<name>.rs` path, which is the only \
          thing tying a row to a file"
     );
+}
+
+/// The anchoring rule, pinned against fixtures rather than against this
+/// repository's current contents.
+///
+/// Every assertion above compares sets drawn from the real tree, so all of them
+/// stay green if the parse is weakened in a way the current README happens to
+/// tolerate. These do not: each one states the rule directly, so removing the
+/// table-row check or the code-span check fails here whatever the tree looks
+/// like.
+mod anchoring {
+    use super::ledger_citations;
+
+    /// A Status cell: a table row, path written as a code span.
+    #[test]
+    fn a_status_cell_counts() {
+        let found = ledger_citations(
+            "| 1 | Some scenario | A guarantee | Why | `tests/infrastructure/a_test.rs` |",
+        );
+        assert!(
+            found.contains("a_test"),
+            "a path in a table row's code span is the one form that accounts for a test"
+        );
+    }
+
+    /// The regression this file exists to close, stated as a rule rather than as
+    /// a mutation someone once ran: prose is not a justification.
+    #[test]
+    fn a_prose_mention_does_not_count() {
+        let found = ledger_citations(
+            "It is now guarded by `tests/infrastructure/a_test.rs`; see its own docs.",
+        );
+        assert!(
+            found.is_empty(),
+            "a prose mention carries no guarantee, no why-in-process and no budget, \
+             so it must not stand in for a deleted Status row — found {found:?}"
+        );
+    }
+
+    /// Both anchors are required, so each is pinned on its own. Dropping either
+    /// check in isolation fails exactly one of these.
+    #[test]
+    fn a_table_row_without_a_code_span_does_not_count() {
+        let found = ledger_citations(
+            "| 1 | Some scenario | A guarantee | Why | tests/infrastructure/a_test.rs |",
+        );
+        assert!(
+            found.is_empty(),
+            "a bare path in a row is not how a Status cell is written — found {found:?}"
+        );
+    }
+
+    /// The exact shape that was a live false green: one document holding both a
+    /// Status row and a prose mention of the same test. Deleting the row must
+    /// leave nothing behind.
+    #[test]
+    fn deleting_a_row_is_not_rescued_by_its_prose_mention() {
+        const WITH_ROW: &str = "\
+| 4 | Two replicas | A guarantee | Why | `tests/infrastructure/a_test.rs` |
+
+It is now guarded by `tests/infrastructure/a_test.rs`.
+";
+        const ROW_DELETED: &str = "\
+It is now guarded by `tests/infrastructure/a_test.rs`.
+";
+        assert!(
+            ledger_citations(WITH_ROW).contains("a_test"),
+            "control: with its row present the test is accounted for"
+        );
+        assert!(
+            ledger_citations(ROW_DELETED).is_empty(),
+            "with the row gone the prose must not keep the test accounted for — \
+             this is the false green the anchoring closes"
+        );
+    }
+}
+
+/// The module-registration parse, pinned the same way and for the same reason.
+mod registration {
+    use super::registered_modules;
+
+    #[test]
+    fn a_declaration_counts_and_a_block_header_does_not() {
+        let found = registered_modules("mod infrastructure {\n    mod a_test;\n}\n");
+        assert!(
+            found.contains("a_test"),
+            "a `mod name;` declaration registers a test"
+        );
+        assert!(
+            !found.contains("infrastructure"),
+            "the enclosing block header is not a test module — found {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_commented_out_declaration_does_not_count() {
+        let found = registered_modules("// mod a_test;\n//! mod b_test;\n");
+        assert!(
+            found.is_empty(),
+            "a module that is commented out is registered nowhere — found {found:?}"
+        );
+    }
 }

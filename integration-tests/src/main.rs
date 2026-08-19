@@ -126,14 +126,35 @@ fn check_ledger() -> LedgerCheck {
         Err(e) => return LedgerCheck::Unavailable(format!("cargo could not be started: {e}")),
     }
 
-    // It builds, so from here a non-zero status is the guard's own verdict.
+    // The guard reads three paths and panics if any is unreadable, so a sparse
+    // checkout, a permission-restricted workspace or a partial clone would make
+    // it exit non-zero for a reason that is not a divergence. Those are checked
+    // here, where the answer can still be `Unavailable`.
+    for path in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/infrastructure"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/infrastructure.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"),
+    ] {
+        if let Err(e) = std::fs::metadata(path) {
+            return LedgerCheck::Unavailable(format!("{path} is not readable: {e}"));
+        }
+    }
+
+    // It builds and its inputs are readable, so from here the guard's own
+    // verdict is what a status means — but only for the status libtest uses to
+    // report failing tests. A child killed by a signal reports no code at all
+    // (an OOM kill, a `SIGTERM` from an impatient CI), and any other code came
+    // from something that is not libtest reporting assertions.
     match std::process::Command::new(env!("CARGO"))
         .arg("test")
         .args(ARGS)
         .status()
     {
         Ok(status) if status.success() => LedgerCheck::Consistent,
-        Ok(_) => LedgerCheck::Diverged,
+        Ok(status) if status.code() == Some(101) => LedgerCheck::Diverged,
+        Ok(status) => LedgerCheck::Unavailable(format!(
+            "the ledger guard ended abnormally rather than reporting a verdict ({status})"
+        )),
         Err(e) => LedgerCheck::Unavailable(format!("cargo could not be started: {e}")),
     }
 }
