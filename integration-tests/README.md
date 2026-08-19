@@ -100,7 +100,25 @@ nowhere, run never — fails too. It is hermetic, starts no container, and the r
 executes it before provisioning PostgreSQL, so drift is caught in milliseconds. It
 does **not** check that a justification is *true*; that stays a review question.
 
-**Measured, four mutations, each restored byte-identically and confirmed by
+**A row means a row.** The guard counts a test as accounted for only from a Status
+cell — a line that is a table row, with the path written as a code span. It does
+not scan the document. That distinction is load-bearing rather than fussy: this
+README cites test paths in prose as a matter of style, and
+`concurrent_replicas_postgres.rs` is named both in its Status cell and in the
+paragraph recording that the scenario is now guarded. An earlier version of the
+guard scanned the whole file, so deleting that row — the only place its
+justification lives — left the prose mention behind and the guard stayed green
+while claiming every test had a row. Measured before and after: the same deletion
+now fails, naming the test.
+
+**Where the runner stops, and why it says which.** A preflight that could not run
+is not a ledger that disagrees, and reporting the first as the second would be a
+guard describing a case it does not cover. The runner builds the guard with
+`--no-run` first: a failure there reports that the ledger was **never checked**,
+naming the build. Only once it builds does a failing run report a real divergence.
+Neither path provisions anything.
+
+**Measured, six mutations, each restored byte-identically and confirmed by
 SHA-256.** A guard is worth what its failures are worth, and each drift direction
 had to kill it by a distinct assertion rather than by the same one twice.
 
@@ -109,7 +127,9 @@ had to kill it by a distinct assertion rather than by the same one twice.
 | A test file added, unregistered and undocumented | 101 | 2 | registration: present on disk, missing from `tests/infrastructure.rs`; ledger: present on disk, missing from `README.md` — both naming the new file |
 | A test file renamed | 101 | 2 | the same two, naming the **new** name; the old name's stale entries are reported once the first assertion is satisfied |
 | A test file deleted, its module and row left behind | 101 | 2 | the two *inverse* assertions: a module registered with no file, and a ledger row for a test that no longer exists |
+| **A Status row deleted, its prose mention kept** | 101 | 1 | ledger: a test with no row, naming `concurrent_replicas_postgres`. **Was a false green** before the parse was anchored to table rows |
 | The ledger stops citing tests by path | 101 | 2 | non-vacuity: zero rows parsed, so the set comparison would otherwise have been three-way-empty and green |
+| The guard target made not to compile | 1 | — | the runner reports the ledger was **never checked**, explicitly not a divergence, and provisions nothing |
 | No mutation | 0 | 0 | none — **negative control**, and it runs in 0.00s with no container |
 
 The third row is the one that matters most, because it is the only drift where

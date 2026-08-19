@@ -112,29 +112,53 @@ fn modules_registered() -> BTreeSet<String> {
     found
 }
 
-/// Every test the ledger accounts for, discovered by the path it cites.
+/// Every test the ledger accounts for, counted **only** from a real table row.
 ///
-/// The ledger cites each test as `tests/infrastructure/<name>.rs`. That path is
-/// the machine-readable part of an otherwise prose document, which keeps one
-/// source of truth: the table a human reads is the table this parses, rather than
-/// a duplicate list that could itself drift.
+/// A test is accounted for by the Status cell of a row that also carries its
+/// guarantee, its why-in-process and the budget it spends. Two anchors are
+/// required, and each closes a different hole:
+///
+/// 1. **The line must be a table row** — trimmed, it starts with `|`.
+/// 2. **The path must be a code span** — delimited by backticks, as every Status
+///    cell writes it.
+///
+/// # Why anchoring is not a refinement
+///
+/// An earlier version scanned the whole document for the bare path, and that was
+/// a live false green rather than a theoretical one. This README is deliberately
+/// narrative and cites test paths in prose: `concurrent_replicas_postgres.rs` is
+/// named both in its Status cell *and* in the paragraph recording that the
+/// scenario is now guarded. Under the unanchored scan, deleting that row — the
+/// only place its justification lives — left the prose mention behind, the name
+/// still in this set, and the guard green while claiming every test has a row.
+///
+/// The guarantee this file states is that every test carries a *justification*.
+/// A name appearing somewhere in the file is not that, so the parse is anchored
+/// to the structure that actually holds one.
 fn modules_in_ledger() -> BTreeSet<String> {
     let ledger = std::fs::read_to_string(README)
         .unwrap_or_else(|e| panic!("the ledger must be readable: {e}"));
 
-    const PREFIX: &str = "tests/infrastructure/";
-    const SUFFIX: &str = ".rs";
+    // Backticks are part of both delimiters: a Status cell writes the path as a
+    // code span, and requiring that rejects a path mentioned in a row's prose.
+    const OPEN: &str = "`tests/infrastructure/";
+    const CLOSE: &str = ".rs`";
 
     let mut found = BTreeSet::new();
-    let mut rest = ledger.as_str();
-    while let Some(start) = rest.find(PREFIX) {
-        rest = &rest[start + PREFIX.len()..];
-        let Some(end) = rest.find(SUFFIX) else {
+    for line in ledger.lines() {
+        if !line.trim_start().starts_with('|') {
             continue;
-        };
-        let name = &rest[..end];
-        if is_module_name(name) {
-            found.insert(name.to_owned());
+        }
+        let mut rest = line;
+        while let Some(start) = rest.find(OPEN) {
+            rest = &rest[start + OPEN.len()..];
+            let Some(end) = rest.find(CLOSE) else {
+                continue;
+            };
+            let name = &rest[..end];
+            if is_module_name(name) {
+                found.insert(name.to_owned());
+            }
         }
     }
     found
@@ -142,9 +166,11 @@ fn modules_in_ledger() -> BTreeSet<String> {
 
 /// A Rust module name as this suite writes them: lowercase, digits, underscores.
 ///
-/// Rejecting anything else is what stops a prose mention like
-/// `tests/infrastructure/<name>.rs` in a template or an example from being
-/// counted as a real entry.
+/// A last filter rather than the anchor. What keeps prose out of the ledger set
+/// is the table-row and code-span anchoring above; this only rejects a match
+/// whose captured text could not be a module name at all — a placeholder like
+/// `<name>`, or a span that ran past its own delimiter into the rest of a line.
+/// It fails closed: an unrecognised shape is dropped, never guessed at.
 fn is_module_name(candidate: &str) -> bool {
     !candidate.is_empty()
         && candidate

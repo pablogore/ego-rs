@@ -63,26 +63,78 @@ async fn connect(url: &str) -> PgPool {
 /// is documented, and is registered nowhere runs never, and a suite that reports
 /// success without it is the failure this guard exists to catch.
 ///
-/// Returns `false` when the guard fails or could not be started; the caller then
-/// exits without provisioning.
-fn ledger_is_consistent() -> bool {
+/// What the ledger preflight concluded.
+///
+/// Three outcomes, not two, because "the guard did not pass" and "the ledger
+/// diverged" are different facts and only one of them is about the ledger.
+/// Collapsing them was a real defect in the first version of this preflight: a
+/// target that failed to *compile* also exits non-zero, and the runner reported
+/// it as a documentation divergence that had not happened. A guard whose message
+/// describes a case it does not cover is worse than no guard.
+enum LedgerCheck {
+    /// The guard ran and passed.
+    Consistent,
+    /// The guard ran and failed: the ledger, the module registration and the
+    /// directory genuinely disagree.
+    Diverged,
+    /// The guard never got to answer — it could not be built, or cargo could not
+    /// be started. This says nothing about the ledger.
+    Unavailable(String),
+}
+
+/// Runs the hermetic ledger guard, before anything is provisioned.
+///
+/// It needs no container, so making it a precondition costs nothing and makes a
+/// drifted ledger fail in milliseconds instead of after a container start, a
+/// template clone and a full suite. It is also the one check here that can fail
+/// for a reason no amount of PostgreSQL would reveal: a test file that exists,
+/// is documented, and is registered nowhere runs never, and a suite that reports
+/// success without it is the failure this guard exists to catch.
+///
+/// # Why two invocations
+///
+/// `cargo test` exits non-zero for a compile error and for a failing assertion
+/// alike, so its status cannot tell those apart. `--no-run` builds without
+/// running: if that fails, the answer is [`LedgerCheck::Unavailable`] and the
+/// ledger was never inspected. Only once it builds does a non-zero status from
+/// the run mean the sets actually disagree. The second invocation compiles
+/// nothing new, so the cost is one cargo no-op.
+fn check_ledger() -> LedgerCheck {
+    const ARGS: [&str; 4] = [
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--test",
+        "ledger",
+    ];
+
+    // Build only. A failure here is a toolchain or compilation fact, never a
+    // statement about the ledger's contents.
     match std::process::Command::new(env!("CARGO"))
-        .args([
-            "test",
-            "--manifest-path",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-            "--test",
-            "ledger",
-        ])
+        .arg("test")
+        .args(ARGS)
+        .arg("--no-run")
         .status()
     {
-        Ok(status) => status.success(),
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            return LedgerCheck::Unavailable(format!(
+                "the ledger guard could not be built (cargo test --no-run exited {status})"
+            ))
+        }
         // Same reasoning as the suite's own spawn below: a child that could not
         // be started at all is a failure to report, never a check to skip.
-        Err(e) => {
-            eprintln!("[integration-tests] the ledger guard could not be started: {e}");
-            false
-        }
+        Err(e) => return LedgerCheck::Unavailable(format!("cargo could not be started: {e}")),
+    }
+
+    // It builds, so from here a non-zero status is the guard's own verdict.
+    match std::process::Command::new(env!("CARGO"))
+        .arg("test")
+        .args(ARGS)
+        .status()
+    {
+        Ok(status) if status.success() => LedgerCheck::Consistent,
+        Ok(_) => LedgerCheck::Diverged,
+        Err(e) => LedgerCheck::Unavailable(format!("cargo could not be started: {e}")),
     }
 }
 
@@ -91,13 +143,26 @@ async fn main() -> ExitCode {
     let started = std::time::Instant::now();
 
     // Before the container: nothing below can make a drifted ledger correct, and
-    // provisioning first would only make finding out slower.
-    if !ledger_is_consistent() {
-        eprintln!(
-            "\n[integration-tests] the ledger and the suite disagree — \
-             nothing was provisioned."
-        );
-        return ExitCode::FAILURE;
+    // provisioning first would only make finding out slower. Each outcome names
+    // what actually happened — a build failure is not a divergence.
+    match check_ledger() {
+        LedgerCheck::Consistent => {}
+        LedgerCheck::Diverged => {
+            eprintln!(
+                "\n[integration-tests] the ledger and the suite disagree — \
+                 nothing was provisioned. The guard's own output above names \
+                 which side has the extra or missing entry."
+            );
+            return ExitCode::FAILURE;
+        }
+        LedgerCheck::Unavailable(why) => {
+            eprintln!(
+                "\n[integration-tests] the ledger guard did not run, so the ledger \
+                 was never checked — nothing was provisioned. This is not a \
+                 divergence: {why}"
+            );
+            return ExitCode::FAILURE;
+        }
     }
 
     let container = Postgres::default()
