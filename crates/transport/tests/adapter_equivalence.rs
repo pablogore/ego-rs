@@ -281,10 +281,11 @@ fn a_coalesced_key_currently_resolves_identically_on_both_adapters() {
 
 /// The negative control for the whole file. Every row above asserts something
 /// is rejected or resolved; without this one, an adapter pair that rejected
-/// *everything* would satisfy most of them. It also pins the boundary the
-/// coalescence rule draws: no separator, so nothing to be ambiguous about.
+/// *everything* would satisfy most of them. What it pins specifically is that
+/// an ordinary single entry is **not swept up by the multiplicity rule** —
+/// one entry is one key, whatever the value happens to contain.
 #[test]
-fn an_ordinary_single_key_still_resolves_and_is_not_swept_up_by_the_new_rules() {
+fn an_ordinary_single_key_is_not_swept_up_by_the_multiplicity_rule() {
     for mode in [
         IdempotencyEnforcementMode::MandatoryKey,
         IdempotencyEnforcementMode::Compatibility,

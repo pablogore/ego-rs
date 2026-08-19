@@ -195,15 +195,14 @@ mod tests {
         assert_eq!(carrier.carrier_name(), "http:Idempotency-Key");
     }
 
-    // --- the two ways a location ends up holding more than one key ----------
+    // --- multiplicity cases, and the documented coalescence gap -------------
     //
-    // They are separate mechanisms with separate causes, and the tests below
-    // keep them apart on purpose. Multiplicity is decided by counting entries
-    // and never reads a value; coalescence is decided by reading the one value
-    // there is. A single test covering "somehow two keys" would pass if either
-    // mechanism were deleted.
+    // Only one mechanism is at work here: counting entries, without reading any
+    // value. The last test in this group is not another case of it — it pins
+    // the gap that mechanism cannot see, where a value an intermediary already
+    // folded arrives as a single entry and resolves as an ordinary key.
 
-    /// Cause one: two entries. Rejected on the count alone.
+    /// Two entries. Rejected on the count alone.
     #[test]
     fn two_entries_report_as_ambiguous_not_as_the_first_of_them() {
         let mut headers = HeaderMap::new();
@@ -358,9 +357,9 @@ mod grpc_tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Unreadable);
     }
 
-    // --- the two ways this location ends up holding more than one key -------
+    // --- multiplicity cases, and the documented coalescence gap -------------
 
-    /// Cause one: two entries, decided on the count alone.
+    /// Two entries, rejected on the count alone.
     #[test]
     fn two_entries_report_as_ambiguous_not_as_the_first_of_them() {
         let mut metadata = MetadataMap::new();
