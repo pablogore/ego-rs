@@ -222,7 +222,8 @@ mod tests {
     // the gap that mechanism cannot see, where a value an intermediary already
     // folded arrives as a single entry and resolves as an ordinary key.
 
-    /// Two entries. Rejected on the count alone.
+    /// Two entries carrying different values. Ambiguous because comparing them
+    /// proves they disagree, so there is no key both of them name.
     #[test]
     fn two_entries_report_as_ambiguous_not_as_the_first_of_them() {
         let mut headers = HeaderMap::new();
@@ -250,11 +251,11 @@ mod tests {
         );
     }
 
-    /// A readable value followed by an unreadable one is **ambiguous**, and the
-    /// reason matters: it is disqualified for being two entries, not for the
-    /// second one's bytes, which are never examined. Were this reported as
-    /// unreadable it would be right by accident, and it would stop being right
-    /// the moment the unreadable entry came first.
+    /// A readable value alongside an unreadable one is **ambiguous**, and the
+    /// reason matters: equality cannot be established against a value that
+    /// never became text, so the entries cannot be shown to agree. Reporting it
+    /// `Unreadable` instead would name the wrong defect — one entry here is
+    /// perfectly readable, and what is missing is agreement, not legibility.
     #[test]
     fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous() {
         let mut headers = HeaderMap::new();
@@ -268,11 +269,13 @@ mod tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// The mirror of the case above, and the reason it is not redundant: with
-    /// the unreadable entry first, a carrier that read before counting would
-    /// answer `Unreadable` here and `Present` in the previous test. Both are
-    /// wrong, and only having both cases makes the read-before-count ordering
-    /// detectable at all.
+    /// The mirror of the case above, and the reason it is not redundant. Having
+    /// both orderings is what catches two distinct wrong implementations: one
+    /// that takes the first value and stops, which would answer `Unreadable`
+    /// here and `Present` in the previous test; and one whose comparison
+    /// short-circuits asymmetrically, treating an unreadable value as matching
+    /// in one direction but not the other. A single ordering leaves both
+    /// undetected.
     #[test]
     fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous() {
         let mut headers = HeaderMap::new();
@@ -381,7 +384,8 @@ mod grpc_tests {
 
     // --- multiplicity cases, and the documented coalescence gap -------------
 
-    /// Two entries, rejected on the count alone.
+    /// Two entries carrying different values. Ambiguous because comparing them
+    /// proves they disagree, identically to HTTP.
     #[test]
     fn two_entries_report_as_ambiguous_not_as_the_first_of_them() {
         let mut metadata = MetadataMap::new();
@@ -408,10 +412,10 @@ mod grpc_tests {
         );
     }
 
-    /// A readable entry followed by an unreadable one is **ambiguous**, and
-    /// the reason is the count, not the bytes: the second value is never
-    /// examined. Reporting it unreadable would be right by accident here and
-    /// wrong the moment the unreadable entry arrived first.
+    /// A readable entry alongside an unreadable one is **ambiguous**: equality
+    /// cannot be established against a value that never became text, so the
+    /// entries cannot be shown to agree. Reporting it `Unreadable` would name
+    /// the wrong defect, exactly as on HTTP.
     #[test]
     fn a_readable_entry_followed_by_an_unreadable_one_is_ambiguous() {
         let mut metadata = MetadataMap::new();
@@ -422,11 +426,13 @@ mod grpc_tests {
         assert_eq!(carrier.raw_operation_key(), RawOperationKey::Ambiguous);
     }
 
-    /// The mirror of the case above, and the reason it is not redundant: with
-    /// the unreadable entry first, a carrier that read before counting would
-    /// answer `Unreadable` here and `Present` in the previous test. Both are
-    /// wrong, and only having both cases makes the read-before-count ordering
-    /// detectable at all.
+    /// The mirror of the case above, and the reason it is not redundant. Having
+    /// both orderings is what catches two distinct wrong implementations: one
+    /// that takes the first value and stops, which would answer `Unreadable`
+    /// here and `Present` in the previous test; and one whose comparison
+    /// short-circuits asymmetrically, treating an unreadable value as matching
+    /// in one direction but not the other. A single ordering leaves both
+    /// undetected.
     #[test]
     fn an_unreadable_entry_followed_by_a_readable_one_is_also_ambiguous() {
         let mut metadata = MetadataMap::new();
