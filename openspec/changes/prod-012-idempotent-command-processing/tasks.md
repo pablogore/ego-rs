@@ -4,11 +4,39 @@
 > commit each, per `skills/work-unit-commits`. Verification default:
 > `cargo test --workspace`; per-slice overrides noted where narrower.
 >
-> **116 tasks total** — 86 complete and 30 pending. Complete: B0.1–B0.3 (merged as
-> `378a639`), A1.1–A1.4 (merged as `10b221d`), A4.1–A4.2 (merged as `cbc0187`),
-> B1.1–B1.10, B2.1–B2.9.
+> **Final accounting — PROD-012 is complete.**
 >
-> The total has moved twice, in this order:
+> | | Count |
+> |---|---|
+> | Task rows in this file (historical) | **117** |
+> | **Active tasks** | **115** |
+> | Closed before the DOC slice | 112 |
+> | Open before the DOC slice (DOC.1–DOC.3) | 3 |
+> | Withdrawn, preserved as `[~]` | 2 |
+> | **Open now** | **0** |
+>
+> So: **115 active tasks, all `[x]`; 2 withdrawn, both `[~]`; 0 remaining `[ ]`.**
+>
+> **Rows are not tasks.** The file carries 117 rows because two of them are withdrawn
+> rather than active: **B4.7a**, superseded by AD-13 and B4.7b, and **E1.2**, superseded
+> by evidence under AD-12. Neither is converted to `[x]`. A withdrawn task is one whose
+> requirement was answered by a different slice or dissolved by measurement; marking it
+> complete would claim work that was superseded rather than performed. They are counted
+> *out of* the active total, never *into* the completed one — which is why 112 + 3 = 115
+> and not 117.
+>
+> A third `[x]` appears inside B4.7a's own explanatory prose, discussing why that task is
+> not `[x]`. It is a quotation, not a row. Any script recounting this file should anchor
+> on rows beginning `- [`, which yields exactly 117.
+>
+> **The previous version of this header was stale — in exactly the way it predicted.** It read
+> "116 tasks total — 86 complete and 30 pending", naming B0.1–B0.3 (`378a639`),
+> A1.1–A1.4 (`10b221d`), A4.1–A4.2 (`cbc0187`), B1.1–B1.10 and B2.1–B2.9 as the complete
+> set. That was accurate when written and drifted afterwards, exactly as the closing
+> paragraph of this block warned it would. The planning history below is preserved
+> unchanged, because how the number moved is worth reconstructing.
+>
+> The planned total moved several times, in this order:
 >
 > 1. **93 originally**, as first planned.
 > 2. **92** once A4.3–A4.5 were removed for resting on a wrong premise — three tasks
@@ -1154,13 +1182,72 @@ unchanged, which is the point of stopping here.
 
       **Phase E1 is closed:** E1.1 delivered, E1.2 withdrawn. Nothing in E1 remains open.
 
-      **PROD-012 as a whole is not closed, and this note exists so that is not mistakenly inferred.** Three tasks remain unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival this change norms identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. Duplicate and coalesced keys are a measured, asserted, deliberately open gap, not a closed one. E1 was the last *recovery* phase, not the last phase.
+      **PROD-012 as a whole was not closed when E1 closed, and this note exists so that is not mistakenly inferred.** *(Superseded: the three tasks named below — DOC.1–DOC.3 — have since been completed, and PROD-012 has no open tasks. See the final accounting at the top of this file. The paragraph is kept because its point stands: closing the last recovery phase was not the same as closing the change.)* Three tasks then remained unchecked outside E1: the three **DOC** items (DOC.1–DOC.3). F1 is closed — the delivery runner's clock is injected and all four of its clock-dependent decisions read it. Block B1 is closed — the gRPC metadata carrier exists behind the `grpc` feature, both adapters resolve every arrival this change norms identically under both enforcement modes, the crate charter matches its contents, protocol neutrality is enforced structurally rather than trusted, and both feature states are gated. Duplicate and coalesced keys are a measured, asserted, deliberately open gap, not a closed one. E1 was the last *recovery* phase, not the last phase.
 
 ### Phase DOC: Documentation and Rollout
 
-- [ ] DOC.1 Update `README.md` with the declared PG14 floor and the `IdempotencyEnforcementMode` compatibility kill switch.
-- [ ] DOC.2 Update `ROADMAP.md` §7.11 marking PROD-012 delivered; confirm no PROD-013 was created.
-- [ ] DOC.3 Cross-reference the two-guarantee table (replay window vs. domain duplication protection) verbatim in user-facing docs, per proposal §2.1/§14 risk mitigation.
+- [x] DOC.1 Update `README.md` with the declared PG14 floor and the `IdempotencyEnforcementMode` compatibility kill switch.
+      The PG14 declaration was already there from A1.4 and is left as it stands — it is
+      lifecycle-driven, not a consequence of any feature this framework uses.
+      Added: an **Idempotent Command Processing** section naming both variants as they
+      exist in the code — `MandatoryKey` (default, fail-closed) and `Compatibility` —
+      and stating the kill switch's real limits rather than implying it turns
+      idempotency off. It loosens the **missing-key** policy and nothing else: an
+      invalid or unreadable key is still rejected under either mode, a request that does
+      carry a key still reserves and still replays, and receipts are permanent and
+      unaffected by the mode. Also records that under `MandatoryKey` a runtime with no
+      registered `OperationReservationStore` fails to *build*.
+      **A false claim was removed, not reworded.** The README stated that
+      `integration-tests/` "does not exist yet" and that "until issue #275 closes, those
+      invariants remain unverified". The workspace exists and holds ten infrastructure
+      test files. The section now gives the real invocation —
+      `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite` — says
+      the suite is started by its own runner rather than by `cargo test`, and states
+      explicitly that the root `cargo test --workspace` never reaches it and starts no
+      container. #275 is still open and is now described for what it actually tracks:
+      the properties **not yet reconstructed** there, not the workspace's existence.
+      `#[idempotent]` added to the macro list, which had listed the other four.
+- [x] DOC.2 Update `ROADMAP.md` marking PROD-012 delivered; confirm no PROD-013 was created.
+      **The section number in this task's own text was wrong, and following it would
+      have destroyed another initiative's entry.** §7.11 is **PROD-011 — Performance and
+      Capacity**. PROD-012 is added as **§7.12**, after it and before `# 8. Documentation
+      and Governance`; §7.11 is untouched.
+      The new section marks PROD-012 delivered, lists the guarantees actually
+      implemented as `[x]`, and — because a roadmap entry that lists only wins
+      misinforms — names the three things deliberately **not** promised: the
+      dual-aggregate write is not atomic, duplicate/coalesced keys are an open measured
+      gap, and the conformance harnesses are not driven against PostgreSQL.
+      The document's `Updated:` date moves to 2026-08-19. No other initiative's status
+      is changed; §7's other entries keep their unchecked boxes, which is
+      DOC-003's subject rather than this one's.
+      **No PROD-013 was created, confirmed by search.** The identifier appears four
+      times in the repository and every one is inside this change, stating that it was
+      *not* created: twice in `decisions.md` (reserved for the next topic; "No
+      PROD-013"), once in `explore.md` (the renumbering record), and once in this file,
+      in DOC.2's own text. There is no PROD-013 section, spec, change directory or
+      roadmap entry anywhere.
+- [x] DOC.3 Cross-reference the two-guarantee table (replay window vs. domain duplication protection) verbatim in user-facing docs, per proposal §2.1/§14 risk mitigation.
+      Published in `COOKBOOK.md` as a new section 9, **Idempotent Command Processing**,
+      placed between Security & Tenant Enforcement and HTTP Transport so it sits where
+      the dispatch order puts it — after the two guards, before the transport. The
+      table of contents is renumbered accordingly.
+      Proposal §2.1's table is reproduced **verbatim**, and so is the normative
+      limitation that follows it: "After the TTL there is no response replay and no
+      boundary-level detection of a reused key. Receipts still prevent re-mutation of
+      any aggregate the operation already reached. For operations rejected before
+      touching any aggregate, or successful without reaching one, protection ends with
+      the TTL."
+      That paragraph is carried on a single line so an exact-string check can verify it
+      rather than a reader having to.
+      The section also states the §9 non-promise in the same place — the dual-aggregate
+      write is not atomic, and a retry resumes rather than repeats — because §14's risk
+      is precisely "idempotent" being read as an atomicity guarantee, and separating the
+      two claims across two documents is how that gets misread.
+      Cross-links both directions: `README.md` points at the COOKBOOK section for the
+      full model, and the COOKBOOK section points back at the README for the enforcement
+      mode. It also warns against the `IdempotencyKey`/`OperationKey` confusion, since
+      the COOKBOOK already documented the former under Core Domain Contracts.
+      Every path and type named in the new section was verified against the tree.
 
 ---
 

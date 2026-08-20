@@ -16,12 +16,13 @@
 | 6 | [Persistent Entity Runtime](#-persistent-entity-runtime) | Event-sourced entity lifecycle |
 | 7 | [Scheduler Pipeline](#-scheduler-pipeline) | Three different "schedulers" — do not conflate them |
 | 8 | [Security & Tenant Enforcement](#-security--tenant-enforcement) | Authn/authz providers, `#[authorize]`, `#[tenant_scoped]` |
-| 9 | [HTTP Transport](#-http-transport) | `ego-transport`'s `AppState`, JWT extractor, `serve()` |
-| 10 | [CQRS Read-Side Engine](#-cqrs-read-side-engine) | Tag-based, batched, idempotent projections |
-| 11 | [Testing Guide](#-testing-guide) | `ego-testkit`, in-memory stores, deterministic tests |
-| 12 | [Conventions & Rules](#-conventions--rules) | Real, current governance sources |
-| 13 | [File Navigation Map](#-file-navigation-map) | Where to find every important file |
-| 14 | [Quick Command Reference](#-quick-command-reference) | Verified working commands |
+| 9 | [Idempotent Command Processing](#-idempotent-command-processing) | `#[idempotent]`, `OperationKey`, reservations, receipts, the two guarantees |
+| 10 | [HTTP Transport](#-http-transport) | `ego-transport`'s `AppState`, JWT extractor, `serve()` |
+| 11 | [CQRS Read-Side Engine](#-cqrs-read-side-engine) | Tag-based, batched, idempotent projections |
+| 12 | [Testing Guide](#-testing-guide) | `ego-testkit`, in-memory stores, deterministic tests |
+| 13 | [Conventions & Rules](#-conventions--rules) | Real, current governance sources |
+| 14 | [File Navigation Map](#-file-navigation-map) | Where to find every important file |
+| 15 | [Quick Command Reference](#-quick-command-reference) | Verified working commands |
 
 ---
 
@@ -841,6 +842,128 @@ impl ApiKeyAuthenticationProvider {
 ### `#[authorize]` / `#[tenant_scoped]` and `TenantEnforcementMode`
 
 Covered in full in [Service SDK](#-service-sdk) — these macros and the enforcement mode live in `ego-service-sdk`/`ego-service-sdk-macros`, but they exist specifically to enforce the security/tenant model described here. In short: `#[authorize(context = ctx, permission = "resource:action")]` calls `authorize_in_context` before the handler runs; `#[tenant_scoped]` requires a resolved tenant per `TenantEnforcementMode`; both fail closed (deny/reject) on any ambiguity — never silent continuation.
+
+---
+
+## 🔁 Idempotent Command Processing
+
+A retried mutating command must not apply twice. ego-rs closes that at the *operation* boundary, not at the transport: a client supplies an `OperationKey`, the runtime reserves it before dispatch, and each aggregate the operation reaches writes a permanent receipt.
+
+Do not confuse this with `IdempotencyKey` in [Core Domain Contracts](#-core-domain-contracts). That one deduplicates a single **external effect** delivery. `OperationKey` identifies one complete **business operation**, which may span several aggregates. No conversion between the two types exists, deliberately — a compile-fail test asserts it.
+
+### The two guarantees, named separately
+
+They are bounded differently, and blurring them into one promise is the mistake this table exists to prevent.
+
+| Guarantee | Bounded by | Ends when |
+|---|---|---|
+| **Replay window** — the exact prior response is returned | Reservation TTL, counted from `completed_at` | The reservation is purged |
+| **Domain duplication protection** — no aggregate re-mutates | Life of the stream (receipts are permanent) | Only on explicit, definitive deletion of the aggregate or tenant |
+
+After the TTL there is no response replay and no boundary-level detection of a reused key. Receipts still prevent re-mutation of any aggregate the operation already reached. For operations **rejected before touching any aggregate**, or **successful without reaching one**, protection ends with the TTL.
+
+**This is not an atomicity promise.** An operation spanning two aggregates is not written atomically. What is promised is that a retry after a partial failure resumes rather than repeats: the aggregates already receipted are skipped, and the remaining ones run.
+
+### Marking an operation
+
+```rust
+#[service(version = "1.0.0")]
+pub trait RegisterUser {
+    #[operation]
+    #[idempotent]
+    async fn register(&self, ctx: ServiceContext, input: RegisterInput)
+        -> Result<RegisterOutput, RegisterError>;
+}
+```
+
+`#[idempotent]` is a marker read by the `#[service]` generator; it is invalid outside `#[service]` and invalid without `#[operation]`. It imposes three compile-time obligations, each with its own `compile_fail` fixture:
+
+| Obligation | Why |
+|---|---|
+| Every fingerprinted argument is `Serialize` | The fingerprint is computed over the typed arguments |
+| `UserOutput: Serialize + DeserializeOwned` | The stored response must round-trip for replay |
+| `UserError: From<ReservationRejection>` | A refusal has to be expressible in the operation's own error type |
+
+The generated dispatch runs the marker in **slot 3** — after `#[authorize]` (slot 1) and `#[tenant_scoped]` (slot 2). Nothing reserves before a guard passes, so a denied request leaves no lease behind.
+
+### Where the key comes in
+
+| Transport | Carrier | Location |
+|---|---|---|
+| HTTP | `HeaderCarrier` | `Idempotency-Key` header |
+| gRPC | `GrpcMetadataCarrier` | `idempotency-key` metadata, behind `ego-transport`'s `grpc` feature |
+
+Both implement `OperationKeyCarrier` and report exactly three states — `Absent`, `Present`, `Unreadable` — and both are judged by the same `ego_testkit::assert_carrier_conformance` harness. Protocol neutrality is enforced structurally: a test asserts no `axum`, `HeaderMap`, `tonic` or `MetadataMap` symbol reaches `ego-domain`, `persistent-entity`, or the reservation and receipt surfaces.
+
+`resolve_operation_key` owns the single policy table for a missing key; see `IdempotencyEnforcementMode` in [README.md](./README.md#idempotent-command-processing).
+
+> **Known, deliberately open gap.** Both carriers read their location with a single-value accessor, so if a key arrives twice the first wins and the rest are invisible. An intermediary that folds repeated occurrences into one comma-separated value produces a key no client sent, and `OperationKey::parse` accepts it — the type rejects only empty/whitespace-only values and values over 255 bytes. This is pinned by `adapter_equivalence.rs` on **both** adapters rather than closed, because every candidate rule was a non-retryable `400` that `Compatibility` cannot admit. Closing it needs its own slice.
+
+### Reservation and receipts
+
+```rust
+pub trait OperationReservationStore {
+    async fn reserve(&self, request: ReserveRequest) -> Result<ReservationOutcome, ReservationError>;
+    async fn renew(&self, /* op id + owner + fencing token */) -> Result<(), ReservationError>;
+    async fn complete(&self, /* .. */) -> Result<(), ReservationError>;
+    async fn abandon(&self, /* .. */) -> Result<(), ReservationError>;
+    async fn purge_completed_before(&self, /* cutoff, batch */) -> Result<u64, ReservationError>;
+    async fn probe(&self) -> Result<(), ReservationError>; // readiness; no default impl
+}
+```
+
+`reserve` answers with six outcomes, and only the first two dispatch:
+
+| Outcome | Result |
+|---|---|
+| `Fresh` | Proceed — first arrival |
+| `TakenOver` | Proceed — the previous owner's lease expired; the fencing token advanced |
+| `OwnedInProgress` | Refused. Fencing proves ownership, not exclusion between two executions of the same owner |
+| `OtherInProgress` | Refused — another owner holds a live lease |
+| `Succeeded` | Replay the stored response; the handler does not run |
+| `Conflict` | Same key, different fingerprint — a permanent conflict, never a silent dedupe |
+
+Registration is fail-closed:
+
+```rust
+RuntimeBuilder::new()
+    .with_operation_reservation_store(store)
+    .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::MandatoryKey)
+    .with_retention_policy(policy)   // optional; absent by default
+    .try_build()?;
+```
+
+Each aggregate the operation reaches confirms its own receipt **inside the same transaction as its events** — `begin()` → `append` → `confirm_receipt` → `commit()`. `commit` takes `self: Box<Self>`, so a committed unit of work cannot be reused, and there is no `rollback`: dropping is the rollback, which makes the safe outcome the one that happens on an early return, a cancellation or a panic. A command carrying no key keeps the existing path and pays for no extra transaction.
+
+The receipt gate runs *ahead* of `handle_command`. A matching fingerprint returns `CommandResult::Replayed { outcome }` without invoking the handler and without re-accepting its effects; a mismatched one is a permanent conflict.
+
+### Retention and purge
+
+`RetentionPolicy` is optional and absent by default; all three of its values must be positive, and enabling it without a reservation store is refused at `build()`. The worker is **runtime-owned**: it starts explicitly through `Runtime::start_retention` — the same shape as `start_effects`, so nothing begins deleting rows as a side effect of `build()` — and stops through a registered async teardown hook.
+
+Purge eligibility is measured from `completed_at`, never from creation, and an in-progress reservation is never TTL-purged however old. Receipts are **not** purged: nothing relates the two tables, and a migration test asserts no statement mentioning `operation_receipts` may carry `REFERENCES`, `FOREIGN KEY` or `CASCADE`.
+
+### Tenant isolation
+
+The key is namespaced by the `CanonicalTenant` that `TenantResolver::resolve` produced, never by a raw client hint. An operation whose scope was never resolved is refused with `ReservationRejection::TenantUnresolved` **before** the store is reached — flattening "no scope resolved" and "scope resolved to systemwide" into one `None` was a real cross-tenant replay leak, not a hypothetical one.
+
+### Observability
+
+Two spans, `idempotency.reserve` and `idempotency.purge_batch`, plus counters, a histogram and a gauge on the existing OTLP surface. The raw key is never emitted: `SpanAttributes` accepts an `OperationKeyHash` (the first 16 hex chars of SHA-256), never a `String`. That token is a **diagnostic correlator** for attempts of one key across traces — not anonymisation, and not an identity or a lookup key; low-entropy keys stay vulnerable to dictionary enumeration.
+
+### Where it lives
+
+| Path | Contents |
+|---|---|
+| `crates/domain/src/operation/key.rs` | `OperationKey`, `OperationFingerprint`, `OperationKeyHash` |
+| `crates/domain/src/operation/identity.rs` | `OperationIdentity` — the key and fingerprint as one indivisible value |
+| `crates/domain/src/operation/reservation.rs` | `OperationReservationStore`, `ReserveRequest`, `ReservationOutcome`, `Lease`, `FencingToken` |
+| `crates/domain/src/operation/receipt.rs` | `OperationReceipt`, `AggregateOutcome` |
+| `crates/service-sdk/src/runtime/idempotency.rs` | `IdempotencyEnforcementMode` |
+| `crates/service-sdk/src/idempotency/extraction.rs` | `OperationKeyCarrier`, `resolve_operation_key`, `OperationKeyRejection` |
+| `crates/transport/src/idempotency.rs` | `HeaderCarrier`, `GrpcMetadataCarrier` |
+| `crates/transport/src/operation_key.rs` | `OperationKeyExtractor` (axum) |
+| `crates/testkit/src/reservation_conformance.rs` | Shared conformance + purge harness. **Currently driven against the in-memory store only** — its `ReserveRequest` fixture hardcodes one tenant scope, so the durable PostgreSQL adapter's `complete`/`renew`/`abandon` tenant predicates have no test reaching them with two scopes. A known coverage gap in that adapter, not a known defect |
 
 ---
 
