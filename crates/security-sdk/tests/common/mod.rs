@@ -1,3 +1,10 @@
+//! Shared fixtures for this crate's integration tests.
+//!
+//! Constructors for principals and security contexts, so each test states the
+//! identity it needs rather than rebuilding one. `dead_code` is allowed because
+//! every integration-test file compiles this module in full while using only
+//! the constructors it needs.
+
 #![allow(dead_code)]
 
 use ego_security_sdk::{
