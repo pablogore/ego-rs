@@ -49,6 +49,17 @@ package-lock.json
 # Rust build artifacts
 target/
 
+# Coverage artifacts.
+#
+# `scripts/verify-coverage.sh` writes its report under `target/`, which is
+# already ignored. These are what `cargo tarpaulin` drops in the repository
+# root when it is invoked by hand or through `make test-cov`, and an untracked
+# file left in the root by a verification step is a real nuisance: it shows up
+# as a change nobody made.
+cobertura.xml
+tarpaulin-report.html
+lcov.info
+
 # Generated / tool directories
 graphify-out/
 .specs-fire/

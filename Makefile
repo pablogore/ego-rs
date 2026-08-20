@@ -6,8 +6,11 @@ test:
 	cargo test -p security-jwt --features test-kit
 	cargo test --test contract_tests
 
+# The floor lives in scripts/verify-coverage.sh, the gate CI actually runs. This
+# target is its human-readable HTML companion, so it asks that script for the
+# number instead of carrying a second copy that could drift away from it.
 test-cov:
-	cargo tarpaulin --workspace --out Html --fail-under 95
+	cargo tarpaulin --workspace --out Html --fail-under $$(./scripts/verify-coverage.sh --print-floor)
 
 buf-deterministic:
 	./scripts/buf generate
