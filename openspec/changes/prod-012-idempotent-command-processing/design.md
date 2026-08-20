@@ -1530,15 +1530,102 @@ rejoin; B5's `operation_receipts` rows become harmless orphans on revert.
 
 ## Open Questions
 
-- [ ] **Renewal cadence and owner.** Slot 3 owns the lease; whether a
-      long-running operation renews from a spawned task or the lease is simply
-      sized above the operation timeout is unresolved. Default assumption:
-      lease length is configuration, no background renewal in this change.
-- [ ] **Readiness gating.** The service-sdk spec pins *startup* fail-closed but
-      is silent on readiness. Proposed: startup only — a runtime that started
-      has a store by construction.
-- [ ] **Purge worker ownership.** Runtime-owned under CORE-017 ordering
-      (assumed here) versus operator-scheduled. Affects B7 only.
+**All three are resolved.** None was withdrawn, and none is deferred to a later
+change. Each is recorded below with the question as it was asked, the answer the
+implementation actually settled on, and — where the two differ — the assumption this
+section originally carried and why it did not survive. Two of the three ended
+somewhere other than where this section proposed, which is the reason for keeping the
+original wording rather than overwriting it.
+
+### Resolved — renewal cadence and owner
+
+*Asked:* slot 3 owns the lease; whether a long-running operation renews from a spawned
+task or the lease is simply sized above the operation timeout. The assumption written
+here was: lease length is configuration, no background renewal in this change.
+
+**Resolved as the assumption stated, and it is now a decision rather than a default.**
+Lease length is configuration on `ReservationConfig` — strictly positive, 30s by
+default — and **no runtime component renews automatically.** A long-running operation
+either fits inside its configured lease or is taken over by a later arrival once that
+lease expires, with a fencing token that advances.
+
+`OperationReservationStore::renew` exists and is implemented by every store, but it has
+no automatic caller: it is a capability held open for a future caller-driven extension,
+not dead surface and not a scheduled behaviour. Where that shows up externally is
+**AD-10c**, which withdrew `idempotency.lease.event{renewed}` precisely because nothing
+in this change produces an independently observable renewal to report.
+
+*Recorded in:* B2.7, and in the doc-comments on `IdempotencyEnforcementMode` and the
+lease-length configuration. *Reopens if:* a component begins renewing on its own, at
+which point the value and the behaviour producing it must arrive in the same unit of
+work, per AD-10c's own condition.
+
+### Resolved — readiness gating
+
+*Asked:* the service-sdk spec pins *startup* fail-closed but is silent on readiness.
+The answer proposed here was: startup only — a runtime that started has a store by
+construction.
+
+**That proposal was wrong, and the implementation does both.** "A runtime that started
+has a store by construction" is true and still insufficient: it covers *no store
+registered at all* and says nothing about *store registered, process started, store now
+unreachable*. No startup check can decide the second, and the two failure modes do not
+cover each other. So they are separate mechanisms:
+
+| Failure | Mechanism | Where it surfaces |
+|---|---|---|
+| No reservation store registered under `MandatoryKey` | Build-time refusal — `build()` panics, `try_build()` returns it as a structured error, from one validation | Startup; the process never runs |
+| Store registered but unreachable | `OperationReservationStoreHealthContributor` | **Readiness only** |
+
+The contributor is registered from the **same `Arc`** the runtime then hands
+`RuntimeInner` — an `Arc::clone` of the field, never a second construction — so
+readiness cannot end up reporting about a different object than the one dispatch uses.
+Registration keys on the store being *present*, not on the enforcement mode: a
+`Compatibility` runtime that registered a store is still dispatching through it.
+
+**Readiness, deliberately not liveness.** `Runtime::liveness` consults no contributor.
+Restarting on a lost database hands the new process the same unreachable database, and
+under a restart-on-failure supervisor that is a crash loop which clears no state.
+
+The port's `probe()` has **no default implementation** — a defaulted `Ok` would let a
+store that forgot to write one report itself reachable forever. The PostgreSQL probe
+reads the reservation table under `LIMIT 1`, so a pool pointed at an unmigrated database
+is caught rather than answering `SELECT 1` happily.
+
+*Recorded in:* B3.7. *Known limit:* the contributor's behaviour against a real
+PostgreSQL — the `LIMIT 1` read and recovery after an outage — rests on the adapter's SQL
+and on in-process evidence, not on a test against a live database; reconstruction is
+tracked in issue #275.
+
+### Resolved — purge worker ownership
+
+*Asked:* runtime-owned under CORE-017 ordering (assumed here) versus
+operator-scheduled.
+
+**Resolved as runtime-owned**, and the assumption held. The worker starts **explicitly**
+through `Runtime::start_retention` — deliberately the same shape as `start_effects`, so
+that nothing begins deleting rows as a side effect of `build()` — and stops through a
+registered async teardown hook, inside the same ordered, panic-isolated mechanism
+provider teardown already uses.
+
+Two consequences that were not part of the question and had to be settled with it:
+
+- **`RetentionPolicy` had to be introduced by this unit rather than presupposed by it.**
+  A worker with no retention window, interval or batch size has no defined behaviour.
+  It is optional and absent by default, validated in its constructor so no caller can
+  hold a degenerate one, and enabling it without a reservation store is refused at
+  `build()` — a retention schedule with nothing to purge cannot mean what it says.
+- **The cutoff comes from the runtime's own clock** (`now - retention`), the same clock
+  the store stamps rows with. A worker reading wall time would disagree with it under
+  test and under skew.
+
+Shutdown is bounded, panic-isolated, and touches no lease: it cancels the loop, waits
+under a deadline, and never calls `abandon`, `complete` or `renew`, because a purge
+worker holds no lease of its own. An overrun aborts and awaits the task rather than
+dropping its `JoinHandle` — dropping one *detaches* it in Tokio, which had the worker
+still purging after shutdown reported failure.
+
+*Recorded in:* B7.7.
 
 ## Risks
 
@@ -1548,4 +1635,4 @@ rejoin; B5's `operation_receipts` rows become harmless orphans on revert.
 | A2's operator backfill aborts on genuinely ambiguous production data | The pre-flight names the ambiguous rows and refuses; resolution is a manual data decision, not an automated guess |
 | AD-2's async conversion ripples further than B4 | A1's characterization tests pin current `append` behaviour before the contract changes |
 | PG 14 floor is newly declared and may surprise an adopter | AD-1 needs nothing beyond PG 7.2; the floor is lifecycle-driven and documented in `README.md` |
-| Six partial indexes drift out of pairs | Schema assertion in `crates/integration-tests/` enumerates the expected set |
+| Six partial indexes drift out of pairs | Schema assertion enumerating the expected set, plus a catalog sweep that fails any table carrying one half of a pair without the other. Rebuilt as `integration-tests/tests/infrastructure/schema_index_assertion.rs` after #274 removed `crates/integration-tests/` |

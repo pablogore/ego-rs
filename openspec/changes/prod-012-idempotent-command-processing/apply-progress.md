@@ -1,5 +1,99 @@
 # Apply Progress: PROD-012 — End-to-End Idempotent Command Processing
 
+## Final state — authoritative, 2026-08-19
+
+**Read this first. Everything below this section is a historical run log, appended
+one slice at a time, and every statement in it is scoped to the run that wrote it.**
+
+In particular, the note that opened this file — "all other phases (A2–A4, B1–B7, E1,
+DOC) are untouched and remain `[ ]`" — was accurate on the day the B0/A1 run wrote it
+and has been superseded many times since. It is preserved immediately below, where it
+was, because deleting it would erase the evidence that this file grew incrementally.
+It is **not** a description of the tree. Nothing in the log that follows should be read
+in the present tense; where an entry says a phase is untouched, a task is open, or a
+target does not exist yet, that was true of that run and is settled here instead.
+
+### Task accounting
+
+| | Count |
+|---|---|
+| Task rows in `tasks.md` (historical) | 117 |
+| **Active tasks** | **115** |
+| Closed before this documentary slice | 112 |
+| Closed **by** this documentary slice (DOC.1–DOC.3) | 3 |
+| Withdrawn, preserved as `[~]` | 2 |
+| Open at the end of this slice | **0** |
+
+The two withdrawn tasks are **B4.7a** (superseded by AD-13 and B4.7b — the contract
+was decided, then the field removed by a different task) and **E1.2** (superseded by
+evidence, AD-12 — there was no recovery path left to wire). Neither is converted into a
+completion: doing so would claim work that was superseded rather than performed. They
+are counted out of the active total, not counted as done.
+
+The historical row count exceeds the active one by exactly those two. A reader
+recounting the file will find 112 `[x]` before this slice and 115 after it.
+
+### Closing sequence
+
+| Step | What closed it |
+|---|---|
+| E1 | `#320` delivered E1.1 against real PostgreSQL; `#321` withdrew E1.2 under AD-12 |
+| B4.7a / B4.7b | `#322` withdrew the field in the normative source; `#323` implemented the removal; `#324` reconciled the prose |
+| B5.8 | `#326` pinned the receipt index pair; `#327` proved index enforcement and isolated discovery by schema |
+| F1 | `#328` drove the delivery runner's scheduling from an injected clock |
+| B1 | `#329` read the key from gRPC metadata through the shared harness; `#330` closed the cross-adapter equivalence question |
+| — | `#331` clamped a backlog age stamped ahead of the reading clock, merged as `6424b375` |
+| **DOC.1–DOC.3** | **This slice.** `README.md`, `ROADMAP.md` §7.12 and `COOKBOOK.md`, plus the reconciliation of `tasks.md`, `proposal.md`, `design.md` and this file |
+
+At `6424b375` the tracker branch `feat/prod-012-idempotency-tracker` carries 76 commits
+ahead of `develop`, with zero open pull requests.
+
+### What this slice does not do
+
+It is documentary and reconciling only. It changes no Rust source, adds no signal,
+does not touch the `integration-tests/` ledger, does not merge the tracker into
+`develop`, and does not archive the change. Physical archive remains a separate step.
+
+**No `state.yaml` is added, and that is a finding rather than an omission.** The
+question was whether this change is missing one by convention. It is not, on two
+independent grounds. First, the artefact is not current practice: 14 of the 41 archived
+changes carry one, and the **eight most recent** — every change archived from
+2026-07-15 onward, including CORE-019, CORE-019A, CORE-027, all four CORE-028 stages
+and PROD-003 — carry none. Second, where it does exist it is written **at archive
+time**: every instance records `status: archived` with an `archived_at` date, alongside
+the archive report. Producing one now would mean stamping an archive status onto a
+change this slice deliberately does not archive. It belongs to the archive step, if
+that step chooses to revive the convention at all.
+
+Relatedly, the `Status` value on `proposal.md` moved from `PROPOSING` to **`CLOSED`**,
+which is the repository's own vocabulary rather than a coined one: `CLOSED` is what
+CORE-021's archive report puts in the identical `| Status |` row for a delivered change.
+It is worth recording that every archived proposal in this repository still reads
+`PROPOSING` in its own metadata table — the status is simply never updated on the way
+out — so there was no "delivered" value to inherit from a proposal, and the one used
+here is taken from the only place the repository states a terminal status at all.
+
+### Known gaps carried forward, deliberately open
+
+Recorded here so a reader does not mistake "no open tasks" for "nothing left".
+
+- **Duplicate and coalesced operation keys.** Both transports read their location with
+  a single-value accessor, so a repeated key is first-value-wins, and an intermediary
+  folding occurrences into one comma-separated value produces a key no client sent.
+  Measured, asserted symmetrically on both adapters, and left open — every candidate
+  rule was a non-retryable `400` that `Compatibility` cannot admit. Closing it needs
+  its own slice and its own impact analysis. See B1.13.
+- **The conformance harnesses are never driven against PostgreSQL.** The reservation
+  harness runs in-memory only and its fixture hardcodes one tenant scope, so the
+  durable adapter's `complete`/`renew`/`abandon` tenant predicates have no test
+  reaching them with two scopes. A coverage gap in the adapter, not a known defect.
+  See B7.9.
+- **Issue #275** tracks the infrastructure-backed properties not yet reconstructed in
+  `integration-tests/`, including B3.7's readiness behaviour against a live database.
+
+---
+
+> **Historical, superseded — see the final state above.**
 > Scope of the B0 run: **Phase B0 only** (PR 1 of the hybrid chain, D11).
 > Scope of the A1 run below: **Phase A1 only** (PR 2). All other phases
 > (A2–A4, B1–B7, E1, DOC) are untouched and remain `[ ]` in `tasks.md`.

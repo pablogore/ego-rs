@@ -12,10 +12,27 @@
 | Inputs | `explore.md` (exploration), `decisions.md` (binding D1–D7) |
 | Related | CORE-019 (effect dedup precedent), CORE-008A (tenant authority), CORE-017 (lifecycle), PROD-003 (tracing) |
 | Sequenced before | PROD-009 (multi-node), CORE-030 (outbox), PROD-008 (crash suite) |
-| Status | PROPOSING |
+| Status | CLOSED |
 
 > **D1–D7 in `decisions.md` are settled.** This proposal records them as the
-> chosen approach and reasons forward. Only the three items in §12 are open.
+> chosen approach and reasons forward.
+>
+> **Status, as of 2026-08-19.** The change is delivered: all 115 active tasks are
+> complete and the two withdrawn ones (B4.7a, E1.2) stay withdrawn. `CLOSED` above
+> marks delivery, in the same sense CORE-021's archive report uses it; the change has
+> not been physically archived yet.
+>
+> The three items §12 left open for design were all resolved there — §12.1 by AD-1,
+> §12.2 by AD-2, §12.3 by AD-3 — and the three questions `design.md` in turn left open
+> are answered in its own Open Questions section. Nothing in this change is still open
+> for decision. What remains open is recorded as a *gap*, not as a question: the
+> duplicate/coalesced-key arrival described under B1.13, and the conformance harnesses
+> not being driven against PostgreSQL.
+>
+> Everything below this line is the proposal as reasoned at the time. Where the
+> implementation later contradicted a factual statement, the statement is corrected in
+> place and says so; decisions and their rationale are preserved unchanged, including
+> the ones that were superseded.
 
 ---
 
@@ -512,26 +529,30 @@ Per slice, because the chain is long and the reversibility is not uniform.
 - CORE-017 lifecycle (shipped) — purge worker startup/shutdown ordering.
 - CORE-012A observability and PROD-003 tracing (shipped) — signal plumbing.
 - `testcontainers` / `testcontainers-modules` — new workspace dev-dependencies; starter config at `assets/integration-crate-template.toml`.
-- An explicit minimum Postgres version, currently undeclared (§12.1).
+- An explicit minimum Postgres version. Undeclared when this was written (§12.1); **declared as PostgreSQL 14 by A1.4**, in `README.md`, and it is what makes AD-1's two-partial-index strategy necessary rather than optional.
 - **No dependency on PROD-009, CORE-030, or CORE-029.** D6 is explicit: PROD-012 waits for none of them.
 
 ---
 
 ## 17. Success Criteria
 
-- [ ] A retried `POST /register` with the same `Idempotency-Key` produces exactly one `UserRegistered` event and one welcome-email effect — the §1 bug, closed by test.
-- [ ] A request without an `Idempotency-Key` is rejected when enforcement is on.
-- [ ] Same key + different fingerprint yields a permanent conflict, never a silent dedupe.
-- [ ] Killing the process after the org command but before the user command, then retrying, completes the operation with zero duplicated events (§9's table, asserted).
-- [ ] An expired lease is taken over atomically; the original owner receives `StaleOwner` and cannot close the operation.
-- [ ] Lease expiry, renewal, and takeover are tested deterministically against an injected `Clock`, with no `Utc::now()` remaining in lease logic.
-- [ ] A tenant-A key never replays a tenant-B response, including in the NULL-tenant systemwide mode.
-- [ ] The `events` unique constraint rejects a duplicate `(tenant_id, aggregate_type, aggregate_id, version)` — including for systemwide (`tenant_id IS NULL`) aggregates.
-- [ ] A successful zero-event command writes its receipt transactionally.
-- [ ] After the reservation TTL expires, the response is no longer replayable **and** the aggregate still refuses to re-apply the operation.
-- [ ] The purge job runs concurrently from two workers without double-purging or deadlocking, and never purges an `InProgress` reservation.
-- [ ] `OperationKey` and `IdempotencyKey` are not interchangeable — a compile-fail test proves it.
-- [ ] `cargo test --workspace` green; `crates/integration-tests/` green under testcontainers.
+Ticked against evidence in the tree, not against intent. The three that are not
+plain ticks say why, because a criterion quietly reworded to match what shipped is
+worth less than one that records the difference.
+
+- [x] A retried `POST /register` with the same `Idempotency-Key` produces exactly one `UserRegistered` event and one welcome-email effect — the §1 bug, closed by test. *(`integration-tests/tests/infrastructure/replay_from_postgres.rs`, counting the published event and the accepted effect independently.)*
+- [x] A request without an `Idempotency-Key` is rejected when enforcement is on. *(Asserted at the router, not only at the extractor: 400, the service recorder still `None`, and zero reservations.)*
+- [x] Same key + different fingerprint yields a permanent conflict, never a silent dedupe.
+- [x] Killing the process after the org command but before the user command, then retrying, completes the operation with zero duplicated events (§9's table, asserted). *(A real child process killed by SIGABRT; the retry runs as a different owner past the lease.)*
+- [x] An expired lease is taken over atomically; the original owner receives `StaleOwner` and cannot close the operation.
+- [x] Lease expiry, renewal, and takeover are tested deterministically against an injected `Clock`, with no `Utc::now()` remaining in lease logic.
+- [x] A tenant-A key never replays a tenant-B response, including in the NULL-tenant systemwide mode. *(This one reproduced as a real leak before it was closed — see B7.8.)*
+- [x] The `events` unique constraint rejects a duplicate `(tenant_id, aggregate_type, aggregate_id, version)` — including for systemwide (`tenant_id IS NULL`) aggregates.
+- [x] A successful zero-event command writes its receipt transactionally.
+- [~] After the reservation TTL expires, the response is no longer replayable **and** the aggregate still refuses to re-apply the operation. **Guaranteed by construction, not by a dedicated test.** A purged reservation makes the next arrival `Fresh`, so it dispatches, and the permanent receipt then answers without re-mutating. Both halves are pinned separately — purge eligibility by `assert_purge_conformance`, the receipt gate by `receipt_gating.rs` — and the composition is stated in the spec's two scenarios. No test drives one operation across the TTL boundary end to end.
+- [~] The purge job runs concurrently from two workers without double-purging or deadlocking, and never purges an `InProgress` reservation. **Reworded by measurement — see B7.2.** Double-purge is prevented by PostgreSQL itself regardless of our query, and no circular wait was reproducible, so neither discriminates this code. What was missing and is now fixed and guarded is **progress**: `FOR UPDATE SKIP LOCKED` in the selection subquery, without which a batch stalls on locked tuples while free eligible rows sit untouched. "Never purges an `InProgress` reservation" holds and is covered.
+- [x] `OperationKey` and `IdempotencyKey` are not interchangeable — a compile-fail test proves it.
+- [x] `cargo test --workspace` green; the infrastructure suite green under testcontainers. **Path corrected:** `crates/integration-tests/` was removed by #274; the suite now lives in `integration-tests/`, an independent Cargo workspace outside the root, started by `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 
 ---
 
