@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-PROD-012 idempotent command processing has been fully planned, implemented, verified, and archived. The change adds end-to-end support for idempotent command semantics across the reference service, allowing duplicate commands to be safely rejected after the first execution completes. All delta specifications have been merged into the canonical `openspec/specs/` tree, and the entire cycle is now closed.
+PROD-012 idempotent command processing has been fully planned, implemented, verified, and archived. The change adds end-to-end idempotent command semantics across the reference service: a retried command carrying the same operation key and the same fingerprint is replayed or no-ops against the recorded outcome, while the same key with a different fingerprint is rejected as a permanent conflict — a duplicate is never silently re-executed. All delta specifications have been merged into the canonical `openspec/specs/` tree, and the entire cycle is now closed.
 
 ## Specs Merged
 
