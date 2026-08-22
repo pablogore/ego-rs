@@ -866,12 +866,29 @@ impl DeliveryRunner {
     /// Fix 8: `mark_terminal` then release the dedup reservation — the
     /// shape every genuinely-terminal-after-reserving call site shares.
     /// HIGH-3: logs each bookkeeping failure instead of silently discarding it.
+    ///
+    /// G15: `dedup.release()` is causally gated on `mark_terminal()` having
+    /// succeeded. `mark_terminal` is the authority check for whether this
+    /// attempt still owns the effect; if it's rejected (`Conflict`,
+    /// `InvalidTransition`, or any other error — a superseded attempt whose
+    /// claim was already reclaimed), this attempt has no standing to perform
+    /// the destructive `release()` either. Releasing anyway would delete a
+    /// reservation a newer attempt may have already flipped to `succeeded`,
+    /// letting a later, unrelated submission see `Fresh` instead of
+    /// `OtherSucceeded` (design.md §3.4). Does not apply to `commit_success`
+    /// (see `finish_success`): that mutation is monotonic and idempotent, so
+    /// a stale call cannot un-succeed a reservation the way a stale release
+    /// can delete one.
     async fn abandon_and_release(&self, id: EffectId, reason: TerminalReason, scope: DedupScope) {
-        if let Err(err) = self.state.mark_terminal(id, reason).await {
-            tracing::warn!(effect_id = %id, error = %err, "mark_terminal failed while abandoning effect");
-        }
-        if let Err(err) = self.dedup.release(&scope).await {
-            tracing::warn!(effect_id = %id, error = %err, "dedup release failed after abandoning effect");
+        match self.state.mark_terminal(id, reason).await {
+            Ok(()) => {
+                if let Err(err) = self.dedup.release(&scope).await {
+                    tracing::warn!(effect_id = %id, error = %err, "dedup release failed after abandoning effect");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(effect_id = %id, error = %err, "mark_terminal failed while abandoning effect; skipping dedup release — this attempt no longer has authority over the reservation");
+            }
         }
     }
 
@@ -2962,6 +2979,88 @@ mod tests {
                 }
             ),
             "B must end up Succeeded once A's reservation resolves, via OtherSucceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_abandonment_does_not_release_a_dedup_reservation_another_attempt_already_succeeded(
+    ) {
+        // Scenario (verbatim from the bug report): A claims; A's lease
+        // expires; B reclaims the same row and completes successfully
+        // (dedup is now `OtherSucceeded` for anyone else); A then lands late
+        // and its own terminal write is no longer legal — the row already
+        // resolved without it. `abandon_and_release` MUST NOT then release
+        // the dedup reservation B's success depends on, or a later,
+        // genuinely new submission under the same scope would wrongly see
+        // `Fresh` instead of `OtherSucceeded`.
+        //
+        // A and B are the SAME `EffectId` here: a lease reclaim hands the
+        // SAME row to a different worker, it doesn't mint a new one. That is
+        // deliberately NOT the same-`worker_id` double-claim window (G2, a
+        // separate accepted residual risk) — A and B are two genuinely
+        // different completions of the row (a reclaim-and-succeed, followed
+        // by the original claimant's stale write), never the same worker
+        // claiming the same row twice.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let state: Arc<dyn EffectStateStore> = store.clone();
+        let dedup: Arc<dyn EffectDedupStore> = store.clone();
+        let (runner, _queue) = runner_with(
+            state.clone(),
+            dedup.clone(),
+            ExecutorRegistry::new(),
+            RetryPolicy::default(),
+        );
+
+        let scope = DedupScope {
+            tenant: TenantId::new("tenant-a").unwrap(),
+            effect_type: "invoice.created".to_string(),
+            key: IdempotencyKey::new("uow-1:0").unwrap(),
+        };
+        let fp = EffectFingerprint::compute(&[1, 2, 3], "https://example.com");
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect).await.unwrap();
+
+        // A claims: reserves the scope and starts dispatching.
+        store.mark_in_flight(id).await.unwrap();
+        assert_eq!(
+            dedup.reserve(&scope, id, fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
+
+        // A's lease expires without A knowing it — recovery hands the row
+        // back to `Pending`.
+        store.recover_in_flight(Timestamp::now()).await.unwrap();
+
+        // B reclaims the same row and completes successfully.
+        store.mark_in_flight(id).await.unwrap();
+        dedup.commit_success(&scope).await.unwrap();
+        store.mark_succeeded(id).await.unwrap();
+
+        // A lands late: its own terminal write is rejected by the in-memory
+        // store's ownership-conflict signal for this scenario —
+        // `InvalidTransition { from: Succeeded, .. }`, not the `Conflict`
+        // variant named in the bug report (this in-memory double never
+        // produces `Conflict` from `mark_terminal` at all; see the module
+        // doc investigation note). `abandon_and_release` must treat this
+        // rejection as "someone else already resolved this effect" and skip
+        // the dedup release.
+        runner
+            .abandon_and_release(
+                id,
+                TerminalReason::Other("stale worker landed late".into()),
+                scope.clone(),
+            )
+            .await;
+
+        // A future, genuinely new submission under the same scope must
+        // still be told it's already settled — never `Fresh`.
+        let future_id = EffectId::new();
+        assert_eq!(
+            dedup.reserve(&scope, future_id, fp).await.unwrap(),
+            DedupOutcome::OtherSucceeded,
+            "a stale abandonment must not release a reservation another attempt already succeeded"
         );
     }
 
