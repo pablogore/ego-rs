@@ -66,5 +66,5 @@ pub use registry::{DuplicateEffectType, ExecutorRegistry};
 pub use store::{
     AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
     EffectState, EffectStateStore, EffectStoreCapabilities, EffectStoreError, InMemoryEffectStore,
-    StoredEffect, TerminalReason, Timestamp,
+    RetentionMaintenance, StoredEffect, TerminalReason, Timestamp,
 };

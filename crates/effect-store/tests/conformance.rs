@@ -188,6 +188,46 @@ mod tier1_stoolap {
             "run_retention must delete exactly `batch` rows, not all eligible rows"
         );
     }
+
+    /// PROD-002 G12: the `RetentionMaintenance` capability wiring calls
+    /// through to the SAME `run_retention` SQL — not a reimplementation —
+    /// so a settled row purged via the trait is indistinguishable from one
+    /// purged by calling `run_retention` directly.
+    #[tokio::test]
+    async fn retention_maintenance_purge_before_calls_through_to_run_retention() {
+        use ego_runtime::effects::store::RetentionMaintenance;
+
+        let store = fresh_store().await;
+
+        let settled_id = EffectId::new();
+        store.accept(accepted(settled_id, "settled")).await.unwrap();
+        store.mark_in_flight(settled_id).await.unwrap();
+        store.mark_succeeded(settled_id).await.unwrap();
+
+        let pending_id = EffectId::new();
+        store.accept(accepted(pending_id, "pending")).await.unwrap();
+
+        let deleted = RetentionMaintenance::purge_before(&store, Timestamp::now(), 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the settled row must be deleted");
+
+        let err = store.mark_in_flight(settled_id).await.unwrap_err();
+        assert!(matches!(err, EffectStoreError::NotFound(_)));
+        let claimed = store.claim_due(Timestamp::now(), 10).await.unwrap();
+        assert!(claimed.iter().any(|e| e.id == pending_id));
+    }
+
+    /// PROD-002 G12: neither provider tracks the oldest-settled-row query
+    /// yet, so `oldest_terminal` must fall through to the trait default
+    /// rather than the provider silently claiming an empty backlog.
+    #[tokio::test]
+    async fn retention_maintenance_oldest_terminal_defaults_to_none() {
+        use ego_runtime::effects::store::RetentionMaintenance;
+
+        let store = fresh_store().await;
+        assert_eq!(RetentionMaintenance::oldest_terminal(&store).await, Ok(None));
+    }
 }
 
 #[cfg(feature = "stoolap")]

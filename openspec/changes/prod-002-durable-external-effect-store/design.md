@@ -89,7 +89,7 @@ table for the decisions that need more than one row.
 | **AD-6** Port sufficiency | Q6 | `claim_due`/`recover_in_flight` + the existing `mark_*` verbs **suffice**. Leasing/ownership is an internal Postgres implementation detail keyed off the provider instance's own `worker_id`; no lease token, epoch, or claim method is added to either port. The **only** additive surface is AD-3's defaulted declaration method (on both ports). `InMemoryEffectStore` stays conformant unchanged | Add `claim_with_lease`/`renew_lease`/`fence_token` to the port | Adding lease/fencing methods would force every impl (in-memory, Stoolap, third-party) to model coordination they don't need and leak a Postgres-specific mechanism into the universal contract. Because one `DeliveryRunner` per process owns the full claim→dispatch→mark lifecycle, the provider validates ownership against its own `worker_id` internally — the token never needs to cross the port. The accepted cost of this minimalism is a bounded limitation: a superseded *same-`worker_id`* claim generation can still land a transition (§3.1), absorbed by at-least-once + idempotency and bounded by lease tuning — not fenced by the port. See §3.1 |
 | **AD-7** Retry persistence shape | Q7 | Durable state = `attempt` + `next_at` + `state`, written through the **existing** `mark_retryable(id, attempt, next_at)` verb (no new column semantics). Retry **policy** (max attempts, backoff base/max/jitter, per-`effect_type` overrides) stays runtime-side in `DeliveryRunner`'s `RetryPolicies` (CORE-019 `policy.rs`), **not** in the store | Store retry policy config in the DB | The store records the *outcome* the runner computed; policy is a runner behavior. Keeping policy out of the schema means tuning backoff is a config change, not a migration, and a third-party store never has to understand policy |
 | **AD-8** Dedup durability | Q8 | Reservation is a durable row keyed by `(tenant, effect_type, key)` with `effect_id` owner, `fingerprint BYTEA(32)`, `succeeded BOOL`. `reserve` = atomic `INSERT … ON CONFLICT DO NOTHING` + classify → `Fresh`/`Owned*`/`Other*`/`Conflict`; `commit_success` flips `succeeded` in place; `release` deletes. A crash mid-reservation leaves no partial state (single atomic upsert). Retention: succeeded/released dedup rows fall under the AD-9 TTL; a reservation is never deleted while its effect is non-terminal | Delete the reservation on success | Deleting on success makes a same-key crash-recovery re-attempt see `Fresh` and re-execute — the exact silent-loss bug CORE-019's round-4 in-place `succeeded` flag fixed; the durable store must mirror that in-place flip. See §3.4 |
-| **AD-9** Cleanup/retention policy | Q9 | TTL-based, operator-tunable (default e.g. 7 days — a runtime constant, **not** spec-normative, same posture as CORE-019 AD-5 backoff numbers). Only terminal-resting rows eligible (`Succeeded`/`TerminalFailed` effect rows + settled dedup rows, `settled_at < now - ttl`), deleted in bounded `DELETE … LIMIT batch` batches as **provider-owned internal maintenance** — a low-frequency retention task each durable provider owns, decoupled from `DeliveryRunner` and from the port surface | Count-based cap; operator-triggered only; a `cleanup`/`purge` verb on the universal port; runner-driven cleanup | The delivery ports expose **no** purge verb, so the runner has nothing to call, and adding one would force every impl (in-memory, third-party) to implement retention they don't need — violating AD-6. Retention belongs where the durable tables live: inside the provider (in-memory is dev-only, needs none). A provider-owned task failing only lags retention (rows accumulate), never breaks delivery; count caps can evict a still-relevant dedup key; manual-only grows unbounded between runs (the named risk). Redundant multi-node deletes are harmless (idempotent `DELETE`) |
+| **AD-9** Cleanup/retention policy | Q9 | TTL-based, operator-tunable (default e.g. 7 days — a runtime constant, **not** spec-normative, same posture as CORE-019 AD-5 backoff numbers). Only terminal-resting rows eligible (`Succeeded`/`TerminalFailed` effect rows + settled dedup rows, `settled_at < now - ttl`), deleted in bounded `DELETE … LIMIT batch` batches. **G12 rewrite:** the SQL stays provider-owned (`PostgresEffectStore`/`StoolapEffectStore::run_retention`, unchanged), but the *schedule* is not — no background task/scheduler lives inside either provider. Both implement the new optional capability trait `RetentionMaintenance` (`purge_before`/`oldest_terminal`), and a **runtime-owned** worker (`ego-service-sdk`'s `EffectRetentionWorker`, sibling of PROD-012's reservation `RetentionWorker`) drives it on a configured schedule — off unless a policy and a `RetentionMaintenance` store are both registered. See §3.7 | Count-based cap; operator-triggered only; a `cleanup`/`purge` verb on the universal port; runner-driven cleanup; a provider-owned background scheduler (Phase 4/5's original shape) | The delivery ports expose **no** purge verb, so the runner has nothing to call, and adding one would force every impl (in-memory, third-party) to implement retention they don't need — violating AD-6. A provider-owned *scheduler* (as opposed to provider-owned *SQL*) duplicates the lifecycle machinery (`Notify`-based cancellation, bounded shutdown, panic isolation) PROD-012 already built once for reservation retention, and gives every provider its own ad hoc on/off switch instead of one runtime-level "off unless asked for" posture. Keeping the SQL in the provider and moving only the schedule to the runtime gets both: no duplicated SQL, and one lifecycle owner. Count caps can evict a still-relevant dedup key; manual-only grows unbounded between runs (the named risk); redundant multi-node deletes are harmless (idempotent `DELETE`) |
 | **AD-10** Migration versioning | Q10 | New crate ⇒ **own** sequence starting at `001` in `crates/effect-store/src/postgres/migrations/`, run by the crate's own hand-rolled `include_str!` runner (mirroring `ego-persistence`'s pattern). Tables prefixed `effect_` (`effect_state`, `effect_dedup`). No collision with `ego-persistence`'s 001–006 — different crates, different tables, no shared version ledger | Continue `ego-persistence`'s 007+ sequence | Continuing 007+ only makes sense under the rejected AD-1 option-2, and would entangle two crates' schema lifecycles. `ego-persistence` uses a hand-rolled runner (not sqlx's `migrate!`/`_sqlx_migrations`), so there is no shared ledger to collide on — "collision" is moot once the tables live in a separate crate |
 | **AD-11** Graceful shutdown with held claims | Q11 | Lease expiry is the **sole, authoritative** release mechanism. On drain, still-`InFlight` effects flow through CORE-019's existing shutdown path; for the durable store, their lease lapses and a successor re-claims them via `claim_due`'s expired-lease predicate (AD-4), redispatching, never assuming delivered. No proactive/explicit release is performed | Mandatory explicit release as the *only* mechanism; a best-effort proactive release on drain | A hard crash (`kill -9`, OOM) can't run an explicit release; correctness must rest on lease expiry alone, or durability is a lie. A proactive release would also need a port method that does not exist (the delivery ports expose no `release_claims`) and only shortens successor latency without changing correctness — so it is deliberately omitted; the successor picks up the lapsed lease on its next `claim_due` tick |
 | **AD-12** TestKit double shape | Q12 | `FaultInjectingEffectStore` — a real impl of **both** ports (like the in-memory composite) wrapping a real `InMemoryEffectStore`, adding a **scripted, deterministic** `FaultPlan`: per-method transient-error queues (`TemporarilyUnavailable`/`Backend` on the Nth call) and three **distinct, non-contradictory** crash operations — `simulate_process_crash()` (destroys volatile state, models non-durable loss), `simulate_runner_crash()` (preserves backing state but abandons in-flight ops so `recover_in_flight`/`claim_due` see them recoverable — the one recovery-logic tests use), and `crash_after(op)` (write landed, response lost — ambiguity/idempotency window) — plus a claim-race interleave hook. No randomness (determinism axiom). Real close→reopen durability is **out of scope** for this double (that is AD-13's durable-provider tier against real Stoolap/Postgres) | A mock-object framework; fault hooks baked into the production durable store; a single `simulate_crash()` doing the job of both loss and recovery | The repo's convention is "real trait impl, not a look-alike" (`RecordingExecutor`; `detect-mock-only-tests.sh` exists). A fault plan on a real store stays usable anywhere the real store is; test concerns never leak into prod code. A single `simulate_crash()` was self-contradictory — dropping state cannot also leave in-flight effects recoverable — so the loss and recovery cases are split. See §3.5 |
@@ -555,6 +555,74 @@ ledger. `cargo test --workspace` at the root was never involved either way:
 it does not build this workspace before G11 and still does not after. The
 only thing that changed is which harness the real-Postgres run uses, and
 that harness happens to be the one PROD-012 built for its own tests.
+
+### 3.7 Runtime-owned retention capability (AD-9 rewrite, G12)
+
+**G12 reconciliation (post-freeze runtime-owned-capability rewrite).** AD-9,
+as written at Phase 4/5, described retention as "a low-frequency retention
+task each durable provider owns" — accurate for what Phases 4 and 5 actually
+shipped (`PostgresEffectStore::run_retention`/`StoolapEffectStore::
+run_retention`, each fully implemented and conformance-tested), but never
+wired to run in production: nothing ever called either method outside a
+test. A prior architectural audit flagged the *shape* of that phrase itself
+as the defect worth fixing before wiring it up — "provider-owned internal
+maintenance" reads as license for each provider to also own a background
+task/scheduler, which is exactly the shape PROD-012's reservation-retention
+worker (`ego-service-sdk::runtime::retention`) had already rejected for the
+identical problem one subsystem over: a runtime-level `Notify`-based
+cancellation loop, bounded shutdown, an `AtomicBool` double-start guard, and
+an explicit two-phase construct-then-start API, all owned by `Runtime`, none
+of it duplicated per provider.
+
+*Resolution:* the SQL stays exactly where AD-9 always put it —
+`run_retention`'s two-table CTE+DELETE per provider is unchanged, still the
+only place either provider's retention SQL is written. What moved is the
+*schedule*. A new optional capability trait,
+[`RetentionMaintenance`](../../../crates/runtime/src/effects/store.rs) (two
+methods — `purge_before(cutoff, batch)`, `oldest_terminal()` defaulting to
+`Ok(None)`), lives alongside `EffectStateStore`/`EffectDedupStore` in
+`crates/runtime/src/effects/store.rs`, the same "optional capability, not a
+mandatory port method" shape `EffectStoreCapabilities` (AD-3) already
+established. `PostgresEffectStore` and `StoolapEffectStore` each implement it
+by calling straight through to their existing `run_retention` — `purge_before`
+supplies a zero `ttl` against an already-computed `cutoff`, so no SQL is
+duplicated or reimplemented.
+
+A new runtime-owned worker, `ego-service-sdk::runtime::effect_retention::
+EffectRetentionWorker`, is the sibling — not a replacement — of PROD-012's
+`RetentionWorker`: same lifecycle shape (`Notify` cooperative cancellation,
+abort-then-await bounded shutdown, panic isolation via the exact same
+`isolate_panics` helper, an `EffectRetentionPolicy` with no `Default` impl,
+mirroring `RetentionPolicy`'s "off unless asked for" posture and its
+`ZeroRetention`/`ZeroInterval`/`ZeroBatch` validation). It is deliberately a
+second, independent worker type rather than a generalization of
+`RetentionWorker` over both subsystems: the two purge different rows through
+different capability traits, and a runtime may configure either, both, or
+neither. `RuntimeBuilder` gained `with_effect_retention_store(Arc<dyn
+RetentionMaintenance>)`, `with_effect_retention_policy(...)`, and
+`with_effect_retention_clock(...)` — the same "register one concrete
+instance under an additional trait object" idiom the effects acceptor's
+dual `EffectStateStore`/`EffectDedupStore` registration and the
+reservation/`RetentionPolicy` pairing already use — plus a `build()`-time
+guard refusing a configured policy with no registered store, mirroring the
+existing reservation-retention guard's shape and wording. The entry point on
+`Runtime` is `start_retention_effects()`, not `start_retention()`: that name
+already belongs to PROD-012's operation-reservation retention, a distinct
+subsystem this runtime configures independently, so the two coexist under
+two names rather than one overloaded one.
+
+**What did not change:** `EffectStateStore`/`EffectDedupStore`'s trait
+signatures (byte-identical); `run_retention`'s SQL in either provider;
+PROD-012's `RetentionWorker`/`RetentionPolicy`/`start_retention()`; G10's
+Clock-injection work; G11's harness relocation; G15's causal dedup-release
+gate. `RuntimeBuilder` still constructs `InMemoryEffectStore` internally
+when an executor is registered and still has no seam to register a *custom*
+`EffectStateStore`/`EffectDedupStore` (tasks.md Phase 7, still open,
+separate from this change) — `with_effect_retention_store` registers the
+`RetentionMaintenance` capability independently of that still-missing
+wiring, the same way a caller who runs a durable store outside this
+builder's construction path can register its `OperationReservationStore`
+side today.
 
 ## 4. Data flow (durable path)
 

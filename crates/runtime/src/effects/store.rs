@@ -459,6 +459,39 @@ pub trait EffectDedupStore: Send + Sync {
     async fn release(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
 }
 
+/// Optional capability: a provider that can purge its own settled rows on a
+/// runtime-owned schedule (PROD-002 G12).
+///
+/// Not a method on [`EffectStateStore`]/[`EffectDedupStore`] — retention is a
+/// maintenance concern orthogonal to delivery bookkeeping, exactly like
+/// [`EffectStoreCapabilities`] is an honestly-declared property rather than a
+/// mandatory port method. A provider implements this trait in addition to
+/// the two ports, and a runtime that never registers a
+/// `dyn RetentionMaintenance` never purges anything — the same "off unless
+/// asked for" posture the PROD-012 reservation-retention worker already
+/// established.
+#[async_trait]
+pub trait RetentionMaintenance: Send + Sync {
+    /// Deletes settled (succeeded/terminal) rows older than `cutoff`, at most
+    /// `batch` rows, and returns how many were actually removed.
+    ///
+    /// `cutoff` is computed by the caller from an injected [`ego_domain::Clock`]
+    /// (PROD-002 G10) — this trait takes the already-computed instant rather
+    /// than a `(now, ttl)` pair, so nothing here needs its own notion of "now".
+    async fn purge_before(&self, cutoff: Timestamp, batch: usize) -> Result<u64, EffectStoreError>;
+
+    /// Reports when the oldest still-held settled row was settled, for a
+    /// backlog-age gauge.
+    ///
+    /// Defaults to `Ok(None)` — mirrors
+    /// [`OperationReservationStore::oldest_completed`](ego_domain::operation::OperationReservationStore::oldest_completed)'s
+    /// reasoning: a provider that does not track this need not implement any
+    /// custom logic just to answer this query.
+    async fn oldest_terminal(&self) -> Result<Option<Timestamp>, EffectStoreError> {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct EffectRecord {
     tenant: TenantId,
@@ -1259,5 +1292,28 @@ mod tests {
         );
         assert_eq!(permanent.to_string(), "backend error: corrupt record");
         assert_eq!(conflict.to_string(), "conflict: optimistic lock lost");
+    }
+
+    // --- PROD-002 G12: RetentionMaintenance optional capability ---
+
+    /// A bare implementor providing only the required `purge_before` gets
+    /// `oldest_terminal`'s default for free — mirrors
+    /// `OperationReservationStore::oldest_completed`'s own default test.
+    #[tokio::test]
+    async fn oldest_terminal_defaults_to_none_for_a_bare_implementor() {
+        struct Bare;
+
+        #[async_trait]
+        impl RetentionMaintenance for Bare {
+            async fn purge_before(
+                &self,
+                _cutoff: Timestamp,
+                _batch: usize,
+            ) -> Result<u64, EffectStoreError> {
+                unreachable!()
+            }
+        }
+
+        assert_eq!(Bare.oldest_terminal().await, Ok(None));
     }
 }

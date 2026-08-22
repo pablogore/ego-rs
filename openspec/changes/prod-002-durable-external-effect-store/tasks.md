@@ -331,6 +331,74 @@ Tier 1/Tier 2-Stoolap's crate-local location
   `crates/effect-store/src/lib.rs`. No port, domain, or production-code file
   changed; Tier 1/Tier 2-Stoolap's files untouched. G11 CLOSED.
 
+## Phase 13: G12 — Runtime-Owned Retention Capability (post-audit rewrite)
+
+Spec: AD-9's retention SQL stays provider-owned and unduplicated
+(`run_retention` in both providers, unchanged); only the *schedule* moves to
+a runtime-owned worker, mirroring PROD-012's reservation-retention shape.
+Scope: a new optional `RetentionMaintenance` capability trait, its two
+provider implementations (delegating, not reimplementing), a new
+`EffectRetentionWorker` in `ego-service-sdk`, and additive `RuntimeBuilder`
+wiring. Explicitly does not touch `EffectStateStore`/`EffectDedupStore`'s
+trait signatures, `run_retention`'s SQL, or PROD-012's
+`RetentionWorker`/`RetentionPolicy`/`start_retention()`.
+
+- [x] 13.1 RED/GREEN — `RetentionMaintenance` trait added to
+  `crates/runtime/src/effects/store.rs` (`purge_before(cutoff, batch) ->
+  Result<u64, EffectStoreError>`; `oldest_terminal() -> Result<Option
+  <Timestamp>, EffectStoreError>` defaulting to `Ok(None)`, mirroring
+  `OperationReservationStore::oldest_completed`'s default). Test:
+  `oldest_terminal_defaults_to_none_for_a_bare_implementor`. Exported from
+  `crates/runtime/src/effects/mod.rs`.
+- [x] 13.2 GREEN — `PostgresEffectStore`/`StoolapEffectStore` each implement
+  `RetentionMaintenance::purge_before` by calling their existing
+  `run_retention(cutoff, Duration::zero(), batch)` and mapping the error to
+  its `source` — no SQL duplicated. Tests (Stoolap, in-process, no Docker):
+  `retention_maintenance_purge_before_calls_through_to_run_retention`,
+  `retention_maintenance_oldest_terminal_defaults_to_none`
+  (`crates/effect-store/tests/conformance.rs`). Postgres SQL correctness
+  stays covered by `run_retention`'s own existing tests — not re-tested here
+  per design.
+- [x] 13.3 GREEN — new module `crates/service-sdk/src/runtime/
+  effect_retention.rs`: `EffectRetentionPolicy`/`EffectRetentionPolicyError`
+  (no `Default`, validated `new`, identical shape to `RetentionPolicy`) and
+  `EffectRetentionWorker` (start/stop, `Notify`-based cancellation,
+  abort-then-await bounded shutdown, `effect.purge_batch` root span per
+  tick, `effect.cleanup.rows`/`effect.cleanup.batch_duration` metrics using
+  G13's already-fixed names). Reuses `super::retention::isolate_panics`
+  rather than a second copy.
+- [x] 13.4 GREEN — `RuntimeBuilder`: `with_effect_retention_store`,
+  `with_effect_retention_policy`, `with_effect_retention_clock`; a
+  `build()`-time guard refusing a configured policy with no registered
+  `RetentionMaintenance` (mirrors the existing reservation-retention guard);
+  `Runtime::start_retention_effects()` — named distinctly from PROD-012's
+  `start_retention()` so both coexist on the same `Runtime`.
+- [x] 13.5 Tests — `crates/service-sdk/tests/
+  effect_retention_worker_lifecycle.rs` (mirrors
+  `retention_worker_lifecycle.rs`'s style): disabled by default and no
+  worker starts without a policy; a degenerate policy is refused at
+  construction; a policy with no registered store is refused at `build()`;
+  a configured worker purges with the exact cutoff (computed from an
+  injected fake clock, never wall time) and batch, then stops on shutdown;
+  starting twice starts one worker; an overrunning worker is aborted, not
+  detached; every tick opens a root `effect.purge_batch` span.
+- [x] 13.6 Scope guard — confirmed by diff:
+  `EffectStateStore`/`EffectDedupStore` byte-identical; `run_retention`'s
+  SQL in both providers untouched; PROD-012's
+  `RetentionWorker`/`RetentionPolicy`/`start_retention()`/
+  `retention_worker_lifecycle.rs` untouched (its 22 tests still pass
+  unmodified); G10 (Clock injection)/G11 (harness relocation)/G15 (causal
+  dedup-release gate) untouched.
+- [x] 13.7 Validation, all green: `cargo build --workspace --all-features`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace --all-features` — 0 failures, 0 regressions
+  (`ego-effect-store`, `ego-runtime`, `ego-service-sdk` — including both
+  retention lifecycle test files — and every other workspace crate all
+  green). G13 (effects metrics wiring) confirmed still open elsewhere in
+  this worktree — this worker uses its two already-fixed cleanup metric
+  names, and leaves a `TODO(G13)` comment (not an invented gauge) where a
+  settled-backlog-age gauge would go once G13 names one. G12 CLOSED.
+
 ## Threat Matrix
 
 | Case | Covered by |

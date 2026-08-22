@@ -29,9 +29,9 @@ use ego_domain::operation::OperationFingerprint;
 use ego_domain::operation::OperationKeyHash;
 use ego_domain::operation::ReservationError;
 use ego_domain::{
-    MetricAttribute, Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer,
+    Clock, MetricAttribute, Observability, SemanticEvent, SpanAttributes, SpanOutcome, Tracer,
 };
-use ego_runtime::effects::RuntimeEffectAcceptor;
+use ego_runtime::effects::{RetentionMaintenance, RuntimeEffectAcceptor};
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::{
     authorize_in_context, Action, AuthorizationProvider, Resource,
@@ -382,6 +382,20 @@ pub struct RuntimeInner {
     pub(crate) effect_started: AtomicBool,
     /// Guards `start_retention` so a second call starts no second worker.
     pub(crate) retention_started: AtomicBool,
+    /// The registered `RetentionMaintenance` capability, if any (PROD-002
+    /// G12). `None` means no effect-retention worker can ever be started —
+    /// `build()` already refuses a configured `effect_retention_policy`
+    /// without one, mirroring `reservation`'s own refusal above.
+    pub(crate) effect_retention_store: Option<Arc<dyn RetentionMaintenance>>,
+    /// Clock effect-retention cutoffs are computed from (G10). Always
+    /// present — resolved to the real system clock at build time when no
+    /// override was registered, the same way `ReservationConfig`'s clock is.
+    pub(crate) effect_retention_clock: Arc<dyn Clock>,
+    /// Guards `start_retention_effects` so a second call starts no second
+    /// worker. Distinct from `retention_started` above: the two subsystems
+    /// (operation-reservation retention vs. effect retention) start and stop
+    /// independently.
+    pub(crate) effect_retention_started: AtomicBool,
     /// How long `Runtime::start_effects`'s registered async teardown hook
     /// waits for the `Deferred` drain loop before forcing remaining
     /// in-flight effects back to `Pending` (design.md §8). Meaningless when
@@ -527,6 +541,8 @@ impl RuntimeInner {
         effect_drain_deadline: Duration,
         data_provider_access: Option<Arc<dyn DataProviderAccess>>,
         tracer: Option<Arc<dyn Tracer>>,
+        effect_retention_store: Option<Arc<dyn RetentionMaintenance>>,
+        effect_retention_clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             registry,
@@ -543,6 +559,9 @@ impl RuntimeInner {
             effect_acceptor_impl,
             effect_started: AtomicBool::new(false),
             retention_started: AtomicBool::new(false),
+            effect_retention_store,
+            effect_retention_clock,
+            effect_retention_started: AtomicBool::new(false),
             effect_drain_deadline,
             data_provider_access,
             tracer,
@@ -1268,6 +1287,8 @@ impl RuntimeInner {
             Duration::from_secs(5),
             None,
             None,
+            None,
+            Arc::new(ego_domain::SystemClock),
         )
     }
 
@@ -1297,6 +1318,8 @@ impl RuntimeInner {
             Duration::from_secs(5),
             None,
             None,
+            None,
+            Arc::new(ego_domain::SystemClock),
         )
     }
 
@@ -1331,6 +1354,8 @@ impl RuntimeInner {
             Duration::from_secs(5),
             None,
             None,
+            None,
+            Arc::new(ego_domain::SystemClock),
         )
     }
 }
@@ -2256,6 +2281,8 @@ mod tests {
             Duration::from_secs(5),
             None,
             None,
+            None,
+            Arc::new(ego_domain::SystemClock),
         );
 
         let result = rt.authorization_provider();

@@ -48,8 +48,8 @@ use ego_domain::{Clock, ExternalEffectDescription, IdempotencyKey, TenantId};
 use ego_runtime::effects::observability::log_cleanup_deleted;
 use ego_runtime::effects::store::{
     AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
-    EffectState, EffectStateStore, EffectStoreCapabilities, EffectStoreError, StoredEffect,
-    TerminalReason, Timestamp,
+    EffectState, EffectStateStore, EffectStoreCapabilities, EffectStoreError, RetentionMaintenance,
+    StoredEffect, TerminalReason, Timestamp,
 };
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, PgPool, Row};
@@ -356,6 +356,21 @@ impl PostgresEffectStore {
             log_cleanup_deleted(deleted, "effect_state+effect_dedup");
         }
         Ok(deleted)
+    }
+}
+
+/// Wires the runtime-owned [`RetentionMaintenance`] capability (PROD-002
+/// G12) straight through to [`PostgresEffectStore::run_retention`] — no SQL
+/// duplicated here. `purge_before` already receives a computed cutoff, so it
+/// calls through with a zero `ttl`: `run_retention`'s own `cutoff = now -
+/// ttl` then reduces to exactly the cutoff this trait was handed.
+#[async_trait]
+impl RetentionMaintenance for PostgresEffectStore {
+    async fn purge_before(&self, cutoff: Timestamp, batch: usize) -> Result<u64, EffectStoreError> {
+        let batch = i64::try_from(batch).unwrap_or(i64::MAX);
+        self.run_retention(cutoff, Duration::zero(), batch)
+            .await
+            .map_err(|failure| failure.source)
     }
 }
 
