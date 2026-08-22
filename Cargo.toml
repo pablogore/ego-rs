@@ -7,6 +7,7 @@ members = [
     "crates/transport",
     "crates/runtime",
     "crates/runtime-tokio",
+    "crates/effect-store",
     "crates/event-adapter",
     "crates/persistent-entity",
     "crates/ego-scheduler",

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ego_domain::time::SystemClock;
+use ego_domain::time::{Clock, SystemClock};
 use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
 use persistent_entity::effect_acceptor::{EffectAcceptanceError, EffectAcceptor};
 use thiserror::Error;
@@ -517,13 +517,28 @@ impl RuntimeEffectAcceptor {
         registry: Arc<ExecutorRegistry>,
         config: DeliveryConfig,
     ) -> Self {
+        Self::with_clock(state, dedup, registry, config, Arc::new(SystemClock))
+    }
+
+    /// Same as [`Self::new`], but with an explicit [`Clock`] instead of the
+    /// production default ([`SystemClock`]). Additive — `new`'s signature and
+    /// behavior are unchanged, so no existing caller breaks — for composition
+    /// roots (integration tests, future deterministic harnesses) that need to
+    /// inject a fake clock into the delivery pipeline.
+    pub fn with_clock(
+        state: Arc<dyn EffectStateStore>,
+        dedup: Arc<dyn EffectDedupStore>,
+        registry: Arc<ExecutorRegistry>,
+        config: DeliveryConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let (queue, receiver) = EffectQueue::bounded(config.queue_capacity);
         let runner = Arc::new(DeliveryRunner::new(
             state.clone(),
             dedup,
             registry,
             config.retry,
-            Arc::new(SystemClock),
+            clock,
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (deadline_tx, deadline_rx) = watch::channel(None);

@@ -48,7 +48,11 @@
 
 pub mod acceptor;
 pub mod executor;
-pub(crate) mod observability;
+// PROD-002 Phase 4 (AD-14): `log_cleanup_deleted` is called from durable
+// provider crates (`ego-effect-store`), so the module can no longer stay
+// crate-private — the other signals here remain wired only from within
+// ego-runtime (Phase 5, Postgres) and stay `pub(crate)` at the fn level.
+pub mod observability;
 pub mod policy;
 pub(crate) mod queue;
 pub mod registry;
@@ -61,6 +65,6 @@ pub use policy::{DeliveryConfig, RetryPolicies, RetryPolicy, RunnerMode};
 pub use registry::{DuplicateEffectType, ExecutorRegistry};
 pub use store::{
     AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
-    EffectState, EffectStateStore, EffectStoreError, InMemoryEffectStore, StoredEffect,
-    TerminalReason, Timestamp,
+    EffectState, EffectStateStore, EffectStoreCapabilities, EffectStoreError, InMemoryEffectStore,
+    StoredEffect, TerminalReason, Timestamp,
 };
