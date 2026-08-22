@@ -247,6 +247,90 @@ second time trait, no feature flags.
   `ego-runtime` (166 tests), `ego-service-sdk`, `security-jwt` (24,
   unmodified), `security-apikey` (42, unmodified). G10 CLOSED.
 
+## Phase 12: G11 — Postgres Test Relocation onto the Shared Harness (post-freeze execution)
+
+Spec: PROD-012 built a top-level `integration-tests/` workspace (one shared
+PostgreSQL per run, one template migrated once, one isolated database per
+test) to replace the old container-per-test-file shape. PROD-002's two
+real-Postgres test files (`crates/integration-tests/tests/
+effect_store_postgres_{unit,conformance}.rs`, each starting its own
+`testcontainers` container) predate that harness and were never migrated onto
+it. Scope: relocate and adapt those two files only. No change to
+`EffectStateStore`/`EffectDedupStore`, `PostgresEffectStore`'s production
+code, AD-6, the conformance tier model (Tier 1/2/3, all frozen, §3.6), or
+Tier 1/Tier 2-Stoolap's crate-local location
+(`crates/effect-store/src/conformance.rs`,
+`crates/effect-store/tests/conformance.rs`).
+
+- [x] 12.1 Recovered both files' real content (not a blind `git mv`) from the
+  last commit that held the old `crates/integration-tests` crate
+  (`c65432f`), since the reconciliation worktree's tree no longer carries
+  that crate at all.
+- [x] 12.2 Investigated whether the harness's template-DB migration step
+  (`ego_persistence::postgres::migrations::run`, `integration-tests/src/
+  main.rs`) needed extending to also apply `ego-effect-store`'s migrations.
+  Finding: it does not. `PostgresEffectStore::connect` (AD-10) already
+  creates its own schema and runs its own migration sequence on every call,
+  idempotently — self-contained per schema, independent of whatever the
+  template's `public` schema carries. No wiring was added; the two crates'
+  migrations coexist in the same physical database (different schemas) with
+  no shared version ledger and no double-apply risk.
+- [x] 12.3 Moved both files into `integration-tests/tests/infrastructure/`,
+  same flat layout and `*_postgres.rs` naming convention as every other file
+  there, and registered both as `mod` declarations in
+  `integration-tests/tests/infrastructure.rs` (alphabetical, matching the
+  existing order).
+- [x] 12.4 Adapted both files' setup: `testcontainers`/per-test
+  `uuid`-suffixed schema replaced with `ego_integration_tests::
+  isolated_database()` (the same fixture every other file in this directory
+  uses) plus a fixed schema constant — fixed rather than `uuid`-suffixed
+  because each test already owns an exclusive database from the harness, so
+  nothing is left for the schema name to disambiguate. `db.close().await` at
+  the end of every test, matching the existing convention.
+- [x] 12.5 Satisfied `tests/ledger.rs`'s three-way consistency guard (disk ↔
+  registration ↔ `README.md`) by adding two rows under a new "PROD-002
+  durable effect-store" section, plus updating the suite's test-count
+  summary block (10 → 12). Confirmed green:
+  `cargo test --manifest-path integration-tests/Cargo.toml --test ledger`.
+- [x] 12.6 `crates/effect-store/Cargo.toml` checked for a leftover
+  `testcontainers`/`testcontainers-modules` dev-dependency: none present —
+  Tier 1/Tier 2-Stoolap conformance (`crates/effect-store/tests/
+  conformance.rs`) never depended on it, so there was nothing to remove.
+  `crates/effect-store/src/lib.rs`'s doc comment (naming the old
+  `crates/integration-tests` as the consumer of the public `conformance`
+  module) updated to name the current top-level `integration-tests/`
+  workspace instead — comment-only, no code change.
+- [x] 12.7 Validation, all green:
+  - `bash scripts/detect-integration-tests.sh` and
+    `bash scripts/detect-integration-tests-selftest.sh` — PASS.
+  - `cargo build --workspace --all-features` and
+    `cargo test --workspace --all-features` — 0 failures, no Docker/
+    testcontainers reference anywhere in the output (root workspace stays
+    hermetic; PROD-012's own invariant, unchanged by this phase).
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+    and the same against `integration-tests/Cargo.toml` — clean.
+  - The harness's own runner, `cargo run --manifest-path
+    integration-tests/Cargo.toml --bin run-suite` (never `cargo test`
+    directly against the `infrastructure` target — the harness's own guard
+    rejects that path, see its `README.md`/`src/lib.rs`): the ledger guard
+    ran first and passed, then 34 passed / 1 ignored / 0 failed across the
+    whole suite in 1.94s (13 of those 34+1 are the relocated effect-store
+    tests: 8 unit + 5 conformance, one of the five `#[ignore]`d by the
+    same documented Tier-1/G1 tension the pre-relocation file already
+    carried). Every pre-existing PROD-012 infrastructure test in the same
+    run still passed, confirming no isolation regression between the two
+    features' tests sharing one harness.
+  - Tier 2 (`postgres_satisfies_durable_conformance`) and Tier 3
+    (`postgres_satisfies_multi_node_conformance`) both ran and passed in
+    that same run — confirmed by name in the runner's own test-result
+    output, not inferred.
+- [x] 12.8 Scope guard — confirmed by diff, not just asserted: the only
+  files touched are `integration-tests/Cargo.toml`,
+  `integration-tests/README.md`, `integration-tests/tests/infrastructure.rs`,
+  the two new test files, and one doc-comment line in
+  `crates/effect-store/src/lib.rs`. No port, domain, or production-code file
+  changed; Tier 1/Tier 2-Stoolap's files untouched. G11 CLOSED.
+
 ## Threat Matrix
 
 | Case | Covered by |

@@ -528,6 +528,34 @@ asked to prove a guarantee it explicitly declares it does not offer, and
 `run_multi_node_conformance` is simply never invoked against
 `StoolapDurableStoreFactory`.
 
+**G11 reconciliation (post-freeze harness consolidation).** The Tier 1
+bullet above, written at Phase 5, described `PostgresEffectStore` as
+"env-gated on a real `DATABASE_URL`; skipped with a logged notice when
+absent" — accurate for how Phase 5 first landed it, but superseded before
+this change closed: those real-Postgres tests (Tier 1's Postgres row, and
+the whole of Tier 2/3) never lived in a root-workspace crate at all by the
+time this reconciliation happened. They lived in a separate,
+non-root-member `crates/integration-tests` crate (one `testcontainers`
+container per test file), which PROD-012 subsequently replaced everywhere
+else in the repository with a single top-level `integration-tests/`
+workspace — one shared container per run, one template database migrated
+once, one isolated database per test. PROD-002's two files were the one
+place that replacement had not yet reached.
+
+*Resolution:* both files (`effect_store_postgres_unit.rs`,
+`effect_store_postgres_conformance.rs`) moved into
+`integration-tests/tests/infrastructure/`, using that harness's
+`isolated_database()` fixture in place of their own `testcontainers` calls.
+No migration wiring was needed to make this work: `PostgresEffectStore::
+connect` (AD-10) already creates and migrates its own schema on every call,
+independently of whatever the harness's template pre-migrates into `public`
+for `ego-persistence`'s own tables — the two crates' tables coexist in the
+same physical database under different schemas, with no shared version
+ledger. `cargo test --workspace` at the root was never involved either way:
+it does not build this workspace before G11 and still does not after. The
+only thing that changed is which harness the real-Postgres run uses, and
+that harness happens to be the one PROD-012 built for its own tests.
+
 ## 4. Data flow (durable path)
 
 ```

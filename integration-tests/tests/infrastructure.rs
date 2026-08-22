@@ -56,6 +56,12 @@ mod infrastructure {
     #[cfg(unix)]
     mod dual_aggregate_crash_recovery_postgres;
     mod durable_entity_progress_postgres;
+    /// PROD-002 G11: Tier 2/3 PostgreSQL effect-store conformance, relocated
+    /// here from the old per-crate `crates/integration-tests`.
+    mod effect_store_postgres_conformance;
+    /// PROD-002 G11: `PostgresEffectStore`-specific unit tests, relocated
+    /// alongside `effect_store_postgres_conformance` above.
+    mod effect_store_postgres_unit;
     mod fencing_window_postgres;
     mod oldest_completed_postgres;
     mod purge_progress_postgres;

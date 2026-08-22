@@ -73,7 +73,9 @@ Real-process-death recovery .......... 1
 PostgreSQL concurrency invariants .... 2
 SQL-expression invariants ............ 1
 Schema/catalog assertions ............ 1
-Total infrastructure tests ........... 10
+PROD-002 backend conformance ......... 1
+PROD-002 backend-specific invariants . 1
+Total infrastructure tests ........... 12
 ```
 
 **This block was wrong, and the correction is the point of keeping this note.** It
@@ -264,6 +266,31 @@ This assertion is what lets the scenario rows above justify themselves by naming
 an index. Row 2's justification depends on `(tenant_id, operation_key)` being
 genuinely unique; without something reading the catalog, that dependency would
 rest on a migration file nobody verified was the one in force.
+
+## PROD-002 durable effect-store: PostgreSQL conformance and backend invariants
+
+Two further infrastructure tests, filed under their own PROD-002 infrastructure
+risk rather than as PROD-012 variants: `PostgresEffectStore`'s durability and
+multi-node claim exclusivity are real-Postgres-only properties, in exactly the
+sense the categories above already are for PROD-012's own store.
+
+| Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|
+| Tier 1/2/3 conformance against a real PostgreSQL | The shared `EffectStateStore`/`EffectDedupStore` port contract (Tier 1); state and dedup reservations survive a genuine close→reopen against the same tables (Tier 2); two independently-owned live claimers sharing the same tables never both hold an overlapping valid claim (Tier 3) | Tier 2/3 need a factory that opens more than one live store instance against the *same* backing storage — the property a restart or a second node relies on — which no in-process double can misrepresent, because an in-process double has no backing storage independent of the instance holding it | `tests/infrastructure/effect_store_postgres_conformance.rs` |
+| `PostgresEffectStore`-specific claim/lease/retention behavior | Claim exclusivity (G1), expired-lease-scoped reclaim (AD-4), epoch-fenced writes, atomic dedup reservation (AD-8), the AD-9 retention batch bound, and the G10 clock-injection guarantee | Each is a property of what the real database enforces under a real conditional `UPDATE`, a real primary-key upsert, or real row atomicity — none of which a scripted double can misrepresent in a way this suite would catch | `tests/infrastructure/effect_store_postgres_unit.rs` |
+
+Relocated here (PROD-002 G11) from the old per-crate `crates/integration-tests`
+— one `testcontainers` container per test file — onto this suite's shared
+container and per-test isolated database, the same consolidation PROD-012's own
+tests went through.
+
+**No migration wiring was needed.** `PostgresEffectStore::connect` already
+creates and migrates its own schema on every call (AD-10's hand-rolled runner,
+every statement `CREATE ... IF NOT EXISTS`) — unlike `ego-persistence`'s
+tables, which this suite's template pre-migrates once into `public`,
+`effect_state`/`effect_dedup` live under a schema the store itself creates the
+first time it connects. Each test's isolated database gets its own copy of
+that schema, migrated by the store, not by the runner's template step.
 
 ## Conventions
 

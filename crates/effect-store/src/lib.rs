@@ -14,9 +14,9 @@ mod postgres;
 #[cfg(feature = "stoolap")]
 mod stoolap;
 
-/// Shared conformance harness, public so `crates/integration-tests` can run
-/// it against `PostgresEffectStore` (a real-Postgres test cannot live in
-/// this crate — see `ego-rs-testing`).
+/// Shared conformance harness, public so the top-level `integration-tests/`
+/// workspace can run it against `PostgresEffectStore` (a real-Postgres test
+/// cannot live in this crate — see `ego-rs-testing`).
 pub mod conformance;
 
 #[cfg(feature = "stoolap")]
