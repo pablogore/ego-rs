@@ -53,7 +53,9 @@ use std::sync::Arc;
 
 use ego_domain::event::DomainEvent;
 use ego_domain::Observability;
-use ego_runtime::effects::ExternalEffectExecutor;
+use ego_runtime::effects::{
+    EffectDedupStore, EffectStateStore, ExternalEffectExecutor, RetentionMaintenance,
+};
 use ego_runtime::providers::ExternalDataProvider;
 use ego_security_sdk::authentication::AuthenticationProvider;
 use ego_security_sdk::authorization::AuthorizationProvider;
@@ -515,6 +517,34 @@ impl AppBuilder {
             .with_reservation_owner_id(owner_id)
             .with_reservation_lease_duration(lease_duration)
             .with_reservation_clock(clock);
+        self
+    }
+
+    /// Registers the effect store the external-effects subsystem uses in
+    /// place of the default `InMemoryEffectStore` — thin delegation to
+    /// [`RuntimeBuilder::with_effect_store`] (PROD-002 Phase 8 finding:
+    /// `RuntimeBuilder` already carried this capability, but nothing forwarded
+    /// it through the facade every real host composes through).
+    ///
+    /// Takes one concrete type implementing both [`EffectStateStore`] and
+    /// [`EffectDedupStore`], exactly as the underlying builder does — see its
+    /// doc comment for why a mixed durable/non-durable pair is not
+    /// representable here.
+    pub fn effect_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: EffectStateStore + EffectDedupStore + 'static,
+    {
+        self.runtime_builder = self.runtime_builder.with_effect_store(store);
+        self
+    }
+
+    /// Registers the [`RetentionMaintenance`] capability settled external
+    /// effects are purged through — thin delegation to
+    /// [`RuntimeBuilder::with_effect_retention_store`]. Independent of
+    /// [`Self::effect_store`]: a type implementing both composes via
+    /// `.effect_store(store.clone()).effect_retention_store(store)`.
+    pub fn effect_retention_store(mut self, store: Arc<dyn RetentionMaintenance>) -> Self {
+        self.runtime_builder = self.runtime_builder.with_effect_retention_store(store);
         self
     }
 
@@ -1216,6 +1246,328 @@ mod tests {
             running.runtime.effect_acceptor().is_some(),
             "App::start() must call Runtime::start_effects"
         );
+    }
+
+    // -- PR6a: AppBuilder::effect_store / effect_retention_store delegation --
+    //
+    // `RuntimeBuilder::with_effect_store`/`with_effect_retention_store` are
+    // already proven to dispatch correctly by
+    // `tests/effect_store_composition.rs` (PROD-002 PR5 Phase 7/7.5) — these
+    // tests do NOT re-litigate that. They only prove the thin `AppBuilder`
+    // facade added above actually forwards to it, using the exact private
+    // `app.runtime`/`running.runtime` access `start_starts_effects_when_an_
+    // executor_was_registered` above already established as this module's
+    // precedent for lifecycle assertions.
+
+    use ego_domain::IdempotencyKey;
+    use ego_runtime::effects::{
+        AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
+        EffectStateStore, EffectStoreError, InMemoryEffectStore, RetentionMaintenance,
+        StoredEffect, TerminalReason, Timestamp,
+    };
+    use persistent_entity::command_context::CommandContext as PECommandContext;
+    use persistent_entity::entity_ref::EntityRef;
+    use persistent_entity::error::EntityError as PEEntityError;
+    use persistent_entity::persistent_entity::{CommandResult, PersistentEntity};
+    use persistent_entity::testing::{create_test_context, TestCommand, TestState};
+    use std::sync::atomic::AtomicUsize;
+
+    /// Delegates every call to a wrapped real `InMemoryEffectStore`, counting
+    /// how many times each port lands here — same decorator idiom
+    /// `effect_store_composition.rs`'s `RecordingEffectStore` uses, kept
+    /// local rather than shared because that file is a separate test binary.
+    struct RecordingEffectStore {
+        inner: InMemoryEffectStore,
+        state_calls: AtomicUsize,
+    }
+
+    impl RecordingEffectStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: InMemoryEffectStore::new(),
+                state_calls: AtomicUsize::new(0),
+            })
+        }
+        fn state_calls(&self) -> usize {
+            self.state_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EffectStateStore for RecordingEffectStore {
+        async fn accept(&self, effect: AcceptedEffect) -> Result<(), EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.accept(effect).await
+        }
+        async fn mark_in_flight(&self, id: EffectId) -> Result<(), EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.mark_in_flight(id).await
+        }
+        async fn mark_succeeded(&self, id: EffectId) -> Result<(), EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.mark_succeeded(id).await
+        }
+        async fn mark_retryable(
+            &self,
+            id: EffectId,
+            attempt: u32,
+            next_at: Timestamp,
+        ) -> Result<(), EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.mark_retryable(id, attempt, next_at).await
+        }
+        async fn mark_terminal(
+            &self,
+            id: EffectId,
+            reason: TerminalReason,
+        ) -> Result<(), EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.mark_terminal(id, reason).await
+        }
+        async fn claim_due(
+            &self,
+            now: Timestamp,
+            limit: usize,
+        ) -> Result<Vec<StoredEffect>, EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.claim_due(now, limit).await
+        }
+        async fn recover_in_flight(&self, now: Timestamp) -> Result<u64, EffectStoreError> {
+            self.state_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.recover_in_flight(now).await
+        }
+    }
+
+    #[async_trait]
+    impl EffectDedupStore for RecordingEffectStore {
+        async fn reserve(
+            &self,
+            scope: &DedupScope,
+            effect_id: EffectId,
+            fingerprint: EffectFingerprint,
+        ) -> Result<DedupOutcome, EffectStoreError> {
+            self.inner.reserve(scope, effect_id, fingerprint).await
+        }
+        async fn commit_success(&self, scope: &DedupScope) -> Result<(), EffectStoreError> {
+            self.inner.commit_success(scope).await
+        }
+        async fn release(&self, scope: &DedupScope) -> Result<(), EffectStoreError> {
+            self.inner.release(scope).await
+        }
+    }
+
+    #[async_trait]
+    impl RetentionMaintenance for RecordingEffectStore {
+        async fn purge_before(
+            &self,
+            cutoff: Timestamp,
+            batch: usize,
+        ) -> Result<u64, EffectStoreError> {
+            let _ = (cutoff, batch);
+            Ok(0)
+        }
+    }
+
+    /// Records every call it receives — proves delivery reached the executor
+    /// registered alongside the custom store.
+    struct RecordingExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl RecordingExecutor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+            })
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ExternalEffectExecutor for RecordingExecutor {
+        async fn execute(
+            &self,
+            _effect: &ExternalEffectDescription,
+            _ctx: &EffectContext,
+        ) -> AttemptOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            AttemptOutcome::Success
+        }
+    }
+
+    /// Describes one external effect on `Increment`, none otherwise — same
+    /// fixture shape `effect_store_composition.rs`'s `EffectDescribingEntity`
+    /// uses, kept local for the same reason as the doubles above.
+    #[derive(Debug)]
+    struct EffectDescribingEntity;
+
+    #[async_trait]
+    impl PersistentEntity for EffectDescribingEntity {
+        type Command = TestCommand;
+        type Event = TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> TestState {
+            TestState::new(0)
+        }
+
+        async fn handle_command(
+            &self,
+            command: &TestCommand,
+            _state: &TestState,
+            _context: &PECommandContext,
+        ) -> Result<Vec<TestEvent>, PEEntityError> {
+            match command {
+                TestCommand::Increment(v) => Ok(vec![TestEvent::Incremented(*v)]),
+                TestCommand::Decrement(v) => Ok(vec![TestEvent::Decremented(*v)]),
+                TestCommand::GetState => Ok(vec![]),
+            }
+        }
+
+        async fn apply_event(
+            &self,
+            state: &TestState,
+            event: &TestEvent,
+        ) -> Result<TestState, PEEntityError> {
+            Ok(match event {
+                TestEvent::Incremented(v) => TestState {
+                    value: state.value + v,
+                    version: state.version + 1,
+                },
+                TestEvent::Decremented(v) => TestState {
+                    value: state.value.saturating_sub(*v),
+                    version: state.version + 1,
+                },
+            })
+        }
+
+        async fn apply_events(
+            &self,
+            state: &TestState,
+            events: &[TestEvent],
+        ) -> Result<TestState, PEEntityError> {
+            let mut s = state.clone();
+            for event in events {
+                s = self.apply_event(&s, event).await?;
+            }
+            Ok(s)
+        }
+
+        async fn external_effects(
+            &self,
+            command: &TestCommand,
+            _new_state: &TestState,
+            events: &[TestEvent],
+            _context: &PECommandContext,
+        ) -> Vec<ExternalEffectDescription> {
+            if events.is_empty() {
+                return Vec::new();
+            }
+            match command {
+                TestCommand::Increment(_) => vec![ExternalEffectDescription {
+                    idempotency_key: IdempotencyKey::new("app-facade-uow-1:0").unwrap(),
+                    effect_type: "probe.effect".to_string(),
+                    payload: vec![],
+                    destination: "https://example.com".to_string(),
+                }],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    // Proves `AppBuilder::effect_store` is not a no-op forward: the runtime
+    // `App::start()` actually builds dispatches THROUGH the registered
+    // double, not through a separately-constructed `InMemoryEffectStore`.
+    #[tokio::test]
+    async fn effect_store_registered_via_app_builder_is_actually_dispatched_through() {
+        let store = RecordingEffectStore::new();
+        let executor = RecordingExecutor::new();
+        let app = compat_app()
+            .effect_store(store.clone())
+            .effect_executor(["probe.effect"], executor.clone())
+            .build()
+            .expect("build succeeds with a custom effect store registered");
+
+        let running = app.start().await.expect("start succeeds");
+        let acceptor = running
+            .runtime
+            .effect_acceptor()
+            .expect("an executor was registered — start_effects must produce an acceptor");
+
+        let entity_runtime = EntityRuntimeBuilder::<TestEvent>::new()
+            .with_effect_acceptor(acceptor)
+            .build();
+        let entity_ref = entity_runtime
+            .entity_ref("probe", "app-facade-1", Arc::new(EffectDescribingEntity))
+            .expect("spawning a fresh actor must succeed");
+
+        let result: CommandResult<TestEvent, TestState> = entity_ref
+            .send_command(TestCommand::Increment(1), create_test_context())
+            .await
+            .expect("the command itself must succeed regardless of effect delivery timing");
+        assert!(
+            matches!(result, CommandResult::Events { .. }),
+            "expected a normal Events commit, got {result:?}"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while executor.call_count() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the registered executor must actually be invoked");
+
+        assert!(
+            store.state_calls() > 0,
+            "AppBuilder::effect_store must forward to the SAME store RuntimeBuilder \
+             dispatches through, not to a separately-constructed InMemoryEffectStore"
+        );
+
+        running
+            .shutdown()
+            .await
+            .expect("RunningApp::shutdown must still succeed with a custom effect store");
+    }
+
+    // `AppBuilder::effect_retention_store` composes with the same provider
+    // instance `effect_store` was given — mirrors
+    // `effect_store_composition.rs`'s `with_effect_store_composes_with_
+    // with_effect_retention_store` compile-and-build assertion at the facade
+    // layer. The retention worker's own lifecycle is untouched by this PR and
+    // stays covered by `effect_retention_worker_lifecycle.rs`.
+    #[test]
+    fn effect_retention_store_composes_with_the_same_instance_via_app_builder() {
+        let store = RecordingEffectStore::new();
+        let _app = compat_app()
+            .effect_store(store.clone())
+            .effect_retention_store(store.clone() as Arc<dyn RetentionMaintenance>)
+            .build()
+            .expect("build succeeds composing effect_store with effect_retention_store");
+    }
+
+    // Regression: the default in-memory path (no custom store registered)
+    // must still build, start, and shut down exactly as before these two new
+    // delegation methods were added.
+    #[tokio::test]
+    async fn default_path_without_effect_store_is_unaffected_by_the_new_delegation() {
+        let executor = RecordingExecutor::new();
+        let app = compat_app()
+            .effect_executor(["probe.effect"], executor.clone())
+            .build()
+            .expect("build succeeds with no custom effect store registered");
+
+        let running = app.start().await.expect("start succeeds");
+        assert!(
+            running.runtime.effect_acceptor().is_some(),
+            "the default in-memory path must still produce an acceptor"
+        );
+        running
+            .shutdown()
+            .await
+            .expect("shutdown succeeds on the unmodified default path");
     }
 
     // Task 3.3 (RED): a registered shutdown-participant stop future runs
