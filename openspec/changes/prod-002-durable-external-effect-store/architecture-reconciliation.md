@@ -40,6 +40,8 @@ Fault/Crash Semantics audit → all 11 scenarios must come back SAFE**~~ — met
 
 `ExternalEffectExecutor::honors_idempotency_key()` (`crates/runtime/src/effects/executor.rs:48-53`) has zero real callers anywhere in the workspace outside its own unit tests — fails Rule of Two. Candidate for DROP or completion, not REPLACE/ADAPT. Does not gate the freeze decision.
 
+**Resolved (G14, tasks.md Phase 15): DROP.** Re-verified exhaustively before removal — CORE-019's own archived design.md already carried this exact default with the identical "doc-only, does not change runtime behavior" doc comment, confirming it was never intended to drive branching. Removed from the trait, its sole test-double override, and the two tests that existed only to exercise it. No replacement capability introduced.
+
 ## G15 — CRITICAL — the only functional/architectural blocker
 
 `abandon_and_release()` (`crates/runtime/src/effects/runner.rs:835-842`) does not gate `dedup.release()` on `mark_terminal()`'s result — a `Conflict` is logged, never stops the flow. `EffectDedupStore::release()` (`crates/effect-store/src/postgres/mod.rs:737-749`) deletes by `DedupScope` alone — no ownership, epoch, or state guard. A superseded worker's stale attempt can delete a dedup reservation another worker already flipped to `succeeded`, violating AD-8's explicit invariant ("a different later submission must observe `OtherSucceeded`, never `Fresh`"; "a reservation is never deleted while its effect is non-terminal"). This is not the accepted at-least-once tradeoff (the same effect executing twice) — it's dedup memory loss causing a *future, independent* submission to be treated as if it never existed.

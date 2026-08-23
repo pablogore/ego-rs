@@ -489,6 +489,57 @@ ownership model, G10's `Clock` model, G11's integration-test layout, G12's
   conformance tests re-confirmed green, unmodified. `spec.md` untouched — no
   public-contract contradiction found. G13 CLOSED.
 
+## Phase 15: G14 — Remove `ExternalEffectExecutor::honors_idempotency_key()`
+
+Spec: non-blocking API cleanup, no behavior change.
+
+- [x] 15.1 Re-verified usage exhaustively before touching anything: every
+  hit for `honors_idempotency_key` across the workspace (Rust, Markdown,
+  OpenSpec) was inside `crates/runtime/src/effects/executor.rs` itself —
+  the trait's default method, one test-double override
+  (`IdempotentExecutor`), and two unit tests exercising exactly that
+  default/override. Zero hits in `runner.rs`, `service-sdk`, `reference-app`,
+  `integration-tests`, or `spec.md`.
+- [x] 15.2 Intent recovered: CORE-019's own archived design.md
+  (`openspec/changes/archive/2026-07-15-core-019-reliable-external-effects/design.md`)
+  already carried this exact default (`fn honors_idempotency_key(&self) ->
+  bool { false }`) with the identical doc comment — "doc-only signal for
+  end-to-end semantics; does not change runtime behavior." It was never
+  intended to drive runtime branching; it was always documentation-shaped,
+  from the change that introduced it.
+- [x] 15.3 Rule of Two — FAILS. Only "use case" found was the trait's own
+  default+override pair, tested only against itself (`IdempotentExecutor`
+  existed solely to override this one method; its `execute()` returning a
+  fixed `RetryableFailure` was never independently asserted for any other
+  reason). No second real consumer anywhere in the workspace, no normative
+  requirement in `spec.md`. DROP, not retain.
+- [x] 15.4 GREEN — removed `honors_idempotency_key()` from
+  `ExternalEffectExecutor`, its override in the now-pointless
+  `IdempotentExecutor` test double (deleted, no other purpose), and the two
+  tests that existed solely to exercise it
+  (`default_honors_idempotency_key_is_false`,
+  `executor_may_override_honors_idempotency_key`) — both were about this
+  method, not incidentally covering something else worth preserving.
+  `AlwaysSucceeds` (existed only to host the first of those two tests) was
+  removed with it. No replacement capability flag, enum, or generalized
+  capability system introduced — deletion only, per the task's own
+  constraint.
+- [x] 15.5 Compatibility: `crates/runtime` is not published, PROD-002 is
+  still unreleased/unmerged — no external consumer exists to break. Not a
+  public-API-breaking-change concern in practice.
+- [x] 15.6 Validation, all green: `cargo build --workspace --all-features`
+  (no unused-import warnings — `IdempotencyKey`/`TenantId` remain used by
+  `EffectContext`'s own fields, untouched), `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`, `cargo test --workspace
+  --all-features` — 0 failures, 0 regressions anywhere in the workspace.
+  `execute()`'s contract and every existing executor's behavior unchanged.
+- [x] 15.7 Frozen architecture confirmed untouched:
+  `EffectStateStore`/`EffectDedupStore`/`RetentionMaintenance` contracts,
+  Clock/Observability models, Postgres claim SQL, Stoolap model, G15's
+  causal gate — none touched. `design.md`/`spec.md` never documented this
+  method as part of the intended architecture, so neither needed updating.
+  G14 CLOSED — DROP.
+
 ## Threat Matrix
 
 | Case | Covered by |
