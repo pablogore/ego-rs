@@ -75,7 +75,8 @@ SQL-expression invariants ............ 1
 Schema/catalog assertions ............ 1
 PROD-002 backend conformance ......... 1
 PROD-002 backend-specific invariants . 1
-Total infrastructure tests ........... 12
+PROD-002 provider composition ........ 1
+Total infrastructure tests ........... 13
 ```
 
 **This block was wrong, and the correction is the point of keeping this note.** It
@@ -278,6 +279,7 @@ sense the categories above already are for PROD-012's own store.
 |---|---|---|---|
 | Tier 1/2/3 conformance against a real PostgreSQL | The shared `EffectStateStore`/`EffectDedupStore` port contract (Tier 1); state and dedup reservations survive a genuine close→reopen against the same tables (Tier 2); two independently-owned live claimers sharing the same tables never both hold an overlapping valid claim (Tier 3) | Tier 2/3 need a factory that opens more than one live store instance against the *same* backing storage — the property a restart or a second node relies on — which no in-process double can misrepresent, because an in-process double has no backing storage independent of the instance holding it | `tests/infrastructure/effect_store_postgres_conformance.rs` |
 | `PostgresEffectStore`-specific claim/lease/retention behavior | Claim exclusivity (G1), expired-lease-scoped reclaim (AD-4), epoch-fenced writes, atomic dedup reservation (AD-8), the AD-9 retention batch bound, and the G10 clock-injection guarantee | Each is a property of what the real database enforces under a real conditional `UPDATE`, a real primary-key upsert, or real row atomicity — none of which a scripted double can misrepresent in a way this suite would catch | `tests/infrastructure/effect_store_postgres_unit.rs` |
+| PROD-002 PR5 Phase 7.5: `RuntimeBuilder::with_effect_store` composed with a real `PostgresEffectStore` | Registering a real, networked `PostgresEffectStore` through the composition seam makes the runtime's `RuntimeEffectAcceptor`/delivery runner actually dispatch THROUGH it end to end — not merely that the seam type-checks. Deliberately not a re-test of the conformance rows above | The in-process sibling (`crates/service-sdk/tests/effect_store_composition.rs`) proves the same seam against a test double and a real embedded Stoolap store; neither exercises sqlx's real connection pool, schema creation and migration path, which only a real networked PostgreSQL can | `tests/infrastructure/effect_store_composition_postgres.rs` |
 
 Relocated here (PROD-002 G11) from the old per-crate `crates/integration-tests`
 — one `testcontainers` container per test file — onto this suite's shared

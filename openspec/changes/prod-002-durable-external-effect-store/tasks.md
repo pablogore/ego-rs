@@ -142,8 +142,140 @@ Spec: "Retry is exercised without a real durable backend."
 
 Spec: "A mixed durable/non-durable registration is not silently treated as durable."
 
-- [ ] 7.1 RED — `crates/service-sdk/src/runtime/builder.rs`: registering a durable `EffectStateStore` + a non-durable `EffectDedupStore` logs both capability profiles independently at startup.
-- [ ] 7.2 GREEN — register the durable store where `InMemoryEffectStore` registers today; log both ports' `capabilities()` at startup via existing tracing conventions.
+- [x] 7.1/7.2 (PR5 Phase 4, superseding design) — added
+  `RuntimeBuilder::with_effect_store<T: EffectStateStore + EffectDedupStore>(Arc<T>)`
+  (`crates/service-sdk/src/runtime/builder.rs`): the single seam this phase
+  was missing (the field's own prior doc comment said so explicitly — "this
+  builder has no seam yet to register a custom durable effect store at
+  all"). Splits ONE registered `Arc<T>` into both the `effect_state_store`
+  and `effect_dedup_store` builder fields, mirroring the
+  `idempotency_reservation_store`/`build()`'s own `InMemoryEffectStore` split
+  idiom already used elsewhere in this file. `build()`'s zero-cost gate now
+  three-way selects: no executors → no store/acceptor built at all; executors
+  + a registered custom store → that store's two ports are used directly;
+  executors + no custom store → `InMemoryEffectStore` is constructed exactly
+  as before (byte-identical default-path behavior). A `debug_assert_eq!`
+  documents that `effect_state_store`/`effect_dedup_store` can only ever be
+  both-`Some` or both-`None`, since the one public setter always sets them
+  together.
+
+  This supersedes the original 7.1/7.2 plan (register two independently-typed
+  ports + log a possibly-mismatched capability pair at startup): the new API
+  accepts only ONE concrete type implementing both `EffectStateStore` and
+  `EffectDedupStore`, so a mixed durable/non-durable registration is no
+  longer a state this builder can express, rather than one it detects and
+  logs. `with_effect_retention_store` is unchanged and composes unchanged —
+  `.with_effect_store(store.clone()).with_effect_retention_store(store)`.
+
+  Evidence: `crates/service-sdk/tests/effect_store_composition.rs` (6 tests,
+  all passing) — default path still dispatches a real effect through
+  `InMemoryEffectStore` end-to-end; a registered custom double's
+  `EffectStateStore` calls are exercised; its `EffectDedupStore` calls are
+  exercised; both trait-object handles the builder produces trace back to
+  the same concrete `Arc` (proven via `Arc::ptr_eq` across matching-type
+  coercions plus a stripped-vtable pointer comparison across the two trait
+  types); a custom store registered with zero executors builds no pipeline
+  and is never called; a store additionally implementing
+  `RetentionMaintenance` composes with `with_effect_retention_store` and
+  builds. `crates/effect-store/src/postgres/mod.rs` and
+  `crates/effect-store/src/stoolap/mod.rs` were not touched — both providers
+  already implement the required trait pair, wiring one through
+  `with_effect_store` is real-provider follow-up, not blocked by anything
+  here. `cargo fmt --check`, `cargo build --workspace --all-features`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` all
+  clean.
+
+## Phase 7.5: Provider Composition Validation (real Stoolap + real PostgreSQL)
+
+Scope addition to the Phase 7 PR, approved before merge. Phase 7's own
+evidence proved the seam generically, against `RecordingEffectStore` — a
+decorator around a real `InMemoryEffectStore`, not a from-scratch
+reimplementation, but still an in-process double. This phase closes the one
+remaining gap the design.md AD-2/§3.2 table opens: that `with_effect_store`
+composes not merely with anything implementing the two traits, but
+specifically with EACH first-party provider (`StoolapEffectStore`,
+`PostgresEffectStore`), and that a real dispatch actually lands in that
+provider's own backing storage — not that the runtime merely believes it
+does. Deliberately NOT a re-test of `claim_due`/`mark_succeeded`/lease/
+retention/recovery semantics: that is Tier 1/2/3 conformance, already
+covered by `ego-effect-store`'s own `tests/conformance.rs` and the G11
+Postgres integration tests.
+
+- [x] Stoolap composition — `crates/service-sdk/tests/
+  effect_store_composition.rs` gained a 7th test,
+  `a_real_stoolap_effect_store_registered_via_with_effect_store_actually_receives_the_dispatch`.
+  Constructs a real, embedded `StoolapEffectStore::open` against a
+  `tempfile::tempdir()` path (no Docker, no external process), registers it
+  via `with_effect_store`, drives one effect end-to-end (accept → dispatch →
+  success) through a real spawned entity actor, then independently proves
+  the dispatch landed in THAT store: a second, independently-constructed
+  `stoolap::Database::open` handle at the identical DSN (Stoolap shares one
+  live engine per DSN while any handle for it is still open) reads the raw
+  `effect_state` row with plain SQL. `InMemoryEffectStore` has no table this
+  could even be asked about — a row showing up here is real evidence of
+  where the dispatch landed, not the runtime's own say-so. Runs under plain
+  `cargo test --workspace --all-features`, hermetically.
+
+  New dev-dependencies on `crates/service-sdk/Cargo.toml`, dev-only (the
+  crate's hexagonal boundary — service-sdk must never depend on a concrete
+  effect-store backend as a regular dependency — stays intact): `ego-
+  effect-store` (path dependency, `features = ["stoolap"]`), `stoolap`
+  (`"0.4"`, for the independent raw-SQL read), `tempfile` (`"3"`, for the
+  on-disk path).
+
+- [x] PostgreSQL composition — new file `integration-tests/tests/
+  infrastructure/effect_store_composition_postgres.rs`, registered as `mod
+  effect_store_composition_postgres;` in `integration-tests/tests/
+  infrastructure.rs` and documented in `integration-tests/README.md`'s
+  PROD-002 table and budget block (13 infrastructure tests total). One test,
+  `a_real_postgres_effect_store_registered_via_with_effect_store_actually_receives_the_dispatch`:
+  connects a real `PostgresEffectStore` against this test's
+  `isolated_database()`-provisioned, per-test-exclusive PostgreSQL database,
+  registers it via `with_effect_store`, drives one effect end-to-end through
+  a real spawned entity actor, then independently proves the dispatch landed
+  in Postgres: a second, completely separate `sqlx::PgPool` (opened via the
+  isolated-database fixture's own `db.pool()`, not through
+  `PostgresEffectStore`'s internal pool) polls the raw `effect_state` table
+  in the schema the store was constructed with until it reads back a
+  `succeeded` row. `integration-tests/Cargo.toml` needed NO new
+  dev-dependency — `ego-effect-store` (`features = ["postgres"]`) and
+  `ego-service-sdk` were already dev-dependencies there from G11 and the
+  PROD-012 scenario suite, respectively; the task brief's assumption that
+  `ego-service-sdk` would need adding was checked and found already
+  satisfied.
+
+  Run via the suite's own runner (`cargo run --manifest-path
+  integration-tests/Cargo.toml --bin run-suite`, `DOCKER_HOST=unix://
+  $HOME/.colima/default/docker.sock`): 35 passed, 1 pre-existing ignored
+  (the documented Tier 1 vs. Postgres G1 tension in
+  `effect_store_postgres_conformance.rs`, unrelated to this change), 0
+  failed — including the new test, alongside every pre-existing G11 Postgres
+  test with no regression. The suite's own `ledger.rs` self-check (README
+  row ↔ module registration ↔ directory agreement) required a matching
+  README row and budget-count update, both added.
+
+- [x] Default in-memory path — re-confirmed
+  `default_path_without_with_effect_store_dispatches_through_in_memory_effect_store`
+  (Phase 7's own test 1: no `with_effect_store` call, dispatch still
+  succeeds through the default-constructed `InMemoryEffectStore`) is exactly
+  the "InMemory ✅" leg this phase's validation matrix needs. No
+  strengthening or duplication added — the existing assertion (the command
+  commits and the registered executor is actually invoked) already covers
+  the default-path composition claim end-to-end.
+
+- [x] Existing 6 Phase 7 tests — unmodified. No conflict forced an
+  adjustment.
+
+  Validation: `cargo fmt --check` clean (both the root workspace and
+  `integration-tests/Cargo.toml`); `cargo build --workspace --all-features`
+  clean; `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings` clean; `cargo test --workspace --all-features` — all crates
+  green, the new Stoolap composition test passing among them, zero Docker/
+  testcontainer references anywhere in that run; `scripts/
+  detect-integration-tests.sh` PASS; `scripts/
+  detect-integration-tests-selftest.sh` PASS (all 11 self-test assertions);
+  the real Postgres suite via `run-suite` — 35 passed, 1 pre-existing
+  ignored, 0 failed, no regression.
 
 ## Phase 8: Reference-App Dogfood (Stoolap)
 

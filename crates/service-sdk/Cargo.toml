@@ -39,6 +39,18 @@ sha2 = "0.11.0"
 
 [dev-dependencies]
 ego-service-sdk-macros = { path = "../service-sdk-macros" }
+# PROD-002 PR5 Phase 7.5: composition-only validation that a real embedded
+# StoolapEffectStore can be selected through `with_effect_store` — dev-only,
+# never a regular dependency, so the crate's hexagonal boundary (service-sdk
+# must not depend on a concrete effect-store backend) stays intact.
+ego-effect-store = { path = "../effect-store", features = ["stoolap"] }
+# Same Phase 7.5 test: opens a second, independent handle on the same DSN to
+# read the raw `effect_state` row back, proving dispatch landed in Stoolap
+# specifically rather than a silently-substituted InMemoryEffectStore.
+stoolap = "0.4"
+# Phase 7.5: a fresh on-disk path for the embedded StoolapEffectStore, same
+# idiom `ego-effect-store`'s own Tier 2 tests already use.
+tempfile = "3"
 # PROD-005 PR2: `#[tokio::test(start_paused = true)]` for deterministic
 # virtual-time health-aggregation timeout tests (feature unifies with the
 # main `tokio` dependency above for test builds).

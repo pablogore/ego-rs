@@ -109,16 +109,26 @@ pub struct RuntimeBuilder {
     retention_policy: Option<crate::runtime::RetentionPolicy>,
     /// The single registered `RetentionMaintenance` capability, if any
     /// (PROD-002 G12). Registered independently from `EffectStateStore`/
-    /// `EffectDedupStore` — this builder has no seam yet to register a
-    /// custom durable effect store at all (`build()` always constructs
-    /// `InMemoryEffectStore` when an executor is registered; that wiring is
-    /// separate, still-open PROD-002 work, tasks.md Phase 7). A caller that
-    /// runs a durable `PostgresEffectStore`/`StoolapEffectStore` elsewhere
-    /// registers that SAME instance here, cast to `dyn RetentionMaintenance`,
-    /// the same "one concrete store, several trait objects" idiom
-    /// `idempotency_reservation_store` above and the effects acceptor's
-    /// dual `EffectStateStore`/`EffectDedupStore` registration already use.
+    /// `EffectDedupStore` (see [`Self::effect_state_store`]/
+    /// [`Self::effect_dedup_store`], wired via
+    /// [`RuntimeBuilder::with_effect_store`], PROD-002 PR5 Phase 7) — a
+    /// caller that runs a durable `PostgresEffectStore`/`StoolapEffectStore`
+    /// registers that SAME instance here too, cast to `dyn
+    /// RetentionMaintenance`, via `.with_effect_store(store.clone())
+    /// .with_effect_retention_store(store)`: the same "one concrete store,
+    /// several trait objects" idiom `idempotency_reservation_store` above
+    /// already uses.
     effect_retention_store: Option<Arc<dyn ego_runtime::effects::RetentionMaintenance>>,
+    /// The custom durable effect state store registered via
+    /// [`RuntimeBuilder::with_effect_store`] (PROD-002 PR5 Phase 7), if any.
+    /// Always `Some` exactly when [`Self::effect_dedup_store`] is — the two
+    /// are set together from the SAME `Arc` by the one public setter; there
+    /// is no way to reach `build()` with only one of them populated.
+    effect_state_store: Option<Arc<dyn EffectStateStore>>,
+    /// The custom durable effect dedup store registered via
+    /// [`RuntimeBuilder::with_effect_store`] (PROD-002 PR5 Phase 7). See
+    /// [`Self::effect_state_store`] for the paired-registration invariant.
+    effect_dedup_store: Option<Arc<dyn EffectDedupStore>>,
     /// The effect-retention schedule, if one was configured (PROD-002 G12).
     effect_retention_policy: Option<crate::runtime::EffectRetentionPolicy>,
     /// Clock effect-retention cutoffs are computed from (G10). `None` means
@@ -230,6 +240,8 @@ impl RuntimeBuilder {
             idempotency_reservation_store: None,
             retention_policy: None,
             effect_retention_store: None,
+            effect_state_store: None,
+            effect_dedup_store: None,
             effect_retention_policy: None,
             effect_retention_clock: None,
             reservation_clock: None,
@@ -458,6 +470,40 @@ impl RuntimeBuilder {
         store: Arc<dyn ego_runtime::effects::RetentionMaintenance>,
     ) -> Self {
         self.effect_retention_store = Some(store);
+        self
+    }
+
+    /// Registers the effect store this runtime's external-effects subsystem
+    /// uses in place of the default `InMemoryEffectStore` (PROD-002 PR5 Phase
+    /// 7). The generic bound below does not require durability — a
+    /// non-durable third-party implementation is equally valid; callers who
+    /// need a durability guarantee get it from which concrete type they pass
+    /// in, not from this method's contract.
+    ///
+    /// Takes ONE concrete type implementing both [`EffectStateStore`] and
+    /// [`EffectDedupStore`] and splits it into both trait-object handles from
+    /// the SAME `Arc` — the same "one concrete store, several trait objects"
+    /// idiom already used above for [`Self::idempotency_reservation_store`]
+    /// and for `build()`'s own `InMemoryEffectStore` split. There is
+    /// deliberately no way to register the two ports from two different
+    /// concrete stores: a mixed durable/non-durable pair is not a
+    /// configuration this builder can express, rather than one it must
+    /// detect and log around.
+    ///
+    /// Optional and absent by default: without this call `build()` keeps
+    /// constructing `InMemoryEffectStore` exactly as before, whenever an
+    /// executor is registered — byte-identical to pre-PR5 behavior.
+    ///
+    /// Composes with [`Self::with_effect_retention_store`] unchanged: a type
+    /// that also implements [`ego_runtime::effects::RetentionMaintenance`]
+    /// registers via `.with_effect_store(store.clone())
+    /// .with_effect_retention_store(store)`.
+    pub fn with_effect_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: EffectStateStore + EffectDedupStore + 'static,
+    {
+        self.effect_state_store = Some(store.clone());
+        self.effect_dedup_store = Some(store);
         self
     }
 
@@ -744,13 +790,34 @@ impl RuntimeBuilder {
         // `new`/`start` split — runs here. [`Runtime::start_effects`] is the
         // new, explicit async entry point a host calls once, after entering
         // Tokio, to actually spawn the `Deferred`-mode drain loop.
+        // PROD-002 PR5 Phase 7: `effect_state_store`/`effect_dedup_store` are
+        // always set together by `with_effect_store`'s single setter — this
+        // debug-only backstop documents that structurally-unreachable-via-
+        // the-public-API invariant, it is not a caller-facing error path.
+        debug_assert_eq!(
+            self.effect_state_store.is_some(),
+            self.effect_dedup_store.is_some(),
+            "effect_state_store and effect_dedup_store must always be set together: \
+             with_effect_store is the only way to populate either, and it always sets \
+             both from the same Arc"
+        );
         let effect_acceptor_impl = if self.effect_executors.is_empty() {
             None
         } else {
-            let store = Arc::new(InMemoryEffectStore::new());
+            let (state_store, dedup_store) =
+                match (self.effect_state_store, self.effect_dedup_store) {
+                    (Some(state_store), Some(dedup_store)) => (state_store, dedup_store),
+                    _ => {
+                        let store = Arc::new(InMemoryEffectStore::new());
+                        (
+                            store.clone() as Arc<dyn EffectStateStore>,
+                            store as Arc<dyn EffectDedupStore>,
+                        )
+                    }
+                };
             Some(Arc::new(RuntimeEffectAcceptor::with_observability(
-                store.clone() as Arc<dyn EffectStateStore>,
-                store as Arc<dyn EffectDedupStore>,
+                state_store,
+                dedup_store,
                 Arc::new(self.effect_executors),
                 self.delivery_config,
                 // PROD-002 G13: `None` when nothing was registered, which
