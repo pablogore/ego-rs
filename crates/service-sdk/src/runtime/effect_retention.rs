@@ -157,9 +157,7 @@ impl EffectRetentionWorker {
                 // `cleanup_deleted` on a successful, non-empty purge (see
                 // `crates/effect-store/src/{postgres,stoolap}/mod.rs`) — this
                 // worker does not log that again, only the metrics/span below.
-                let purged = store
-                    .purge_before(cutoff, policy.batch_size())
-                    .await;
+                let purged = store.purge_before(cutoff, policy.batch_size()).await;
 
                 // G13's fixed metric names (architecture-reconciliation.md):
                 // `effect.cleanup.rows` (counter) and

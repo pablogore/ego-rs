@@ -68,7 +68,10 @@ impl RecordingStore {
 impl RetentionMaintenance for RecordingStore {
     async fn purge_before(&self, cutoff: Timestamp, batch: usize) -> Result<u64, EffectStoreError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.purges.lock().expect("not poisoned").push((cutoff, batch));
+        self.purges
+            .lock()
+            .expect("not poisoned")
+            .push((cutoff, batch));
         self.results
             .get(n.min(self.results.len().saturating_sub(1)))
             .cloned()
@@ -208,7 +211,11 @@ struct HangingStore {
 
 #[async_trait]
 impl RetentionMaintenance for HangingStore {
-    async fn purge_before(&self, _cutoff: Timestamp, _batch: usize) -> Result<u64, EffectStoreError> {
+    async fn purge_before(
+        &self,
+        _cutoff: Timestamp,
+        _batch: usize,
+    ) -> Result<u64, EffectStoreError> {
         self.entered.fetch_add(1, Ordering::SeqCst);
         self.release.notified().await;
         self.resumed.fetch_add(1, Ordering::SeqCst);
@@ -561,7 +568,10 @@ async fn an_uninstrumented_worker_still_purges_and_counts_nothing() {
         .expect("the worker starts");
 
     wait_for_a_purge(&store).await;
-    assert!(store.calls() >= 1, "the purge happens without instrumentation");
+    assert!(
+        store.calls() >= 1,
+        "the purge happens without instrumentation"
+    );
     let _ = runtime.shutdown_async().await;
 }
 
@@ -680,7 +690,8 @@ async fn no_sample_when_the_store_reports_none() {
     let _ = runtime.shutdown_async().await;
 
     assert!(
-        obs.values_of("effect.cleanup.oldest_terminal_age").is_empty(),
+        obs.values_of("effect.cleanup.oldest_terminal_age")
+            .is_empty(),
         "a provider that does not track this (the default) must add no sample: {:?}",
         obs.values_of("effect.cleanup.oldest_terminal_age")
     );
@@ -715,7 +726,8 @@ async fn no_sample_when_oldest_terminal_errors() {
     let _ = runtime.shutdown_async().await;
 
     assert!(
-        obs.values_of("effect.cleanup.oldest_terminal_age").is_empty(),
+        obs.values_of("effect.cleanup.oldest_terminal_age")
+            .is_empty(),
         "an error from oldest_terminal must add no sample: {:?}",
         obs.values_of("effect.cleanup.oldest_terminal_age")
     );
@@ -734,8 +746,9 @@ async fn each_metric_is_emitted_exactly_once_per_tick_not_duplicated() {
     let obs = RecordingObservability::new();
     // An interval long enough that only the immediate first-pass tick fires
     // before shutdown below.
-    let policy = EffectRetentionPolicy::new(Duration::from_secs(300), Duration::from_secs(3_600), 7)
-        .expect("a valid policy");
+    let policy =
+        EffectRetentionPolicy::new(Duration::from_secs(300), Duration::from_secs(3_600), 7)
+            .expect("a valid policy");
     let runtime = RuntimeBuilder::new()
         .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
         .with_effect_retention_store(store.clone())

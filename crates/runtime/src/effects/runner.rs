@@ -3628,7 +3628,9 @@ mod tests {
         let store = Arc::new(InMemoryEffectStore::new());
         let mut registry = ExecutorRegistry::new();
         let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::Success]));
-        registry.register("invoice.created", executor.clone()).unwrap();
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
         let (_queue, receiver) = EffectQueue::bounded(4);
         let obs = RecordingObservability::new();
         let runner = Arc::new(
@@ -3646,14 +3648,13 @@ mod tests {
         let id = EffectId::new();
         // Accepted but never sent through the queue: only the periodic
         // reclaim tick (claim_due) can ever find and dispatch this effect.
-        store.accept(accepted(id, "invoice.created", "uow-1:0")).await.unwrap();
+        store
+            .accept(accepted(id, "invoice.created", "uow-1:0"))
+            .await
+            .unwrap();
 
-        let loop_handle = tokio::spawn(runner.run_inner(
-            receiver,
-            1,
-            shutdown_rx,
-            StdDuration::from_millis(10),
-        ));
+        let loop_handle =
+            tokio::spawn(runner.run_inner(receiver, 1, shutdown_rx, StdDuration::from_millis(10)));
 
         tokio::time::timeout(StdDuration::from_secs(2), async {
             while obs.calls().is_empty() {

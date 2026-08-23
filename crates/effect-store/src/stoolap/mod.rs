@@ -48,7 +48,8 @@ use ego_runtime::effects::store::{
 };
 use stoolap::Database;
 
-const BASE64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const BASE64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
 
 fn state_from_str(s: &str) -> Result<EffectState, EffectStoreError> {
     match s {
@@ -123,7 +124,11 @@ pub struct PartialRetentionFailure {
 
 impl std::fmt::Display for PartialRetentionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "retention batch failed after deleting {} rows: {}", self.deleted, self.source)
+        write!(
+            f,
+            "retention batch failed after deleting {} rows: {}",
+            self.deleted, self.source
+        )
     }
 }
 
@@ -266,20 +271,29 @@ impl StoolapEffectStore {
                          LIMIT $2",
                         (cutoff, batch),
                     )
-                    .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?;
+                    .map_err(|e| PartialRetentionFailure {
+                        deleted,
+                        source: backend_err(e),
+                    })?;
                 let mut ids = Vec::new();
                 for row in rows {
-                    let row = row.map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?;
-                    ids.push(
-                        row.get::<String>(0)
-                            .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?,
-                    );
+                    let row = row.map_err(|e| PartialRetentionFailure {
+                        deleted,
+                        source: backend_err(e),
+                    })?;
+                    ids.push(row.get::<String>(0).map_err(|e| PartialRetentionFailure {
+                        deleted,
+                        source: backend_err(e),
+                    })?);
                 }
                 ids
             };
             delete_batch_preserving_partial_count(effect_ids, &mut deleted, |id| {
-                db.execute("DELETE FROM effect_state WHERE effect_id = $1", (id.clone(),))
-                    .map_err(backend_err)
+                db.execute(
+                    "DELETE FROM effect_state WHERE effect_id = $1",
+                    (id.clone(),),
+                )
+                .map_err(backend_err)
             })?;
 
             let dedup_scopes: Vec<(String, String, String)> = {
@@ -291,17 +305,29 @@ impl StoolapEffectStore {
                          LIMIT $2",
                         (cutoff, batch),
                     )
-                    .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?;
+                    .map_err(|e| PartialRetentionFailure {
+                        deleted,
+                        source: backend_err(e),
+                    })?;
                 let mut scopes = Vec::new();
                 for row in rows {
-                    let row = row.map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?;
+                    let row = row.map_err(|e| PartialRetentionFailure {
+                        deleted,
+                        source: backend_err(e),
+                    })?;
                     scopes.push((
-                        row.get::<String>(0)
-                            .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?,
-                        row.get::<String>(1)
-                            .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?,
-                        row.get::<String>(2)
-                            .map_err(|e| PartialRetentionFailure { deleted, source: backend_err(e) })?,
+                        row.get::<String>(0).map_err(|e| PartialRetentionFailure {
+                            deleted,
+                            source: backend_err(e),
+                        })?,
+                        row.get::<String>(1).map_err(|e| PartialRetentionFailure {
+                            deleted,
+                            source: backend_err(e),
+                        })?,
+                        row.get::<String>(2).map_err(|e| PartialRetentionFailure {
+                            deleted,
+                            source: backend_err(e),
+                        })?,
                     ));
                 }
                 scopes
@@ -310,7 +336,13 @@ impl StoolapEffectStore {
                 dedup_scopes,
                 &mut deleted,
                 |(tenant, effect_type, idempotency_key)| {
-                    Self::delete_eligible_dedup_scope(db, tenant, effect_type, idempotency_key, cutoff)
+                    Self::delete_eligible_dedup_scope(
+                        db,
+                        tenant,
+                        effect_type,
+                        idempotency_key,
+                        cutoff,
+                    )
                 },
             )?;
 
@@ -540,7 +572,11 @@ impl EffectStateStore for StoolapEffectStore {
             if affected == 1 {
                 Ok(())
             } else {
-                Err(Self::transition_error(db, id, EffectState::RetryableFailed)?)
+                Err(Self::transition_error(
+                    db,
+                    id,
+                    EffectState::RetryableFailed,
+                )?)
             }
         })
         .await
@@ -609,11 +645,9 @@ impl EffectStateStore for StoolapEffectStore {
                     .map_err(|e| EffectStoreError::Backend(format!("payload decode: {e}")))?;
 
                 out.push(StoredEffect {
-                    id: EffectId::from_uuid(
-                        id_str
-                            .parse()
-                            .map_err(|e: uuid::Error| EffectStoreError::Backend(format!("effect_id decode: {e}")))?,
-                    ),
+                    id: EffectId::from_uuid(id_str.parse().map_err(|e: uuid::Error| {
+                        EffectStoreError::Backend(format!("effect_id decode: {e}"))
+                    })?),
                     tenant: TenantId::new(tenant)
                         .map_err(|e| EffectStoreError::Backend(format!("tenant decode: {e}")))?,
                     description: Arc::new(ExternalEffectDescription {
@@ -774,7 +808,9 @@ mod tests {
 
     #[test]
     fn backend_err_classifies_lock_failures_as_temporarily_unavailable() {
-        let err = backend_err(stoolap::Error::LockAcquisitionFailed("held by another writer".into()));
+        let err = backend_err(stoolap::Error::LockAcquisitionFailed(
+            "held by another writer".into(),
+        ));
         assert!(
             matches!(err, EffectStoreError::TemporarilyUnavailable(_)),
             "LockAcquisitionFailed must be retryable, got {err:?}"
@@ -864,7 +900,10 @@ mod tests {
         });
 
         let err = result.unwrap_err();
-        assert_eq!(err.deleted, 2, "the two rows deleted before the failure must not be lost");
+        assert_eq!(
+            err.deleted, 2,
+            "the two rows deleted before the failure must not be lost"
+        );
         assert_eq!(
             deleted, 2,
             "the caller's running total must also reflect the two successful deletes"
@@ -886,7 +925,10 @@ mod tests {
         let fp = EffectFingerprint::compute(b"payload", "https://example.com");
 
         // Old reservation settles (succeeded) — eligible for retention.
-        assert_eq!(store.reserve(&s, old_owner, fp).await.unwrap(), DedupOutcome::Fresh);
+        assert_eq!(
+            store.reserve(&s, old_owner, fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
         store.commit_success(&s).await.unwrap();
         let cutoff = Utc::now();
 
@@ -894,7 +936,10 @@ mod tests {
         // scope key before the delete executes.
         store.release(&s).await.unwrap();
         let new_owner = EffectId::new();
-        assert_eq!(store.reserve(&s, new_owner, fp).await.unwrap(), DedupOutcome::Fresh);
+        assert_eq!(
+            store.reserve(&s, new_owner, fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
 
         // The fixed predicate must reject the delete: the row now sharing
         // this scope key is no longer succeeded/settled-before-cutoff.

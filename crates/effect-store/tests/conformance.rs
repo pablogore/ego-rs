@@ -226,7 +226,10 @@ mod tier1_stoolap {
         use ego_runtime::effects::store::RetentionMaintenance;
 
         let store = fresh_store().await;
-        assert_eq!(RetentionMaintenance::oldest_terminal(&store).await, Ok(None));
+        assert_eq!(
+            RetentionMaintenance::oldest_terminal(&store).await,
+            Ok(None)
+        );
     }
 }
 

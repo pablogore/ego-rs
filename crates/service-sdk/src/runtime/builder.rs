@@ -1514,11 +1514,10 @@ impl Runtime {
             return Ok(());
         }
         // Guaranteed by the build-time refusal above; stated rather than assumed.
-        let store = self
-            .inner
-            .effect_retention_store
-            .clone()
-            .expect("build() refuses an effect retention policy without a RetentionMaintenance");
+        let store =
+            self.inner.effect_retention_store.clone().expect(
+                "build() refuses an effect retention policy without a RetentionMaintenance",
+            );
 
         let worker = crate::runtime::effect_retention::EffectRetentionWorker::start(
             policy,
