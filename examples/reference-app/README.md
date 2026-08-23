@@ -72,6 +72,10 @@ curl -i http://127.0.0.1:3000/tenants/tenant-a/users \
 - Interactive docs: http://127.0.0.1:3000/swagger-ui
 - Raw spec: http://127.0.0.1:3000/api-docs/openapi.json
 
+### Local state
+
+External effects (currently: the post-registration "welcome email") are persisted durably in an embedded [Stoolap](https://github.com/stoolap/stoolap) store on disk — no separate server to run, unlike the Postgres-backed event stores above. Defaults to `data/effects` inside this crate; override with `EGO_REFERENCE_APP_EFFECT_STORE_PATH`. Delete the directory to reset all accepted-but-undelivered effect state (never committed — see `.gitignore`).
+
 ### Shutting down
 
 `Ctrl-C` triggers the full graceful sequence: drain in-flight HTTP requests → stop and drain the read-side scheduler → drain the runtime's sync teardown stack (logger/security). Each step is logged.

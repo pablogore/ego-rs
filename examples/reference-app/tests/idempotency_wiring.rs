@@ -34,7 +34,9 @@ use ego_domain::operation::{
 };
 use ego_domain::time::Clock;
 use ego_service_sdk::runtime::IdempotencyEnforcementMode;
-use reference_app::{build_runtime_with, AppConfig, EntityEventStores, IdempotencyWiring};
+use reference_app::{
+    build_runtime_with, AppConfig, EntityEventStores, ExternalEffectsWiring, IdempotencyWiring,
+};
 
 /// Frozen, and years in the past. Only its existence matters here.
 struct FrozenClock;
@@ -84,6 +86,7 @@ fn mode_under(idempotency: IdempotencyWiring) -> IdempotencyEnforcementMode {
         EntityEventStores::in_memory(),
         idempotency,
         None,
+        ExternalEffectsWiring::None,
     )
     .expect("the reference app builds")
     .app

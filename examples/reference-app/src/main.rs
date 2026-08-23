@@ -32,12 +32,31 @@
 //! that failure and "shutdown complete" is never printed, instead of
 //! silently reporting success for a shutdown that didn't actually drain.
 
+use ego_effect_store::StoolapEffectStore;
 use ego_transport::AppState;
+use reference_app::effects::WelcomeEmailExecutor;
 use reference_app::ports::http::build_router;
 use reference_app::{
-    build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, IdempotencyWiring,
+    build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, ExternalEffectsWiring,
+    IdempotencyWiring,
 };
+use std::sync::Arc;
 use tokio::net::TcpListener;
+
+/// Overrides where the durable external-effects store lives on disk. Unset
+/// uses [`DEFAULT_EFFECT_STORE_PATH`].
+///
+/// Read exactly once, at the composition root — same idiom as
+/// `reference_app::CRASH_FAILPOINT_VAR`: a workflow that consulted the
+/// environment itself would carry a second, invisible input.
+const EFFECT_STORE_PATH_VAR: &str = "EGO_REFERENCE_APP_EFFECT_STORE_PATH";
+
+/// This crate has no prior app-data-directory convention (checked
+/// `config.toml`, `.gitignore`) — this is the first one, and it is a
+/// directory, not a file (Stoolap's own on-disk layout). Never committed
+/// (see `examples/reference-app/.gitignore`); delete it to reset all
+/// accepted-but-undelivered effect state.
+const DEFAULT_EFFECT_STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/effects");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,6 +77,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ego_persistence::postgres::migrations::run(&pool).await?;
     let stores = EntityEventStores::open(pool).await?;
 
+    // PROD-002 Phase 8: durable external effects, embedded — no separate
+    // server to run (unlike the Postgres-backed event stores above).
+    // `StoolapEffectStore::open` creates the directory (including any
+    // missing parents) itself — confirmed empirically, not just from its
+    // doc comment's "creating if absent" — so nothing here pre-creates it.
+    let effect_store_path = std::env::var(EFFECT_STORE_PATH_VAR)
+        .unwrap_or_else(|_| DEFAULT_EFFECT_STORE_PATH.to_string());
+    let effect_store =
+        Arc::new(StoolapEffectStore::open(std::path::Path::new(&effect_store_path)).await?);
+
     let BuiltRuntime {
         app,
         authn,
@@ -73,6 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // migration behind it, not a default to inherit.
         IdempotencyWiring::Compatibility,
         None,
+        ExternalEffectsWiring::Stoolap {
+            store: effect_store,
+            executor: Arc::new(WelcomeEmailExecutor),
+        },
     )?;
 
     let query = read_side_handles.query.clone();
@@ -90,9 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(app.resolver(), authn);
     let router = build_router(state, query);
 
-    // `App::start()` (AD-2/AD-6): starts effects (none registered here —
-    // zero-cost no-op), owns no transport future. The host still sequences
-    // its own transport around it, same as before this migration.
+    // `App::start()` (AD-2/AD-6): starts effects — since PROD-002 Phase 8
+    // this spawns the real `DeliveryRunner` that claims and delivers
+    // `WelcomeEmailExecutor`-owned effects from `effect_store` — and owns no
+    // transport future. The host still sequences its own transport around
+    // it, same as before this migration.
     let running = app.start().await?;
 
     let listener = TcpListener::bind("127.0.0.1:3000").await?;

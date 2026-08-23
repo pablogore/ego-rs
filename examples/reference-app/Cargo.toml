@@ -31,6 +31,12 @@ serde_json = "1"
 ego-domain = { path = "../../crates/domain" }
 ego-infrastructure = { path = "../../crates/infrastructure" }
 ego-runtime = { path = "../../crates/runtime" }
+# PROD-002 Phase 8: the reference app's durable external-effects backend —
+# an embedded, no-external-server-dependency store (mirrors how the entity
+# event stores use Postgres, but this one needs no separate service to run).
+# A regular (non-dev) dependency: `main.rs` uses it in production, not only
+# in tests.
+ego-effect-store = { path = "../../crates/effect-store", features = ["stoolap"] }
 persistent-entity = { path = "../../crates/persistent-entity" }
 security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
@@ -56,6 +62,15 @@ utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 ego-testkit = { path = "../../crates/testkit" }
+# PROD-002 Phase 8: `tests/stoolap_restart_persistence.rs` opens a second,
+# independent handle on the same on-disk DSN to read the raw `effect_state`
+# row back — proving delivery landed in the REGISTERED Stoolap store, not
+# merely that the executor was called. Same idiom as
+# `crates/service-sdk/tests/effect_store_composition.rs`.
+stoolap = "0.4"
+# Same test: a fresh on-disk path shared across two independently-opened
+# `StoolapEffectStore` instances (simulated process restart).
+tempfile = "3"
 # The in-memory metrics reader the OTLP adapter's acceptance test asserts through.
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "testing"] }

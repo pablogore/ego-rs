@@ -1,0 +1,4 @@
+# Durable local state (PROD-002 Phase 8): the embedded Stoolap external-
+# effects store `main.rs` opens by default. Never commit runtime DB files —
+# delete this directory to reset all accepted-but-undelivered effect state.
+data/
