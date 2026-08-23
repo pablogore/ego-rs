@@ -142,8 +142,48 @@ Spec: "Retry is exercised without a real durable backend."
 
 Spec: "A mixed durable/non-durable registration is not silently treated as durable."
 
-- [ ] 7.1 RED — `crates/service-sdk/src/runtime/builder.rs`: registering a durable `EffectStateStore` + a non-durable `EffectDedupStore` logs both capability profiles independently at startup.
-- [ ] 7.2 GREEN — register the durable store where `InMemoryEffectStore` registers today; log both ports' `capabilities()` at startup via existing tracing conventions.
+- [x] 7.1/7.2 (PR5 Phase 4, superseding design) — added
+  `RuntimeBuilder::with_effect_store<T: EffectStateStore + EffectDedupStore>(Arc<T>)`
+  (`crates/service-sdk/src/runtime/builder.rs`): the single seam this phase
+  was missing (the field's own prior doc comment said so explicitly — "this
+  builder has no seam yet to register a custom durable effect store at
+  all"). Splits ONE registered `Arc<T>` into both the `effect_state_store`
+  and `effect_dedup_store` builder fields, mirroring the
+  `idempotency_reservation_store`/`build()`'s own `InMemoryEffectStore` split
+  idiom already used elsewhere in this file. `build()`'s zero-cost gate now
+  three-way selects: no executors → no store/acceptor built at all; executors
+  + a registered custom store → that store's two ports are used directly;
+  executors + no custom store → `InMemoryEffectStore` is constructed exactly
+  as before (byte-identical default-path behavior). A `debug_assert_eq!`
+  documents that `effect_state_store`/`effect_dedup_store` can only ever be
+  both-`Some` or both-`None`, since the one public setter always sets them
+  together.
+
+  This supersedes the original 7.1/7.2 plan (register two independently-typed
+  ports + log a possibly-mismatched capability pair at startup): the new API
+  accepts only ONE concrete type implementing both `EffectStateStore` and
+  `EffectDedupStore`, so a mixed durable/non-durable registration is no
+  longer a state this builder can express, rather than one it detects and
+  logs. `with_effect_retention_store` is unchanged and composes unchanged —
+  `.with_effect_store(store.clone()).with_effect_retention_store(store)`.
+
+  Evidence: `crates/service-sdk/tests/effect_store_composition.rs` (6 tests,
+  all passing) — default path still dispatches a real effect through
+  `InMemoryEffectStore` end-to-end; a registered custom double's
+  `EffectStateStore` calls are exercised; its `EffectDedupStore` calls are
+  exercised; both trait-object handles the builder produces trace back to
+  the same concrete `Arc` (proven via `Arc::ptr_eq` across matching-type
+  coercions plus a stripped-vtable pointer comparison across the two trait
+  types); a custom store registered with zero executors builds no pipeline
+  and is never called; a store additionally implementing
+  `RetentionMaintenance` composes with `with_effect_retention_store` and
+  builds. `crates/effect-store/src/postgres/mod.rs` and
+  `crates/effect-store/src/stoolap/mod.rs` were not touched — both providers
+  already implement the required trait pair, wiring one through
+  `with_effect_store` is real-provider follow-up, not blocked by anything
+  here. `cargo fmt --check`, `cargo build --workspace --all-features`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` all
+  clean.
 
 ## Phase 8: Reference-App Dogfood (Stoolap)
 
