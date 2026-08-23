@@ -748,11 +748,16 @@ impl RuntimeBuilder {
             None
         } else {
             let store = Arc::new(InMemoryEffectStore::new());
-            Some(Arc::new(RuntimeEffectAcceptor::new(
+            Some(Arc::new(RuntimeEffectAcceptor::with_observability(
                 store.clone() as Arc<dyn EffectStateStore>,
                 store as Arc<dyn EffectDedupStore>,
                 Arc::new(self.effect_executors),
                 self.delivery_config,
+                // PROD-002 G13: `None` when nothing was registered, which
+                // makes `effect.claim.event`'s site a no-op rather than
+                // driving a discarding implementation on every reclaim tick
+                // — same posture as `start_retention`/`start_retention_effects`.
+                self.observability.clone(),
             )))
         };
 

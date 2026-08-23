@@ -624,6 +624,110 @@ wiring, the same way a caller who runs a durable store outside this
 builder's construction path can register its `OperationReservationStore`
 side today.
 
+### AD-14 reconciliation (G13 — metrics wiring)
+
+**ADAPT, not REPLACE.** Every `log_*` tracing call in
+`crates/runtime/src/effects/observability.rs` (`log_accepted`,
+`log_dispatch_started`, `log_attempt`, `log_success`,
+`log_retry_scheduled`, `log_terminal_failed`, `log_deduplicated`,
+`log_executor_missing`, `log_queue_depth`, `log_oldest_pending_age`,
+`log_claim_acquired`, `log_claim_reclaimed_after_expiry`,
+`log_recovered_in_flight`, `log_cleanup_deleted`) remains exactly as it was.
+G13 adds metrics **alongside** tracing, at existing call sites — tracing
+answers "what happened to this one effect and why," metrics answer "how much
+of this is happening across the fleet," and neither substitutes for the
+other (PROD-012's AD-10a already established this for idempotency; G13
+carries the same posture into effects).
+
+**Canonical metric names (fixed, not renegotiable here):**
+
+- `effect.claim.event` — Counter. One attribute, `event ∈ {"acquired",
+  "reclaimed_after_expiry"}` — a closed, code-controlled set.
+- `effect.recovery.rows` — Counter. Value is the actual row count a
+  `recover_in_flight` sweep recovered; emitted only on success.
+- `effect.cleanup.rows` — Counter, success-only, actual rows deleted.
+- `effect.cleanup.batch_duration` — Histogram, emitted on both success and
+  failure of a purge attempt.
+- `effect.cleanup.oldest_terminal_age` — Gauge (new in G13, chosen to sit in
+  the same `effect.cleanup.*` family as the two metrics above, since it is
+  queried from the same worker tick, immediately mirroring
+  `idempotency.purge.oldest_completed_age`'s contract for
+  `RetentionMaintenance::oldest_terminal`).
+
+**Cardinality policy (hard constraint, permanent).** `owner`,
+`previous_owner`, `new_owner` (UUIDs), `epoch`, `expires_at` (timestamps)
+never become metric attributes — unbounded by nature, and this holds forever,
+not just until a backend complains. Terminal `reason` (currently a free-form
+`String`/`&str`) also never becomes an attribute *in its current form* — it
+is unbounded only because it is untyped today, not because it is
+conceptually a bad dimension; it stays trace-only, a future candidate for a
+dimension once (and only once) it is a closed enum.
+
+**Wiring.** `DeliveryRunner` (`crates/runtime/src/effects/runner.rs`) gained
+an `Option<Arc<dyn Observability>>` field and an additive
+`with_observability` builder step, exactly the idiom G10 used for `Clock`
+(`DeliveryRunner::new` unchanged; a new consuming setter). `Observability`
+reaches it through a new `RuntimeEffectAcceptor::with_observability`
+constructor, sibling to `::new`/`::with_clock`, which `service-sdk`'s
+`RuntimeBuilder::build()` now calls with `self.observability.clone()` instead
+of the previous `RuntimeEffectAcceptor::new(...)` — the same
+`Arc<dyn Observability>` `with_observability(...)` already registers for
+macro-guard denials now also reaches the effects delivery pipeline. Effect
+cleanup's wiring needed no new plumbing: G12 already threaded
+`self.inner.observability()` into `EffectRetentionWorker::start`, so G13's
+cleanup metrics (and the new gauge) are additions inside that worker's
+existing tick, not a new wiring path.
+
+**`effect.claim.event`'s actual call site — and why it is not
+`claim_due` itself.** AD-14's original text (above) describes
+`claim_reclaimed_after_expiry` as fired from `claim_due`'s own `UPDATE`,
+"where the previous/new owner and epoch are genuinely both in hand." That
+remains true for the *tracing* call, and remains **unreachable for any
+provider without widening `EffectStateStore`**: `StoredEffect` (`claim_due`'s
+return type) carries no owner/epoch/lease fields for any implementor —
+in-memory, Stoolap, or Postgres — only `id`, `tenant`, `description`,
+`attempt`, `state`, `next_at`. Widening it to carry owner/epoch would touch
+the frozen `EffectStateStore` contract, which this change does not do.
+`log_claim_acquired`/`log_claim_reclaimed_after_expiry` therefore stay
+exactly as unwired as they were (`#[allow(dead_code)]`), for a data-shape
+reason, not an oversight.
+
+The **metric**, unlike the tracing call, does not need that data at all —
+the cardinality policy above already forbids owner/epoch as attributes, so
+`effect.claim.event`'s only legitimate input is which of the two closed
+buckets a claimed row falls into, and that is fully determined by
+`StoredEffect::state` as already returned: a row still `Pending`/
+`RetryableFailed` is a fresh acquisition, a row still `InFlight` is one
+`claim_due` took over because its lease had expired. This is read generically
+in `DeliveryRunner::reclaim_due` — the one place, provider-agnostic, that
+every `claim_due` call in the running system already flows through — rather
+than inside any one provider's implementation. (Only Postgres's `claim_due`
+ever returns an `InFlight` row at all: the in-memory and Stoolap providers'
+`claim_due` only ever select `Pending`/`RetryableFailed` rows, so
+`reclaimed_after_expiry` is structurally always zero for them — consistent
+with §3.1's ownership/lease model being Postgres-only.)
+
+**`effect.recovery.rows` — found unwireable as specified, reported rather
+than improvised.** `EffectStateStore::recover_in_flight` has **no production
+caller anywhere** in `ego-runtime`/`ego-service-sdk` as of G12's HEAD — every
+call site outside its own trait/impl definitions is a test double or a unit
+test calling it directly. There is no "startup recovery sweep" this metric
+could be added alongside without first inventing one, and inventing new
+runtime behavior (when a crash-recovery sweep runs, at what scope, on what
+schedule) is a functional design decision outside an observability-wiring
+change's charter. `effect.recovery.rows` and `log_recovered_in_flight`
+therefore remain unwired, not as a G13 gap but as a pre-existing gap this
+change surfaces rather than papers over. Whoever designs the recovery sweep
+gets both the tracing call and this metric name for free at that call site
+when it is added.
+
+**What did not change:** `EffectStateStore`/`EffectDedupStore` (byte-
+identical); the Postgres claim SQL in `crates/effect-store/src/postgres/
+mod.rs` (`claim_due`'s `UPDATE ... RETURNING` is untouched — no new returned
+column, no new branch); Stoolap's ownership model; G10's `Clock` model; G11's
+integration-test layout; G12's `RetentionMaintenance` contract/trait shape;
+G15's causal gate in `abandon_and_release`.
+
 ## 4. Data flow (durable path)
 
 ```

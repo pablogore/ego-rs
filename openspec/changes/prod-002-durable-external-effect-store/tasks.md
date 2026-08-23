@@ -399,6 +399,96 @@ trait signatures, `run_retention`'s SQL, or PROD-012's
   names, and leaves a `TODO(G13)` comment (not an invented gauge) where a
   settled-backlog-age gauge would go once G13 names one. G12 CLOSED.
 
+## Phase 14: G13 — Effects Observability/Metrics Wiring (AD-14 reconciliation)
+
+Spec: tracing and metrics are complementary, not substitutes — every
+existing `log_*` call in `crates/runtime/src/effects/observability.rs`
+stays exactly as it was; metrics are added alongside at existing call
+sites. Scope: `DeliveryRunner`/`RuntimeEffectAcceptor` wiring +
+`EffectRetentionWorker`'s cleanup tick. Explicitly does not touch
+`EffectStateStore`/`EffectDedupStore`, the Postgres claim SQL, Stoolap's
+ownership model, G10's `Clock` model, G11's integration-test layout, G12's
+`RetentionMaintenance` contract, or G15's causal gate.
+
+- [x] 14.1 GREEN — `DeliveryRunner` gains an `Option<Arc<dyn Observability>>`
+  field + additive `with_observability` builder step (same idiom G10 used
+  for `Clock`; `DeliveryRunner::new`'s signature unchanged).
+  `RuntimeEffectAcceptor` gains a sibling `with_observability` constructor
+  (and an internal `with_clock_and_observability` composition point both
+  named constructors delegate to) so `service-sdk`'s `RuntimeBuilder::
+  build()` can pass `self.observability.clone()` through instead of the
+  previous unconditional `RuntimeEffectAcceptor::new(...)` call — the same
+  `Arc<dyn Observability>` already registered for macro-guard denials now
+  also reaches the effects delivery pipeline.
+- [x] 14.2 GREEN — `effect.claim.event` (Counter, `event ∈ {"acquired",
+  "reclaimed_after_expiry"}`) emitted from `DeliveryRunner::reclaim_due` —
+  provider-agnostic, bucketed purely from `StoredEffect::state` as
+  `claim_due` already returns it (`Pending`/`RetryableFailed` → acquired,
+  `InFlight` → reclaimed). No owner/epoch/lease timestamp crosses this
+  boundary — `StoredEffect` carries none for any provider, so exposing them
+  here would mean widening the frozen `EffectStateStore` contract, which
+  this task does not do. `log_claim_acquired`/`log_claim_reclaimed_after_expiry`
+  stay exactly as unwired as before (`#[allow(dead_code)]`), for that same
+  data-shape reason, not an oversight. Tests (`runner.rs`, no Docker):
+  `a_purely_fresh_batch_emits_only_the_acquired_bucket`,
+  `a_purely_reclaimed_batch_emits_only_the_reclaimed_bucket`,
+  `a_mixed_batch_reports_both_buckets_with_their_own_counts`,
+  `an_empty_batch_emits_nothing`, `no_observability_registered_is_a_silent_no_op`,
+  `only_the_closed_event_attribute_ever_appears_never_owner_or_epoch_or_timestamps`,
+  `the_reclaim_loop_itself_emits_effect_claim_event_for_a_pending_effect`
+  (end-to-end through `run_inner`, proving the wiring reaches the real
+  production tick, not just a direct method call).
+- [x] 14.3 Found unwireable, reported rather than improvised —
+  `effect.recovery.rows`: `EffectStateStore::recover_in_flight` has **no
+  production caller anywhere** in `ego-runtime`/`ego-service-sdk` as of
+  G12's HEAD (confirmed by exhaustive grep — every call site outside its
+  own trait/impl definitions is a test double or a direct unit-test call).
+  There is no startup/crash-recovery sweep this metric could be added
+  alongside without first inventing one, and inventing that runtime
+  behavior (when a sweep runs, at what scope, on what schedule) is a
+  functional design decision outside this observability-wiring change's
+  charter. `effect.recovery.rows` and `log_recovered_in_flight` remain
+  unwired — a pre-existing gap this task surfaces rather than papers over,
+  not a new G13 gap. Whoever designs the recovery sweep gets both the
+  tracing call and this metric name for free at that call site.
+- [x] 14.4 GREEN — cleanup metrics need no new wiring path: G12 already
+  threaded `Arc<dyn Observability>` into `EffectRetentionWorker::start`, so
+  `effect.cleanup.rows`/`effect.cleanup.batch_duration` (already emitted
+  since G12, using these exact fixed names) needed no change here. Added
+  `effect.cleanup.oldest_terminal_age` (Gauge) — same `effect.cleanup.*`
+  family since it's queried from the same tick — mirroring PROD-012's
+  `idempotency.purge.oldest_completed_age` line for line: queried *after*
+  the purge (describes the remaining backlog, not what this batch just
+  removed), computed from the worker's injected `Clock` (never wall time),
+  clamped at zero for cross-replica clock skew, silent on `None`/`Err`
+  exactly as `OperationReservationStore::oldest_completed`'s
+  `Empty`/`Unsupported` cases already are for reservations. Tests
+  (`effect_retention_worker_lifecycle.rs`):
+  `a_successful_tick_counts_the_rows_it_removed_and_its_duration`,
+  `a_failing_purge_reports_its_duration_and_no_rows`,
+  `an_uninstrumented_worker_still_purges_and_counts_nothing`,
+  `the_gauge_reports_the_age_of_the_oldest_surviving_settlement`,
+  `a_settlement_ahead_of_the_observing_clock_reports_zero_not_a_negative_age`,
+  `no_sample_when_the_store_reports_none`, `no_sample_when_oldest_terminal_errors`,
+  `each_metric_is_emitted_exactly_once_per_tick_not_duplicated` (provider vs.
+  worker double-emission guard).
+- [x] 14.5 Scope guard — confirmed by diff: `EffectStateStore`/
+  `EffectDedupStore` byte-identical; Postgres `claim_due`'s
+  `UPDATE ... RETURNING` untouched (no new returned column, no new branch);
+  Stoolap's ownership model, G10's `Clock` model, G11's integration-test
+  layout, G12's `RetentionMaintenance` contract/trait shape, and G15's
+  causal gate in `abandon_and_release` all untouched.
+- [x] 14.6 Cardinality guard — `only_the_closed_event_attribute_ever_appears_never_owner_or_epoch_or_timestamps`
+  (14.2) and the cleanup metrics' zero-extra-attribute call sites (14.4)
+  jointly confirm owner/previous_owner/new_owner/epoch/expires_at/reason
+  never appear as a metric attribute anywhere this task touches.
+- [x] 14.7 Validation, all green: `cargo build --workspace --all-features`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace --all-features` — 0 failures, 0 regressions.
+  PROD-012's own `retention_worker_lifecycle.rs` (22 tests) and observability
+  conformance tests re-confirmed green, unmodified. `spec.md` untouched — no
+  public-contract contradiction found. G13 CLOSED.
+
 ## Threat Matrix
 
 | Case | Covered by |

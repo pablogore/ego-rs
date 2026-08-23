@@ -178,13 +178,35 @@ impl EffectRetentionWorker {
                         obs.counter("effect.cleanup.rows", *rows as f64, &[]);
                     }
 
-                    // TODO(G13): no fixed metric name exists yet for a
-                    // "settled backlog age" gauge (only `effect.cleanup.rows`
-                    // /`effect.cleanup.batch_duration` are decided). Wiring
-                    // `store.oldest_terminal()` into a gauge here, the same
-                    // way `idempotency.purge.oldest_completed_age` does for
-                    // reservations, is left for whoever formalizes that name
-                    // as part of G13 rather than invented ad hoc here.
+                    // G13's `effect.cleanup.oldest_terminal_age` gauge —
+                    // mirrors `RetentionWorker`'s `idempotency.purge.
+                    // oldest_completed_age` line for line (`retention.rs`):
+                    // queried *after* the purge (so it describes the backlog
+                    // that remains, not rows this batch was about to
+                    // delete), computed from this worker's own injected
+                    // clock (not the store's `settled_at`, and not
+                    // `Instant::now()` — a test positions the logical clock
+                    // freely), and clamped at zero for the same reason: two
+                    // replicas' clocks can disagree, and a settled_at
+                    // slightly ahead of this reader must read as "nothing
+                    // older than now", not as negative backlog.
+                    //
+                    // `RetentionMaintenance::oldest_terminal` returns
+                    // `Result<Option<Timestamp>, EffectStoreError>` rather
+                    // than `OperationReservationStore::oldest_completed`'s
+                    // three-variant `OldestCompleted` — its default already
+                    // folds "empty" and "unsupported" into the same `None`,
+                    // so both stay silent here exactly as `Empty`/
+                    // `Unsupported` do for reservations, and an `Err` adds no
+                    // sample of its own, matching that same precedent.
+                    if let Ok(Some(settled_at)) = store.oldest_terminal().await {
+                        let age = clock.now() - settled_at.into_utc();
+                        obs.gauge(
+                            "effect.cleanup.oldest_terminal_age",
+                            age.num_milliseconds().max(0) as f64 / 1_000.0,
+                            &[],
+                        );
+                    }
                 }
 
                 if let Some(span) = span {
