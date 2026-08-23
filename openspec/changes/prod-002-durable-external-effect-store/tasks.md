@@ -281,6 +281,13 @@ Postgres integration tests.
 
 Spec: kill-the-process success criterion.
 
+Phase 8 blocked on AppBuilder facade delegation, resolved by PR6a
+(`AppBuilder::effect_store`/`effect_retention_store`,
+`crates/service-sdk/src/app/mod.rs`) — `examples/reference-app` builds
+through `App::builder()`, not `RuntimeBuilder` directly, and `AppBuilder` had
+no delegation for `RuntimeBuilder::with_effect_store`/
+`with_effect_retention_store`. Phase 8 itself resumes unstarted below.
+
 - [ ] 8.1 RED — reference-app e2e: an accepted effect survives a simulated restart against the embedded `StoolapEffectStore` (new process/store instance over the same on-disk file).
 - [ ] 8.2 GREEN — wire `examples/reference-app` to register `StoolapEffectStore` in place of `InMemoryEffectStore` — no external server dependency.
 - [ ] 8.3 Run `cargo test -p reference-app` — 0 regressions.
