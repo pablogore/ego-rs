@@ -159,13 +159,9 @@ impl EffectRetentionWorker {
                 // worker does not log that again, only the metrics/span below.
                 let purged = store.purge_before(cutoff, policy.batch_size()).await;
 
-                // G13's fixed metric names (architecture-reconciliation.md):
+                // Fixed metric names (architecture-reconciliation.md):
                 // `effect.cleanup.rows` (counter) and
-                // `effect.cleanup.batch_duration` (histogram) — G13 itself
-                // (wiring claim/recovery metrics too) is not yet implemented
-                // in this worktree, but its names for cleanup are already
-                // decided, so this worker uses them rather than inventing a
-                // parallel ad hoc scheme.
+                // `effect.cleanup.batch_duration` (histogram).
                 if let Some(obs) = observability.as_ref() {
                     obs.histogram(
                         "effect.cleanup.batch_duration",
