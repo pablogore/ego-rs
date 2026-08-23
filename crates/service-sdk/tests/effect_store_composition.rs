@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ego_domain::{ExternalEffectDescription, IdempotencyKey};
+use ego_effect_store::StoolapEffectStore;
 use ego_runtime::effects::{
     AcceptedEffect, AttemptOutcome, DedupOutcome, DedupScope, EffectContext, EffectDedupStore,
     EffectFingerprint, EffectId, EffectStateStore, EffectStoreError, ExternalEffectExecutor,
@@ -429,4 +430,72 @@ fn with_effect_store_composes_with_with_effect_retention_store() {
     // Compiling and building is the whole assertion: the retention worker's
     // own lifecycle (start/stop/purge cadence) is already covered by
     // `effect_retention_worker_lifecycle.rs`.
+}
+
+// ---------------------------------------------------------------------------
+// 7. Provider composition validation (PROD-002 PR5 Phase 7.5): a REAL
+// embedded StoolapEffectStore, not a test double
+// ---------------------------------------------------------------------------
+//
+// Everything above proves the seam works generically, against
+// `RecordingEffectStore` (a decorator, not a from-scratch reimplementation).
+// This test proves the same seam composes with a real first-party durable
+// provider: `with_effect_store` accepts it, and the runtime's
+// `RuntimeEffectAcceptor`/delivery runner actually dispatch THROUGH it — not
+// merely that it type-checks. It deliberately does NOT re-test
+// `claim_due`/`mark_succeeded`/lease/retention semantics: that is Tier 1/2/3
+// conformance, already covered by `ego-effect-store`'s own
+// `tests/conformance.rs`.
+#[tokio::test]
+async fn a_real_stoolap_effect_store_registered_via_with_effect_store_actually_receives_the_dispatch(
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(
+        StoolapEffectStore::open(dir.path())
+            .await
+            .expect("open a real embedded StoolapEffectStore"),
+    );
+    let executor = RecordingExecutor::new();
+    let sdk_runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .with_effect_store(store.clone())
+        .register_effect_executor(["invoice.created"], executor.clone())
+        .unwrap()
+        .build();
+    sdk_runtime
+        .start_effects()
+        .await
+        .expect("an executor was registered — start_effects must succeed");
+
+    dispatch_one_effect_and_wait(&sdk_runtime, &executor, "stoolap-1").await;
+
+    // Independent inspection: open a SECOND, independently-constructed handle
+    // at the exact same on-disk DSN — Stoolap's process-global registry
+    // shares one live engine per DSN while any handle for it (our `store`
+    // above, still alive inside `sdk_runtime`) is still open — and read the
+    // raw `effect_state` row with plain SQL. `InMemoryEffectStore` has no
+    // table this could even ask about, so a row showing up here is real
+    // evidence the dispatch landed in the REGISTERED Stoolap store, not that
+    // the runtime merely *believes* it did. Polled, not asserted once,
+    // because `mark_succeeded` lands asynchronously, a moment after the
+    // executor above already returned.
+    let dsn = format!("file://{}", dir.path().display());
+    let inspector =
+        stoolap::Database::open(&dsn).expect("open a second, independent handle on the same DSN");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let mut rows = inspector
+                .query(
+                    "SELECT state FROM effect_state WHERE state = 'succeeded'",
+                    (),
+                )
+                .expect("query the raw effect_state table");
+            if matches!(rows.next(), Some(Ok(_))) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the registered Stoolap store must independently show the effect as succeeded");
 }

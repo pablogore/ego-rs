@@ -56,6 +56,10 @@ mod infrastructure {
     #[cfg(unix)]
     mod dual_aggregate_crash_recovery_postgres;
     mod durable_entity_progress_postgres;
+    /// PROD-002 PR5 Phase 7.5: composition-only validation that a real
+    /// `PostgresEffectStore` composes with `RuntimeBuilder::with_effect_store`
+    /// end to end — not a re-test of Tier 1/2/3 conformance below.
+    mod effect_store_composition_postgres;
     /// PROD-002 G11: Tier 2/3 PostgreSQL effect-store conformance, relocated
     /// here from the old per-crate `crates/integration-tests`.
     mod effect_store_postgres_conformance;
