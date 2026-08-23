@@ -25,6 +25,11 @@ use ego_service_sdk::context::ServiceContext;
 #[allow(dead_code)] // not every consumer of this module uses this fixture
 pub struct RecordingObservability {
     pub events: Mutex<Vec<SemanticEvent>>,
+    /// Every metric emission, whole and in order.
+    ///
+    /// See [`ego_testkit::RecordedMetric::capture`] for why a trace-focused
+    /// double records these at all, and why it appends rather than overwrites.
+    pub metrics: Mutex<Vec<ego_testkit::RecordedMetric>>,
 }
 
 #[allow(dead_code)]
@@ -48,7 +53,12 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric(&self, _name: &str, _value: f64) {}
+    fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .push(ego_testkit::RecordedMetric::capture(&observation));
+    }
     fn log(&self, _level: Level, _message: &str) {}
 }
 
@@ -69,5 +79,19 @@ pub fn authenticated_ctx_with_hint(tenant: Option<&str>, hint: Option<&str>) -> 
     match hint {
         Some(h) => ctx.with_tenant_id(h),
         None => ctx,
+    }
+}
+
+#[cfg(test)]
+mod observability_contract {
+    use super::RecordingObservability;
+
+    /// This module's double preserves every field of what it is handed.
+    #[test]
+    fn the_double_preserves_metric_observations() {
+        let obs = RecordingObservability::new();
+        ego_testkit::assert_metric_observations_are_preserved(&obs, || {
+            obs.metrics.lock().unwrap().clone()
+        });
     }
 }

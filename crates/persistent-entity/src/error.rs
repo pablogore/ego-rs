@@ -23,6 +23,21 @@ pub enum EntityError {
     RecoveryError(String),
     /// An internal error occurred.
     Internal(String),
+    /// The same operation key arrived carrying a different request.
+    ///
+    /// **Permanent, and deliberately not a [`VersionConflict`].** That variant
+    /// reports stream concurrency: two writers raced, the loser reloads and
+    /// retries, and its two version numbers tell the caller where it stands.
+    /// This one has no versions to report and no retry that could help — the
+    /// key is already bound to another request, and it stays bound. Collapsing
+    /// the two would tell a caller to retry something that will never succeed,
+    /// and would hide a client-side key-reuse bug inside a routine race.
+    ///
+    /// [`VersionConflict`]: EntityError::VersionConflict
+    OperationConflict {
+        /// The operation key that is already bound to a different request.
+        operation_key: String,
+    },
     /// A version conflict occurred.
     VersionConflict {
         /// The expected version.
@@ -49,6 +64,12 @@ impl fmt::Display for EntityError {
                 f,
                 "Version conflict: expected {}, actual {}",
                 expected, actual
+            ),
+            EntityError::OperationConflict { operation_key } => write!(
+                f,
+                "Operation conflict: operation key {:?} is already bound to a different \
+                 request; retrying will not resolve it",
+                operation_key
             ),
             EntityError::MailboxClosed => write!(f, "Mailbox closed"),
         }

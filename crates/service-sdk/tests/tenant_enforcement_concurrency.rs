@@ -24,7 +24,11 @@ fn resolved_tenant_id(ctx: &ServiceContext) -> Option<&str> {
 // a small owned value per AD-004/AD-005, not shared state.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_operations_with_different_tenants_do_not_cross_contaminate() {
-    let runtime = RuntimeBuilder::new().build();
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let inner_a = runtime.inner().clone();
     let inner_b = runtime.inner().clone();
 
@@ -51,7 +55,11 @@ async fn concurrent_operations_with_different_tenants_do_not_cross_contaminate()
 // from the failed attempt.
 #[test]
 fn retried_call_resolves_to_the_identical_canonical_tenant() {
-    let runtime = RuntimeBuilder::new().build();
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let inner = runtime.inner();
 
     let mut first_attempt = authenticated_ctx(Some("tenant-a"));
@@ -85,7 +93,11 @@ fn clone_before_resolution_neither_copy_has_a_canonical_tenant() {
 
 #[test]
 fn clone_after_resolution_carries_the_same_canonical_tenant_and_cannot_diverge() {
-    let runtime = RuntimeBuilder::new().build();
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build();
     let mut ctx = authenticated_ctx(Some("tenant-a"));
     runtime.inner().enforce_tenant(&mut ctx).expect("resolves");
 

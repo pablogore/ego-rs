@@ -3,7 +3,7 @@
 
 use ego_domain::Validate;
 use reference_app::read_side::UsersByTenantStore;
-use reference_app::{build_runtime, AppConfig};
+use reference_app::{build_runtime_in_memory, AppConfig};
 
 #[test]
 fn valid_app_config_passes_validate_and_builds_runtime() {
@@ -14,7 +14,7 @@ fn valid_app_config_passes_validate_and_builds_runtime() {
         "default AppConfig should be valid"
     );
 
-    let runtime = build_runtime(&config);
+    let runtime = build_runtime_in_memory(&config);
     assert!(
         runtime.is_ok(),
         "build_runtime should construct services from a valid AppConfig"
@@ -36,7 +36,7 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
     // build_runtime calls config.validate() before constructing any service
     // (see lib.rs `build_runtime` — `config.validate()?` is the first line),
     // so the same invalid config must fail the pipeline the same way.
-    let pipeline_err = build_runtime(&config);
+    let pipeline_err = build_runtime_in_memory(&config);
     assert!(
         pipeline_err.is_err(),
         "build_runtime must return Err before constructing any service"
@@ -46,14 +46,15 @@ fn invalid_subtree_config_fails_validate_before_any_service_is_constructed() {
 // CORE-028 Stage 2 (task 5.2, design.md Testing Strategy): the design doc's
 // own test plan for this feature is exactly this cheap, non-async assertion
 // — the query handle `build_runtime`'s `.projection(...)` call registers
-// must be resolvable through the DI path. `e2e_register.rs` separately
-// proves the resolved handle observes live engine writes, which needs the
-// full HTTP/JWT stack; reachability alone does not.
+// must be resolvable through the DI path. That the resolved handle observes
+// live engine writes needs the full HTTP/JWT stack over a real socket, and is
+// no longer proven anywhere in this workspace — see
+// `docs/integration-test-backlog.md`. Reachability alone does not establish it.
 #[test]
 fn build_runtime_registers_the_read_model_as_a_resolvable_projection() {
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config).expect("build_runtime succeeds");
+    let runtime = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     assert!(
         runtime
             .app
@@ -74,7 +75,7 @@ fn build_runtime_registers_the_user_entity_runtime_as_resolvable() {
 
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config).expect("build_runtime succeeds");
+    let runtime = build_runtime_in_memory(&config).expect("build_runtime succeeds");
     assert!(
         runtime.app.resolve_entity::<UserEntity>().is_ok(),
         "UserEntity's runtime must be resolvable via the entity DI path after build"
@@ -166,6 +167,9 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
     // `App::builder().entity::<UserEntity>(...)`, exactly as `build_runtime`
     // does, then resolve it back out via `App::resolve_entity`.
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .entity::<UserEntity>(user_runtime.clone())
         .build()
         .expect("build succeeds");
@@ -195,8 +199,8 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
     // `EffectAcceptor` (mirroring `build_runtime`, which registers none
     // either), so a real, successful write here is `EffectsAcceptanceFailed`,
     // not `Events` — a committed write with a post-commit warning attached,
-    // never a command failure (same as `e2e_register.rs`/
-    // `register_user_partial_failure.rs` handle it).
+    // never a command failure (same as `register_user_partial_failure.rs`
+    // handles it).
     match fresh_result {
         CommandResult::Events { new_state, .. }
         | CommandResult::EffectsAcceptanceFailed { new_state, .. } => assert_eq!(
@@ -228,7 +232,7 @@ async fn di_resolved_entity_runtime_ref_dispatches_and_shares_state_with_product
 fn build_runtime_wires_real_kit_config_output() {
     let config = AppConfig::default();
 
-    let runtime = build_runtime(&config);
+    let runtime = build_runtime_in_memory(&config);
     assert!(
         runtime.is_ok(),
         "build_runtime should materialize configuration through the real kit-config \

@@ -34,6 +34,9 @@ use crate::runtime::logger::TeardownStack;
 use crate::runtime::runtime_builder::{
     DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner,
 };
+use ego_domain::operation::OperationReservationStore;
+
+use crate::runtime::idempotency::IdempotencyEnforcementMode;
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
 use crate::runtime::{Resolvable, ResolvableContainer, RuntimeInfraError};
 
@@ -94,6 +97,29 @@ pub struct RuntimeBuilder {
     /// `projections` (AD-4).
     entities: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     tenant_enforcement_mode: TenantEnforcementMode,
+    /// How a missing client-supplied operation key is treated.
+    ///
+    /// Defaults to the enforcing variant, and that default has teeth: under it a
+    /// runtime cannot be built without an [`OperationReservationStore`], because a
+    /// runtime that promises mandatory keys and has nowhere to reserve them cannot
+    /// keep the promise.
+    idempotency_enforcement_mode: IdempotencyEnforcementMode,
+    /// The single registered reservation store, if any.
+    idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
+    retention_policy: Option<crate::runtime::RetentionPolicy>,
+    /// Clock the reservation lease is computed from. `None` means the real one.
+    /// Injectable so lease expiry is testable without wall time (AD-3i).
+    reservation_clock: Option<Arc<dyn ego_domain::time::Clock>>,
+    /// Identity this runtime reserves under. `None` means `build()` mints one.
+    /// Injectable only so `OwnedInProgress`, `OtherInProgress` and `TakenOver`
+    /// can be exercised deterministically; production must neither share it
+    /// across instances nor persist it across restarts (AD-3i).
+    reservation_owner_id: Option<ego_domain::operation::OwnerId>,
+    /// How long a reservation's lease holds. Must exceed the longest a
+    /// legitimate execution can take: when it expires another owner may take
+    /// over *while the original is still running*, so until renewal exists a
+    /// short lease permits overlap (AD-3i).
+    reservation_lease_duration: std::time::Duration,
     /// `(service_name, S::validate)` pairs recorded via `with_injectable`.
     /// Read only by `try_build()`; has no effect on `build()` (AD-3).
     validators: Vec<ValidatorEntry>,
@@ -183,6 +209,12 @@ impl RuntimeBuilder {
             projections: HashMap::new(),
             entities: HashMap::new(),
             tenant_enforcement_mode: TenantEnforcementMode::AuthenticatedOnly,
+            idempotency_enforcement_mode: IdempotencyEnforcementMode::default(),
+            idempotency_reservation_store: None,
+            retention_policy: None,
+            reservation_clock: None,
+            reservation_owner_id: None,
+            reservation_lease_duration: std::time::Duration::from_secs(30),
             validators: Vec::new(),
             observability: None,
             tracer: None,
@@ -355,6 +387,98 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets how a missing client-supplied operation key is treated.
+    ///
+    /// The default is [`IdempotencyEnforcementMode::MandatoryKey`], and it is the
+    /// reason building without a reservation store fails: a runtime that promises
+    /// every mutating operation carries a client key has nowhere to reserve those
+    /// keys, so it cannot keep the promise.
+    ///
+    /// [`IdempotencyEnforcementMode::Compatibility`] is the explicit way to say a
+    /// deployment has not adopted enforcement yet. It is deliberately something a
+    /// caller has to write: the alternative — treating an unconfigured builder as
+    /// not-yet-adopted — would let a deployment end up unguarded without anyone
+    /// deciding that, which is exactly what the fail-closed default exists to
+    /// prevent.
+    pub fn with_idempotency_enforcement_mode(mut self, mode: IdempotencyEnforcementMode) -> Self {
+        self.idempotency_enforcement_mode = mode;
+        self
+    }
+
+    /// Registers the single [`OperationReservationStore`] this runtime reserves
+    /// operations through.
+    ///
+    /// Exactly one: a second call replaces the first rather than accumulating,
+    /// because two stores would mean two places a key could be reserved and no
+    /// answer to which one decides.
+    /// Enables retention of completed reservations.
+    ///
+    /// Optional and absent by default: without this call no worker is started and
+    /// nothing is ever deleted. An SDK upgrade must not begin removing a service's
+    /// data on a schedule nobody chose.
+    ///
+    /// Requires a registered [`OperationReservationStore`]; `build()` refuses
+    /// otherwise, because a retention schedule with nothing to purge is a
+    /// configuration that cannot mean what it says.
+    pub fn with_retention_policy(mut self, policy: crate::runtime::RetentionPolicy) -> Self {
+        self.retention_policy = Some(policy);
+        self
+    }
+
+    pub fn with_operation_reservation_store(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+    ) -> Self {
+        self.idempotency_reservation_store = Some(store);
+        self
+    }
+
+    /// Overrides the clock the reservation lease is computed from.
+    ///
+    /// Defaults to the real system clock. It is injectable because lease expiry
+    /// is otherwise only observable by waiting: `TakenOver` needs an expired
+    /// lease, and a test that produces one by sleeping is a test that is slow
+    /// when it passes and flaky when the machine is loaded. This is the same
+    /// reason A4 generalised `Clock` out of auth.
+    pub fn with_reservation_clock(mut self, clock: Arc<dyn ego_domain::time::Clock>) -> Self {
+        self.reservation_clock = Some(clock);
+        self
+    }
+
+    /// Overrides the identity this runtime reserves under.
+    ///
+    /// Normally left alone: `build()` mints a fresh UUID per instance, which is
+    /// what makes a retry inside this runtime observable as `OwnedInProgress`
+    /// while another replica sees `OtherInProgress`.
+    ///
+    /// It exists because those two outcomes, and `TakenOver`, cannot otherwise
+    /// be exercised deterministically — a test needs to decide who owns what.
+    /// **Production should neither share an owner across instances nor persist
+    /// one across restarts.** Sharing would not let two replicas proceed
+    /// (AD-3h blocks `OwnedInProgress` as well), but it would erase the
+    /// difference between self-contention and external contention and would
+    /// break lease renewal, which must only renew a lease this instance holds.
+    pub fn with_reservation_owner_id(mut self, owner_id: ego_domain::operation::OwnerId) -> Self {
+        self.reservation_owner_id = Some(owner_id);
+        self
+    }
+
+    /// Sets how long a reservation's lease holds. Defaults to 30 seconds.
+    ///
+    /// **This must exceed the longest a legitimate execution can take.** When a
+    /// lease expires another owner may take the reservation over *while the
+    /// original is still running*, so until renewal exists a lease shorter than
+    /// a real operation permits overlap — a correctness problem, not a tuning
+    /// preference. The 30-second default is an operational policy, not a
+    /// guarantee that any particular operation fits inside it.
+    ///
+    /// Zero is rejected when the runtime is built: a lease that expires the
+    /// instant it is taken excludes nobody while appearing to work.
+    pub fn with_reservation_lease_duration(mut self, lease: std::time::Duration) -> Self {
+        self.reservation_lease_duration = lease;
+        self
+    }
+
     /// Registers an `Observability` implementor to receive macro-guard
     /// security-denial events (CORE-012A). When never called, the runtime
     /// defaults to `None` (AD-2) — recording is a silent no-op and behavior
@@ -501,12 +625,43 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Whether this configuration can honour the idempotency guarantee it declares.
+    ///
+    /// The **one** definition of that rule. `build` panics on its error and
+    /// `try_build` returns it, so the two cannot come to disagree about what a valid
+    /// configuration is.
+    fn validate_idempotency(&self) -> Result<(), RuntimeError> {
+        match self.idempotency_enforcement_mode {
+            IdempotencyEnforcementMode::MandatoryKey
+                if self.idempotency_reservation_store.is_none() =>
+            {
+                Err(RuntimeError::OperationReservationStoreNotRegistered)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
-    /// Always succeeds — security and the logger are both optional. By the
-    /// time this runs, the logger (if supplied) is already constructed and
-    /// initialized by the host; this only pushes it onto the teardown stack.
+    /// # Panics
+    ///
+    /// Panics when [`IdempotencyEnforcementMode::MandatoryKey`] is in effect and no
+    /// [`OperationReservationStore`] was registered.
+    ///
+    /// A panic rather than a `Result`, because this signature is what every host and
+    /// test already calls and because the alternative is worse than a loud stop: a
+    /// runtime that declares mandatory operation keys with nowhere to reserve them
+    /// would accept traffic it cannot make idempotent. That is the fail-open the mode
+    /// exists to prevent, and it would surface as duplicated business operations
+    /// under retry rather than as a startup error. Bootstrap is the cheapest moment to
+    /// refuse.
+    ///
+    /// [`Self::try_build`] returns the same condition as a structured error for a
+    /// caller that would rather handle it.
     pub fn build(self) -> Runtime {
+        if let Err(err) = self.validate_idempotency() {
+            panic!("{err}");
+        }
         let security_providers = match (self.authn, self.authz) {
             (Some(authn), Some(authz)) => Some((authn, authz)),
             _ => None,
@@ -599,12 +754,83 @@ impl RuntimeBuilder {
                 )) as Arc<dyn ego_domain::health::HealthContributor>
             },
         ));
+        // The registered reservation store contributes its own readiness, from
+        // the SAME `Arc` handed to `RuntimeInner` below — `Arc::clone` of the
+        // field, never a second construction and never a second read of the
+        // configuration. Two instances built from one config would be a store
+        // that dispatch reserves through and a *different* store that readiness
+        // reports on, and the report would be true about the wrong thing.
+        //
+        // Keyed on the store being present, not on the enforcement mode. A
+        // `Compatibility` runtime with no store registered adds no contributor
+        // at all and stays ready, which is correct: it never promised to
+        // reserve anything, so there is no dependency to be down. A
+        // `Compatibility` runtime that *did* register one is still dispatching
+        // through it, so it is still a real dependency and is checked. The
+        // remaining combination — `MandatoryKey` with no store — cannot reach
+        // this line, because `validate_idempotency` already refused the build.
+        if let Some(store) = &self.idempotency_reservation_store {
+            health_contributors.push(Arc::new(
+                crate::health::OperationReservationStoreHealthContributor::new(Arc::clone(store)),
+            )
+                as Arc<dyn ego_domain::health::HealthContributor>);
+        }
         let health_aggregator = Arc::new(HealthAggregator::new(
             HealthRegistry::from_contributors(health_contributors),
             HealthAggregationConfig::default(),
         ));
 
+        // AD-3i: the four pieces are assembled once, here, or not at all. A
+        // deployment without a store has no reservation capability rather than a
+        // half-configured one — which is why `RuntimeInner` holds
+        // `Option<ReservationConfig>` and the config itself has no optional
+        // fields.
+        let reservation = match self.idempotency_reservation_store.clone() {
+            None => None,
+            Some(store) => {
+                let clock = self
+                    .reservation_clock
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(ego_domain::time::SystemClock));
+                // Minted once, here, so every operation this runtime reserves
+                // carries the same identity and a restart carries a different
+                // one.
+                let owner = self.reservation_owner_id.clone().unwrap_or_else(|| {
+                    ego_domain::operation::OwnerId::new(uuid::Uuid::new_v4().to_string())
+                });
+                Some(
+                    crate::runtime::idempotency::ReservationConfig::new(
+                        store,
+                        clock,
+                        owner,
+                        self.reservation_lease_duration,
+                    )
+                    .expect(
+                        "the reservation lease duration must be greater than zero: a zero \
+                         lease expires the instant it is taken, so every attempt would see \
+                         the previous one as expired and take it over — the reservation \
+                         would exclude nobody while appearing to work",
+                    ),
+                )
+            }
+        };
+
+        // A retention schedule with nothing to purge cannot mean what it says, so it
+        // is refused at build time rather than starting a worker that would find no
+        // store to call. Panicking here matches the existing refusal for a missing
+        // reservation store in the enforcing mode; `try_build` callers reach the
+        // same check through the same path.
+        assert!(
+            !(self.retention_policy.is_some() && reservation.is_none()),
+            "a retention policy was configured but no OperationReservationStore is \
+             registered: retention purges completed reservations, so without a store \
+             there is nothing for it to purge and the schedule would run forever \
+             removing nothing"
+        );
+        let retention_policy = self.retention_policy;
+
         let runtime = Runtime {
+            retention_policy,
             health_aggregator,
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
@@ -619,10 +845,23 @@ impl RuntimeBuilder {
                 self.logger,
                 Mutex::new(teardown),
                 TenantResolver::new(self.tenant_enforcement_mode),
+                // Exactly the value this build was validated against — see the
+                // check above, which refuses MandatoryKey with no store. Passing
+                // it on rather than dropping it is what lets a transport apply
+                // the same policy instead of choosing its own.
+                self.idempotency_enforcement_mode,
+                reservation,
                 self.observability,
                 effect_acceptor_impl,
                 self.effect_drain_deadline,
                 data_provider_access,
+                // The same `Arc` the `TracingInterceptor` above was built from,
+                // cloned rather than re-registered. The interceptor owns the
+                // request-boundary span; `RuntimeInner` needs the tracer for the
+                // idempotency spans (AD-10), which belong to the reservation path
+                // and have no interceptor to hang off. Two readers of one
+                // registration, never two registrations.
+                self.tracer,
             )),
         };
 
@@ -696,6 +935,10 @@ impl RuntimeBuilder {
     /// (AD-3/AD-4). Calls the existing infallible [`Self::build`] unchanged
     /// — `Injectable::build` is never invoked here, only `Injectable::validate`.
     pub fn try_build(mut self) -> Result<Runtime, RuntimeError> {
+        // Before delegating, not after. `build` panics on this condition, so checking
+        // afterwards would mean this method could never return the error it exists to
+        // return — the panic would already have unwound.
+        self.validate_idempotency()?;
         let validators = std::mem::take(&mut self.validators);
         let rt = self.build();
         for (service_name, validate) in validators {
@@ -736,6 +979,10 @@ impl Default for RuntimeBuilder {
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
+    /// The retention schedule, if one was configured. Absent by default, and the
+    /// only thing [`Runtime::start_retention`] consults before deciding whether
+    /// there is a worker to start at all.
+    retention_policy: Option<crate::runtime::RetentionPolicy>,
     /// The runtime-owned health aggregator (PROD-005 PR2 TASK-018/019),
     /// built once by [`RuntimeBuilder::build`] from every registered
     /// lifecycle component's `health_contributors()`. Cheap to clone (an
@@ -787,9 +1034,30 @@ impl Runtime {
         self.inner.security_providers.as_ref()
     }
 
+    /// The idempotency policy this runtime was built and validated under.
+    ///
+    /// Exposed so a transport can apply the same policy the build was checked
+    /// against, rather than carrying a second copy of the configuration that
+    /// could drift from it. Read it to *pass it on* — the policy table has one
+    /// owner, `resolve_operation_key`.
+    pub fn idempotency_enforcement_mode(&self) -> IdempotencyEnforcementMode {
+        self.inner.idempotency_enforcement_mode()
+    }
+
     /// Returns the registered logger, if any.
     pub fn logger(&self) -> Option<&Arc<KITLogger>> {
         self.inner.logger()
+    }
+
+    /// The registered `Observability`, if any.
+    ///
+    /// Public because the transport edge needs it: the operation-key extractor runs
+    /// before any service is resolved, so it cannot reach the runtime any other way.
+    /// This mirrors [`Runtime::logger`], which is public for the same reason and is the
+    /// precedent for exposing a capability this narrowly rather than handing out the
+    /// runtime.
+    pub fn observability(&self) -> Option<Arc<dyn Observability>> {
+        self.inner.observability()
     }
 
     /// Spawns the external-effects `Deferred`-mode drain loop (if any
@@ -817,6 +1085,7 @@ impl Runtime {
     /// `Deferred`-mode runner task was never spawned — closing the "effects
     /// accepted into a queue nobody ever drains" gap a synchronous,
     /// auto-starting `build()` used to leave open.
+    ///
     pub async fn start_effects(&self) -> Result<(), RuntimeInfraError> {
         let Some(acceptor) = self.inner.effect_acceptor_impl.clone() else {
             return Ok(());
@@ -1012,6 +1281,114 @@ impl Runtime {
             runtime: self.clone(),
         }
     }
+
+    /// **Placed last in this `impl` on purpose.** Inserting this method above
+    /// another one left the preceding doc comment attached to it three separate
+    /// times — `start_effects`', then `effect_acceptor`'s, then
+    /// `data_provider_access`'. Each time the neighbour lost its documentation and
+    /// this method's rustdoc claimed something it does not do. At the end of the
+    /// block there is no following item whose doc it can take.
+    ///
+    /// Starts the retention worker, if a policy was configured.
+    ///
+    /// Explicit, like [`Runtime::start_effects`], and for the same reason: nothing
+    /// should begin deleting rows as a side effect of `build()`. A runtime with no
+    /// policy returns `Ok(())` having started nothing.
+    ///
+    /// The shutdown hook is registered here rather than at build time, so a worker
+    /// that was never started never contributes a hook — the ordering of the
+    /// remaining hooks is then exactly what it was.
+    ///
+    /// **Idempotent.** Calling this twice starts one worker and registers one hook,
+    /// guarded by the same compare-and-exchange the effects subsystem uses. An
+    /// earlier version had no guard: a second call spawned a second loop purging on
+    /// the same schedule and a second teardown hook, while this documentation —
+    /// inherited by an editing slip — claimed it never double-spawned.
+    ///
+    /// That slip happened three times before it was fixed properly — see the note
+    /// above. Moving the method after one accessor only relocated the problem to the
+    /// next one; being last in the block is what actually settles it.
+    pub async fn start_retention(&self) -> Result<(), RuntimeInfraError> {
+        let Some(policy) = self.retention_policy else {
+            return Ok(());
+        };
+        if self
+            .inner
+            .retention_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        // Guaranteed by the build-time refusal above; stated rather than assumed.
+        let reservation = self
+            .inner
+            .reservation()
+            .expect("build() refuses a retention policy without a reservation store");
+
+        let worker = crate::runtime::retention::RetentionWorker::start(
+            policy,
+            reservation.store().clone(),
+            reservation.clock().clone(),
+            // `None` when no tracer was registered, which makes the span site a no-op
+            // rather than driving a `NoopTracer` on every tick.
+            self.inner.tracer(),
+            // `None` when nothing was registered, which makes the metric sites no-ops
+            // rather than driving a discarding implementation on every tick.
+            self.inner.observability(),
+        );
+
+        // Bounded, ordered and panic-isolated, matching the provider teardown
+        // precedent: a worker that panics or overruns must not stop the hooks
+        // after it, and must not vanish silently either. Reporting beyond this is
+        // B7.10/B7.11's subject.
+        let deadline = policy
+            .interval()
+            .saturating_mul(2)
+            .max(Duration::from_secs(1));
+        let worker = std::sync::Mutex::new(Some(worker));
+        self.register_async_teardown(async move {
+            let taken = worker.lock().ok().and_then(|mut slot| slot.take());
+            let Some(worker) = taken else { return Ok(()) };
+
+            // The outcome is *returned*, not logged. That matches the provider
+            // precedent — hooks all run, and a failure is surfaced afterwards as
+            // `RuntimeInfraError::Teardown` — and it keeps this path free of a
+            // logger it would otherwise have to reach for. Richer reporting is
+            // B7.10/B7.11's subject.
+            let mut outcome = crate::runtime::retention::RetentionShutdown::Stopped;
+            let panicked = crate::runtime::retention::isolate_panics(async {
+                outcome = worker.stop(deadline).await;
+            })
+            .await;
+
+            if panicked {
+                return Err(RuntimeInfraError::Teardown {
+                    reason: "the retention teardown hook panicked".to_string(),
+                });
+            }
+            match outcome {
+                crate::runtime::retention::RetentionShutdown::Stopped => Ok(()),
+                crate::runtime::retention::RetentionShutdown::Panicked => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker panicked".to_string(),
+                    })
+                }
+                crate::runtime::retention::RetentionShutdown::TimedOut => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the retention worker did not stop within its deadline".to_string(),
+                    })
+                }
+            }
+        });
+
+        Ok(())
+    }
 }
 
 /// A resolution-only handle into a [`Runtime`] (CORE-028 Stage 1 PR2 review
@@ -1039,9 +1416,25 @@ impl RuntimeResolver {
         self.runtime.resolve::<Tag>()
     }
 
+    /// The idempotency policy this runtime was built under — identical to
+    /// [`Runtime::idempotency_enforcement_mode`]. This is the accessor the HTTP
+    /// operation-key extractor reads.
+    pub fn idempotency_enforcement_mode(&self) -> IdempotencyEnforcementMode {
+        self.runtime.idempotency_enforcement_mode()
+    }
+
     /// Returns the registered logger, if any — identical to [`Runtime::logger`].
     pub fn logger(&self) -> Option<&Arc<KITLogger>> {
         self.runtime.logger()
+    }
+
+    /// The registered `Observability`, if any — identical to
+    /// [`Runtime::observability`].
+    ///
+    /// Read by the HTTP operation-key extractor, which rejects a request before any
+    /// handler runs and so has no other route to a registered instance.
+    pub fn observability(&self) -> Option<Arc<dyn Observability>> {
+        self.runtime.observability()
     }
 }
 
@@ -1050,6 +1443,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use ego_domain::Observability;
     use ego_security_sdk::authentication::AuthenticationProvider;
     use ego_security_sdk::authorization::{AuthorizationDecision, AuthorizationProvider};
     use ego_security_sdk::context::SecurityContext;
@@ -1059,8 +1453,601 @@ mod tests {
     use ego_security_sdk::AuthenticationError;
     use kitlogger::KITLogger;
 
-    use super::{Runtime, RuntimeBuilder};
+    use super::{IdempotencyEnforcementMode, Runtime, RuntimeBuilder};
     use crate::runtime::{RuntimeError, RuntimeInfraError};
+
+    /// A builder that has explicitly not adopted idempotency enforcement.
+    ///
+    /// Every test below whose subject is *not* idempotency uses this, so the
+    /// fail-closed default does not turn each of them into a statement about a topic
+    /// it is not testing. It is `#[cfg(test)]` and local: nothing production-facing
+    /// can reach it, and no example or host bootstrap can quietly inherit a relaxed
+    /// mode from it.
+    ///
+    /// The tests that *are* about the default deliberately do not use it — they call
+    /// `RuntimeBuilder::new()` directly, because a helper that pre-answers the
+    /// question is no way to test the answer.
+    fn compat() -> RuntimeBuilder {
+        RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+    }
+
+    /// A reservation store that refuses everything.
+    ///
+    /// Registration is the only thing under test here, so the store never needs to
+    /// work — and one that errors is safer than one that pretends: if a future change
+    /// made a build-time check actually call it, the failure is loud rather than a
+    /// silently accepted reservation.
+    struct UnusableReservationStore;
+
+    #[async_trait]
+    impl ego_domain::operation::OperationReservationStore for UnusableReservationStore {
+        async fn reserve(
+            &self,
+            _req: ego_domain::operation::ReserveRequest,
+        ) -> Result<
+            ego_domain::operation::ReservationOutcome,
+            ego_domain::operation::ReservationError,
+        > {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+
+        async fn complete(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _response: ego_domain::operation::StoredServiceResponse,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+
+        async fn abandon(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+
+        async fn purge_completed_before(
+            &self,
+            _cutoff: chrono::DateTime<chrono::Utc>,
+            _batch: usize,
+        ) -> Result<u64, ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+
+        async fn probe(&self) -> Result<(), ego_domain::operation::ReservationError> {
+            Err(ego_domain::operation::ReservationError::Backend(
+                "registration-only stub".to_string(),
+            ))
+        }
+    }
+
+    /// A reservation store whose `probe` answers from a script and counts its calls.
+    ///
+    /// The count is what makes instance identity provable: a contributor wired to a
+    /// second store built from the same configuration would leave this one at zero
+    /// while still reporting perfectly healthy. Its five real methods panic, so a
+    /// readiness check that reserved, renewed or purged anything fails loudly rather
+    /// than passing while mutating the table it is supposed to be observing.
+    struct ProbeCountingStore {
+        outcome: std::sync::Mutex<Result<(), ego_domain::operation::ReservationError>>,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ProbeCountingStore {
+        fn new(outcome: Result<(), ego_domain::operation::ReservationError>) -> Arc<Self> {
+            Arc::new(Self {
+                outcome: std::sync::Mutex::new(outcome),
+                probes: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        fn probes(&self) -> usize {
+            self.probes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Changes what the next probe answers — the store going down, or coming
+        /// back, without the runtime being rebuilt.
+        fn set(&self, outcome: Result<(), ego_domain::operation::ReservationError>) {
+            *self.outcome.lock().expect("probe outcome mutex poisoned") = outcome;
+        }
+    }
+
+    #[async_trait]
+    impl ego_domain::operation::OperationReservationStore for ProbeCountingStore {
+        async fn reserve(
+            &self,
+            _req: ego_domain::operation::ReserveRequest,
+        ) -> Result<
+            ego_domain::operation::ReservationOutcome,
+            ego_domain::operation::ReservationError,
+        > {
+            panic!("a readiness probe must never reserve an operation");
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never renew a lease");
+        }
+
+        async fn complete(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _response: ego_domain::operation::StoredServiceResponse,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never complete a reservation");
+        }
+
+        async fn abandon(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never abandon a reservation");
+        }
+
+        async fn purge_completed_before(
+            &self,
+            _cutoff: chrono::DateTime<chrono::Utc>,
+            _batch: usize,
+        ) -> Result<u64, ego_domain::operation::ReservationError> {
+            panic!("a readiness probe must never purge reservations");
+        }
+
+        async fn probe(&self) -> Result<(), ego_domain::operation::ReservationError> {
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.outcome
+                .lock()
+                .expect("probe outcome mutex poisoned")
+                .clone()
+        }
+    }
+
+    /// The contributor's report within a readiness fold, by name.
+    fn reservation_store_report(
+        report: &ego_domain::health::HealthReport,
+    ) -> Option<&ego_domain::health::ContributorReport> {
+        report
+            .contributors
+            .iter()
+            .find(|c| c.name == crate::health::OPERATION_RESERVATION_STORE_CONTRIBUTOR)
+    }
+
+    // ---- The fail-closed default (B3.6) ---------------------------------------
+
+    /// The default mode with no store registered refuses to build.
+    ///
+    /// `RuntimeBuilder::new()` directly, not the `compat` helper: the subject is what
+    /// an unconfigured builder does, so pre-configuring it would test nothing.
+    ///
+    /// A runtime built here would declare that every mutating operation carries a
+    /// client-supplied key and have nowhere to reserve one. It would accept traffic it
+    /// cannot make idempotent, and the symptom would be duplicated business
+    /// operations under retry rather than a startup error.
+    #[test]
+    #[should_panic(expected = "no OperationReservationStore is registered")]
+    fn the_default_mode_without_a_reservation_store_refuses_to_build() {
+        let _ = RuntimeBuilder::new().build();
+    }
+
+    /// The same condition through `try_build`, as a structured error rather than a
+    /// panic.
+    ///
+    /// Both paths must agree, and they do because there is one validation: `build`
+    /// panics on its error and `try_build` returns it. This also pins the ordering —
+    /// `try_build` delegates to `build`, so it has to validate *before* delegating or
+    /// the panic would unwind before the error could be returned.
+    #[test]
+    fn try_build_reports_the_missing_reservation_store_as_an_error() {
+        match RuntimeBuilder::new().try_build() {
+            Err(RuntimeError::OperationReservationStoreNotRegistered) => {}
+            Ok(_) => panic!("try_build must not produce a runtime that cannot enforce its mode"),
+            Err(other) => panic!("expected OperationReservationStoreNotRegistered, got {other:?}"),
+        }
+    }
+
+    /// The error names both ways out, because either can be the right one.
+    #[test]
+    fn the_refusal_names_the_registration_and_the_opt_out() {
+        let message = RuntimeBuilder::new()
+            .try_build()
+            .err()
+            .expect("the default without a store must fail")
+            .to_string();
+
+        assert!(
+            message.contains(".with_operation_reservation_store("),
+            "the error must name the registration that fixes it: {message}"
+        );
+        assert!(
+            message.contains("Compatibility"),
+            "the error must also name the explicit opt-out, since a deployment that has \
+             genuinely not adopted enforcement needs a way to say so: {message}"
+        );
+    }
+
+    /// Compatibility is the explicit way to build without a store.
+    #[test]
+    fn compatibility_mode_without_a_store_builds() {
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build();
+        assert!(rt.security_providers().is_none());
+    }
+
+    /// The runtime retains the very store that was registered.
+    ///
+    /// `Arc::ptr_eq`, not "a store is present": registration that type-checks and then
+    /// drops the value on the floor would satisfy any weaker assertion, and the whole
+    /// point of the setter is that idempotent dispatch later reaches *this* instance.
+    /// A store that vanishes at build time makes the method nominal and leaves the
+    /// dispatch it exists for with nothing to call.
+    #[test]
+    fn the_registered_reservation_store_is_the_one_the_runtime_keeps() {
+        let store: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(Arc::clone(&store))
+            .build();
+
+        let retained = rt
+            .inner()
+            .reservation()
+            .map(|r| r.store())
+            .expect("an enforcing runtime must retain the store it was given");
+        assert!(
+            Arc::ptr_eq(retained, &store),
+            "the runtime must hold the registered instance, not merely some store"
+        );
+    }
+
+    /// Compatibility without a store retains nothing.
+    ///
+    /// So a caller finding `None` knows enforcement is off, rather than that a
+    /// registration was missed — the builder refuses to produce an enforcing runtime
+    /// without one, which is what makes that reading sound.
+    #[test]
+    fn compatibility_without_a_store_retains_none() {
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build();
+        assert!(rt.inner().reservation().is_none());
+    }
+
+    /// Registering twice keeps the second, observed through the retained instance.
+    ///
+    /// Two stores would mean two places a key could be reserved and no answer to which
+    /// one decides. Asserting only that the build succeeds would leave that unpinned:
+    /// keeping the first, keeping the second, and keeping neither all build fine.
+    #[test]
+    fn registering_a_second_reservation_store_replaces_the_first() {
+        let first: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
+        let second: Arc<dyn ego_domain::operation::OperationReservationStore> =
+            Arc::new(UnusableReservationStore);
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(Arc::clone(&first))
+            .with_operation_reservation_store(Arc::clone(&second))
+            .build();
+
+        let retained = rt
+            .inner()
+            .reservation()
+            .map(|r| r.store())
+            .expect("a store was registered");
+        assert!(
+            Arc::ptr_eq(retained, &second),
+            "the second registration must replace the first"
+        );
+        assert!(
+            !Arc::ptr_eq(retained, &first),
+            "the first registration must not survive alongside it"
+        );
+    }
+
+    // ---- Readiness for the registered store (B3.7) -----------------------------
+    //
+    // B3.6 above covers "no store registered at all": the build is refused and no
+    // runtime exists. These cover the other failure, which cannot be decided at
+    // startup — the store is registered, the process started, and the backing store
+    // has since become unreachable.
+
+    /// Registering a store registers its readiness contributor.
+    ///
+    /// The wiring is one `push` and is easy to omit while everything else keeps
+    /// working: dispatch would reserve through the store, readiness would report on
+    /// nothing, and the instance would keep taking traffic straight through an
+    /// outage. Nothing else in the suite would notice, which is why this asserts the
+    /// contributor is present by name rather than only that the report is healthy.
+    #[tokio::test]
+    async fn registering_a_reservation_store_registers_its_readiness_contributor() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        let contributor = reservation_store_report(&report).unwrap_or_else(|| {
+            panic!(
+                "a registered store must contribute to readiness; present: {:?}",
+                report
+                    .contributors
+                    .iter()
+                    .map(|c| &c.name)
+                    .collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            contributor.status,
+            ego_domain::health::HealthStatus::Healthy
+        );
+        assert_eq!(
+            contributor.requirement,
+            ego_domain::health::DependencyRequirement::Required
+        );
+        assert_eq!(report.status, ego_domain::health::HealthStatus::Healthy);
+    }
+
+    /// Readiness probes the exact instance the runtime dispatches through.
+    ///
+    /// Two assertions, because either alone is satisfiable by the wrong wiring. The
+    /// probe count proves the contributor reached *this* object — a contributor built
+    /// from a second store over the same configuration would leave it at zero while
+    /// reporting a perfectly healthy, entirely unrelated connection. `Arc::ptr_eq`
+    /// proves the runtime kept the same one, so the thing that was probed is the
+    /// thing a reservation will go through.
+    #[tokio::test]
+    async fn readiness_probes_the_same_store_instance_the_runtime_retained() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let registered = store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>;
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(Arc::clone(&registered))
+            .build();
+
+        assert_eq!(store.probes(), 0, "building must not probe the store");
+
+        rt.readiness().await;
+
+        assert_eq!(
+            store.probes(),
+            1,
+            "readiness must probe the registered instance itself, not a second store \
+             built from the same configuration"
+        );
+        let retained = rt
+            .inner()
+            .reservation()
+            .map(|r| r.store())
+            .expect("an enforcing runtime retains its store");
+        assert!(
+            Arc::ptr_eq(retained, &registered),
+            "the probed instance and the dispatched instance must be one object"
+        );
+    }
+
+    /// An unreachable store makes the runtime not ready.
+    ///
+    /// The error is reported as `Unavailable` and, because the store is a `Required`
+    /// dependency, it clamps the whole report to `Unhealthy` rather than degrading
+    /// it. Serving while it is down means a retried request cannot be recognised as
+    /// a retry and gets executed a second time.
+    #[tokio::test]
+    async fn a_store_that_cannot_be_reached_makes_the_runtime_not_ready() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(
+            report.status,
+            ego_domain::health::HealthStatus::Unhealthy,
+            "a store error must never fold in as ready"
+        );
+        let contributor =
+            reservation_store_report(&report).expect("the contributor must still be reported");
+        assert_eq!(
+            contributor.code,
+            Some(ego_domain::health::HealthCode::Unavailable)
+        );
+    }
+
+    /// The store's error text never reaches the readiness report.
+    ///
+    /// A driver's connection error routinely quotes the DSN it failed on, and a DSN
+    /// routinely carries a password. Readiness payloads are commonly served
+    /// unauthenticated, so this asserts on the whole rendered report rather than on
+    /// the contributor's code alone.
+    #[tokio::test]
+    async fn a_store_failure_never_puts_credentials_in_the_readiness_report() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "error connecting to postgres://ego:sup3r-s3cret@db.internal:5432/ego".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let rendered = format!("{:?}", rt.readiness().await);
+
+        assert!(
+            !rendered.contains("sup3r-s3cret"),
+            "the readiness report must not carry the store's error text: {rendered}"
+        );
+        assert!(
+            !rendered.contains("db.internal"),
+            "the readiness report must not carry the store's connection detail: {rendered}"
+        );
+    }
+
+    /// Compatibility with no store registered is ready, and contributes nothing.
+    ///
+    /// It never promised to reserve anything, so there is no dependency to be down.
+    /// A contributor that reported the *absence* of a store as a failure would make
+    /// every not-yet-adopted deployment permanently un-ready — turning an explicit,
+    /// supported opt-out into an outage.
+    #[tokio::test]
+    async fn compatibility_without_a_store_is_ready_and_contributes_nothing() {
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert_eq!(
+            report.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "declining enforcement is a supported configuration, not a failure"
+        );
+        assert!(
+            reservation_store_report(&report).is_none(),
+            "with no store registered there is nothing to report on: {:?}",
+            report.contributors
+        );
+    }
+
+    /// Compatibility *with* a store still checks it.
+    ///
+    /// The wiring keys on the store being present, not on the mode, and this is why:
+    /// a `Compatibility` runtime that registered one is still dispatching through it,
+    /// so it is still a real dependency. Keying on the mode instead would leave that
+    /// deployment reporting ready with its store down.
+    #[tokio::test]
+    async fn compatibility_with_a_registered_store_still_checks_it() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        let report = rt.readiness().await;
+
+        assert!(
+            reservation_store_report(&report).is_some(),
+            "a registered store is a dependency regardless of the enforcement mode"
+        );
+        assert_eq!(report.status, ego_domain::health::HealthStatus::Unhealthy);
+    }
+
+    /// Losing the store stops traffic, and never touches liveness.
+    ///
+    /// This is the separation stated as an executable claim. Readiness goes
+    /// unhealthy, so the instance leaves rotation. Liveness stays healthy with no
+    /// contributors at all, so nothing kills the process.
+    ///
+    /// Restarting on a lost database would be actively harmful: the replacement comes
+    /// up against the same unreachable store, fails identically, and under a
+    /// restart-on-failure supervisor loops — replacing a recoverable outage with a
+    /// crash loop that clears no state. The recovery case below is what actually
+    /// happens instead.
+    #[tokio::test]
+    async fn losing_the_store_fails_readiness_without_touching_liveness() {
+        let store = ProbeCountingStore::new(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store as Arc<dyn ego_domain::operation::OperationReservationStore>,
+            )
+            .build();
+
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Unhealthy
+        );
+
+        let liveness = rt.liveness();
+        assert_eq!(
+            liveness.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "an unreachable dependency is not a reason to kill the process"
+        );
+        assert!(
+            liveness.contributors.is_empty(),
+            "liveness consults no contributor, including this one: {:?}",
+            liveness.contributors
+        );
+    }
+
+    /// Readiness recovers on its own once the store is reachable again.
+    ///
+    /// Each probe answers from the store as it is *now*, so there is no latched
+    /// failure to clear and no restart needed to clear it. Without this, an outage
+    /// that ended would leave the instance permanently out of rotation — the
+    /// asserted-once cases above are all compatible with a report that never
+    /// recovers.
+    #[tokio::test]
+    async fn readiness_recovers_when_the_store_becomes_reachable_again() {
+        let store = ProbeCountingStore::new(Ok(()));
+        let rt = RuntimeBuilder::new()
+            .with_operation_reservation_store(
+                store.clone() as Arc<dyn ego_domain::operation::OperationReservationStore>
+            )
+            .build();
+
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Healthy
+        );
+
+        store.set(Err(ego_domain::operation::ReservationError::Backend(
+            "connection refused".to_string(),
+        )));
+        assert_eq!(
+            rt.readiness().await.status,
+            ego_domain::health::HealthStatus::Unhealthy
+        );
+
+        store.set(Ok(()));
+        let recovered = rt.readiness().await;
+        assert_eq!(
+            recovered.status,
+            ego_domain::health::HealthStatus::Healthy,
+            "readiness must reflect the store's current reachability, not the worst it \
+             has ever been"
+        );
+        assert_eq!(
+            reservation_store_report(&recovered)
+                .expect("the contributor is still registered")
+                .code,
+            None,
+            "a recovered contributor must carry no failure code"
+        );
+    }
 
     struct StubAuthn;
 
@@ -1091,13 +2078,13 @@ mod tests {
 
     #[test]
     fn build_without_security_succeeds() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(rt.security_providers().is_none());
     }
 
     #[test]
     fn build_with_security_succeeds() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_security(Arc::new(StubAuthn), Arc::new(StubAuthz))
             .build();
         assert!(rt.security_providers().is_some());
@@ -1105,7 +2092,7 @@ mod tests {
 
     #[test]
     fn runtime_inner_is_accessible() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let _inner = rt.inner();
     }
 
@@ -1119,7 +2106,7 @@ mod tests {
 
     #[test]
     fn build_without_logger_has_none_logger() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(rt.logger().is_none());
     }
 
@@ -1138,24 +2125,20 @@ mod tests {
 
     #[test]
     fn build_with_logger_has_some_logger() {
-        let rt = RuntimeBuilder::new()
-            .with_logger(Arc::new(KITLogger::default()))
-            .build();
+        let rt = compat().with_logger(Arc::new(KITLogger::default())).build();
         assert!(rt.logger().is_some());
     }
 
     #[test]
     fn shutdown_with_logger_succeeds_and_is_idempotent() {
-        let rt = RuntimeBuilder::new()
-            .with_logger(initialized_logger())
-            .build();
+        let rt = compat().with_logger(initialized_logger()).build();
         assert!(rt.shutdown().is_ok());
         assert!(rt.shutdown().is_ok());
     }
 
     #[test]
     fn shutdown_without_logger_succeeds() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(rt.shutdown().is_ok());
     }
 
@@ -1180,7 +2163,7 @@ mod tests {
     #[test]
     fn shutdown_releases_teardown_stack_ownership_of_logger() {
         let logger = initialized_logger();
-        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+        let rt = compat().with_logger(logger.clone()).build();
 
         let count_after_build = Arc::strong_count(&logger);
         assert!(
@@ -1207,9 +2190,7 @@ mod tests {
 
     #[test]
     fn with_adapter_registers_and_resolves() {
-        let rt = RuntimeBuilder::new()
-            .with_adapter(Arc::new(StubAdapter(7)))
-            .build();
+        let rt = compat().with_adapter(Arc::new(StubAdapter(7))).build();
 
         let resolved = rt.inner().resolve_adapter::<StubAdapter>();
         assert!(resolved.is_ok());
@@ -1218,7 +2199,7 @@ mod tests {
 
     #[test]
     fn with_config_registers_and_resolves() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_config(Arc::new(StubConfig("hello".to_string())))
             .build();
 
@@ -1229,7 +2210,7 @@ mod tests {
 
     #[test]
     fn with_adapter_last_write_wins() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_adapter(Arc::new(StubAdapter(1)))
             .with_adapter(Arc::new(StubAdapter(2)))
             .build();
@@ -1240,7 +2221,7 @@ mod tests {
 
     #[test]
     fn with_config_last_write_wins() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_config(Arc::new(StubConfig("first".to_string())))
             .with_config(Arc::new(StubConfig("second".to_string())))
             .build();
@@ -1256,7 +2237,7 @@ mod tests {
 
     #[test]
     fn with_projection_registers_and_resolves() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_projection(Arc::new(StubProjection(7)))
             .unwrap()
             .build();
@@ -1268,7 +2249,7 @@ mod tests {
 
     #[test]
     fn with_projection_rejects_duplicate_and_retains_first() {
-        let builder = RuntimeBuilder::new()
+        let builder = compat()
             .with_projection(Arc::new(StubProjection(1)))
             .unwrap();
 
@@ -1287,7 +2268,7 @@ mod tests {
 
     #[test]
     fn resolve_projection_unregistered_returns_dependency_not_found() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let err = rt
             .inner()
             .resolve_projection::<StubProjection>()
@@ -1310,7 +2291,7 @@ mod tests {
     #[test]
     fn with_entity_registers_and_resolves() {
         let entity_runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_entity::<TestEntity>(entity_runtime)
             .unwrap()
             .build();
@@ -1324,9 +2305,7 @@ mod tests {
         let first = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let second = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
 
-        let builder = RuntimeBuilder::new()
-            .with_entity::<TestEntity>(first.clone())
-            .unwrap();
+        let builder = compat().with_entity::<TestEntity>(first.clone()).unwrap();
 
         let err = match builder.clone().with_entity::<TestEntity>(second.clone()) {
             Err(e) => e,
@@ -1352,7 +2331,7 @@ mod tests {
 
     #[test]
     fn resolve_entity_unregistered_returns_dependency_not_found_naming_aggregate() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let err = rt
             .inner()
             .resolve_entity::<TestEntity>()
@@ -1420,7 +2399,7 @@ mod tests {
         let expected_a = EntityRuntimeRef::<TestEntity>::new(runtime_a.clone());
         let expected_b = EntityRuntimeRef::<TestEntity2>::new(runtime_b.clone());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_entity::<TestEntity>(runtime_a)
             .unwrap()
             .with_entity::<TestEntity2>(runtime_b)
@@ -1460,7 +2439,7 @@ mod tests {
 
     #[test]
     fn chained_registration_multiple_types() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_adapter(Arc::new(StubAdapter(1)))
             .with_config(Arc::new(StubConfig("c".to_string())))
             .with_adapter(Arc::new(StubAdapterB(2)))
@@ -1525,7 +2504,7 @@ mod tests {
 
     #[test]
     fn liveness_is_healthy_and_tagged_liveness_probe() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let report = rt.liveness();
         assert_eq!(report.probe, ProbeKind::Liveness);
         assert_eq!(report.status, HealthStatus::Healthy);
@@ -1536,7 +2515,7 @@ mod tests {
     fn liveness_takes_no_registry_and_is_unaffected_by_a_required_unhealthy_contributor() {
         // `liveness()` is a zero-argument call on `Runtime` — it cannot be
         // handed a registry even if one exists on this runtime.
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
             .build();
 
@@ -1550,7 +2529,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_collects_health_contributors_from_registered_lifecycle_components() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
             .build();
 
@@ -1570,7 +2549,7 @@ mod tests {
             // Default `health_contributors()` -> empty.
         }
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_lifecycle_component(Arc::new(NoContributors))
             .build();
 
@@ -1582,7 +2561,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_without_any_lifecycle_component_yields_healthy_empty_readiness() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let report = rt.readiness().await;
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.contributors.is_empty());
@@ -1713,7 +2692,7 @@ mod tests {
 
     #[test]
     fn resolve_adapter_unregistered_returns_dependency_not_found() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let result = rt.inner().resolve_adapter::<StubAdapter>();
         assert!(matches!(
             result,
@@ -1723,7 +2702,7 @@ mod tests {
 
     #[test]
     fn resolve_config_unregistered_returns_dependency_not_found() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let result = rt.inner().resolve_config::<StubConfig>();
         assert!(matches!(
             result,
@@ -1736,7 +2715,7 @@ mod tests {
     #[test]
     fn with_adapter_preserves_arc_identity() {
         let original = Arc::new(StubAdapter(7));
-        let rt = RuntimeBuilder::new().with_adapter(original.clone()).build();
+        let rt = compat().with_adapter(original.clone()).build();
 
         let resolved = rt.inner().resolve_adapter::<StubAdapter>().unwrap();
         assert!(
@@ -1748,7 +2727,7 @@ mod tests {
     #[test]
     fn with_config_preserves_arc_identity() {
         let original = Arc::new(StubConfig("hello".to_string()));
-        let rt = RuntimeBuilder::new().with_config(original.clone()).build();
+        let rt = compat().with_config(original.clone()).build();
 
         let resolved = rt.inner().resolve_config::<StubConfig>().unwrap();
         assert!(
@@ -1764,7 +2743,7 @@ mod tests {
 
     #[test]
     fn adapter_and_config_of_same_concrete_type_do_not_collide() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_adapter(Arc::new(SharedType(1)))
             .with_config(Arc::new(SharedType(2)))
             .build();
@@ -1816,10 +2795,7 @@ mod tests {
     fn try_build_fails_fast_on_missing_dependency_naming_both_type_and_service() {
         // `Runtime` (the `Ok` type) doesn't implement `Debug`, so `expect_err`
         // isn't available here — match manually instead.
-        let err = match RuntimeBuilder::new()
-            .with_injectable::<NeedsAdapter>()
-            .try_build()
-        {
+        let err = match compat().with_injectable::<NeedsAdapter>().try_build() {
             Err(e) => e,
             Ok(_) => panic!("try_build must fail fast when a recorded dependency is missing"),
         };
@@ -1888,7 +2864,7 @@ mod tests {
 
     #[test]
     fn try_build_succeeds_when_declared_projection_dependency_is_registered() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_projection(Arc::new(StubProjection(9)))
             .unwrap()
             .with_injectable::<NeedsProjection>()
@@ -1902,10 +2878,7 @@ mod tests {
 
     #[test]
     fn try_build_fails_before_startup_when_declared_projection_dependency_is_missing() {
-        let err = match RuntimeBuilder::new()
-            .with_injectable::<NeedsProjection>()
-            .try_build()
-        {
+        let err = match compat().with_injectable::<NeedsProjection>().try_build() {
             Err(e) => e,
             Ok(_) => panic!(
                 "try_build must fail fast when the declared projection dependency is missing"
@@ -1955,7 +2928,7 @@ mod tests {
     #[test]
     fn try_build_succeeds_when_declared_entity_dependency_is_registered() {
         let entity_runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_entity::<TestEntity>(entity_runtime)
             .unwrap()
             .with_injectable::<NeedsEntity>()
@@ -1974,10 +2947,7 @@ mod tests {
 
     #[test]
     fn try_build_fails_before_startup_when_declared_entity_dependency_is_missing() {
-        let err = match RuntimeBuilder::new()
-            .with_injectable::<NeedsEntity>()
-            .try_build()
-        {
+        let err = match compat().with_injectable::<NeedsEntity>().try_build() {
             Err(e) => e,
             Ok(_) => {
                 panic!("try_build must fail fast when the declared entity dependency is missing")
@@ -2010,7 +2980,7 @@ mod tests {
     #[test]
     fn try_build_reports_only_the_first_registered_service_when_multiple_are_missing_dependencies()
     {
-        let err = match RuntimeBuilder::new()
+        let err = match compat()
             .with_injectable::<NeedsAdapter>()
             .with_injectable::<NeedsConfig>()
             .try_build()
@@ -2028,7 +2998,7 @@ mod tests {
             ),
         }
 
-        let err = match RuntimeBuilder::new()
+        let err = match compat()
             .with_injectable::<NeedsConfig>()
             .with_injectable::<NeedsAdapter>()
             .try_build()
@@ -2059,9 +3029,7 @@ mod tests {
     #[test]
     fn with_observability_wiring_reaches_runtime_inner() {
         let obs = Arc::new(RecordingObservability::new());
-        let rt = RuntimeBuilder::new()
-            .with_observability(obs.clone())
-            .build();
+        let rt = compat().with_observability(obs.clone()).build();
 
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::AuthorizationDenied);
@@ -2079,9 +3047,68 @@ mod tests {
         // behavior (authorization_integration.rs, tenant_scoped_codegen.rs —
         // neither calls with_observability) is unaffected by this change;
         // this test proves the None-path plumbing itself never panics.
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         rt.inner()
             .record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    /// The accessor hands back the very instance that was registered.
+    ///
+    /// Pointer identity, not "some implementor": the transport edge reads this to emit
+    /// counters, and a copy or a freshly constructed default would swallow them
+    /// silently — every assertion downstream would still see a live `Observability` and
+    /// pass while the registered collector recorded nothing.
+    #[test]
+    fn observability_returns_the_registered_instance() {
+        let obs = Arc::new(RecordingObservability::new());
+        let registered: Arc<dyn Observability> = obs.clone();
+        let rt = compat().with_observability(obs).build();
+
+        let exposed = rt
+            .observability()
+            .expect("a registered Observability is reachable");
+        assert!(
+            Arc::ptr_eq(&registered, &exposed),
+            "the accessor must expose the registered instance, not an equivalent one"
+        );
+    }
+
+    /// Nothing registered reads as `None`, not as an inert stand-in.
+    ///
+    /// The distinction is the caller's to make. A silently substituted no-op would let
+    /// a runtime that was never instrumented look instrumented at every call site.
+    #[test]
+    fn observability_is_none_when_none_was_registered() {
+        assert!(
+            compat().build().observability().is_none(),
+            "an uninstrumented runtime has no Observability to hand out"
+        );
+    }
+
+    /// The resolver is a view of the same runtime, not a second source of truth.
+    ///
+    /// Both directions are asserted. The registered case is what the transport edge
+    /// actually reads; the unregistered case guards the delegation against inverting
+    /// `Some` and `None`, which a Some-only test cannot see.
+    #[test]
+    fn the_resolver_exposes_the_same_observability_as_the_runtime() {
+        let obs = Arc::new(RecordingObservability::new());
+        let registered: Arc<dyn Observability> = obs.clone();
+        let rt = compat().with_observability(obs).build();
+
+        let exposed = rt
+            .resolver()
+            .observability()
+            .expect("the resolver reaches the registered Observability");
+        assert!(
+            Arc::ptr_eq(&registered, &exposed),
+            "the resolver must delegate to the runtime, not hold its own"
+        );
+
+        assert!(
+            compat().build().resolver().observability().is_none(),
+            "an uninstrumented runtime's resolver has nothing to hand out either"
+        );
     }
 
     // -- Finding 6 (post-CORE-018 review): async teardown hooks -------------
@@ -2095,7 +3122,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_async_runs_hooks_in_registration_order_before_sync_stack_drains() {
         let logger = initialized_logger();
-        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+        let rt = compat().with_logger(logger.clone()).build();
 
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let order_a = order.clone();
@@ -2120,7 +3147,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_async_with_no_registered_hooks_still_drains_sync_stack() {
         let logger = initialized_logger();
-        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+        let rt = compat().with_logger(logger.clone()).build();
 
         rt.shutdown_async().await.expect("shutdown_async succeeds");
         assert!(logger.log(Severity::Info, "after-shutdown").is_err());
@@ -2128,7 +3155,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_async_is_idempotent() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(rt.shutdown_async().await.is_ok());
         assert!(rt.shutdown_async().await.is_ok());
     }
@@ -2140,7 +3167,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_async_surfaces_a_failing_hook_but_still_drains_the_sync_stack() {
         let logger = initialized_logger();
-        let rt = RuntimeBuilder::new().with_logger(logger.clone()).build();
+        let rt = compat().with_logger(logger.clone()).build();
 
         rt.register_async_teardown(async move {
             Err(RuntimeInfraError::Teardown {
@@ -2164,7 +3191,7 @@ mod tests {
     /// an earlier one failed.
     #[tokio::test]
     async fn shutdown_async_runs_every_hook_even_after_an_earlier_one_fails() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let second_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let second_ran_for_closure = second_ran.clone();
 
@@ -2188,7 +3215,7 @@ mod tests {
 
     #[test]
     fn try_build_succeeds_identically_to_build_when_all_dependencies_present() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_adapter(Arc::new(StubAdapter(7)))
             .with_injectable::<NeedsAdapter>()
             .try_build()
@@ -2204,9 +3231,7 @@ mod tests {
         // A required adapter is missing, but calling build() (not try_build())
         // must still succeed — with_injectable bookkeeping has no effect on
         // build(), matching the existing "build() Behavior Is Unchanged" contract.
-        let rt = RuntimeBuilder::new()
-            .with_injectable::<NeedsAdapter>()
-            .build();
+        let rt = compat().with_injectable::<NeedsAdapter>().build();
         assert!(rt.inner().resolve_adapter::<StubAdapter>().is_err());
     }
 
@@ -2287,7 +3312,7 @@ mod tests {
         // `build()` never constructs a store/queue/runner at all — proven
         // here by the absence of the acceptor itself, not merely an unused
         // `Some`.
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(
             rt.effect_acceptor().is_none(),
             "no executor was registered, so no RuntimeEffectAcceptor may exist"
@@ -2299,7 +3324,7 @@ mod tests {
         // Companion proof of the zero-cost path: with nothing registered, no
         // async teardown hook exists for the effects subsystem either, so
         // shutdown_async has nothing effects-related to await.
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let started = Instant::now();
         rt.shutdown_async().await.expect("shutdown_async succeeds");
         assert!(
@@ -2314,7 +3339,7 @@ mod tests {
         // existing Result-returning pattern above), so match manually rather
         // than `.expect_err`.
         let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
-        let err = match RuntimeBuilder::new()
+        let err = match compat()
             .register_effect_executor(["invoice.created"], executor.clone())
             .expect("first registration succeeds")
             .register_effect_executor(["invoice.created"], executor)
@@ -2343,7 +3368,7 @@ mod tests {
     #[test]
     fn build_with_registered_effect_executor_does_not_panic_outside_a_tokio_runtime() {
         let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_effect_executor(["invoice.created"], executor)
             .unwrap()
             .build();
@@ -2360,7 +3385,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_effects_is_a_no_op_in_the_zero_cost_path() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         rt.start_effects()
             .await
             .expect("no executor registered — start_effects must be a harmless no-op");
@@ -2370,7 +3395,7 @@ mod tests {
     #[tokio::test]
     async fn start_effects_is_idempotent() {
         let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_effect_executor(["invoice.created"], executor)
             .unwrap()
             .build();
@@ -2390,7 +3415,7 @@ mod tests {
         // acceptor is configured), now proven end-to-end through the new
         // two-step lifecycle.
         let executor = Arc::new(AlwaysSucceedsExecutor::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_effect_executor(["invoice.created"], executor.clone())
             .unwrap()
             .build();
@@ -2422,7 +3447,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_async_drains_cleanly_when_delivery_completes_before_the_deadline() {
         let executor = Arc::new(AlwaysSucceedsExecutor::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_effect_executor(["invoice.created"], executor.clone())
             .unwrap()
             .with_effect_drain_deadline(Duration::from_millis(200))
@@ -2459,7 +3484,7 @@ mod tests {
         // signal — rather than silently discarding it.
         let gate = Arc::new(Notify::new());
         let executor = Arc::new(GatedExecutor { gate: gate.clone() });
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_effect_executor(["invoice.created"], executor)
             .unwrap()
             .with_delivery_config(DeliveryConfig::default())
@@ -2536,7 +3561,7 @@ mod tests {
         // Zero-cost path (spec: "Zero Runtime Overhead When Unused";
         // design.md AD-006): no provider registered means `build()` never
         // constructs a registry or `RuntimeDataProviderAccess` at all.
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         assert!(
             rt.data_provider_access().is_none(),
             "no provider was registered, so no RuntimeDataProviderAccess may exist"
@@ -2545,7 +3570,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_async_with_no_registered_data_provider_completes_instantly() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let started = Instant::now();
         rt.shutdown_async().await.expect("shutdown_async succeeds");
         assert!(
@@ -2557,7 +3582,7 @@ mod tests {
     #[test]
     fn register_data_provider_duplicate_provider_id_fails_closed() {
         let provider: Arc<dyn ExternalDataProvider> = Arc::new(RecordingShutdownProvider::new());
-        let err = match RuntimeBuilder::new()
+        let err = match compat()
             .register_data_provider("pricing", provider.clone())
             .expect("first registration succeeds")
             .register_data_provider("pricing", provider)
@@ -2575,7 +3600,7 @@ mod tests {
     #[tokio::test]
     async fn build_with_registered_data_provider_wires_a_usable_facade() {
         let provider: Arc<dyn ExternalDataProvider> = Arc::new(RecordingShutdownProvider::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("pricing", provider)
             .unwrap()
             .build();
@@ -2599,7 +3624,7 @@ mod tests {
         let provider_a = Arc::new(RecordingShutdownProvider::new());
         let provider_b = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "pricing",
                 provider_a.clone() as Arc<dyn ExternalDataProvider>,
@@ -2623,7 +3648,7 @@ mod tests {
         // never once per registration (review finding on PR2).
         let provider = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("jwks", provider.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
             .register_data_provider(
@@ -2675,7 +3700,7 @@ mod tests {
         let before = Arc::new(RecordingShutdownProvider::new());
         let after = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("before", before.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
             .register_data_provider(
@@ -2707,7 +3732,7 @@ mod tests {
 
     #[tokio::test]
     async fn panicking_shutdown_hook_does_not_escape_as_unwind() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "boom",
                 Arc::new(PanickingShutdownProvider::new("kaboom")) as Arc<dyn ExternalDataProvider>,
@@ -2726,7 +3751,7 @@ mod tests {
     async fn each_provider_shuts_down_at_most_once() {
         let provider = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("pricing", provider.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
             .build();
@@ -2743,7 +3768,7 @@ mod tests {
         // the `Arc::ptr_eq` dedup at registration.
         let provider = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("jwks", provider.clone() as Arc<dyn ExternalDataProvider>)
             .unwrap()
             .register_data_provider(
@@ -2760,7 +3785,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_panic_reason_does_not_leak_payload() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "boom",
                 Arc::new(PanickingShutdownProvider::new("SECRET_SHUTDOWN_abc123"))
@@ -2838,7 +3863,7 @@ mod tests {
     async fn shutdown_isolates_a_synchronous_construction_panic_and_continues() {
         let after = Arc::new(RecordingShutdownProvider::new());
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "boom",
                 Arc::new(SyncConstructionPanicShutdown) as Arc<dyn ExternalDataProvider>,
@@ -2892,7 +3917,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_registered_via_the_builder_participates_in_the_same_health_aggregator() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "pricing",
                 Arc::new(StaticHealthDataProvider {
@@ -2916,7 +3941,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unhealthy_registered_provider_drives_global_readiness_and_startup_unhealthy() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "pricing",
                 Arc::new(StaticHealthDataProvider {
@@ -2947,7 +3972,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_still_consults_no_provider_even_when_one_is_registered_and_unhealthy() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider(
                 "pricing",
                 Arc::new(StaticHealthDataProvider {
@@ -2974,7 +3999,7 @@ mod tests {
             health: ProviderHealth::Healthy,
         }) as Arc<dyn ExternalDataProvider>;
 
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .register_data_provider("pricing-v1", provider.clone())
             .unwrap()
             .register_data_provider("pricing-v2", provider)
@@ -2999,7 +4024,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_data_provider_health_composes_with_lifecycle_component_health() {
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_lifecycle_component(Arc::new(UnhealthyLifecycleComponent))
             .register_data_provider(
                 "pricing",
@@ -3125,7 +4150,7 @@ mod tests {
     #[tokio::test]
     async fn with_tracer_wires_a_tracing_interceptor_into_the_chain() {
         let tracer = Arc::new(SpyTracer::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_tracer(tracer.clone() as Arc<dyn Tracer>)
             .build();
 
@@ -3147,7 +4172,7 @@ mod tests {
     async fn without_with_tracer_no_interceptor_is_wired_and_behavior_is_unchanged() {
         // Omitted ⇒ byte-identical to today: no TracingInterceptor is added
         // at all (not even a NoopTracer-backed one running for nothing).
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
 
         let ctx = ctx_with_root_trace();
         rt.inner()
@@ -3158,20 +4183,20 @@ mod tests {
 
         // No tracer was ever wired, so there is nothing to assert calls
         // against — the interceptor chain itself must report zero wired
-        // interceptors (default `RuntimeBuilder::new()` behavior,
+        // interceptors (default `compat()` behavior,
         // pre-PROD-003, unchanged).
         assert_eq!(
             format!("{:?}", rt.inner().interceptor_chain),
             format!("{:?}", InterceptorChain::new()),
             "with no tracer registered, the interceptor chain must remain exactly as empty as \
-             RuntimeBuilder::new()'s default — no TracingInterceptor wired"
+             compat()'s default — no TracingInterceptor wired"
         );
     }
 
     #[tokio::test]
     async fn shutdown_async_invokes_tracer_lifecycle_shutdown_exactly_once() {
         let lifecycle = Arc::new(SpyTracerLifecycle::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_tracer_lifecycle(lifecycle.clone() as Arc<dyn TracerLifecycle>)
             .build();
 
@@ -3183,7 +4208,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_async_called_twice_still_shuts_down_tracer_lifecycle_exactly_once() {
         let lifecycle = Arc::new(SpyTracerLifecycle::new());
-        let rt = RuntimeBuilder::new()
+        let rt = compat()
             .with_tracer_lifecycle(lifecycle.clone() as Arc<dyn TracerLifecycle>)
             .build();
 
@@ -3203,7 +4228,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_async_with_no_tracer_lifecycle_registers_no_hook() {
-        let rt = RuntimeBuilder::new().build();
+        let rt = compat().build();
         let started = Instant::now();
         rt.shutdown_async().await.expect("shutdown_async succeeds");
         assert!(
@@ -3215,7 +4240,7 @@ mod tests {
     #[tokio::test]
     async fn with_traced_sets_both_tracer_and_tracer_lifecycle_from_the_same_instance() {
         let traced = Arc::new(TracedDouble::new());
-        let rt = RuntimeBuilder::new().with_traced(traced.clone()).build();
+        let rt = compat().with_traced(traced.clone()).build();
 
         let ctx = ctx_with_root_trace();
         rt.inner()
@@ -3234,6 +4259,174 @@ mod tests {
             traced.shutdown_calls.load(Ordering::SeqCst),
             1,
             "with_traced must wire the same instance as the TracerLifecycle shut down on teardown"
+        );
+    }
+}
+
+/// PROD-012 AD-3i — the reservation configuration `build()` assembles.
+///
+/// These go through `RuntimeBuilder::build()` rather than calling
+/// `ReservationConfig::new` directly, on purpose. A test that constructed the
+/// config itself would keep passing if `build()` stopped threading the setters
+/// through — which is the failure that actually matters here, because the
+/// setters are the only way a deployment configures any of this.
+#[cfg(test)]
+mod reservation_config_tests {
+    use super::*;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ego_domain::operation::{
+        OwnerFence, OwnerId, ReservationError, ReservationOutcome, ReserveRequest,
+        StoredServiceResponse,
+    };
+    use ego_domain::time::Clock;
+    use std::time::Duration;
+
+    /// A clock that never moves, so lease arithmetic is checked rather than raced.
+    struct FrozenClock(DateTime<Utc>);
+
+    impl Clock for FrozenClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    /// Present only so a reservation can be configured; every method panics
+    /// because none of these tests dispatch an operation.
+    struct InertStore;
+
+    #[async_trait::async_trait]
+    impl OperationReservationStore for InertStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            panic!("these tests configure a reservation; they never take one");
+        }
+        async fn renew(
+            &self,
+            _fence: &OwnerFence,
+            _until: DateTime<Utc>,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never renew one");
+        }
+        async fn complete(
+            &self,
+            _fence: &OwnerFence,
+            _response: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never complete one");
+        }
+        async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+            panic!("these tests configure a reservation; they never abandon one");
+        }
+        async fn purge_completed_before(
+            &self,
+            _cutoff: DateTime<Utc>,
+            _batch: usize,
+        ) -> Result<u64, ReservationError> {
+            panic!("these tests configure a reservation; they never purge");
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(secs, 0)
+            .single()
+            .expect("a valid instant")
+    }
+
+    fn runtime_with(lease: Duration, clock_at: i64, owner: Option<OwnerId>) -> Runtime {
+        let mut b = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_operation_reservation_store(Arc::new(InertStore))
+            .with_reservation_clock(Arc::new(FrozenClock(at(clock_at))))
+            .with_reservation_lease_duration(lease);
+        if let Some(owner) = owner {
+            b = b.with_reservation_owner_id(owner);
+        }
+        b.build()
+    }
+
+    /// One identity per runtime, stable for its whole life — which is what makes
+    /// a retry inside this runtime observable as `OwnedInProgress`.
+    #[test]
+    fn one_runtime_reports_the_same_owner_every_time() {
+        let rt = runtime_with(Duration::from_secs(30), 1_000, None);
+        let first = rt
+            .inner
+            .reservation()
+            .expect("configured")
+            .owner_id()
+            .clone();
+        let second = rt
+            .inner
+            .reservation()
+            .expect("configured")
+            .owner_id()
+            .clone();
+        assert_eq!(
+            first, second,
+            "an owner that changed between reads would make self-contention \
+             indistinguishable from external contention"
+        );
+    }
+
+    /// Two runtimes are two owners. Sharing one would erase the difference
+    /// between self-contention and external contention, and would break lease
+    /// renewal, which must only renew a lease this instance holds.
+    #[test]
+    fn two_runtimes_get_different_owners() {
+        let a = runtime_with(Duration::from_secs(30), 1_000, None);
+        let b = runtime_with(Duration::from_secs(30), 1_000, None);
+        assert_ne!(
+            a.inner.reservation().expect("configured").owner_id(),
+            b.inner.reservation().expect("configured").owner_id(),
+            "each runtime instance must mint its own reservation identity"
+        );
+    }
+
+    /// The injected owner survives `build()` intact — the property a test that
+    /// needs to decide who owns what depends on.
+    #[test]
+    fn an_injected_owner_is_kept_exactly() {
+        let owner = OwnerId::new("owner-under-test");
+        let rt = runtime_with(Duration::from_secs(30), 1_000, Some(owner.clone()));
+        assert_eq!(
+            rt.inner.reservation().expect("configured").owner_id(),
+            &owner
+        );
+    }
+
+    /// `lease_until` is `now + lease` read from the configured clock, so expiry
+    /// is checked by arithmetic rather than by waiting.
+    #[test]
+    fn the_lease_expiry_comes_from_the_injected_clock() {
+        let rt = runtime_with(Duration::from_secs(45), 1_000, None);
+        assert_eq!(
+            rt.inner.reservation().expect("configured").lease_until(),
+            at(1_045),
+            "a lease computed from the system clock instead would make expiry \
+             testable only by sleeping"
+        );
+    }
+
+    /// Zero is refused at construction, so no partially-valid configuration can
+    /// exist for a caller to hold.
+    #[test]
+    fn a_zero_lease_is_refused_rather_than_stored() {
+        let refused = crate::runtime::idempotency::ReservationConfig::new(
+            Arc::new(InertStore),
+            Arc::new(FrozenClock(at(0))),
+            OwnerId::new("owner"),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            refused.err(),
+            Some(crate::runtime::idempotency::ReservationConfigError::ZeroLease),
+            "a zero lease expires the instant it is taken: every attempt would \
+             see the previous one as expired and take it over"
         );
     }
 }

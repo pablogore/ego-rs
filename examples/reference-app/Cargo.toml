@@ -4,6 +4,23 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Lets a build install the crash failpoint `RegisterUser` exposes, and nothing
+# else. **Off by default, and it must stay off by default.**
+#
+# The trait and the `Option` field are always compiled: they are an ordinary
+# explicit dependency, `None` in every build, and a null check at the call site.
+# What this feature guards is the *activator* — the environment variable that
+# turns that `None` into a process abort. Without the feature the composition
+# root does not read the variable and the aborting implementation does not exist
+# to be constructed, so no ordinary host can be pushed into aborting mid-request
+# by an inherited variable.
+#
+# Only `integration-tests` enables it. That crate is a separate workspace rather
+# than a member of this one, so Cargo's feature unification cannot carry it back
+# into any build of this workspace.
+crash-test-failpoint = []
+
 [dependencies]
 async-trait = "0.1"
 axum = "0.7"
@@ -19,6 +36,9 @@ security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
 ego-scheduler = { path = "../../crates/ego-scheduler" }
 ego-persistence = { path = "../../crates/persistence" }
+# The host owns the pool: it opens Postgres, runs migrations, and refuses to
+# start without them. Nothing downstream degrades to memory on failure.
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 ego-service-sdk = { path = "../../crates/service-sdk" }
 ego-service-sdk-macros = { path = "../../crates/service-sdk-macros" }
 ego-transport = { path = "../../crates/transport" }
@@ -35,5 +55,7 @@ utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 ego-testkit = { path = "../../crates/testkit" }
+# The in-memory metrics reader the OTLP adapter's acceptance test asserts through.
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "testing"] }

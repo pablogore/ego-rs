@@ -1,6 +1,6 @@
 # ego.rs Roadmap
 
-> Updated: 2026-07-18
+> Updated: 2026-08-19
 > Status: Active
 > Source of truth: current `develop` branch, archived OpenSpec changes, and living specs.
 
@@ -831,6 +831,45 @@ Benchmarks:
 * [ ] Graceful shutdown under load
 
 Operational limits and recommended defaults must be documented.
+
+---
+
+## 7.12 PROD-012 — End-to-End Idempotent Command Processing
+
+Priority: P0
+Status: **Delivered.**
+
+A retried mutating command no longer applies twice. A client-supplied `OperationKey`
+identifies one complete business operation, the runtime reserves it before dispatch,
+and every aggregate the operation reaches writes a permanent receipt in the same
+transaction as its events.
+
+Delivered:
+
+* [x] `OperationKey` / `OperationFingerprint` / `OperationIdentity`, distinct from `IdempotencyKey` with no conversion between them
+* [x] Protocol-neutral extraction, demonstrated by two conforming adapters — HTTP `Idempotency-Key` and gRPC `idempotency-key` metadata — judged by one shared conformance harness
+* [x] Protocol neutrality enforced structurally: no transport type reaches the domain, reservation or receipt surfaces
+* [x] `IdempotencyEnforcementMode`, fail-closed by default, with a bounded compatibility variant as the operational kill switch
+* [x] `OperationReservationStore` port, in-memory double and PostgreSQL implementation, with lease, owner, fencing token and atomic takeover
+* [x] Readiness health contributor for a registered-but-unreachable store, distinct from the startup refusal for no store at all
+* [x] Asynchronous `EventStore` plus an `EventStoreUnitOfWork` whose `commit` consumes it, so a spent transaction cannot be reused
+* [x] Per-aggregate `operation_receipts`, confirmed inside the append's own transaction, gating dispatch ahead of the handler
+* [x] `#[idempotent]` marker and slot-3 dispatch, ordered after `#[authorize]` and `#[tenant_scoped]`
+* [x] Replay versus permanent conflict decided by fingerprint, with six distinguishable reservation outcomes
+* [x] Split retention: runtime-owned purge worker, eligibility measured from `completed_at`, receipts never purged
+* [x] Cross-tenant replay prohibited — an unresolved scope is refused before the store is reached
+* [x] Observability on the existing OTLP surface: two spans, counters, a histogram and a gauge; the raw key is never emitted, only a truncated SHA-256 correlator
+* [x] PostgreSQL 14 declared as the supported floor, with effective stream-identity uniqueness expressed as complementary partial index pairs
+* [x] `aggregate_type` promoted to a real column, with an abort-on-ambiguity backfill and an exact reverse migration
+* [x] Dual-aggregate recovery after mid-operation process death, proven against real PostgreSQL
+
+Deliberately **not** promised, and documented as such:
+
+* The dual-aggregate write is **not** atomic. A retry after a partial failure resumes; it does not repeat.
+* A key arriving more than once, or coalesced by an intermediary into one comma-separated value, is admitted first-value-wins. The behaviour is measured and asserted on both adapters rather than closed; every candidate rule was a non-retryable `400` that the compatibility mode cannot admit.
+* The reservation conformance harness is not driven against PostgreSQL; the durable adapter's multi-scope tenant predicates have no test reaching them with two scopes.
+
+No PROD-013 was created. The identifier stays reserved for the next topic.
 
 ---
 

@@ -25,6 +25,7 @@ use crate::scheduler::EntityTriple;
 use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
 use ego_domain::event::DomainEvent;
+use ego_domain::Observability;
 
 /// The actor's sole teardown contract (ADR-005, FR-009): every step is
 /// synchronous so it can run from `Drop`, the only code guaranteed to execute
@@ -129,6 +130,7 @@ where
         mailbox_capacity: usize,
         passivation_timeout: std::time::Duration,
         effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+        observability: Option<Arc<dyn Observability>>,
     ) -> Result<Self, EntityError> {
         let aggregate_id = triple.aggregate_id();
 
@@ -202,6 +204,7 @@ where
                     // keeps this capability at zero cost (AD-2/spec: "Zero
                     // cost when the capability is unused").
                     effect_acceptor,
+                    observability,
                     snapshot_strategy,
                     entity_handler,
                     event_sender,
@@ -327,6 +330,7 @@ mod tests {
             4,
             std::time::Duration::from_secs(300),
             None,
+            None,
         )
         .expect("existing entry must downcast cleanly");
 
@@ -354,6 +358,7 @@ mod tests {
             event_bus_channel().0,
             4,
             std::time::Duration::from_secs(300),
+            None,
             None,
         )
         .expect("no live entry remains, a fresh spawn must succeed");

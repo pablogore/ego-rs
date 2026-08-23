@@ -1,0 +1,19 @@
+error: #[idempotent] requires #[operation] on the same method
+  --> tests/compile_fail/idempotent_without_operation.rs:35:14
+   |
+35 |     async fn not_an_operation(&self, ctx: ServiceContext, id: String)
+   |              ^^^^^^^^^^^^^^^^
+
+warning: unused import: `ego_service_sdk::context::ServiceContext`
+ --> tests/compile_fail/idempotent_without_operation.rs:9:5
+  |
+9 | use ego_service_sdk::context::ServiceContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `idempotent` and `operation`
+  --> tests/compile_fail/idempotent_without_operation.rs:12:30
+   |
+12 | use ego_service_sdk_macros::{idempotent, operation, service};
+   |                              ^^^^^^^^^^  ^^^^^^^^^

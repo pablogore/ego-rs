@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{PersistenceError, Repository};
 
 type RepoKey = (String, Option<String>);
@@ -77,13 +78,5 @@ impl<A: Clone> Repository<A> for InMemoryRepository<A> {
                 aggregate_id: aggregate_id.to_string(),
             }),
         }
-    }
-}
-
-fn resolve_tenant(tenant_id: Option<&str>) -> Result<Option<String>, PersistenceError> {
-    match tenant_id {
-        Some("") => Err(PersistenceError::MissingTenant),
-        Some(t) => Ok(Some(t.to_string())),
-        None => Ok(None),
     }
 }

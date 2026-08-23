@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::error::ServiceError;
+use ego_service_sdk::idempotency::OperationKeyRejection;
 use serde_json::json;
 
 /// A transport-facing error category. Maps 1:1 to an HTTP status code and a
@@ -87,6 +88,29 @@ impl From<ServiceError> for TransportError {
             ServiceError::ServiceUnavailable { .. } => TransportError::ServiceUnavailable,
             ServiceError::BusinessLogic { .. } => TransportError::Conflict,
             ServiceError::Custom { .. } => TransportError::Internal,
+        }
+    }
+}
+
+impl From<OperationKeyRejection> for TransportError {
+    /// A missing, invalid or unreadable `Idempotency-Key` are all
+    /// caller-supplied input that failed a rule before any handler ran — the
+    /// same category `ServiceError::Validation` and
+    /// `SecurityError::InvalidAccessRequest` already map to. None is a resource
+    /// conflict (`Conflict` is reserved for a same-key-different-fingerprint
+    /// replay mismatch downstream) and none is a credential failure
+    /// (`Unauthorized`/`Forbidden`), so `BadRequest` is the closest existing
+    /// category rather than a new one.
+    ///
+    /// They collapse to one status deliberately: the three reasons are kept
+    /// distinct upstream so the rejection can say *which* rule failed in a
+    /// diagnostic, but a client cannot act differently on them, and splitting
+    /// the status would leak how the key was judged.
+    fn from(err: OperationKeyRejection) -> Self {
+        match err {
+            OperationKeyRejection::Missing { .. } => TransportError::BadRequest,
+            OperationKeyRejection::Invalid { .. } => TransportError::BadRequest,
+            OperationKeyRejection::Unreadable { .. } => TransportError::BadRequest,
         }
     }
 }
@@ -188,6 +212,45 @@ mod tests {
             (
                 SecurityError::CrossTenantDenied { reason: "x".into() },
                 StatusCode::FORBIDDEN,
+            ),
+        ];
+        for (err, expected) in cases {
+            let mapped: TransportError = err.into();
+            assert_eq!(mapped.status_code(), expected);
+        }
+    }
+
+    // RED: a rejected OperationKey extraction (missing or invalid) maps to the
+    // same status category as other caller-supplied-input failures rejected
+    // before a handler runs (ServiceError::Validation, SecurityError::
+    // InvalidAccessRequest) — a bad request, never a server-side category.
+    // All three reasons collapse to one status: distinct upstream so a rejection
+    // can name which rule failed, identical here because a client cannot act
+    // differently on them and splitting would leak how the key was judged.
+    #[test]
+    fn operation_key_rejection_status_table() {
+        let cases = [
+            (
+                OperationKeyRejection::Missing {
+                    carrier: "http:Idempotency-Key",
+                },
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OperationKeyRejection::Invalid {
+                    carrier: "http:Idempotency-Key",
+                    source: ego_domain::operation::OperationKeyError::Empty,
+                },
+                StatusCode::BAD_REQUEST,
+            ),
+            // The third reason. The exhaustive match already guarantees it is
+            // mapped at all; this asserts it collapses to the *same* status as
+            // the other two, which is the claim the table actually makes.
+            (
+                OperationKeyRejection::Unreadable {
+                    carrier: "http:Idempotency-Key",
+                },
+                StatusCode::BAD_REQUEST,
             ),
         ];
         for (err, expected) in cases {

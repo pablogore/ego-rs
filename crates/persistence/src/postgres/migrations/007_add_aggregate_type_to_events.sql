@@ -1,0 +1,24 @@
+-- Add the aggregate type as its own column, distinct from the aggregate id.
+--
+-- The column starts nullable. Existing rows carry a joined identifier in
+-- `aggregate_id` (for example "user-7") with no type recorded separately, and
+-- there is no way to split that text into its two components from the
+-- database side alone: the join separator can also appear inside a type
+-- name, so more than one type/id pair can produce the same joined string.
+-- Filling this column for existing rows therefore requires an operator step
+-- that is told which types are registered and refuses to guess when a row is
+-- ambiguous or matches no registered type. That step also rewrites
+-- `aggregate_id` down to the bare identifier and finishes by making this
+-- column mandatory once every row has a value. Until that step runs, reads
+-- and writes that rely on the split identity treat a null value here as "not
+-- yet migrated" rather than as a valid type.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS aggregate_type VARCHAR(255);
+
+-- Reversing this addition, once rows have been rewritten, means restoring
+-- exactly the text this column split apart before dropping it — rejoin
+-- `aggregate_type` and `aggregate_id` with the same separator the operator
+-- step removed, then drop the column. That rejoin is exact and lossless: it
+-- undoes precisely the split that was recorded, rather than reconstructing
+-- anything by guesswork. It is applied by the same tool that performs the
+-- forward step, not by a second SQL file, so the rejoin and the drop happen
+-- together inside one transaction.

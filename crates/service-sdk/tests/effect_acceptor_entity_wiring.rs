@@ -151,6 +151,9 @@ impl PersistentEntity for EffectDescribingEntity {
 async fn effect_executor_registered_on_runtime_builder_is_invoked_by_a_really_spawned_actor() {
     let executor = Arc::new(RecordingExecutor::new());
     let sdk_runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .register_effect_executor(["invoice.created"], executor.clone())
         .unwrap()
         .build();
@@ -203,6 +206,9 @@ async fn effect_executor_registered_on_runtime_builder_is_invoked_by_a_really_sp
 async fn without_with_effect_acceptor_the_executor_is_never_reached() {
     let executor = Arc::new(RecordingExecutor::new());
     let _sdk_runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .register_effect_executor(["invoice.created"], executor.clone())
         .unwrap()
         .build();

@@ -63,6 +63,9 @@ use persistent_entity::persistent_entity::PersistentEntity;
 use persistent_entity::runtime::EntityRuntime;
 
 use crate::di::{AdapterRef, ConfigValue, EntityRuntimeRef, Injectable, ProjectionRef};
+use ego_domain::operation::OperationReservationStore;
+
+use crate::runtime::IdempotencyEnforcementMode;
 use crate::runtime::{
     HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver,
 };
@@ -434,6 +437,87 @@ impl AppBuilder {
         self
     }
 
+    /// Sets how a missing client-supplied operation key is treated.
+    ///
+    /// Forwarded because the underlying builder's default is fail-closed: a runtime
+    /// under [`IdempotencyEnforcementMode::MandatoryKey`] cannot be built without a
+    /// reservation store, so an application needs a way either to register one or to
+    /// state that it has not adopted enforcement yet. Without this method the facade
+    /// would offer neither, and every application would fail to build.
+    ///
+    /// Note that `AppBuilder` does *not* forward the tenant enforcement mode. That is
+    /// not an inconsistency to copy: tenant enforcement has a permissive-by-default
+    /// posture that needs no decision at bootstrap, while this one refuses to start
+    /// until the decision is made.
+    pub fn idempotency_enforcement_mode(mut self, mode: IdempotencyEnforcementMode) -> Self {
+        self.runtime_builder = self.runtime_builder.with_idempotency_enforcement_mode(mode);
+        self
+    }
+
+    /// Registers the single [`OperationReservationStore`] operations are reserved
+    /// through.
+    ///
+    /// This is the other half of the decision above: registering a store is how an
+    /// application adopts enforcement rather than deferring it.
+    pub fn operation_reservation_store(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+    ) -> Self {
+        self.runtime_builder = self.runtime_builder.with_operation_reservation_store(store);
+        self
+    }
+
+    /// Adopts operation-key enforcement, with everything a lease needs to behave.
+    ///
+    /// One method rather than four forwards, because these four are not four
+    /// settings. A store with no clock cannot compute a lease expiry; an owner
+    /// with no store means nothing; a lease length without a clock is unusable.
+    /// Exposed separately they would let a host assemble combinations most of
+    /// which are incoherent — enforcement declared with no store, a store with no
+    /// owner, an owner with no clock — and each of those looks configured while
+    /// guaranteeing nothing.
+    ///
+    /// So the facade's surface is a **complete** configuration. It delegates to
+    /// [`RuntimeBuilder`]'s individual setters internally, where the pieces are
+    /// separate for the builder's own reasons; what a host can express is the
+    /// whole thing or none of it.
+    ///
+    /// # The parameters, and why each is a host decision
+    ///
+    /// - `store`: where reservations are held. Durable, or enforcement is
+    ///   decorative — an in-memory store makes the build succeed and the
+    ///   deployment look adopted while surviving nothing.
+    /// - `owner_id`: who this runtime reserves as. A takeover is *this* owner
+    ///   displacing *that* one, so two replicas sharing an id could not displace
+    ///   each other at all.
+    /// - `lease_duration`: how long a lease is held before another owner may take
+    ///   it. Must exceed the longest a legitimate execution can take; a shorter
+    ///   one permits two owners to run the same operation at once, which is a
+    ///   correctness problem rather than a tuning preference.
+    /// - `clock`: what expiry is measured against. One source, so a worker
+    ///   reading wall time cannot disagree with a store reading an injected
+    ///   clock — under test, or under skew.
+    ///
+    /// The alternative to calling this is
+    /// [`Self::idempotency_enforcement_mode`] with the compatibility variant,
+    /// which is how a deployment states it has not adopted enforcement yet.
+    pub fn enforced_idempotency(
+        mut self,
+        store: Arc<dyn OperationReservationStore>,
+        owner_id: ego_domain::operation::OwnerId,
+        lease_duration: std::time::Duration,
+        clock: Arc<dyn ego_domain::time::Clock>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::MandatoryKey)
+            .with_operation_reservation_store(store)
+            .with_reservation_owner_id(owner_id)
+            .with_reservation_lease_duration(lease_duration)
+            .with_reservation_clock(clock);
+        self
+    }
+
     /// Registers an external-effect executor — thin delegation to
     /// [`RuntimeBuilder::register_effect_executor`] (review F1). This is
     /// what makes [`App::start`] actually have effects to start:
@@ -641,6 +725,17 @@ impl AppBuilder {
 
 #[cfg(test)]
 mod tests {
+
+    /// An `AppBuilder` that has explicitly not adopted idempotency enforcement.
+    ///
+    /// `#[cfg(test)]` and local, so nothing production-facing can reach it and no
+    /// example or host bootstrap can inherit a relaxed mode from it. Tests whose
+    /// subject *is* the enforcement decision construct the builder directly.
+    use crate::runtime::IdempotencyEnforcementMode;
+
+    fn compat_app() -> AppBuilder {
+        App::builder().idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+    }
     use super::*;
 
     #[derive(Debug, PartialEq)]
@@ -693,7 +788,7 @@ mod tests {
     // registration has one documented, testable outcome").
     #[test]
     fn duplicate_adapter_registration_is_rejected() {
-        let result = App::builder()
+        let result = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .adapter(Arc::new(StubAdapter(2)))
             .build();
@@ -714,7 +809,7 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct OtherAdapter(u32);
 
-        let app = App::builder()
+        let app = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .adapter(Arc::new(OtherAdapter(2)))
             .build()
@@ -730,7 +825,7 @@ mod tests {
     // dup-guard and performs the explicit override.
     #[test]
     fn replace_adapter_bypasses_the_duplicate_guard() {
-        let app = App::builder()
+        let app = compat_app()
             .adapter(Arc::new(StubAdapter(1)))
             .replace_adapter(Arc::new(StubAdapter(2)))
             .build()
@@ -747,7 +842,7 @@ mod tests {
 
     #[test]
     fn registered_config_value_resolves_after_build() {
-        let app = App::builder()
+        let app = compat_app()
             .config(Arc::new(StubConfig("hello".to_string())))
             .build()
             .expect("build succeeds");
@@ -798,7 +893,7 @@ mod tests {
             }
         }
 
-        let app = App::builder()
+        let app = compat_app()
             .security(Arc::new(StubAuthn), Arc::new(StubAuthz))
             .build()
             .expect("build succeeds");
@@ -813,7 +908,7 @@ mod tests {
     fn registered_logger_is_present_on_the_built_runtime() {
         use kitlogger::KITLogger;
 
-        let app = App::builder()
+        let app = compat_app()
             .logger(Arc::new(KITLogger::default()))
             .build()
             .expect("build succeeds");
@@ -831,7 +926,7 @@ mod tests {
     fn registered_observability_hook_does_not_prevent_build() {
         use crate::test_support::RecordingObservability;
 
-        let app = App::builder()
+        let app = compat_app()
             .observability(Arc::new(RecordingObservability::new()))
             .build();
         assert!(
@@ -845,7 +940,7 @@ mod tests {
     // own contract exactly (no silent last-write-wins).
     #[test]
     fn duplicate_effect_type_registration_is_rejected() {
-        let result = App::builder()
+        let result = compat_app()
             .effect_executor(["dup.effect"], Arc::new(StubExecutor))
             .effect_executor(["dup.effect"], Arc::new(StubExecutor))
             .build();
@@ -877,7 +972,7 @@ mod tests {
             }
         }
 
-        let ok = App::builder()
+        let ok = compat_app()
             .data_provider("provider-a", Arc::new(StubProvider))
             .build();
         assert!(
@@ -885,7 +980,7 @@ mod tests {
             "a single data provider registration must succeed"
         );
 
-        let dup = App::builder()
+        let dup = compat_app()
             .data_provider("provider-b", Arc::new(StubProvider))
             .data_provider("provider-b", Arc::new(StubProvider))
             .build();
@@ -906,7 +1001,7 @@ mod tests {
     // build").
     #[test]
     fn projection_registers_and_resolves() {
-        let app = App::builder()
+        let app = compat_app()
             .projection(Arc::new(StubProjection(7)))
             .build()
             .expect("build succeeds");
@@ -921,7 +1016,7 @@ mod tests {
     // (spec "Duplicate ... fails closed", "surfaced through `build()`").
     #[test]
     fn projection_rejects_duplicate_registration_at_build() {
-        let result = App::builder()
+        let result = compat_app()
             .projection(Arc::new(StubProjection(1)))
             .projection(Arc::new(StubProjection(2)))
             .build();
@@ -940,6 +1035,7 @@ mod tests {
     #[test]
     fn runtimebuilder_and_appbuilder_projection_registration_are_equivalent() {
         let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
             .with_projection(Arc::new(StubProjection(42)))
             .unwrap()
             .build();
@@ -948,7 +1044,7 @@ mod tests {
             .resolve_projection::<StubProjection>()
             .unwrap();
 
-        let via_app_builder = App::builder()
+        let via_app_builder = compat_app()
             .projection(Arc::new(StubProjection(42)))
             .build()
             .expect("build succeeds");
@@ -971,7 +1067,7 @@ mod tests {
     #[test]
     fn entity_registers_and_resolves() {
         let runtime = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let app = App::builder()
+        let app = compat_app()
             .entity::<TestEntity>(runtime)
             .build()
             .expect("build succeeds");
@@ -987,7 +1083,7 @@ mod tests {
         let runtime_a = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let runtime_b = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
 
-        let result = App::builder()
+        let result = compat_app()
             .entity::<TestEntity>(runtime_a)
             .entity::<TestEntity>(runtime_b)
             .build();
@@ -1007,6 +1103,7 @@ mod tests {
     fn runtimebuilder_and_appbuilder_entity_registration_are_equivalent() {
         let via_runtime_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
         let via_runtime_builder = crate::runtime::RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
             .with_entity::<TestEntity>(via_runtime_builder_rt.clone())
             .unwrap()
             .build();
@@ -1027,7 +1124,7 @@ mod tests {
         );
 
         let via_app_builder_rt = Arc::new(EntityRuntimeBuilder::<TestEvent>::new().build());
-        let via_app_builder = App::builder()
+        let via_app_builder = compat_app()
             .entity::<TestEntity>(via_app_builder_rt.clone())
             .build()
             .expect("build succeeds");
@@ -1047,9 +1144,7 @@ mod tests {
     // nothing").
     #[test]
     fn build_starts_nothing_and_no_tokio_runtime_is_required() {
-        let app = App::builder()
-            .build()
-            .expect("build succeeds without Tokio");
+        let app = compat_app().build().expect("build succeeds without Tokio");
         assert!(
             app.runtime.effect_acceptor().is_none(),
             "no executor was registered and start() was never called"
@@ -1065,7 +1160,7 @@ mod tests {
     // (not a dead clone) while only exposing `resolve`/`logger`.
     #[test]
     fn app_resolver_sees_the_same_registered_logger_as_the_underlying_runtime() {
-        let app = App::builder()
+        let app = compat_app()
             .logger(Arc::new(KITLogger::default()))
             .build()
             .expect("build succeeds");
@@ -1110,7 +1205,7 @@ mod tests {
     // `Some` post-start when an executor was registered.
     #[tokio::test]
     async fn start_starts_effects_when_an_executor_was_registered() {
-        let app = App::builder()
+        let app = compat_app()
             .effect_executor(["test.effect"], Arc::new(StubExecutor))
             .build()
             .expect("build succeeds");
@@ -1132,7 +1227,7 @@ mod tests {
         let read_model = Arc::new(Mutex::new(vec!["initial".to_string()]));
         let stop_ran = Arc::new(AtomicBool::new(false));
 
-        let app = App::builder().build().expect("build succeeds");
+        let app = compat_app().build().expect("build succeeds");
         let stop_ran_clone = stop_ran.clone();
         app.register_shutdown(async move {
             stop_ran_clone.store(true, Ordering::SeqCst);
@@ -1160,7 +1255,7 @@ mod tests {
     // others").
     #[tokio::test]
     async fn shutdown_runs_every_participant_and_surfaces_the_first_error() {
-        let app = App::builder().build().expect("build succeeds");
+        let app = compat_app().build().expect("build succeeds");
         let second_ran = Arc::new(AtomicBool::new(false));
         let second_ran_clone = second_ran.clone();
 
@@ -1184,6 +1279,229 @@ mod tests {
         assert!(
             second_ran.load(Ordering::SeqCst),
             "the second participant must still run despite the first one failing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod enforced_idempotency_wiring {
+    //! Every piece of an enforced posture arrives, not just the mode.
+    //!
+    //! Before [`AppBuilder::enforced_idempotency`], the facade forwarded the
+    //! enforcement mode and the store and stopped: `owner_id`, `lease_duration`
+    //! and `clock` lived on [`RuntimeBuilder`] with no route through it. A host
+    //! adopting enforcement got a store with no identity, no lease and no clock,
+    //! and a test needing those had to reach past the facade and build a runtime
+    //! the host would never build.
+    //!
+    //! So these follow the pieces individually. It is not enough that enforcement
+    //! is *on*: a forward silently dropped is invisible from outside until a lease
+    //! misbehaves in production, or until a takeover cannot name whose lease it is
+    //! taking.
+    //!
+    //! Read back through the crate's own accessors rather than by driving a
+    //! reservation. What is under test is the configuration the host assembled,
+    //! and that is exactly what these expose — a scripted store would add a
+    //! moving part between the claim and the evidence.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ego_domain::operation::{
+        OperationReservationStore, OwnerFence, OwnerId, ReservationError, ReservationOutcome,
+        ReserveRequest, StoredServiceResponse,
+    };
+    use ego_domain::time::Clock;
+
+    use super::*;
+    use crate::runtime::IdempotencyEnforcementMode;
+
+    const OWNER: &str = "replica-under-test";
+    /// Deliberately not a round number, so a default or a dropped forward differs.
+    const LEASE: Duration = Duration::from_secs(97);
+
+    /// Frozen years in the past, so an expiry computed from wall time is far away
+    /// rather than close enough to pass.
+    struct FrozenClock;
+
+    impl FrozenClock {
+        fn instant() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2021, 3, 14, 15, 9, 26).unwrap()
+        }
+    }
+
+    impl Clock for FrozenClock {
+        fn now(&self) -> DateTime<Utc> {
+            Self::instant()
+        }
+    }
+
+    /// Exists to be registered. Nothing here calls it.
+    struct InertStore;
+
+    #[async_trait]
+    impl OperationReservationStore for InertStore {
+        async fn reserve(
+            &self,
+            _req: ReserveRequest,
+        ) -> Result<ReservationOutcome, ReservationError> {
+            unreachable!("this fixture is registered, never driven")
+        }
+        async fn renew(
+            &self,
+            _f: &OwnerFence,
+            _until: DateTime<Utc>,
+        ) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn complete(
+            &self,
+            _f: &OwnerFence,
+            _r: StoredServiceResponse,
+        ) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn abandon(&self, _f: &OwnerFence) -> Result<(), ReservationError> {
+            unreachable!()
+        }
+        async fn purge_completed_before(
+            &self,
+            _cutoff: DateTime<Utc>,
+            _batch: usize,
+        ) -> Result<u64, ReservationError> {
+            unreachable!()
+        }
+        async fn probe(&self) -> Result<(), ReservationError> {
+            Ok(())
+        }
+    }
+
+    fn enforced_app() -> App {
+        App::builder()
+            .enforced_idempotency(
+                Arc::new(InertStore),
+                OwnerId::new(OWNER),
+                LEASE,
+                Arc::new(FrozenClock),
+            )
+            .build()
+            .expect("a complete enforced configuration builds")
+    }
+
+    /// One call turns enforcement on **and** gives it somewhere to reserve.
+    ///
+    /// Both halves together, because the runtime refuses to build with one and not
+    /// the other — so a test asserting only the mode could not tell a complete
+    /// configuration from a rejected one.
+    #[test]
+    fn one_call_adopts_enforcement_and_registers_a_store() {
+        let app = enforced_app();
+
+        assert_eq!(
+            app.runtime.idempotency_enforcement_mode(),
+            IdempotencyEnforcementMode::MandatoryKey,
+            "an enforced host refuses a request carrying no operation key"
+        );
+        assert!(
+            app.runtime.inner().reservation().is_some(),
+            "and it has somewhere to reserve — enforcement with no store is the \
+             configuration that looks adopted and guarantees nothing"
+        );
+    }
+
+    /// The owner the host named is the owner the runtime reserves as.
+    ///
+    /// The piece E1 cannot do without: a takeover is one owner displacing another,
+    /// so an owner dropped between the facade and the config makes "this
+    /// reservation still belongs to owner A" unassertable — and leaves two
+    /// replicas unable to displace each other in production.
+    #[test]
+    fn the_owner_the_host_named_reaches_the_reservation_config() {
+        let app = enforced_app();
+        let reservation = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .clone();
+
+        assert_eq!(
+            reservation.owner_id().as_str(),
+            OWNER,
+            "the runtime must reserve as the owner the host configured"
+        );
+    }
+
+    /// The lease and the clock together determine the expiry.
+    ///
+    /// Asserted as the exact arithmetic rather than as "some future instant":
+    /// that sum is the whole content of both settings. A dropped duration would
+    /// still produce a plausible timestamp from the clock alone, and a dropped
+    /// clock would produce one from wall time.
+    #[test]
+    fn the_lease_and_the_clock_determine_the_expiry() {
+        let app = enforced_app();
+        let reservation = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .clone();
+
+        assert_eq!(
+            reservation.lease_until(),
+            FrozenClock::instant()
+                + chrono::Duration::from_std(LEASE).expect("a small duration converts"),
+            "the expiry is the configured lease measured from the configured clock"
+        );
+    }
+
+    /// The injected clock is the one measured from, not wall time.
+    ///
+    /// Separate from the assertion above because that one would also pass if both
+    /// the clock and the lease were dropped and something else produced the same
+    /// sum. This pins the direction: the instant is years in the past, so wall
+    /// time cannot land near it.
+    #[test]
+    fn the_expiry_derives_from_the_injected_clock_not_wall_time() {
+        let app = enforced_app();
+        let expiry = app
+            .runtime
+            .inner()
+            .reservation()
+            .expect("an enforced host has a reservation config")
+            .lease_until();
+
+        assert!(
+            expiry < Utc::now() - chrono::Duration::days(365),
+            "an expiry computed from wall time would be near now; this must derive \
+             from the injected clock: {expiry}"
+        );
+    }
+
+    /// The compatibility posture registers no store at all.
+    ///
+    /// The negative control. Without it, a change that made every host enforce
+    /// would satisfy every assertion above, and the honest "not adopted yet"
+    /// declaration would have quietly stopped existing.
+    #[test]
+    fn the_compatibility_posture_adopts_nothing() {
+        let app = App::builder()
+            .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .build()
+            .expect("a compatibility host builds");
+
+        assert_eq!(
+            app.runtime.idempotency_enforcement_mode(),
+            IdempotencyEnforcementMode::Compatibility,
+            "a deployment still in transition keeps admitting keyless requests"
+        );
+        assert!(
+            app.runtime.inner().reservation().is_none(),
+            "and registers no store — an in-memory stand-in would make it look \
+             adopted while surviving nothing"
         );
     }
 }

@@ -90,7 +90,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use ego_domain::time::Clock;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
@@ -136,16 +136,21 @@ const RECLAIM_BATCH_LIMIT: usize = 32;
 /// the maximum backoff" into "retry immediately", causing a retry storm
 /// instead of backoff. 100 years is far longer than any real backoff value
 /// while staying safely inside `chrono::DateTime<Utc>`'s representable range
-/// from "now", so the later `Utc::now() + chrono_duration` addition itself
+/// from "now", so the later `clock.now() + chrono_duration` addition itself
 /// cannot overflow and panic.
 fn saturated_backoff_fallback() -> chrono::Duration {
     chrono::Duration::days(365 * 100)
 }
 
-fn timestamp_after(duration: Duration) -> Timestamp {
+/// `now + duration`, where "now" comes from `clock` rather than the wall
+/// clock, so every `next_at` this computes is deterministic under test.
+/// Deliberately a free function taking the clock explicitly (instead of a
+/// `&self` method) so the saturation and arithmetic contracts above can be
+/// asserted directly against a controlled clock, without building a runner.
+fn timestamp_after(clock: &dyn Clock, duration: Duration) -> Timestamp {
     let chrono_duration =
         chrono::Duration::from_std(duration).unwrap_or_else(|_| saturated_backoff_fallback());
-    Timestamp::from_utc(Utc::now() + chrono_duration)
+    Timestamp::from_utc(clock.now() + chrono_duration)
 }
 
 /// Drains accepted effects through the one delivery pipeline: dedup reserve →
@@ -183,6 +188,14 @@ pub(crate) struct DeliveryRunner {
     /// still drains cleanly out of `tasks` instead of being force-aborted
     /// mid-bookkeeping.
     executor_aborts: AsyncMutex<Vec<tokio::task::AbortHandle>>,
+    /// The one source of "now" for every scheduling decision this runner
+    /// makes. Injected rather than read from the wall clock at each decision
+    /// site so all of them are deterministically testable — read directly via
+    /// [`Self::now`] by [`Self::reclaim_due`] and
+    /// [`Self::requeue_without_charging_attempt`], and passed to
+    /// [`timestamp_after`] by [`Self::retry_or_give_up`] and
+    /// [`Self::finish_success`].
+    clock: Arc<dyn Clock>,
 }
 
 impl DeliveryRunner {
@@ -192,11 +205,20 @@ impl DeliveryRunner {
     /// still take an [`EffectQueueReceiver`] directly (the queue-fed path
     /// hasn't changed), but nothing inside `DeliveryRunner` needs to hold
     /// the sender half itself.
+    ///
+    /// `clock` is deliberately a **required** parameter with no defaulting
+    /// overload: every scheduling decision below depends on it, so a
+    /// constructor that silently supplied a `SystemClock` would let a caller
+    /// forget the dependency and quietly reintroduce an untestable wall-clock
+    /// read. Production supplies `Arc::new(SystemClock)` from the one
+    /// composition root (`RuntimeEffectAcceptor::new`); tests supply an
+    /// explicit controllable clock.
     pub(crate) fn new(
         state: Arc<dyn EffectStateStore>,
         dedup: Arc<dyn EffectDedupStore>,
         registry: Arc<ExecutorRegistry>,
         retry: impl Into<RetryPolicies>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             state,
@@ -205,7 +227,23 @@ impl DeliveryRunner {
             retry: retry.into(),
             tasks: AsyncMutex::new(JoinSet::new()),
             executor_aborts: AsyncMutex::new(Vec::new()),
+            clock,
         }
+    }
+
+    /// Test-only read access to the injected clock, so a test can prove which
+    /// clock a composition root actually wired in (rather than inferring it
+    /// from the fact that the code compiled).
+    #[cfg(test)]
+    pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// The injected clock's current instant, in the store's `Timestamp` form.
+    /// Every scheduling decision that needs "now" directly goes through here,
+    /// so there is one place to look for the runner's time source.
+    fn now(&self) -> Timestamp {
+        Timestamp::from_utc(self.clock.now())
     }
 
     /// Fix 5: tracks `fut` in the shared [`JoinSet`] instead of a detached
@@ -541,11 +579,7 @@ impl DeliveryRunner {
         backpressure: &Backpressure,
         shutdown: &mut watch::Receiver<bool>,
     ) -> bool {
-        let due = match self
-            .state
-            .claim_due(Timestamp::now(), RECLAIM_BATCH_LIMIT)
-            .await
-        {
+        let due = match self.state.claim_due(self.now(), RECLAIM_BATCH_LIMIT).await {
             Ok(due) => due,
             // ponytail: a transient `claim_due` error just waits for the
             // next tick rather than retrying inline — the next tick is at
@@ -917,7 +951,7 @@ impl DeliveryRunner {
         );
         let next_attempt = effect.attempt + 1;
         let policy = self.retry.policy_for(&scope.effect_type);
-        let next_at = timestamp_after(policy.backoff(next_attempt.max(1)));
+        let next_at = timestamp_after(self.clock.as_ref(), policy.backoff(next_attempt.max(1)));
         // Dedup reservation stays held (dedup-lifetime redesign, `drain_one`
         // doc comment): the effect already succeeded, so its own reservation
         // must still be there when the reclaim loop re-enters `drain_one`
@@ -958,7 +992,7 @@ impl DeliveryRunner {
 
         let dispatched_attempt = effect.attempt + 1;
         let backoff = policy.backoff(dispatched_attempt);
-        let next_at = timestamp_after(backoff);
+        let next_at = timestamp_after(self.clock.as_ref(), backoff);
 
         if self
             .mark_retryable_with_retry(effect.id, dispatched_attempt, next_at)
@@ -1014,7 +1048,7 @@ impl DeliveryRunner {
     /// respect to the retry cap.
     async fn requeue_without_charging_attempt(&self, effect: AcceptedEffect) {
         if self
-            .mark_retryable_with_retry(effect.id, effect.attempt, Timestamp::now())
+            .mark_retryable_with_retry(effect.id, effect.attempt, self.now())
             .await
             .is_err()
         {
@@ -1087,6 +1121,8 @@ mod tests {
         EffectId, EffectState, EffectStoreError, InMemoryEffectStore, StoredEffect,
     };
     use async_trait::async_trait;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ego_domain::time::SystemClock;
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
@@ -1542,7 +1578,13 @@ mod tests {
         retry: impl Into<RetryPolicies>,
     ) -> (Arc<DeliveryRunner>, EffectQueue) {
         let (queue, _receiver) = EffectQueue::bounded(8);
-        let runner = Arc::new(DeliveryRunner::new(state, dedup, Arc::new(registry), retry));
+        let runner = Arc::new(DeliveryRunner::new(
+            state,
+            dedup,
+            Arc::new(registry),
+            retry,
+            Arc::new(SystemClock),
+        ));
         (runner, queue)
     }
 
@@ -1601,6 +1643,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             fast_retry,
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1935,6 +1978,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1996,6 +2040,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             config.retry,
+            Arc::new(SystemClock),
         );
 
         let id = EffectId::new();
@@ -2213,6 +2258,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2260,6 +2306,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2302,6 +2349,7 @@ mod tests {
             store as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2356,6 +2404,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             long_backoff_retry,
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2439,6 +2488,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             no_retries,
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2552,6 +2602,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -2719,6 +2770,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             policies,
+            Arc::new(SystemClock),
         ));
 
         let fast_id = EffectId::new();
@@ -2988,19 +3040,371 @@ mod tests {
         assert_eq!(due[0].attempt, 0);
     }
 
+    // --- F1: every clock-dependent scheduling decision reads the INJECTED
+    // clock, never the wall clock -------------------------------------------
+    //
+    // The runner makes four production decisions that depend on "now":
+    //
+    //   1. the instant `reclaim_due` claims due effects at;
+    //   2. `next_at` for an ordinary retry (`retry_or_give_up`);
+    //   3. `next_at` for the successful-but-unconfirmed fallback
+    //      (`finish_success`);
+    //   4. the immediate requeue instant after a shutdown cancellation
+    //      (`requeue_without_charging_attempt`).
+    //
+    // Decisions 2 and 3 share one source, `timestamp_after`, so injecting the
+    // clock there covers both at their common origin rather than at two
+    // separate call sites. Every test below pins the clock to one fixed
+    // instant decades away from real time and asserts against that instant, so
+    // none of them can pass by reading the wall clock, and none of them
+    // depends on elapsed time, sleeping, or a tolerance window.
+
+    /// A clock pinned to one instant.
+    struct FixedClock(DateTime<Utc>);
+
+    impl Clock for FixedClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    /// The instant every test below pins its clock to: 2001-02-03 04:05:06
+    /// UTC. Deliberately decades from any plausible execution time, so an
+    /// assertion that this exact instant reached the store is unsatisfiable by
+    /// a wall-clock read. `the_pinned_instant_is_decades_from_real_time`
+    /// enforces that premise instead of trusting it.
+    fn pinned_instant() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2001, 2, 3, 4, 5, 6).unwrap()
+    }
+
+    fn pinned_clock() -> Arc<dyn Clock> {
+        Arc::new(FixedClock(pinned_instant()))
+    }
+
+    /// A policy whose backoff ceiling is a known, non-zero 60s.
+    ///
+    /// `RetryPolicy::backoff` applies **full jitter** — a uniformly random
+    /// duration in `[0, capped]` drawn fresh per call — so a test cannot
+    /// predict the exact backoff the runner picked by recomputing
+    /// `policy.backoff(n)` itself; that would compare two independent random
+    /// draws. The two `next_at` tests therefore assert a bracket derived
+    /// entirely from the pinned clock and this known ceiling, while the exact
+    /// `now + duration` arithmetic is pinned separately, over a
+    /// test-supplied duration, by
+    /// `timestamp_after_adds_the_duration_to_the_injected_clock`.
+    fn bounded_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 5,
+            base_backoff: StdDuration::from_secs(60),
+            max_backoff: StdDuration::from_secs(60),
+        }
+    }
+
+    /// One recorded store operation with its complete argument list.
+    #[derive(Debug, Clone, PartialEq)]
+    enum StoreCall {
+        ClaimDue {
+            now: Timestamp,
+            limit: usize,
+        },
+        MarkRetryable {
+            id: EffectId,
+            attempt: u32,
+            next_at: Timestamp,
+        },
+    }
+
+    /// Captures the full arguments of the two clock-carrying store operations
+    /// in ONE ordered collection under ONE lock — deliberately not a set of
+    /// parallel per-argument vectors, which can drift out of alignment and let
+    /// a test pass against an argument combination that never actually
+    /// occurred together.
+    struct RecordingStore {
+        calls: std::sync::Mutex<Vec<StoreCall>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<StoreCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl EffectStateStore for RecordingStore {
+        async fn accept(&self, _effect: AcceptedEffect) -> Result<(), EffectStoreError> {
+            Ok(())
+        }
+
+        async fn mark_in_flight(&self, _id: EffectId) -> Result<(), EffectStoreError> {
+            Ok(())
+        }
+
+        /// Never confirms — this is what drives `finish_success` down its
+        /// exhausted-bookkeeping fallback, the path that schedules a `next_at`.
+        async fn mark_succeeded(&self, _id: EffectId) -> Result<(), EffectStoreError> {
+            Err(EffectStoreError::TemporarilyUnavailable(
+                "recording store never confirms success".to_string(),
+            ))
+        }
+
+        async fn mark_retryable(
+            &self,
+            id: EffectId,
+            attempt: u32,
+            next_at: Timestamp,
+        ) -> Result<(), EffectStoreError> {
+            self.calls.lock().unwrap().push(StoreCall::MarkRetryable {
+                id,
+                attempt,
+                next_at,
+            });
+            Ok(())
+        }
+
+        async fn mark_terminal(
+            &self,
+            _id: EffectId,
+            _reason: TerminalReason,
+        ) -> Result<(), EffectStoreError> {
+            Ok(())
+        }
+
+        async fn claim_due(
+            &self,
+            now: Timestamp,
+            limit: usize,
+        ) -> Result<Vec<StoredEffect>, EffectStoreError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(StoreCall::ClaimDue { now, limit });
+            Ok(Vec::new())
+        }
+
+        async fn recover_in_flight(&self, _now: Timestamp) -> Result<u64, EffectStoreError> {
+            Ok(0)
+        }
+    }
+
+    #[async_trait]
+    impl EffectDedupStore for RecordingStore {
+        async fn reserve(
+            &self,
+            _scope: &DedupScope,
+            _effect_id: EffectId,
+            _fingerprint: EffectFingerprint,
+        ) -> Result<DedupOutcome, EffectStoreError> {
+            Ok(DedupOutcome::Fresh)
+        }
+
+        async fn commit_success(&self, _scope: &DedupScope) -> Result<(), EffectStoreError> {
+            Ok(())
+        }
+
+        async fn release(&self, _scope: &DedupScope) -> Result<(), EffectStoreError> {
+            Ok(())
+        }
+    }
+
+    fn recording_runner(store: Arc<RecordingStore>, clock: Arc<dyn Clock>) -> Arc<DeliveryRunner> {
+        Arc::new(DeliveryRunner::new(
+            store.clone() as Arc<dyn EffectStateStore>,
+            store as Arc<dyn EffectDedupStore>,
+            Arc::new(ExecutorRegistry::new()),
+            bounded_policy(),
+            clock,
+        ))
+    }
+
+    fn scope_of(effect: &AcceptedEffect) -> DedupScope {
+        DedupScope {
+            tenant: effect.tenant.clone(),
+            effect_type: effect.description.effect_type.clone(),
+            key: effect.description.idempotency_key.clone(),
+        }
+    }
+
+    /// Asserts `next_at` was measured from the pinned clock: it must land in
+    /// `[pinned, pinned + max_backoff]`. Both bounds come from the injected
+    /// clock and the policy's own ceiling — the window contains no real-time
+    /// reference at all, and a wall-clock read lands decades above it.
+    fn assert_scheduled_from_pinned_clock(next_at: Timestamp) {
+        let lower = pinned_instant();
+        let upper = pinned_instant()
+            + chrono::Duration::from_std(bounded_policy().max_backoff)
+                .expect("60s is representable as a chrono::Duration");
+        let got = next_at.into_utc();
+        assert!(
+            got >= lower && got <= upper,
+            "next_at {got} must be the INJECTED clock's instant plus a jittered backoff, \
+             i.e. inside [{lower}, {upper}]; a wall-clock read lands far outside this window"
+        );
+    }
+
+    fn only_mark_retryable(calls: &[StoreCall]) -> (EffectId, u32, Timestamp) {
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one scheduling write, got {calls:?}"
+        );
+        match calls[0] {
+            StoreCall::MarkRetryable {
+                id,
+                attempt,
+                next_at,
+            } => (id, attempt, next_at),
+            ref other => panic!("expected a mark_retryable call, got {other:?}"),
+        }
+    }
+
+    /// Decision 1: the instant `reclaim_due` claims at.
+    #[tokio::test]
+    async fn reclaim_due_claims_at_exactly_the_injected_clocks_instant() {
+        let store = Arc::new(RecordingStore::new());
+        let runner = recording_runner(store.clone(), pinned_clock());
+        let backpressure = Backpressure::new(4);
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        assert!(runner.reclaim_due(&backpressure, &mut shutdown_rx).await);
+
+        assert_eq!(
+            store.calls(),
+            vec![StoreCall::ClaimDue {
+                now: Timestamp::from_utc(pinned_instant()),
+                limit: RECLAIM_BATCH_LIMIT,
+            }],
+            "reclaim_due must hand claim_due exactly the injected clock's instant"
+        );
+    }
+
+    /// Decision 2: `next_at` of an ordinary retry.
+    #[tokio::test]
+    async fn retry_or_give_up_schedules_next_at_from_the_injected_clock() {
+        let store = Arc::new(RecordingStore::new());
+        let runner = recording_runner(store.clone(), pinned_clock());
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        let scope = scope_of(&effect);
+
+        runner.retry_or_give_up(effect, scope).await;
+
+        let (got_id, attempt, next_at) = only_mark_retryable(&store.calls());
+        assert_eq!(got_id, id);
+        assert_eq!(attempt, 1, "the failed attempt 0 redispatches as attempt 1");
+        assert_scheduled_from_pinned_clock(next_at);
+    }
+
+    /// Decision 3: `next_at` of the successful-but-unconfirmed fallback. The
+    /// recording store never confirms `mark_succeeded`, so bookkeeping
+    /// exhausts its bounded retries and the effect is made reclaim-eligible.
+    #[tokio::test]
+    async fn finish_success_falls_back_to_a_next_at_from_the_injected_clock() {
+        let store = Arc::new(RecordingStore::new());
+        let runner = recording_runner(store.clone(), pinned_clock());
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        let scope = scope_of(&effect);
+
+        runner.finish_success(effect, scope).await;
+
+        let (got_id, attempt, next_at) = only_mark_retryable(&store.calls());
+        assert_eq!(got_id, id);
+        assert_eq!(
+            attempt, 1,
+            "the succeeded attempt 0 redispatches as attempt 1"
+        );
+        assert_scheduled_from_pinned_clock(next_at);
+    }
+
+    /// Decision 4: the immediate requeue instant after a cancellation. This
+    /// one is the clock's instant *exactly* — a cancelled attempt is due
+    /// immediately, with no backoff added.
+    #[tokio::test]
+    async fn requeue_without_charging_attempt_uses_exactly_the_injected_clocks_instant() {
+        let store = Arc::new(RecordingStore::new());
+        let runner = recording_runner(store.clone(), pinned_clock());
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+
+        runner.requeue_without_charging_attempt(effect).await;
+
+        assert_eq!(
+            store.calls(),
+            vec![StoreCall::MarkRetryable {
+                id,
+                attempt: 0,
+                next_at: Timestamp::from_utc(pinned_instant()),
+            }],
+            "a cancelled attempt must be requeued at exactly the injected clock's instant, \
+             immediately due and without charging an attempt"
+        );
+    }
+
+    /// The shared arithmetic behind decisions 2 and 3, pinned exactly: the
+    /// supplied duration is added to the INJECTED clock's instant. Over a
+    /// test-supplied duration there is no jitter, so this can assert exact
+    /// equality — which is what makes both "read the real clock instead" and
+    /// "stop adding the backoff at all" detectable here.
+    #[test]
+    fn timestamp_after_adds_the_duration_to_the_injected_clock() {
+        let clock = FixedClock(pinned_instant());
+
+        let ts = timestamp_after(&clock, StdDuration::from_secs(3600));
+
+        assert_eq!(
+            ts,
+            Timestamp::from_utc(pinned_instant() + chrono::Duration::hours(1)),
+            "timestamp_after must add the supplied duration to the injected clock's instant"
+        );
+    }
+
+    /// The premise the whole group rests on, enforced rather than assumed:
+    /// the pinned fixture instant is decades from real time, so no assertion
+    /// above could be satisfied by a wall-clock read. This is the only test in
+    /// the group that mentions real time, and only to prove the fixture cannot
+    /// be confused with it.
+    #[test]
+    fn the_pinned_instant_is_decades_from_real_time() {
+        let days_away = (Utc::now() - pinned_instant()).num_days();
+
+        assert!(
+            days_away > 365 * 10,
+            "the pinned instant must stay decades from real time (currently {days_away} days) \
+             so that asserting against it cannot accidentally hold for a wall-clock read"
+        );
+    }
+
     // --- HIGH-4: backoff/timestamp arithmetic saturates, never silently
     // degrades to zero on overflow ------------------------------------------
 
+    /// Saturation semantics are unchanged by the clock injection: an
+    /// unrepresentable backoff still saturates to the century-long fallback
+    /// instead of collapsing to "retry immediately", and adding that fallback
+    /// to the injected instant neither overflows nor panics. Measuring from a
+    /// pinned clock lets this assert the exact saturated instant rather than
+    /// merely "more than a year from now".
     #[test]
     fn timestamp_after_saturates_instead_of_degrading_to_zero_on_overflow() {
-        let before_plus_one_year = Utc::now() + chrono::Duration::days(365);
+        let clock = FixedClock(pinned_instant());
 
-        let ts = timestamp_after(StdDuration::MAX);
+        let ts = timestamp_after(&clock, StdDuration::MAX);
 
+        assert_eq!(
+            ts,
+            Timestamp::from_utc(pinned_instant() + saturated_backoff_fallback()),
+            "an unrepresentable duration must saturate to the century-long fallback measured \
+             from the injected clock, never collapse to `now` (which a `zero()` fallback would \
+             silently produce, causing a retry storm)"
+        );
         assert!(
-            ts.into_utc() > before_plus_one_year,
-            "an unrepresentable duration must saturate to a large fallback, never `now` \
-             (which a `zero()` fallback would silently produce, causing a retry storm)"
+            ts.into_utc() > pinned_instant() + chrono::Duration::days(365),
+            "the saturated fallback must stay far in the future, not degrade to an immediate retry"
         );
     }
 
@@ -3197,6 +3601,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let backpressure = Backpressure::new(4);
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -3251,6 +3656,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -3328,6 +3734,7 @@ mod tests {
             store.clone() as Arc<dyn EffectDedupStore>,
             Arc::new(registry),
             RetryPolicy::default(),
+            Arc::new(SystemClock),
         ));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 

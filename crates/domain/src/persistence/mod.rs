@@ -9,10 +9,10 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | `error` | `PersistenceError` — NotFound, Conflict, Internal, MissingTenant |
-//! | `event_store` | `EventStore<E>` — append and load domain events |
+//! | `event_store` | `EventStore<E>` — append and load domain events; `EventStoreUnitOfWork<E>` — a span in which appends share one fate |
 //! | `repository` | `Repository<A>` — save, load, and delete aggregates |
 //! | `snapshot` | `Snapshot` — save and load aggregate state snapshots |
-//! | `stored_event` | `StoredEvent<E>` — event wrapper with optional correlation_id |
+//! | `stored_event` | `StoredEvent<E>` — event wrapper carrying an optional operation key |
 
 /// Persistence error types.
 pub mod error;
@@ -20,17 +20,21 @@ pub mod error;
 /// Event store contract — append and load domain events.
 pub mod event_store;
 
+/// Resolution of a caller-supplied tenant scope into the value a store files under.
+pub mod tenant;
+
 /// Aggregate repository contract — save, load, and delete.
 pub mod repository;
 
 /// Aggregate snapshot contract — save and load state snapshots.
 pub mod snapshot;
 
-/// Event wrapper with optional correlation_id.
+/// Event wrapper carrying an optional operation key.
 pub mod stored_event;
 
 pub use error::PersistenceError;
-pub use event_store::EventStore;
+pub use event_store::{EventStore, EventStoreUnitOfWork};
 pub use repository::Repository;
 pub use snapshot::Snapshot;
 pub use stored_event::StoredEvent;
+pub use tenant::resolve_tenant;

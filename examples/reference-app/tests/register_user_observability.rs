@@ -19,6 +19,11 @@ use support::make_register_user;
 #[derive(Default)]
 struct RecordingObservability {
     events: Mutex<Vec<SemanticEvent>>,
+    /// Every metric emission, whole and in order.
+    ///
+    /// See [`ego_testkit::RecordedMetric::capture`] for why a trace-focused
+    /// double records these at all, and why it appends rather than overwrites.
+    metrics: Mutex<Vec<ego_testkit::RecordedMetric>>,
 }
 
 impl RecordingObservability {
@@ -40,8 +45,22 @@ impl Observability for RecordingObservability {
     fn trace(&self, event: SemanticEvent) {
         self.events.lock().unwrap().push(event);
     }
-    fn metric(&self, _name: &str, _value: f64) {}
+    fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .push(ego_testkit::RecordedMetric::capture(&observation));
+    }
     fn log(&self, _level: Level, _message: &str) {}
+}
+
+/// This file's double preserves every field of what it is handed.
+#[test]
+fn the_double_preserves_metric_observations() {
+    let obs = RecordingObservability::new();
+    ego_testkit::assert_metric_observations_are_preserved(&obs, || {
+        obs.metrics.lock().unwrap().clone()
+    });
 }
 
 fn make_service() -> Arc<dyn RegisterUser> {

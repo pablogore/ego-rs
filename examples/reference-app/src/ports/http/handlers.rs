@@ -7,7 +7,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use ego_service_sdk::context::ServiceContext;
-use ego_transport::{AppState, AuthenticatedContext, TraceContextExtractor, TransportError};
+use ego_service_sdk::runtime::ReservationRejection;
+use ego_transport::{
+    AppState, AuthenticatedContext, OperationKeyExtractor, TraceContextExtractor, TransportError,
+};
 use kitlogger_log_domain::Severity;
 
 use crate::application::{
@@ -36,6 +39,58 @@ fn map_register_error(err: RegisterUserError) -> TransportError {
     match err {
         RegisterUserError::Security(e) => e.into(),
         RegisterUserError::EntityWrite(_) => TransportError::Internal,
+        // The three refusals a client can reason about all say "this key is
+        // taken, by this request or another" — 409, which is the one status a
+        // caller can act on without reading prose.
+        RegisterUserError::Refused(
+            ReservationRejection::SelfInProgress
+            | ReservationRejection::OtherInProgress
+            | ReservationRejection::FingerprintConflict,
+        ) => TransportError::Conflict,
+        // The store could not answer. 503 rather than 500: the request is
+        // well-formed and may well succeed later, and a caller that stops
+        // retrying on 500 would give up on something transient.
+        RegisterUserError::Refused(ReservationRejection::StoreUnavailable) => {
+            TransportError::ServiceUnavailable
+        }
+        // The three remaining cases, all needing someone to look rather than
+        // something to be retried: the operation completed but its answer cannot
+        // be read back; the request could not be fingerprinted at all; or no
+        // tenant scope was resolved before the reservation. No amount of waiting
+        // is a justified recovery for any of them, so 500 is the honest answer.
+        //
+        // **Named, not `_`.** This arm used to be a wildcard, and a wildcard here
+        // decides the status for every variant that does not exist yet: an eighth
+        // refusal would silently arrive as 500 without anyone choosing that. The
+        // three arms above and this one now cover the enum exhaustively, so adding
+        // a variant fails to compile until someone maps it — the same criterion
+        // the reservation outcome match already holds itself to. That is worth a
+        // compile error precisely because the wrong default is invisible: a 500 is
+        // never obviously incorrect from the outside.
+        //
+        // Measured rather than assumed: adding an eighth variant to
+        // `ReservationRejection` fails this build with E0004, naming the unmapped
+        // variant. Checked and reverted when this arm was written.
+        //
+        // `TenantUnresolved` is deliberately here and not a 4xx. It means an
+        // operation is marked idempotent while nothing on its path resolves a
+        // scope — a wiring fault in this service, not something the caller did or
+        // can fix. Reporting it as a client error would send the caller looking
+        // for a mistake in a request that is fine.
+        //
+        // Deliberately not "retrying reproduces it exactly". That holds for the
+        // stored bytes, which do not change. It does not follow for a
+        // fingerprint failure: `Serialize` is satisfied at compile time, so what
+        // failed is *this value*, and a hand-written impl may fail on one value
+        // and succeed on the next, or depend on state outside the value
+        // entirely. Same overstatement that was withdrawn from the epilogue's
+        // docs — the status is chosen for the action it implies, not for a
+        // prediction about recurrence.
+        RegisterUserError::Refused(
+            ReservationRejection::StoredResponseIncompatible
+            | ReservationRejection::RequestNotFingerprintable
+            | ReservationRejection::TenantUnresolved,
+        ) => TransportError::Internal,
     }
 }
 
@@ -63,6 +118,12 @@ pub async fn register_handler(
     // starts a fresh root trace. Handlers just declare the extractor; they
     // never hand-repeat the header-reading/origination logic.
     TraceContextExtractor(trace_context): TraceContextExtractor,
+    // PROD-012: the `Idempotency-Key` header is read, validated and admitted or
+    // refused at the boundary, once, under the runtime's own policy — the same
+    // arrangement as the trace context above. A rejection happens here, before
+    // `register` is invoked at all. This handler only carries the result
+    // forward; it re-decides nothing and regenerates nothing.
+    OperationKeyExtractor(operation_key): OperationKeyExtractor,
     Json(input): Json<RegisterInput>,
 ) -> Result<(StatusCode, Json<RegisterOutput>), TransportError> {
     log(
@@ -76,10 +137,17 @@ pub async fn register_handler(
         .resolve::<RegisterUserTag>()
         .map_err(|_| TransportError::Internal)?;
 
-    let ctx = ServiceContext::new()
+    let mut ctx = ServiceContext::new()
         .with_security(Arc::new(security))
         .with_tenant_id(input.tenant_id.clone())
         .with_trace_context(trace_context);
+    // Set only when the boundary resolved one. `None` means this deployment
+    // permits a keyless request, and inventing a key here would manufacture an
+    // identity the caller never supplied — which is the one thing the extraction
+    // contract exists to prevent.
+    if let Some(key) = operation_key {
+        ctx = ctx.with_operation_key(key);
+    }
 
     let user_id = input.user_id.clone();
     match proxy.register(ctx, input).await {
@@ -140,6 +208,61 @@ mod tests {
     use ego_security_sdk::SecurityError;
 
     use super::*;
+
+    /// Every `ReservationRejection`, pinned to the status it becomes.
+    ///
+    /// The HTTP-level suite (`http_replay_and_conflict.rs`) drives five of these
+    /// through the real router by scripting the reservation store. The sixth,
+    /// `RequestNotFingerprintable`, **cannot be provoked that way**: it is
+    /// raised before the store is reached, when an operation's arguments fail to
+    /// serialise, and `RegisterInput` always serialises. Its translation is
+    /// therefore proven here, directly against the mapper — which is also why
+    /// this test enumerates all six rather than only the one that is otherwise
+    /// unreachable. A table with one entry proven somewhere else and five
+    /// assumed is how a mapping drifts.
+    ///
+    /// The split is by what the caller can do about it, never by which enum the
+    /// value came from.
+    #[test]
+    fn every_reservation_rejection_maps_to_the_status_its_caller_can_act_on() {
+        use ego_service_sdk::runtime::ReservationRejection;
+
+        let cases = [
+            // This key is taken — by this request or another. Something a caller
+            // can act on: wait, or stop reusing the key.
+            (ReservationRejection::SelfInProgress, StatusCode::CONFLICT),
+            (ReservationRejection::OtherInProgress, StatusCode::CONFLICT),
+            (
+                ReservationRejection::FingerprintConflict,
+                StatusCode::CONFLICT,
+            ),
+            // The machinery could not answer. Well-formed, and may well succeed
+            // later — a caller that gave up on a 500 would abandon something
+            // transient.
+            (
+                ReservationRejection::StoreUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            // Neither of the above: nothing a caller can do, and waiting is not
+            // a justified strategy. Someone has to look.
+            (
+                ReservationRejection::StoredResponseIncompatible,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ReservationRejection::RequestNotFingerprintable,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (rejection, expected) in cases {
+            assert_eq!(
+                map_register_error(RegisterUserError::Refused(rejection.clone())).status_code(),
+                expected,
+                "{rejection:?} must translate to the status its caller can act on"
+            );
+        }
+    }
 
     // Finding 4 (RED first): map_register_error must delegate every
     // Security(_) denial to ego-transport's own granular

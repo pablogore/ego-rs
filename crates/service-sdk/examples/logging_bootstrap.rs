@@ -40,7 +40,12 @@ fn main() {
         .expect("enabled=true yields a logger");
 
     // RuntimeBuilder takes ownership; Runtime owns lifecycle from here on.
-    let runtime = RuntimeBuilder::new().with_logger(logger.clone()).build();
+    let runtime = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .with_logger(logger.clone())
+        .build();
 
     // Services access the logger through ServiceContext, mirroring `security`.
     let ctx = ServiceContext::new().with_logger(logger);

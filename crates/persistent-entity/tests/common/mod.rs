@@ -80,28 +80,68 @@ impl CountingEventStore {
     }
 }
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for CountingEventStore {
-    fn append(
-        &mut self,
+    async fn append(
+        &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
         expected_version: i64,
         events: Vec<StoredEvent<TestEvent>>,
     ) -> Result<i64, PersistenceError> {
         self.inner
-            .append(aggregate_id, tenant_id, expected_version, events)
+            .append(
+                aggregate_type,
+                aggregate_id,
+                tenant_id,
+                expected_version,
+                events,
+            )
+            .await
     }
 
-    fn load(
+    async fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.load(aggregate_id, tenant_id)
+        self.inner
+            .load(aggregate_type, aggregate_id, tenant_id)
+            .await
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
-        self.inner.list_aggregate_ids(tenant_id)
+    async fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.inner.list_aggregate_ids(tenant_id).await
+    }
+
+    /// This double does not model receipts; reporting a miss keeps it from
+    /// claiming an operation completed that it never recorded.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<ego_domain::operation::OperationReceipt>, PersistenceError> {
+        Ok(None)
+    }
+    /// These doubles exist to inject failures into the direct append path, and
+    /// none of the tests using them opens a unit of work. An explicit refusal is
+    /// the honest answer: it cannot silently behave like a transaction, and if a
+    /// future test ever does reach here the message says what is missing rather
+    /// than the test failing somewhere further away.
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn ego_domain::persistence::EventStoreUnitOfWork<TestEvent>>, PersistenceError>
+    {
+        Err(PersistenceError::Internal(
+            "this test double does not implement unit-of-work semantics".to_string(),
+        ))
     }
 }

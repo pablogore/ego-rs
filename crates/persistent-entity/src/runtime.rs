@@ -18,6 +18,7 @@ use crate::registry::EntityRegistry;
 use crate::scheduler::{EntityTriple, Scheduler};
 use crate::scheduler_event::SchedulerEventSender;
 use crate::snapshot::SnapshotStrategy;
+use ego_domain::Observability;
 
 /// Configuration for the entity runtime.
 ///
@@ -114,6 +115,10 @@ pub struct EntityRuntime<E> {
     /// every spawned actor's `effect_acceptor` at `None`, preserving today's
     /// fail-closed-if-effects-described behavior unchanged.
     pub effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
+    /// Observability sink threaded to every actor spawned via [`Self::entity_ref`].
+    /// `None` by default — an actor without one behaves exactly as it did before
+    /// the receipt gate was instrumented.
+    pub observability: Option<Arc<dyn Observability>>,
     /// Full-precision passivation timeout, as configured directly via
     /// [`crate::builder::EntityRuntimeBuilder::passivation_timeout`] — kept
     /// separate from `config.passivation_timeout_secs` (whole seconds only,
@@ -200,6 +205,7 @@ where
             snapshot_strategy,
             event_sender,
             effect_acceptor,
+            observability: None,
             passivation_timeout,
             _event: PhantomData,
         }
@@ -212,6 +218,19 @@ where
     /// this keeps behaving exactly as before this method existed.
     pub fn with_effect_acceptor(mut self, acceptor: Arc<dyn EffectAcceptor>) -> Self {
         self.effect_acceptor = Some(acceptor);
+        self
+    }
+
+    /// Wires an observability sink so every actor spawned from now on reports
+    /// what its receipt gate decided. Purely additive: a runtime that never
+    /// calls this keeps behaving exactly as before this method existed.
+    ///
+    /// Consumes `self`, so it must be called **before** the runtime is wrapped in
+    /// the `Arc` a host registers — there is no way to add a sink afterwards. See
+    /// [`crate::builder::EntityRuntimeBuilder::with_observability`] for the wiring
+    /// order a host actually follows.
+    pub fn with_observability(mut self, observability: Arc<dyn Observability>) -> Self {
+        self.observability = Some(observability);
         self
     }
 
@@ -255,6 +274,7 @@ where
             self.config.mailbox_capacity,
             self.passivation_timeout,
             self.effect_acceptor.clone(),
+            self.observability.clone(),
         )
     }
 

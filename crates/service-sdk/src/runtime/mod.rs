@@ -1,18 +1,26 @@
 mod builder;
 mod config_provider;
 mod error;
+mod idempotency;
 mod logger;
 mod permit;
 mod resolvable;
+mod retention;
 mod runtime_builder;
 mod tenant;
 
 pub use builder::{Runtime, RuntimeBuilder, RuntimeResolver};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
 pub use error::RuntimeInfraError;
+pub use idempotency::{
+    decode_stored_response, encode_stored_response, operation_fingerprint,
+    IdempotencyEnforcementMode, ReservationConfig, ReservationConfigError, ReservationDecision,
+    ReservationPermit, ReservationRejection, StoredResponseError,
+};
 pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
 pub use resolvable::{HasServiceTag, Resolvable, ResolvableContainer};
+pub use retention::{RetentionPolicy, RetentionPolicyError};
 pub use runtime_builder::{DependencyKind, RuntimeError, RuntimeInner, SecurityDenialKind};
 pub use tenant::{CanonicalTenant, TenantEnforcementMode, TenantResolver};
 // Crate-internal only (AD-014 Established Fact type) — `crate::context`
@@ -29,9 +37,11 @@ pub(crate) use tenant::CrossTenantGrant;
 /// Per the testing skill's Decision Gates table, these exercise only
 /// in-memory state (kitlogger's capture-buffer exporter, `serde_json::json!`
 /// values) — no real DB/broker/HTTP — so they live as ordinary
-/// `#[cfg(test)]` modules here rather than in `crates/integration-tests/`.
+/// `#[cfg(test)]` modules here, which is where anything needing no
+/// infrastructure belongs.
 #[cfg(test)]
 mod integration_tests {
+    use super::IdempotencyEnforcementMode;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -81,7 +91,10 @@ mod integration_tests {
             .expect("logger constructs")
             .expect("enabled settings yield a logger");
 
-        let rt = RuntimeBuilder::new().with_logger(logger).build();
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_logger(logger)
+            .build();
         let rt_logger = rt.logger().expect("runtime holds the logger").clone();
 
         let ctx = ServiceContext::new().with_logger(rt_logger.clone());
@@ -124,7 +137,10 @@ mod integration_tests {
             .log(Severity::Info, "record-3")
             .expect("record 3 logs");
 
-        let rt = RuntimeBuilder::new().with_logger(logger).build();
+        let rt = RuntimeBuilder::new()
+            .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .with_logger(logger)
+            .build();
 
         assert!(rt.shutdown().is_ok());
 

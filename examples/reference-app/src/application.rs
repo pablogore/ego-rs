@@ -21,8 +21,9 @@ use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::error::category::ErrorCategory;
 use ego_service_sdk::error::ServiceErrorTrait;
+use ego_service_sdk::runtime::ReservationRejection;
 #[allow(unused_imports)]
-use ego_service_sdk_macros::{authorize, operation, service, tenant_scoped};
+use ego_service_sdk_macros::{authorize, idempotent, operation, service, tenant_scoped};
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::error::EntityError;
@@ -69,6 +70,14 @@ pub enum RegisterUserError {
     Security(SecurityError),
     /// A `TenantOrganization` or `User` entity write failed.
     EntityWrite(String),
+    /// The reservation refused this operation before it ran.
+    ///
+    /// Carries the original [`ReservationRejection`] rather than a message,
+    /// because the six cases call for different caller and operator action —
+    /// "retry shortly", "never retry" and "an operator must intervene" must not
+    /// require parsing prose to tell apart. Kept distinct from `EntityWrite`:
+    /// nothing was written here, and nothing ran.
+    Refused(ReservationRejection),
 }
 
 impl std::fmt::Display for RegisterUserError {
@@ -76,6 +85,7 @@ impl std::fmt::Display for RegisterUserError {
         match self {
             RegisterUserError::Security(e) => write!(f, "security error: {e}"),
             RegisterUserError::EntityWrite(m) => write!(f, "entity write error: {m}"),
+            RegisterUserError::Refused(r) => write!(f, "operation refused: {r}"),
         }
     }
 }
@@ -83,6 +93,12 @@ impl std::fmt::Display for RegisterUserError {
 impl From<SecurityError> for RegisterUserError {
     fn from(e: SecurityError) -> Self {
         RegisterUserError::Security(e)
+    }
+}
+
+impl From<ReservationRejection> for RegisterUserError {
+    fn from(r: ReservationRejection) -> Self {
+        RegisterUserError::Refused(r)
     }
 }
 
@@ -97,6 +113,7 @@ impl ServiceErrorTrait for RegisterUserError {
         match self {
             RegisterUserError::Security(_) => "REGISTER_USER_SECURITY_ERROR",
             RegisterUserError::EntityWrite(_) => "REGISTER_USER_ENTITY_WRITE_ERROR",
+            RegisterUserError::Refused(_) => "REGISTER_USER_OPERATION_REFUSED",
         }
     }
 
@@ -104,6 +121,17 @@ impl ServiceErrorTrait for RegisterUserError {
         match self {
             RegisterUserError::Security(_) => ErrorCategory::Authorization,
             RegisterUserError::EntityWrite(_) => ErrorCategory::System,
+            // Split by who can act, not by which enum the value came from.
+            // Contention and a conflicting fingerprint are answers about this
+            // operation — the caller's situation, and business outcomes. The
+            // other three are the machinery failing to answer, which is nobody's
+            // business decision and needs an operator.
+            RegisterUserError::Refused(
+                ReservationRejection::SelfInProgress
+                | ReservationRejection::OtherInProgress
+                | ReservationRejection::FingerprintConflict,
+            ) => ErrorCategory::Business,
+            RegisterUserError::Refused(_) => ErrorCategory::System,
         }
     }
 
@@ -121,6 +149,7 @@ pub trait RegisterUser {
     #[operation]
     #[authorize(context = ctx, permission = "user:register")]
     #[tenant_scoped]
+    #[idempotent]
     async fn register(
         &self,
         ctx: ServiceContext,
@@ -139,6 +168,30 @@ pub struct RegisterUserImpl {
     /// `RegisterUserImpl::new(...)` call site keeps compiling unchanged;
     /// `build_runtime` wires a real sink via `with_read_side_sink`.
     read_side_sink: Option<ReadSideSink>,
+    /// `None` in every ordinary build. See [`DualAggregateFailpoint`].
+    failpoint: Option<Arc<dyn DualAggregateFailpoint>>,
+}
+
+/// An interruption between this workflow's two halves, for tests that have to
+/// survive one.
+///
+/// The organization is ensured before the user is registered, and after the
+/// organization's receipt is confirmed there is a window where one half of the
+/// operation is durable and the other does not exist. A process that stops
+/// existing inside that window is the only failure recovery genuinely has to
+/// resume from, and no in-process error reproduces it: returning `Err` unwinds,
+/// which runs destructors and can release a lease on the way out.
+///
+/// The position is fixed by this trait's one method rather than passed in.
+/// A failpoint whose position is a parameter is a failpoint whose position can
+/// drift away from the invariant it was written to probe, leaving a test that
+/// reports crossing a boundary it never actually crossed.
+pub trait DualAggregateFailpoint: Send + Sync {
+    /// Called once, after the organization's event and receipt are durable and
+    /// before the user command is sent.
+    ///
+    /// An implementation is not expected to return.
+    fn after_org_receipt_confirmed(&self);
 }
 
 impl RegisterUserImpl {
@@ -152,7 +205,14 @@ impl RegisterUserImpl {
             user_runtime,
             observability,
             read_side_sink: None,
+            failpoint: None,
         }
+    }
+
+    /// Installs an interruption between the two aggregates.
+    pub fn with_failpoint(mut self, failpoint: Arc<dyn DualAggregateFailpoint>) -> Self {
+        self.failpoint = Some(failpoint);
+        self
     }
 
     /// Wires a `ReadSideSink` so successful writes also feed the
@@ -247,7 +307,15 @@ impl RegisterUser for RegisterUserImpl {
                     org_id: input.tenant_id.clone(),
                     name: input.org_name.clone(),
                 },
-                CommandContext::new("tenant_organization".to_string()),
+                // The identity the reservation accepted, carried down unchanged.
+                // Both aggregates in this workflow get the same one, because
+                // they are two steps of one business operation — that is what
+                // lets the second step be recovered after the first already
+                // completed. Read, never recomputed: deriving it again here
+                // could differ from what the reservation used and turn a
+                // legitimate retry into a permanent conflict.
+                CommandContext::new("tenant_organization".to_string())
+                    .carrying(ctx.operation_identity()),
             )
             .await?;
         match &org_result {
@@ -256,6 +324,28 @@ impl RegisterUser for RegisterUserImpl {
                 self.publish_read_side(&input.tenant_id, events);
             }
             CommandResult::NoEvents { .. } => {}
+            // This step already happened under this operation key. Its events
+            // were projected when they were first written, so republishing
+            // would duplicate read-side work for a command that did not run.
+            //
+            // The workflow continues to the user step regardless: that is the
+            // whole point of a per-aggregate receipt after a partial failure —
+            // the org is confirmed, the user may still be missing. Nothing here
+            // needs data from the org step, so no current-state read is
+            // required; if it ever did, that read would be explicit and would
+            // not be presented as this command's historical answer.
+            CommandResult::Replayed { .. } => {}
+        }
+
+        // The boundary. Above this line the organization's event and receipt are
+        // durable; below it the user's do not exist yet. That asymmetry is what
+        // recovery has to resume from, and it is the only point in this operation
+        // where interrupting proves anything.
+        //
+        // `None` in production, so this is a null check and not a branch on
+        // configuration.
+        if let Some(failpoint) = &self.failpoint {
+            failpoint.after_org_receipt_confirmed();
         }
 
         // Then register the User. On failure here, the org write above is
@@ -273,7 +363,11 @@ impl RegisterUser for RegisterUserImpl {
                     email: input.email.clone(),
                     tenant_id: input.tenant_id.clone(),
                 },
-                CommandContext::new("user".to_string()),
+                // The same identity the org step above was given. Handing this
+                // step a different one — or none — would make the two steps
+                // belong to different operations, and a retry after a partial
+                // failure would re-run this one instead of recovering it.
+                CommandContext::new("user".to_string()).carrying(ctx.operation_identity()),
             )
             .await;
 
@@ -294,6 +388,12 @@ impl RegisterUser for RegisterUserImpl {
                         self.publish_read_side(&input.tenant_id, events);
                     }
                     CommandResult::NoEvents { .. } => {}
+                    // The user step already happened under this key. Same
+                    // reasoning as the org branch: its events were projected
+                    // when written. The response below is composed from the
+                    // request, not from a replayed result, so a replay of this
+                    // step is safe to fall through to success.
+                    CommandResult::Replayed { .. } => {}
                 }
                 self.record("register_user.success", &input.user_id, "completed");
                 Ok(RegisterOutput {

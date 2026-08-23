@@ -49,6 +49,9 @@ async fn describe_deliver_retry_through_the_real_actor_spawn_path_and_repeat_reg
     ]));
 
     let rt = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .register_effect_executor(["user.welcome_email"], executor.clone())
         .unwrap()
         .build();

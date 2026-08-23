@@ -65,6 +65,9 @@ impl GreetingService for GreetingServiceImpl {
 #[tokio::test]
 async fn registered_service_with_satisfied_dependencies_resolves() {
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .adapter(Arc::new(GreeterAdapter("hello".to_string())))
         .service_with_tag::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build()
@@ -83,6 +86,9 @@ async fn registered_service_with_satisfied_dependencies_resolves() {
 #[test]
 fn missing_dependency_names_both_type_and_requester() {
     let result = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .service_with_tag::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build();
 
@@ -140,6 +146,9 @@ impl GreetingService for MisdeclaredGreetingServiceImpl {
 #[test]
 fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() {
     let result = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .service_with_tag::<MisdeclaredGreetingServiceImpl, GreetingServiceTag>(|arc| arc)
         .build();
 
@@ -172,7 +181,12 @@ fn build_time_dependency_failure_is_attributed_even_when_dependencies_omit_it() 
 // Part A flowing through end to end.
 #[test]
 fn resolving_an_unregistered_service_names_the_missing_tag() {
-    let app = App::builder().build().expect("build succeeds");
+    let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .build()
+        .expect("build succeeds");
 
     match app.resolve::<GreetingServiceTag>() {
         Err(RuntimeError::ServiceNotFound { type_name, .. }) => {
@@ -209,6 +223,9 @@ impl GreetingService for LinkedGreetingServiceImpl {
 #[tokio::test]
 async fn macro_linked_service_registers_with_single_type_parameter_and_resolves_identically() {
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .adapter(Arc::new(GreeterAdapter("hello".to_string())))
         .service::<LinkedGreetingServiceImpl>()
         .build()
@@ -241,6 +258,9 @@ impl GreetingService for PreBuiltGreeter {
 async fn service_instance_registers_a_pre_built_instance_resolvable_under_its_tag() {
     let instance: Arc<dyn GreetingService> = Arc::new(PreBuiltGreeter);
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .service_instance::<GreetingServiceTag>(instance)
         .build()
         .expect("service_instance registration succeeds");
@@ -299,6 +319,9 @@ impl LimitService for LimitServiceImpl {
 #[tokio::test]
 async fn app_and_fixture_builder_resolve_the_same_service_identically() {
     let app = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .config(Arc::new(10u32))
         .service_with_tag::<LimitServiceImpl, LimitServiceTag>(|arc| arc)
         .build()
@@ -335,6 +358,9 @@ async fn app_and_fixture_builder_resolve_the_same_service_identically() {
 async fn runtime_builder_direct_and_app_builder_resolve_identical_services_under_the_same_tag() {
     let direct_instance: Arc<dyn GreetingService> = Arc::new(PreBuiltGreeter);
     let rt = ego_service_sdk::runtime::RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
         .with_service::<GreetingServiceTag>(direct_instance)
         .expect("direct registration succeeds")
         .build();
@@ -347,9 +373,11 @@ async fn runtime_builder_direct_and_app_builder_resolve_identical_services_under
 
     let app_instance: Arc<dyn GreetingService> = Arc::new(PreBuiltGreeter);
     let app = App::builder()
+        .idempotency_enforcement_mode(ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility)
         .service_instance::<GreetingServiceTag>(app_instance)
         .build()
-        .expect("App::builder() registration succeeds");
+        .expect("App::builder()
+            .idempotency_enforcement_mode(ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility) registration succeeds");
     let via_app_out = app
         .resolve::<GreetingServiceTag>()
         .expect("App resolution succeeds")
@@ -359,7 +387,8 @@ async fn runtime_builder_direct_and_app_builder_resolve_identical_services_under
 
     assert_eq!(
         direct_out, via_app_out,
-        "RuntimeBuilder-direct and App::builder() composition must resolve \
+        "RuntimeBuilder-direct and App::builder()
+            .idempotency_enforcement_mode(ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility) composition must resolve \
          identical services under the same Tag (AD-10 same-contract proof)"
     );
 }

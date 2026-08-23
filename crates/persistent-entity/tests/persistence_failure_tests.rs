@@ -31,9 +31,11 @@ fn ctx() -> CommandContext {
 
 struct FailingEventStore;
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for FailingEventStore {
-    fn append(
-        &mut self,
+    async fn append(
+        &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -42,8 +44,9 @@ impl EventStore<TestEvent> for FailingEventStore {
         Ok(0)
     }
 
-    fn load(
+    async fn load(
         &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
@@ -52,11 +55,43 @@ impl EventStore<TestEvent> for FailingEventStore {
         ))
     }
 
-    fn list_aggregate_ids(
+    async fn list_aggregate_ids(
         &self,
         _tenant_id: Option<&str>,
-    ) -> Result<Vec<String>, PersistenceError> {
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
         Ok(Vec::new())
+    }
+
+    /// This double exists to fail; a receipt lookup it cannot answer truthfully
+    /// must not answer at all.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<ego_domain::operation::OperationReceipt>, PersistenceError> {
+        Err(PersistenceError::Internal(
+            "this test double does not implement receipt lookup".to_string(),
+        ))
+    }
+    /// These doubles exist to inject failures into the direct append path, and
+    /// none of the tests using them opens a unit of work. An explicit refusal is
+    /// the honest answer: it cannot silently behave like a transaction, and if a
+    /// future test ever does reach here the message says what is missing rather
+    /// than the test failing somewhere further away.
+    /// These doubles exist to inject failures into the direct append path, and
+    /// none of the tests using them opens a unit of work. An explicit refusal is
+    /// the honest answer: it cannot silently behave like a transaction, and if a
+    /// future test ever does reach here the message says what is missing rather
+    /// than the test failing somewhere further away.
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn ego_domain::persistence::EventStoreUnitOfWork<TestEvent>>, PersistenceError>
+    {
+        Err(PersistenceError::Internal(
+            "this test double does not implement unit-of-work semantics".to_string(),
+        ))
     }
 }
 
@@ -72,9 +107,11 @@ impl AppendFailingStore {
     }
 }
 
+#[async_trait::async_trait]
 impl EventStore<TestEvent> for AppendFailingStore {
-    fn append(
-        &mut self,
+    async fn append(
+        &self,
+        _aggregate_type: &str,
         _aggregate_id: &str,
         _tenant_id: Option<&str>,
         _expected_version: i64,
@@ -85,22 +122,50 @@ impl EventStore<TestEvent> for AppendFailingStore {
         ))
     }
 
-    fn load(
+    async fn load(
         &self,
+        aggregate_type: &str,
         aggregate_id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
-        self.inner.load(aggregate_id, tenant_id)
+        self.inner
+            .load(aggregate_type, aggregate_id, tenant_id)
+            .await
     }
 
-    fn list_aggregate_ids(&self, tenant_id: Option<&str>) -> Result<Vec<String>, PersistenceError> {
-        self.inner.list_aggregate_ids(tenant_id)
+    async fn list_aggregate_ids(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>, PersistenceError> {
+        self.inner.list_aggregate_ids(tenant_id).await
+    }
+
+    /// This double exists to fail; a receipt lookup it cannot answer truthfully
+    /// must not answer at all.
+    async fn find_receipt(
+        &self,
+        _aggregate_type: &str,
+        _aggregate_id: &str,
+        _tenant_id: Option<&str>,
+        _operation_key: &str,
+    ) -> Result<Option<ego_domain::operation::OperationReceipt>, PersistenceError> {
+        Err(PersistenceError::Internal(
+            "this test double does not implement receipt lookup".to_string(),
+        ))
+    }
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn ego_domain::persistence::EventStoreUnitOfWork<TestEvent>>, PersistenceError>
+    {
+        Err(PersistenceError::Internal(
+            "this test double does not implement unit-of-work semantics".to_string(),
+        ))
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_load_error_propagates_to_caller() {
-    let event_store = Arc::new(Mutex::new(FailingEventStore));
+    let event_store = Arc::new(FailingEventStore);
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()
@@ -125,9 +190,9 @@ async fn test_load_error_propagates_to_caller() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_snapshot_recovery_with_version_offset() {
-    let event_store = Arc::new(Mutex::new(
-        InMemoryEventStore::<TestEvent>::new().with_version_offset("counter-snap-1", 5),
-    ));
+    let event_store = Arc::new(
+        InMemoryEventStore::<TestEvent>::new().with_version_offset("counter", "snap-1", 5),
+    );
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     {
@@ -166,7 +231,7 @@ async fn test_snapshot_recovery_with_version_offset() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_persist_failure_drains_mailbox() {
-    let event_store = Arc::new(Mutex::new(AppendFailingStore::new()));
+    let event_store = Arc::new(AppendFailingStore::new());
     let snapshot_store = Arc::new(Mutex::new(InMemorySnapshotStore::new()));
 
     let runtime = EntityRuntimeBuilder::<TestEvent>::new()

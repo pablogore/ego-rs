@@ -99,7 +99,9 @@ fn make_proxy_with_observability(
 ) -> (Runtime, MixedTenantServiceRef) {
     let inner: Arc<dyn MixedTenantService> = service;
     let chain = Arc::new(InterceptorChain::new());
-    let mut builder = RuntimeBuilder::new();
+    let mut builder = RuntimeBuilder::new().with_idempotency_enforcement_mode(
+        ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+    );
     if let Some(obs) = observability {
         builder = builder.with_observability(obs);
     }

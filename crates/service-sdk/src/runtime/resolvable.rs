@@ -44,7 +44,7 @@ unsafe impl<T: ?Sized + Send + Sync + 'static> Sync for ResolvableContainer<T> {
 /// use ego_service_sdk::async_trait::async_trait;
 /// use ego_service_sdk::context::ServiceContext;
 /// use ego_service_sdk::error::ServiceError;
-/// use ego_service_sdk::runtime::RuntimeBuilder;
+/// use ego_service_sdk::runtime::{IdempotencyEnforcementMode, RuntimeBuilder};
 /// use ego_service_sdk_macros::{operation, service};
 ///
 /// #[service(version = "1.0.0")]
@@ -66,6 +66,14 @@ unsafe impl<T: ?Sized + Send + Sync + 'static> Sync for ResolvableContainer<T> {
 /// async fn main() {
 ///     let inner: Arc<dyn GreeterService> = Arc::new(GreeterServiceImpl);
 ///     let runtime = RuntimeBuilder::new()
+///         // This example is about typed proxy resolution, not idempotency, so it
+///         // states that it has not adopted enforcement. The builder's default is
+///         // the enforcing variant and refuses to build without a registered
+///         // `OperationReservationStore` — a runtime that promises client-supplied
+///         // operation keys has nowhere to reserve them otherwise. Every real
+///         // service makes this choice deliberately; an example should show that it
+///         // is a choice rather than omit it.
+///         .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
 ///         .with_service::<GreeterServiceTag>(inner)
 ///         .unwrap()
 ///         .build();

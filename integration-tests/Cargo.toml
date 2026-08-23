@@ -1,0 +1,75 @@
+# An INDEPENDENT Cargo workspace, deliberately not a member of the root.
+#
+# The root workspace must keep building and testing with no Docker, and must
+# neither compile nor run anything here:
+#
+#   cargo test --workspace                                  # root; no Docker, never touches this
+#   cargo test --manifest-path integration-tests/Cargo.toml  # this suite, explicit and opt-in
+#
+# No `exclude` entry is required in the root manifest: it uses an explicit
+# `members` list with no globs, and a subdirectory carrying its own
+# `[workspace]` table is its own workspace root. The separation is structural,
+# not a list someone has to remember to maintain.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "ego-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+# The runner. It owns the container and the template; the test target owns
+# per-test isolation. Named rather than defaulted so the command reads as what it
+# does.
+name = "run-suite"
+path = "src/main.rs"
+
+[dependencies]
+# The harness itself needs these, not just the tests: it owns the container, the
+# template database and the migrations. Dev-dependencies do not reach a library's
+# own code.
+ego-persistence = { path = "../crates/persistence" }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "migrate"] }
+# No `watchdog`, deliberately. It was enabled while the test binary still owned
+# the container, and it did not fix that leak. Once the runner began reclaiming
+# explicitly it became actively harmful: the watchdog raced the runner's own
+# `rm()`, took a 409 "removal already in progress" from Docker, and panicked on a
+# non-main thread — which wedged process exit for ten minutes. The runner owns
+# reclamation; nothing else should try.
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[dev-dependencies]
+ego-domain = { path = "../crates/domain" }
+ego-persistence = { path = "../crates/persistence" }
+ego-service-sdk = { path = "../crates/service-sdk" }
+ego-testkit = { path = "../crates/testkit" }
+ego-transport = { path = "../crates/transport" }
+persistent-entity = { path = "../crates/persistent-entity" }
+# `crash-test-failpoint` is what lets the crash-recovery scenario interrupt the
+# real workflow. It is off by default in the reference app on purpose — see that
+# crate's `[features]` — and this is the only place that turns it on. This
+# workspace is not a member of the root one, so enabling it here cannot unify
+# back into any ordinary build.
+reference-app = { path = "../examples/reference-app", features = [
+    "crash-test-failpoint",
+] }
+
+async-trait = "0.1"
+# Must match the reference app's and ego-transport's axum ("0.7"), or the Router
+# this suite builds would be a different type than the one they produce.
+axum = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "migrate"] }
+# Same as the dependency above; cargo unifies features, so a divergent copy here
+# would re-introduce the watchdog for the whole build.
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tower = { version = "0.5", features = ["util"] }

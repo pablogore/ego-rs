@@ -37,6 +37,35 @@ pub struct OrganizationEnsured {
 }
 
 impl OrganizationEnsured {
+    /// Rebuilds a stored event from its payload and the envelope timestamp.
+    ///
+    /// `occurred_at` comes from the row the store wrote it to, never from the
+    /// clock: reconstructing it would say the event happened when it was read.
+    /// The payload carries the business data and nothing else, which is why it
+    /// alone was not enough to rebuild the event.
+    pub fn from_stored(
+        payload: Value,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<Self, ego_domain::persistence::PersistenceError> {
+        let field = |name: &str| -> Result<String, ego_domain::persistence::PersistenceError> {
+            payload
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ego_domain::persistence::PersistenceError::Internal(format!(
+                        "a stored organization event is missing `{name}`"
+                    ))
+                })
+        };
+        Ok(Self {
+            org_id: field("org_id")?,
+            name: field("name")?,
+            occurred_at,
+            payload,
+        })
+    }
+
     fn new(org_id: String, name: String, occurred_at: DateTime<Utc>) -> Self {
         let payload = serde_json::json!({
             "org_id": org_id,

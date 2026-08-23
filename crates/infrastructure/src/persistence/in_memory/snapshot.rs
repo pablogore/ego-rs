@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ego_domain::persistence::resolve_tenant;
 use ego_domain::persistence::{PersistenceError, Snapshot};
 use serde_json::Value;
 
@@ -52,13 +53,5 @@ impl Snapshot for InMemorySnapshotStore {
             Some((v, p)) => Ok(Some((*v, p.clone()))),
             None => Ok(None),
         }
-    }
-}
-
-fn resolve_tenant(tenant_id: Option<&str>) -> Result<Option<String>, PersistenceError> {
-    match tenant_id {
-        Some("") => Err(PersistenceError::MissingTenant),
-        Some(t) => Ok(Some(t.to_string())),
-        None => Ok(None),
     }
 }

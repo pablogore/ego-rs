@@ -6,7 +6,10 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use ego_domain::context::TenantId;
 use ego_domain::event::DomainEvent;
+use ego_domain::operation::{AggregateOutcome, OperationReceipt};
+use ego_domain::{MetricAttribute, Observability};
 use tokio::sync::watch;
 
 use crate::command_envelope::{ActorEnvelope, CommandEnvelope};
@@ -60,6 +63,11 @@ pub struct EntityActor<C, E: DomainEvent, S, Sig: PassivationSignal> {
     pub(crate) event_sender: SchedulerEventSender,
     /// Passivation signal that fires when the actor should stop.
     pub(crate) signal: Sig,
+    /// Where this actor reports what its receipt gate decided (AD-10's
+    /// `idempotency.receipt.outcome`). `None` when the host wired none, in which
+    /// case every path below behaves exactly as it did before the gate was
+    /// instrumented — the counter is the only thing that disappears.
+    pub(crate) observability: Option<Arc<dyn Observability>>,
     pub(crate) _phantom: PhantomData<(C, S)>,
 }
 
@@ -76,6 +84,37 @@ where
     fn transition(&mut self, state: EntityState) {
         let _ = self.lifecycle.transition_to(state);
         let _ = self.tx.send(state);
+    }
+
+    /// AD-10's `idempotency.receipt.outcome`, from the four places the receipt
+    /// gate reaches a verdict.
+    ///
+    /// `aggregate_type` is read from this actor's own registered identity, never
+    /// from anything a caller supplied. That is what makes it admissible as a
+    /// dimension at all: it is bounded by the set of registered entity types,
+    /// where client input is unbounded and would multiply time series without
+    /// limit.
+    ///
+    /// The operation key is deliberately not a parameter here. It is
+    /// client-supplied and unbounded, so it is a span attribute only and never a
+    /// metric one — a rule this signature keeps by giving the key no way in,
+    /// rather than by filtering it out further down.
+    ///
+    /// `outcome` is `&'static str` because its three values are fixed by this
+    /// contract; a runtime-computed value is what folding a dimension into a
+    /// name looks like, and there is nothing here that could produce one.
+    fn count_receipt_outcome(&self, outcome: &'static str) {
+        let Some(observability) = &self.observability else {
+            return;
+        };
+        observability.counter(
+            "idempotency.receipt.outcome",
+            1.0,
+            &[
+                MetricAttribute::new("outcome", outcome),
+                MetricAttribute::new("aggregate_type", self.entity_id.aggregate_type()),
+            ],
+        );
     }
 
     /// Runs recovery, then the command loop, then passivation; drains mailbox on recovery failure.
@@ -102,7 +141,8 @@ where
         let (snap_data, stored_events) = self
             .persistence
             .load_for_recovery(
-                &self.entity_id.aggregate_id(),
+                self.entity_id.aggregate_type(),
+                &self.entity_id.entity_id,
                 Some(&self.entity_id.tenant_id),
             )
             .await?;
@@ -210,13 +250,116 @@ where
             }
         };
 
+        // Idempotency gate, before dispatch and before anything is persisted.
+        //
+        // A command carrying no identity takes the pre-existing path untouched
+        // and pays for no lookup. There is no third case: `OperationIdentity`
+        // carries the key and the fingerprint together, so "which operation"
+        // without "which request" is not a state this can be handed.
+        if let Some(identity) = &context.identity {
+            let (key, fingerprint) = (identity.key(), identity.fingerprint());
+            let found = self
+                .persistence
+                .find_receipt(
+                    self.entity_id.aggregate_type(),
+                    &self.entity_id.entity_id,
+                    Some(&self.entity_id.tenant_id),
+                    key.as_str(),
+                )
+                .await;
+
+            match found {
+                // A lookup that failed is not a miss. A miss means "run the
+                // command", so falling through to the handler here would
+                // re-execute an operation that may already have completed —
+                // the exact duplicate the receipt exists to prevent.
+                Err(e) => {
+                    let _ = reply.send(Err(crate::error::EntityError::PersistenceError(format!(
+                        "could not read the operation receipt: {e}"
+                    ))));
+                    return;
+                }
+                Ok(Some(receipt)) if receipt.fingerprint() == fingerprint => {
+                    // The same request, arriving again. Nothing runs, nothing
+                    // is written, and no effect is accepted a second time. The
+                    // outcome travels as durable evidence, never as a rebuilt
+                    // result: see `CommandResult::Replayed`.
+                    self.count_receipt_outcome("already_applied");
+                    let result: CommandResult<E, S> = CommandResult::Replayed {
+                        outcome: receipt.outcome().clone(),
+                    };
+                    let boxed: CommandErasedResult = Box::new(result);
+                    let _ = reply.send(Ok(boxed));
+                    return;
+                }
+                Ok(Some(_)) => {
+                    // A different request reusing an operation key. Refused
+                    // permanently, and `handle_command` is never reached:
+                    // executing it would let one caller's key drive another
+                    // caller's command.
+                    self.count_receipt_outcome("conflict");
+                    let _ = reply.send(Err(crate::error::EntityError::OperationConflict {
+                        operation_key: key.as_str().to_string(),
+                    }));
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+
         let handler_result = self
             .entity_handler
             .handle_command(&command, &current_state, &context)
             .await;
 
+        // A command with no idempotency identity keeps exactly the path it had
+        // before this existed, and pays for no unit of work it does not need.
+        let identity = context
+            .identity
+            .as_ref()
+            .map(|i| (i.key().clone(), i.fingerprint().clone()));
+        // Captured before `identity` is consumed below. The events path's
+        // `persist_result` covers both the receipt-writing and the plain-append
+        // branch, so without this the success arm could not tell a confirmed
+        // receipt from a command that never had one to confirm.
+        let confirms_a_receipt = identity.is_some();
+
         match handler_result {
             Ok(events) if events.is_empty() => {
+                // A success that emitted nothing has no event in the stream to
+                // carry its completion, so without a receipt it is
+                // indistinguishable from a command that never ran. This is the
+                // case the receipt exists for, which is why it opens a real unit
+                // of work to write one rather than returning early.
+                if let Some((key, fingerprint)) = identity {
+                    let receipt = OperationReceipt::new(
+                        self.entity_id.aggregate_type(),
+                        &self.entity_id.entity_id,
+                        TenantId::new(&self.entity_id.tenant_id).ok(),
+                        key,
+                        fingerprint,
+                        AggregateOutcome::NoEvents,
+                    );
+                    if let Err(e) = self
+                        .persistence
+                        .persist_events_with_receipt(
+                            self.entity_id.aggregate_type(),
+                            &self.entity_id.entity_id,
+                            Some(&self.entity_id.tenant_id),
+                            self.version,
+                            &[],
+                            &receipt,
+                        )
+                        .await
+                    {
+                        let _ = reply.send(Err(crate::error::EntityError::PersistenceError(e)));
+                        return;
+                    }
+                    // After the write, never before: a receipt counted ahead of
+                    // its commit would report operations that never landed.
+                    self.count_receipt_outcome("confirmed");
+                }
+
                 let result: CommandResult<E, S> = CommandResult::NoEvents {
                     state: current_state,
                 };
@@ -224,18 +367,64 @@ where
                 let _ = reply.send(Ok(boxed));
             }
             Ok(events) => {
-                let persist_result = self
-                    .persistence
-                    .persist_events(
-                        &self.entity_id.aggregate_id(),
-                        Some(&self.entity_id.tenant_id),
-                        self.version,
-                        &events,
-                    )
-                    .await;
+                let persist_result = match identity {
+                    // Events and receipt in one unit of work, one commit. A
+                    // receipt written after a separate append could survive a
+                    // rollback of the events it describes, or be lost while they
+                    // survive.
+                    Some((key, fingerprint)) => {
+                        let outcome = match AggregateOutcome::events(
+                            self.version as i64 + 1,
+                            self.version as i64 + events.len() as i64,
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(e) => {
+                                let _ = reply.send(Err(crate::error::EntityError::Internal(
+                                    format!("the appended version range is not encodable: {e:?}"),
+                                )));
+                                return;
+                            }
+                        };
+                        let receipt = OperationReceipt::new(
+                            self.entity_id.aggregate_type(),
+                            &self.entity_id.entity_id,
+                            TenantId::new(&self.entity_id.tenant_id).ok(),
+                            key,
+                            fingerprint,
+                            outcome,
+                        );
+                        self.persistence
+                            .persist_events_with_receipt(
+                                self.entity_id.aggregate_type(),
+                                &self.entity_id.entity_id,
+                                Some(&self.entity_id.tenant_id),
+                                self.version,
+                                &events,
+                                &receipt,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.persistence
+                            .persist_events(
+                                self.entity_id.aggregate_type(),
+                                &self.entity_id.entity_id,
+                                Some(&self.entity_id.tenant_id),
+                                self.version,
+                                &events,
+                            )
+                            .await
+                    }
+                };
 
                 match persist_result {
                     Ok(new_version) => {
+                        // Guarded, not unconditional: the `None` branch above
+                        // appends without a receipt, and counting there would
+                        // report confirmations for commands that never had one.
+                        if confirms_a_receipt {
+                            self.count_receipt_outcome("confirmed");
+                        }
                         let state = match self
                             .entity_handler
                             .apply_events(&current_state, &events)
@@ -598,6 +787,7 @@ mod tests {
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(PanicOnBoomHandler),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         };
@@ -791,6 +981,7 @@ mod tests {
             snapshot_strategy: Arc::new(NoSnapshot),
             entity_handler: Arc::new(EffectEmittingHandler),
             event_sender,
+            observability: None,
             signal: ManualSignal::new(),
             _phantom: PhantomData,
         }
@@ -1010,6 +1201,174 @@ mod tests {
             actor.state.as_ref().unwrap().value,
             7,
             "the commit that happened before the gate must be reflected regardless of the delayed reply"
+        );
+    }
+
+    // --- CommandContext carries the operation identity through to the actor ---
+
+    /// Records the exact `OperationIdentity` `handle_command` was called with,
+    /// so a test can compare it against the value set at the boundary rather
+    /// than merely proving the field exists on `CommandContext`. Recording the
+    /// whole identity rather than the key alone is what makes "the key arrived
+    /// but the fingerprint did not" a failure rather than an unobserved gap.
+    #[derive(Debug)]
+    struct RecordingContextHandler {
+        seen_identity: Arc<std::sync::Mutex<Option<ego_domain::operation::OperationIdentity>>>,
+    }
+
+    #[async_trait]
+    impl PersistentEntity for RecordingContextHandler {
+        type Command = TestCommand;
+        type Event = TestEvent;
+        type State = TestState;
+
+        fn initial_state(&self) -> TestState {
+            TestState::new(0)
+        }
+
+        async fn handle_command(
+            &self,
+            _command: &TestCommand,
+            _state: &TestState,
+            context: &CommandContext,
+        ) -> Result<Vec<TestEvent>, crate::error::EntityError> {
+            *self.seen_identity.lock().unwrap() = context.identity.clone();
+            Ok(vec![])
+        }
+
+        async fn apply_event(
+            &self,
+            state: &TestState,
+            _event: &TestEvent,
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+
+        async fn apply_events(
+            &self,
+            state: &TestState,
+            _events: &[TestEvent],
+        ) -> Result<TestState, crate::error::EntityError> {
+            Ok(state.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn command_context_operation_identity_reaches_the_actor_unchanged() {
+        use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("tenant-x".to_string(), "probe", "actor-opkey-1");
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        let mut actor = EntityActor {
+            entity_id,
+            mailbox,
+            state: Some(TestState::new(0)),
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry,
+            tx,
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor: None,
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(RecordingContextHandler {
+                seen_identity: seen.clone(),
+            }),
+            event_sender,
+            observability: None,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        };
+
+        let identity = OperationIdentity::new(
+            OperationKey::parse("op-carriage-1").unwrap(),
+            OperationFingerprint::new("c".repeat(64)),
+        );
+        let context = ctx().carrying(Some(identity.clone()));
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::GetState,
+                context,
+            },
+            reply: reply_tx,
+        };
+
+        actor.execute_command(envelope).await;
+        reply_rx
+            .await
+            .expect("reply sender must not be dropped")
+            .expect("a zero-event command must reply Ok");
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(identity),
+            "handle_command must observe the identical OperationIdentity set at the \
+             boundary — both halves, and neither regenerated, normalised, nor \
+             reconstructed on the way"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_context_with_no_operation_identity_reaches_the_actor_as_none() {
+        let seen = Arc::new(std::sync::Mutex::new(Some(
+            ego_domain::operation::OperationIdentity::new(
+                ego_domain::operation::OperationKey::parse("sentinel").unwrap(),
+                ego_domain::operation::OperationFingerprint::new("s".repeat(64)),
+            ),
+        )));
+        let (event_sender, _rx) = event_bus_channel();
+        let registry = Arc::new(EntityRegistry::new());
+        let entity_id = EntityTriple::new("tenant-x".to_string(), "probe", "actor-opkey-2");
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+        let (tx, _rx_watch) = watch::channel(EntityState::Recovering);
+
+        let mut actor = EntityActor {
+            entity_id,
+            mailbox,
+            state: Some(TestState::new(0)),
+            version: 0,
+            lifecycle: LifecycleStateMachine::new(),
+            registry,
+            tx,
+            persistence: Arc::new(PersistenceFacade::new()),
+            publisher: Arc::new(NoopPublisher::new()),
+            effect_acceptor: None,
+            snapshot_strategy: Arc::new(NoSnapshot),
+            entity_handler: Arc::new(RecordingContextHandler {
+                seen_identity: seen.clone(),
+            }),
+            event_sender,
+            observability: None,
+            signal: ManualSignal::new(),
+            _phantom: PhantomData,
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let envelope = ActorEnvelope {
+            envelope: CommandEnvelope {
+                command: TestCommand::GetState,
+                context: ctx(),
+            },
+            reply: reply_tx,
+        };
+
+        actor.execute_command(envelope).await;
+        reply_rx
+            .await
+            .expect("reply sender must not be dropped")
+            .expect("a zero-event command must reply Ok");
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            None,
+            "an absent operation identity must reach the actor as None, not a stale prior value"
         );
     }
 }
