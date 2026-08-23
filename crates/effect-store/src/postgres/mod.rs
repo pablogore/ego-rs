@@ -861,8 +861,8 @@ mod tests {
     }
 
     // Tests that need a live Postgres (claim/lease/reclaim/retention/
-    // capabilities behavior) live in `crates/integration-tests/tests/
-    // effect_store_postgres_unit.rs`, provisioned via testcontainers
-    // (ego-rs-testing: a real external resource never runs inline in a
-    // production crate's own test module).
+    // capabilities behavior) live in `integration-tests/tests/infrastructure/
+    // effect_store_postgres_unit.rs`, using the shared isolated-database
+    // harness (a real external resource never runs inline in a production
+    // crate's own test module).
 }
