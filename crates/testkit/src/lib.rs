@@ -34,7 +34,7 @@ pub use authz::AllowAllAuthorizationProvider;
 pub use authz::{DenyAllAuthorizationProvider, ScriptedAuthorizationProvider};
 pub use config::TestConfig;
 pub use context::{test_context, TestContextBuilder};
-pub use effects::{RecordedAttempt, RecordingExecutor};
+pub use effects::{FaultInjectingEffectStore, RecordedAttempt, RecordingExecutor, StoreOp};
 pub use event_store::assert_event_store_conformance;
 pub use fixtures::{FixtureBuilder, ServiceTestFixture};
 pub use health::StaticHealthContributor;

@@ -37,6 +37,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # PROD-002 Phase 4 (AD-13 Tier 2): DurableStoreFactory reopen tests need a
 # fixed on-disk path shared across two independent Stoolap instances.
 tempfile = "3"
+# PROD-002 Phase 6 (AD-12/6.7): `FaultInjectingEffectStore` is proven as an
+# additional Tier 1 harness subject — test-only, one direction
+# (ego-effect-store's dev-deps -> ego-testkit); ego-testkit has no dependency
+# back on this crate, so no cycle.
+ego-testkit = { path = "../testkit" }
 
 [features]
 # No default backend feature (design.md §2) — each deployment opts into

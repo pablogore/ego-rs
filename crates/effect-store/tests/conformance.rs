@@ -56,6 +56,29 @@ mod tier1_in_memory {
     }
 }
 
+/// PROD-002 Phase 6 (6.7): `FaultInjectingEffectStore` with an empty fault
+/// plan is a genuine Tier 1 subject — it must behave exactly like a
+/// legitimate port implementation when no fault is armed, proving the
+/// double stays a real `EffectStateStore + EffectDedupStore`, not a
+/// look-alike.
+#[cfg(test)]
+mod tier1_fault_injecting {
+    use super::*;
+    use ego_testkit::FaultInjectingEffectStore;
+
+    #[tokio::test]
+    async fn fault_injecting_store_with_an_empty_plan_satisfies_state_store_conformance() {
+        let store = FaultInjectingEffectStore::new();
+        run_state_store_conformance(&store).await;
+    }
+
+    #[tokio::test]
+    async fn fault_injecting_store_with_an_empty_plan_satisfies_dedup_conformance() {
+        let store = FaultInjectingEffectStore::new();
+        run_dedup_conformance(&store).await;
+    }
+}
+
 #[cfg(feature = "stoolap")]
 mod tier1_stoolap {
     use super::*;
