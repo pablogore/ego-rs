@@ -1,5 +1,6 @@
 mod builder;
 mod config_provider;
+mod effect_retention;
 mod error;
 mod idempotency;
 mod logger;
@@ -11,6 +12,7 @@ mod tenant;
 
 pub use builder::{Runtime, RuntimeBuilder, RuntimeResolver};
 pub use config_provider::{ConfigurationProvider, LogFormatSetting, LoggingSettings};
+pub use effect_retention::{EffectRetentionPolicy, EffectRetentionPolicyError};
 pub use error::RuntimeInfraError;
 pub use idempotency::{
     decode_stored_response, encode_stored_response, operation_fingerprint,

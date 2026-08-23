@@ -27,6 +27,15 @@ impl EffectId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Reconstructs an [`EffectId`] from a UUID read back from durable
+    /// storage (PROD-002 AD-1: a durable provider persists `EffectId` as
+    /// text/UUID and must be able to rebuild it when reconstructing a
+    /// [`StoredEffect`] in `claim_due`). Unlike [`EffectId::new`], this does
+    /// not mint a fresh identity — it wraps an existing one.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl Default for EffectId {
@@ -193,6 +202,32 @@ pub struct StoredEffect {
     pub next_at: Timestamp,
 }
 
+/// A provider's honestly-declared durability/concurrency profile (PROD-002
+/// AD-3, spec: "A provider declares its capabilities honestly").
+///
+/// Fields are stated as **observable guarantees**, not mechanisms — a caller
+/// never needs to inspect a provider's internals to know what it promises.
+/// Returned by a defaulted [`EffectStateStore::capabilities`] /
+/// [`EffectDedupStore::capabilities`] method so no existing or third-party
+/// implementation breaks; the default (all-`false`) is the in-memory,
+/// non-durable profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectStoreCapabilities {
+    /// An accepted effect survives process death.
+    pub durable: bool,
+    /// Two concurrent claimers sharing this store *within a single process
+    /// or host ownership domain* never both hold a valid claim on the same
+    /// effect. Says nothing about safety across independent processes/nodes
+    /// — hence "local", not "process": "process-safe" would wrongly imply
+    /// cross-process safety.
+    pub concurrent_local_safe: bool,
+    /// The above holds across independent nodes/hosts.
+    pub multi_node_safe: bool,
+    /// Claims carry an expiring lease, reclaimable after owner death without
+    /// a manual sweep.
+    pub supports_leases: bool,
+}
+
 /// Public port owning delivery-state bookkeeping for accepted effects.
 ///
 /// Every method signature here is built from public types only
@@ -201,6 +236,22 @@ pub struct StoredEffect {
 /// depends on `ego-runtime`, not only from within it (F-01).
 #[async_trait]
 pub trait EffectStateStore: Send + Sync {
+    /// Declares this store's durability/concurrency profile (PROD-002 AD-3).
+    ///
+    /// Defaulted to the non-durable, single-process profile so no existing
+    /// or third-party implementation breaks; a durable provider overrides
+    /// this to report its truthful capabilities. Synchronous — a static
+    /// declaration, no I/O — so it does not disturb the `#[async_trait]` /
+    /// `Send + Sync` shape.
+    fn capabilities(&self) -> EffectStoreCapabilities {
+        EffectStoreCapabilities {
+            durable: false,
+            concurrent_local_safe: false,
+            multi_node_safe: false,
+            supports_leases: false,
+        }
+    }
+
     /// Records a newly-accepted effect as [`EffectState::Pending`].
     ///
     /// MUST be idempotent for a replayed acceptance: re-accepting the same
@@ -277,6 +328,14 @@ impl EffectFingerprint {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&digest);
         Self(bytes)
+    }
+
+    /// Returns the raw 32-byte digest (PROD-002 AD-1: a durable provider must
+    /// persist the fingerprint alongside a dedup reservation and compare it
+    /// back on a later `reserve` — there is no other way to get at the bytes
+    /// from outside this module).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -357,6 +416,22 @@ pub struct DedupScope {
 /// Public port owning single-flight idempotency reservations.
 #[async_trait]
 pub trait EffectDedupStore: Send + Sync {
+    /// Declares this store's durability/concurrency profile (PROD-002 AD-3).
+    ///
+    /// Declared independently from [`EffectStateStore::capabilities`] (G6):
+    /// a deployment may pair a durable `EffectStateStore` with a non-durable
+    /// `EffectDedupStore`, and this lets that mismatch be observed from the
+    /// two capability declarations rather than hidden behind one combined
+    /// flag. Defaulted to the non-durable, single-process profile.
+    fn capabilities(&self) -> EffectStoreCapabilities {
+        EffectStoreCapabilities {
+            durable: false,
+            concurrent_local_safe: false,
+            multi_node_safe: false,
+            supports_leases: false,
+        }
+    }
+
     /// Reserves `scope` for `effect_id`'s attempt, keyed by a fingerprint of
     /// the effect's payload/destination (F-02, PR2 round 4: `effect_id` is
     /// new — reservations now track ownership, not just occupancy, so the
@@ -382,6 +457,39 @@ pub trait EffectDedupStore: Send + Sync {
     /// only for genuinely abandoning the scope (terminal failure), freeing it
     /// for a future, unrelated submission with the same key.
     async fn release(&self, scope: &DedupScope) -> Result<(), EffectStoreError>;
+}
+
+/// Optional capability: a provider that can purge its own settled rows on a
+/// runtime-owned schedule (PROD-002 G12).
+///
+/// Not a method on [`EffectStateStore`]/[`EffectDedupStore`] — retention is a
+/// maintenance concern orthogonal to delivery bookkeeping, exactly like
+/// [`EffectStoreCapabilities`] is an honestly-declared property rather than a
+/// mandatory port method. A provider implements this trait in addition to
+/// the two ports, and a runtime that never registers a
+/// `dyn RetentionMaintenance` never purges anything — the same "off unless
+/// asked for" posture the PROD-012 reservation-retention worker already
+/// established.
+#[async_trait]
+pub trait RetentionMaintenance: Send + Sync {
+    /// Deletes settled (succeeded/terminal) rows older than `cutoff`, at most
+    /// `batch` rows, and returns how many were actually removed.
+    ///
+    /// `cutoff` is computed by the caller from an injected [`ego_domain::Clock`]
+    /// (PROD-002 G10) — this trait takes the already-computed instant rather
+    /// than a `(now, ttl)` pair, so nothing here needs its own notion of "now".
+    async fn purge_before(&self, cutoff: Timestamp, batch: usize) -> Result<u64, EffectStoreError>;
+
+    /// Reports when the oldest still-held settled row was settled, for a
+    /// backlog-age gauge.
+    ///
+    /// Defaults to `Ok(None)` — mirrors
+    /// [`OperationReservationStore::oldest_completed`](ego_domain::operation::OperationReservationStore::oldest_completed)'s
+    /// reasoning: a provider that does not track this need not implement any
+    /// custom logic just to answer this query.
+    async fn oldest_terminal(&self) -> Result<Option<Timestamp>, EffectStoreError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1111,6 +1219,54 @@ mod tests {
         );
     }
 
+    // --- PROD-002 Phase 1 (AD-3, G6): capability descriptor ---
+
+    #[tokio::test]
+    async fn in_memory_declares_all_false_capabilities_by_default() {
+        let store = InMemoryEffectStore::new();
+
+        let state_caps = EffectStateStore::capabilities(&store);
+        let dedup_caps = EffectDedupStore::capabilities(&store);
+
+        assert_eq!(
+            state_caps,
+            EffectStoreCapabilities {
+                durable: false,
+                concurrent_local_safe: false,
+                multi_node_safe: false,
+                supports_leases: false,
+            }
+        );
+        assert_eq!(
+            dedup_caps,
+            EffectStoreCapabilities {
+                durable: false,
+                concurrent_local_safe: false,
+                multi_node_safe: false,
+                supports_leases: false,
+            }
+        );
+    }
+
+    // --- PROD-002 Phase 4 (AD-1): durable-provider (de)serialization hooks ---
+
+    #[test]
+    fn effect_id_round_trips_through_from_uuid() {
+        let uuid = Uuid::new_v4();
+        let id = EffectId::from_uuid(uuid);
+        assert_eq!(id.to_string(), uuid.to_string());
+    }
+
+    #[test]
+    fn effect_fingerprint_as_bytes_is_stable_for_identical_inputs() {
+        let a = EffectFingerprint::compute(b"payload", "https://example.com");
+        let b = EffectFingerprint::compute(b"payload", "https://example.com");
+        // A durable provider persists these bytes (e.g. as hex) and must be
+        // able to compare a freshly-computed fingerprint against them later.
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_eq!(a.as_bytes().len(), 32);
+    }
+
     // --- F-03: error taxonomy ---
 
     #[test]
@@ -1136,5 +1292,28 @@ mod tests {
         );
         assert_eq!(permanent.to_string(), "backend error: corrupt record");
         assert_eq!(conflict.to_string(), "conflict: optimistic lock lost");
+    }
+
+    // --- PROD-002 G12: RetentionMaintenance optional capability ---
+
+    /// A bare implementor providing only the required `purge_before` gets
+    /// `oldest_terminal`'s default for free — mirrors
+    /// `OperationReservationStore::oldest_completed`'s own default test.
+    #[tokio::test]
+    async fn oldest_terminal_defaults_to_none_for_a_bare_implementor() {
+        struct Bare;
+
+        #[async_trait]
+        impl RetentionMaintenance for Bare {
+            async fn purge_before(
+                &self,
+                _cutoff: Timestamp,
+                _batch: usize,
+            ) -> Result<u64, EffectStoreError> {
+                unreachable!()
+            }
+        }
+
+        assert_eq!(Bare.oldest_terminal().await, Ok(None));
     }
 }

@@ -107,6 +107,23 @@ pub struct RuntimeBuilder {
     /// The single registered reservation store, if any.
     idempotency_reservation_store: Option<Arc<dyn OperationReservationStore>>,
     retention_policy: Option<crate::runtime::RetentionPolicy>,
+    /// The single registered `RetentionMaintenance` capability, if any
+    /// (PROD-002 G12). Registered independently from `EffectStateStore`/
+    /// `EffectDedupStore` — this builder has no seam yet to register a
+    /// custom durable effect store at all (`build()` always constructs
+    /// `InMemoryEffectStore` when an executor is registered; that wiring is
+    /// separate, still-open PROD-002 work, tasks.md Phase 7). A caller that
+    /// runs a durable `PostgresEffectStore`/`StoolapEffectStore` elsewhere
+    /// registers that SAME instance here, cast to `dyn RetentionMaintenance`,
+    /// the same "one concrete store, several trait objects" idiom
+    /// `idempotency_reservation_store` above and the effects acceptor's
+    /// dual `EffectStateStore`/`EffectDedupStore` registration already use.
+    effect_retention_store: Option<Arc<dyn ego_runtime::effects::RetentionMaintenance>>,
+    /// The effect-retention schedule, if one was configured (PROD-002 G12).
+    effect_retention_policy: Option<crate::runtime::EffectRetentionPolicy>,
+    /// Clock effect-retention cutoffs are computed from (G10). `None` means
+    /// the real one.
+    effect_retention_clock: Option<Arc<dyn ego_domain::time::Clock>>,
     /// Clock the reservation lease is computed from. `None` means the real one.
     /// Injectable so lease expiry is testable without wall time (AD-3i).
     reservation_clock: Option<Arc<dyn ego_domain::time::Clock>>,
@@ -212,6 +229,9 @@ impl RuntimeBuilder {
             idempotency_enforcement_mode: IdempotencyEnforcementMode::default(),
             idempotency_reservation_store: None,
             retention_policy: None,
+            effect_retention_store: None,
+            effect_retention_policy: None,
+            effect_retention_clock: None,
             reservation_clock: None,
             reservation_owner_id: None,
             reservation_lease_duration: std::time::Duration::from_secs(30),
@@ -422,6 +442,47 @@ impl RuntimeBuilder {
     /// configuration that cannot mean what it says.
     pub fn with_retention_policy(mut self, policy: crate::runtime::RetentionPolicy) -> Self {
         self.retention_policy = Some(policy);
+        self
+    }
+
+    /// Registers the [`ego_runtime::effects::RetentionMaintenance`]
+    /// capability this runtime purges settled external effects through
+    /// (PROD-002 G12).
+    ///
+    /// Independent of [`Self::with_retention_policy`] above — that one
+    /// governs [`OperationReservationStore`] retention, this one governs the
+    /// external-effects subsystem's own settled rows, and a deployment may
+    /// configure either, both, or neither.
+    pub fn with_effect_retention_store(
+        mut self,
+        store: Arc<dyn ego_runtime::effects::RetentionMaintenance>,
+    ) -> Self {
+        self.effect_retention_store = Some(store);
+        self
+    }
+
+    /// Enables retention of settled external effects (PROD-002 G12).
+    ///
+    /// Optional and absent by default, for the identical reason
+    /// [`Self::with_retention_policy`] is: without this call no worker is
+    /// started and no effect is ever deleted.
+    ///
+    /// Requires a registered [`ego_runtime::effects::RetentionMaintenance`]
+    /// (see [`Self::with_effect_retention_store`]); `build()` refuses
+    /// otherwise, mirroring the existing reservation-retention guard below.
+    pub fn with_effect_retention_policy(
+        mut self,
+        policy: crate::runtime::EffectRetentionPolicy,
+    ) -> Self {
+        self.effect_retention_policy = Some(policy);
+        self
+    }
+
+    /// Overrides the clock effect-retention cutoffs are computed from
+    /// (PROD-002 G10/G12). Defaults to the real system clock. Mirrors
+    /// [`Self::with_reservation_clock`] for the same testability reason.
+    pub fn with_effect_retention_clock(mut self, clock: Arc<dyn ego_domain::time::Clock>) -> Self {
+        self.effect_retention_clock = Some(clock);
         self
     }
 
@@ -687,11 +748,16 @@ impl RuntimeBuilder {
             None
         } else {
             let store = Arc::new(InMemoryEffectStore::new());
-            Some(Arc::new(RuntimeEffectAcceptor::new(
+            Some(Arc::new(RuntimeEffectAcceptor::with_observability(
                 store.clone() as Arc<dyn EffectStateStore>,
                 store as Arc<dyn EffectDedupStore>,
                 Arc::new(self.effect_executors),
                 self.delivery_config,
+                // PROD-002 G13: `None` when nothing was registered, which
+                // makes `effect.claim.event`'s site a no-op rather than
+                // driving a discarding implementation on every reclaim tick
+                // — same posture as `start_retention`/`start_retention_effects`.
+                self.observability.clone(),
             )))
         };
 
@@ -829,8 +895,24 @@ impl RuntimeBuilder {
         );
         let retention_policy = self.retention_policy;
 
+        // Same refusal, same shape, for the effects subsystem (PROD-002 G12): a
+        // configured effect-retention schedule with no `RetentionMaintenance`
+        // registered would start a worker that finds nothing to call.
+        assert!(
+            !(self.effect_retention_policy.is_some() && self.effect_retention_store.is_none()),
+            "an effect retention policy was configured but no RetentionMaintenance was \
+             registered via with_effect_retention_store: retention purges settled \
+             external effects, so without one there is nothing for it to purge and the \
+             schedule would run forever removing nothing"
+        );
+        let effect_retention_policy = self.effect_retention_policy;
+        let effect_retention_clock = self
+            .effect_retention_clock
+            .unwrap_or_else(|| Arc::new(ego_domain::time::SystemClock));
+
         let runtime = Runtime {
             retention_policy,
+            effect_retention_policy,
             health_aggregator,
             inner: Arc::new(RuntimeInner::new_with_logger(
                 self.registry,
@@ -862,6 +944,8 @@ impl RuntimeBuilder {
                 // and have no interceptor to hang off. Two readers of one
                 // registration, never two registrations.
                 self.tracer,
+                self.effect_retention_store,
+                effect_retention_clock,
             )),
         };
 
@@ -983,6 +1067,13 @@ pub struct Runtime {
     /// only thing [`Runtime::start_retention`] consults before deciding whether
     /// there is a worker to start at all.
     retention_policy: Option<crate::runtime::RetentionPolicy>,
+    /// The effect-retention schedule, if one was configured (PROD-002 G12).
+    /// Absent by default, and the only thing
+    /// [`Runtime::start_retention_effects`] consults before deciding whether
+    /// there is a worker to start at all. Distinct from `retention_policy`
+    /// above — that one governs `OperationReservationStore` retention, this
+    /// one governs the external-effects subsystem.
+    effect_retention_policy: Option<crate::runtime::EffectRetentionPolicy>,
     /// The runtime-owned health aggregator (PROD-005 PR2 TASK-018/019),
     /// built once by [`RuntimeBuilder::build`] from every registered
     /// lifecycle component's `health_contributors()`. Cheap to clone (an
@@ -1382,6 +1473,93 @@ impl Runtime {
                 crate::runtime::retention::RetentionShutdown::TimedOut => {
                     Err(RuntimeInfraError::Teardown {
                         reason: "the retention worker did not stop within its deadline".to_string(),
+                    })
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Starts the effect-retention worker, if a policy was configured
+    /// (PROD-002 G12).
+    ///
+    /// Named `start_retention_effects` rather than reusing `start_retention`
+    /// above: that name already belongs to PROD-012's operation-reservation
+    /// retention, a separate subsystem this runtime may configure
+    /// independently. Two schedules that can coexist on the same `Runtime`
+    /// need two distinct entry points, not one overloaded one.
+    ///
+    /// Explicit, for the same reason as [`Runtime::start_retention`] and
+    /// [`Runtime::start_effects`]: nothing should begin deleting effects as a
+    /// side effect of `build()`. A runtime with no policy returns `Ok(())`
+    /// having started nothing. **Idempotent** — a second call starts one
+    /// worker and registers one hook, guarded by the same compare-and-exchange
+    /// idiom as `start_retention`/`start_effects`.
+    pub async fn start_retention_effects(&self) -> Result<(), RuntimeInfraError> {
+        let Some(policy) = self.effect_retention_policy else {
+            return Ok(());
+        };
+        if self
+            .inner
+            .effect_retention_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        // Guaranteed by the build-time refusal above; stated rather than assumed.
+        let store =
+            self.inner.effect_retention_store.clone().expect(
+                "build() refuses an effect retention policy without a RetentionMaintenance",
+            );
+
+        let worker = crate::runtime::effect_retention::EffectRetentionWorker::start(
+            policy,
+            store,
+            self.inner.effect_retention_clock.clone(),
+            self.inner.tracer(),
+            self.inner.observability(),
+        );
+
+        // Bounded, ordered and panic-isolated, matching `start_retention`'s own
+        // teardown shape (and, transitively, provider teardown's precedent).
+        let deadline = policy
+            .interval()
+            .saturating_mul(2)
+            .max(Duration::from_secs(1));
+        let worker = std::sync::Mutex::new(Some(worker));
+        self.register_async_teardown(async move {
+            let taken = worker.lock().ok().and_then(|mut slot| slot.take());
+            let Some(worker) = taken else { return Ok(()) };
+
+            let mut outcome = crate::runtime::effect_retention::EffectRetentionShutdown::Stopped;
+            let panicked = crate::runtime::retention::isolate_panics(async {
+                outcome = worker.stop(deadline).await;
+            })
+            .await;
+
+            if panicked {
+                return Err(RuntimeInfraError::Teardown {
+                    reason: "the effect retention teardown hook panicked".to_string(),
+                });
+            }
+            match outcome {
+                crate::runtime::effect_retention::EffectRetentionShutdown::Stopped => Ok(()),
+                crate::runtime::effect_retention::EffectRetentionShutdown::Panicked => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the effect retention worker panicked".to_string(),
+                    })
+                }
+                crate::runtime::effect_retention::EffectRetentionShutdown::TimedOut => {
+                    Err(RuntimeInfraError::Teardown {
+                        reason: "the effect retention worker did not stop within its deadline"
+                            .to_string(),
                     })
                 }
             }

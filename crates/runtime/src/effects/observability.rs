@@ -32,8 +32,9 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+use uuid::Uuid;
 
-use super::store::AcceptedEffect;
+use super::store::{AcceptedEffect, EffectId, Timestamp};
 
 /// Redacts an idempotency key to a short, deterministic, non-reversible hash
 /// — never the raw key — for cross-log correlation (spec: "Observability
@@ -230,12 +231,165 @@ pub(crate) fn log_drain_incomplete(recovered: u64) {
     warn!(recovered_effect_count = recovered, "drain_incomplete");
 }
 
+// --- PROD-002 Phase 2 (AD-14): claim/lease/recovery/cleanup signals ---
+//
+// A durable provider's own concerns (Postgres claim ownership, provider-owned
+// TTL retention) — extending this same `log_*` surface rather than growing a
+// parallel one (design.md AD-14). Same discipline as above: no payload, and
+// the field-construction stays a pure function separate from the
+// `tracing::info!`/`warn!` call, for the same CORE-027 flakiness reason noted
+// at the top of this file.
+
+/// Fields for [`log_claim_acquired`], split out so redaction/shape is
+/// directly testable without emitting through `tracing`.
+struct ClaimAcquiredFields {
+    effect_id: String,
+    owner: String,
+    expires_at: String,
+}
+
+fn claim_acquired_fields(
+    effect_id: EffectId,
+    owner: Uuid,
+    expires_at: Timestamp,
+) -> ClaimAcquiredFields {
+    ClaimAcquiredFields {
+        effect_id: effect_id.to_string(),
+        owner: owner.to_string(),
+        expires_at: expires_at.into_utc().to_rfc3339(),
+    }
+}
+
+/// `claim_acquired`: a durable provider's `claim_due` stamped ownership
+/// (`owner`) and a lease (`expires_at`) on `effect_id` (PROD-002 AD-2/AD-14).
+#[allow(dead_code)] // ponytail: wired by the Postgres provider, Phase 5 (PR3)
+pub(crate) fn log_claim_acquired(effect_id: EffectId, owner: Uuid, expires_at: Timestamp) {
+    let f = claim_acquired_fields(effect_id, owner, expires_at);
+    info!(
+        effect_id = %f.effect_id,
+        owner = %f.owner,
+        expires_at = %f.expires_at,
+        "claim_acquired"
+    );
+}
+
+/// Fields for [`log_claim_reclaimed_after_expiry`].
+struct ClaimReclaimedFields {
+    effect_id: String,
+    previous_owner: String,
+    new_owner: String,
+    previous_epoch: i64,
+    new_epoch: i64,
+}
+
+fn claim_reclaimed_fields(
+    effect_id: EffectId,
+    previous_owner: Uuid,
+    new_owner: Uuid,
+    previous_epoch: i64,
+    new_epoch: i64,
+) -> ClaimReclaimedFields {
+    ClaimReclaimedFields {
+        effect_id: effect_id.to_string(),
+        previous_owner: previous_owner.to_string(),
+        new_owner: new_owner.to_string(),
+        previous_epoch,
+        new_epoch,
+    }
+}
+
+/// `claim_reclaimed_after_expiry`: `claim_due` took over a row whose lease
+/// had expired — fired from `claim_due` itself, the only place that sees
+/// both the prior and new owner/epoch in hand (design.md AD-14/§3.1). Does
+/// **not** claim a stale write from the superseded generation can no longer
+/// land (§3.1's known G2 limitation) — it only confirms the reclaim itself
+/// happened.
+#[allow(dead_code)] // ponytail: wired by the Postgres provider, Phase 5 (PR3)
+pub(crate) fn log_claim_reclaimed_after_expiry(
+    effect_id: EffectId,
+    previous_owner: Uuid,
+    new_owner: Uuid,
+    previous_epoch: i64,
+    new_epoch: i64,
+) {
+    let f = claim_reclaimed_fields(
+        effect_id,
+        previous_owner,
+        new_owner,
+        previous_epoch,
+        new_epoch,
+    );
+    warn!(
+        effect_id = %f.effect_id,
+        previous_owner = %f.previous_owner,
+        new_owner = %f.new_owner,
+        previous_epoch = f.previous_epoch,
+        new_epoch = f.new_epoch,
+        "claim_reclaimed_after_expiry"
+    );
+}
+
+/// Fields for [`log_recovered_in_flight`].
+struct RecoveredInFlightFields {
+    recovered: u64,
+    scope: String,
+}
+
+fn recovered_in_flight_fields(recovered: u64, scope: &str) -> RecoveredInFlightFields {
+    RecoveredInFlightFields {
+        recovered,
+        scope: scope.to_string(),
+    }
+}
+
+/// `recovered_in_flight`: a `recover_in_flight` sweep (startup, or a
+/// Postgres provider's expired-lease scope) recovered `recovered` effects
+/// (design.md AD-4/AD-14). `scope` names where the sweep ran (e.g.
+/// `"startup"`), distinguishing this from `EffectStateStore::
+/// recover_in_flight`'s own return count.
+#[allow(dead_code)] // ponytail: wired by the delivery runner/providers, Phase 4/5 (PR2/PR3)
+pub(crate) fn log_recovered_in_flight(recovered: u64, scope: &str) {
+    let f = recovered_in_flight_fields(recovered, scope);
+    info!(
+        recovered_effect_count = f.recovered,
+        scope = %f.scope,
+        "recovered_in_flight"
+    );
+}
+
+/// Fields for [`log_cleanup_deleted`].
+struct CleanupDeletedFields {
+    deleted: u64,
+    table: String,
+}
+
+fn cleanup_deleted_fields(deleted: u64, table: &str) -> CleanupDeletedFields {
+    CleanupDeletedFields {
+        deleted,
+        table: table.to_string(),
+    }
+}
+
+/// `cleanup_deleted`: a provider-owned TTL retention task (design.md AD-9)
+/// deleted `deleted` settled rows from `table`. Public — called from the
+/// `ego-effect-store` crate's durable providers (Stoolap Phase 4, Postgres
+/// Phase 5), which live outside `ego-runtime`.
+pub fn log_cleanup_deleted(deleted: u64, table: &str) {
+    let f = cleanup_deleted_fields(deleted, table);
+    info!(
+        deleted_row_count = f.deleted,
+        table = %f.table,
+        "cleanup_deleted"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::store::EffectId;
+    use crate::effects::store::{EffectId, Timestamp};
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
     use std::sync::Arc;
+    use uuid::Uuid;
 
     const DISTINCTIVE_PAYLOAD_MARKER: &str = "PAYLOAD-MUST-NEVER-LEAK-3f9a";
 
@@ -309,5 +463,62 @@ mod tests {
     #[test]
     fn oldest_pending_age_ms_converts_some_duration_to_milliseconds() {
         assert_eq!(oldest_pending_age_ms(Some(Duration::from_secs(1))), 1000);
+    }
+
+    // --- PROD-002 Phase 2 (AD-14): claim/lease/recovery/cleanup signals ---
+
+    #[test]
+    fn claim_acquired_fields_carries_effect_owner_and_expiry() {
+        let effect_id = EffectId::new();
+        let owner = Uuid::new_v4();
+        let expires_at = Timestamp::now();
+
+        let f = claim_acquired_fields(effect_id, owner, expires_at);
+
+        assert_eq!(f.effect_id, effect_id.to_string());
+        assert_eq!(f.owner, owner.to_string());
+        assert_eq!(f.expires_at, expires_at.into_utc().to_rfc3339());
+    }
+
+    #[test]
+    fn claim_reclaimed_fields_carries_both_owners_and_both_epochs() {
+        let effect_id = EffectId::new();
+        let previous_owner = Uuid::new_v4();
+        let new_owner = Uuid::new_v4();
+
+        let f = claim_reclaimed_fields(effect_id, previous_owner, new_owner, 3, 4);
+
+        assert_eq!(f.effect_id, effect_id.to_string());
+        assert_eq!(f.previous_owner, previous_owner.to_string());
+        assert_eq!(f.new_owner, new_owner.to_string());
+        assert_eq!(f.previous_epoch, 3);
+        assert_eq!(f.new_epoch, 4);
+        assert_ne!(
+            f.previous_owner, f.new_owner,
+            "a genuine reclaim must carry two distinct owners"
+        );
+    }
+
+    #[test]
+    fn recovered_in_flight_fields_carries_count_and_scope() {
+        let f = recovered_in_flight_fields(3, "startup");
+
+        assert_eq!(f.recovered, 3);
+        assert_eq!(f.scope, "startup");
+    }
+
+    #[test]
+    fn recovered_in_flight_fields_reports_zero_when_nothing_recovered() {
+        let f = recovered_in_flight_fields(0, "startup");
+
+        assert_eq!(f.recovered, 0);
+    }
+
+    #[test]
+    fn cleanup_deleted_fields_carries_deleted_count_and_table_name() {
+        let f = cleanup_deleted_fields(42, "effect_state");
+
+        assert_eq!(f.deleted, 42);
+        assert_eq!(f.table, "effect_state");
     }
 }

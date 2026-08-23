@@ -1,0 +1,45 @@
+[package]
+name = "ego-effect-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ego-runtime = { path = "../runtime" }
+ego-domain = { path = "../domain" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+# PROD-002 Phase 5: PostgreSQL provider (feature-gated, no default backend).
+# `migrate` is deliberately excluded — AD-10: this crate hand-rolls its own
+# `include_str!` migration runner (mirroring ego-persistence's pattern), not
+# sqlx's `migrate!`/`_sqlx_migrations` ledger. `uuid` enables binding/reading
+# `uuid::Uuid` directly against the native Postgres `UUID` column type.
+sqlx = { version = "0.8", optional = true, features = [
+    "runtime-tokio",
+    "postgres",
+    "chrono",
+    "json",
+    "uuid",
+] }
+# PROD-002 Phase 4: Stoolap provider (feature-gated, no default backend).
+stoolap = { version = "0.4", optional = true }
+# PROD-002 Phase 4: Stoolap has no BYTEA/blob column type (core::Value has no
+# binary variant) — payload bytes are stored as base64 TEXT. Same version
+# already used by security-jwt/security-sdk elsewhere in the workspace.
+base64 = { version = "0.22", optional = true }
+# PROD-002 correction round (resilience fix 4): every Stoolap call is
+# synchronous I/O — `spawn_blocking` moves it off the async worker thread.
+tokio = { version = "1", optional = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# PROD-002 Phase 4 (AD-13 Tier 2): DurableStoreFactory reopen tests need a
+# fixed on-disk path shared across two independent Stoolap instances.
+tempfile = "3"
+
+[features]
+# No default backend feature (design.md §2) — each deployment opts into
+# exactly the driver it runs.
+postgres = ["dep:sqlx"]
+stoolap = ["dep:stoolap", "dep:base64", "dep:tokio"]

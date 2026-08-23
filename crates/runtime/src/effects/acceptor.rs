@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ego_domain::time::SystemClock;
-use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
+use ego_domain::time::{Clock, SystemClock};
+use ego_domain::{ExternalEffectDescription, IdempotencyKey, Observability, TenantId};
 use persistent_entity::effect_acceptor::{EffectAcceptanceError, EffectAcceptor};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
@@ -517,14 +517,66 @@ impl RuntimeEffectAcceptor {
         registry: Arc<ExecutorRegistry>,
         config: DeliveryConfig,
     ) -> Self {
-        let (queue, receiver) = EffectQueue::bounded(config.queue_capacity);
-        let runner = Arc::new(DeliveryRunner::new(
-            state.clone(),
+        Self::with_clock(state, dedup, registry, config, Arc::new(SystemClock))
+    }
+
+    /// Same as [`Self::new`], but with an explicit [`Clock`] instead of the
+    /// production default ([`SystemClock`]). Additive — `new`'s signature and
+    /// behavior are unchanged, so no existing caller breaks — for composition
+    /// roots (integration tests, future deterministic harnesses) that need to
+    /// inject a fake clock into the delivery pipeline.
+    pub fn with_clock(
+        state: Arc<dyn EffectStateStore>,
+        dedup: Arc<dyn EffectDedupStore>,
+        registry: Arc<ExecutorRegistry>,
+        config: DeliveryConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self::with_clock_and_observability(state, dedup, registry, config, clock, None)
+    }
+
+    /// Same as [`Self::new`], but with an explicit [`Observability`] sink
+    /// (PROD-002 G13) instead of none. Additive, same idiom as
+    /// [`Self::with_clock`] — `new`'s signature and behavior are unchanged —
+    /// for a composition root (`ego-service-sdk`'s `RuntimeBuilder`) that
+    /// wants `effect.claim.event` wired into the delivery pipeline's
+    /// periodic reclaim loop.
+    pub fn with_observability(
+        state: Arc<dyn EffectStateStore>,
+        dedup: Arc<dyn EffectDedupStore>,
+        registry: Arc<ExecutorRegistry>,
+        config: DeliveryConfig,
+        observability: Option<Arc<dyn Observability>>,
+    ) -> Self {
+        Self::with_clock_and_observability(
+            state,
             dedup,
             registry,
-            config.retry,
+            config,
             Arc::new(SystemClock),
-        ));
+            observability,
+        )
+    }
+
+    /// The composition point every other constructor above delegates to.
+    /// Not itself named `new`/`with_clock`/`with_observability` because it is
+    /// the one place both optional dependencies are actually threaded through
+    /// — a caller reaches it via whichever named constructor matches what it
+    /// has to inject, never directly.
+    fn with_clock_and_observability(
+        state: Arc<dyn EffectStateStore>,
+        dedup: Arc<dyn EffectDedupStore>,
+        registry: Arc<ExecutorRegistry>,
+        config: DeliveryConfig,
+        clock: Arc<dyn Clock>,
+        observability: Option<Arc<dyn Observability>>,
+    ) -> Self {
+        let (queue, receiver) = EffectQueue::bounded(config.queue_capacity);
+        let mut runner = DeliveryRunner::new(state.clone(), dedup, registry, config.retry, clock);
+        if let Some(observability) = observability {
+            runner = runner.with_observability(observability);
+        }
+        let runner = Arc::new(runner);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (deadline_tx, deadline_rx) = watch::channel(None);
 

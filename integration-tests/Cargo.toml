@@ -45,7 +45,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 
 [dev-dependencies]
 ego-domain = { path = "../crates/domain" }
+# PROD-002 G11: Tier 2/3 PostgreSQL effect-store conformance, relocated here
+# from the old per-crate `crates/integration-tests` (one testcontainers
+# container per test file) onto this suite's shared container + per-test
+# isolated database. `postgres` is the only backend this suite needs — the
+# Stoolap/in-memory tiers stay crate-local (Tier 1/Tier 2-Stoolap, unmoved).
+ego-effect-store = { path = "../crates/effect-store", features = ["postgres"] }
 ego-persistence = { path = "../crates/persistence" }
+ego-runtime = { path = "../crates/runtime" }
 ego-service-sdk = { path = "../crates/service-sdk" }
 ego-testkit = { path = "../crates/testkit" }
 ego-transport = { path = "../crates/transport" }

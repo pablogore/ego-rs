@@ -91,6 +91,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_domain::time::Clock;
+use ego_domain::{MetricAttribute, Observability};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::task::JoinSet;
 
@@ -106,7 +107,7 @@ use super::queue::EffectQueueReceiver;
 use super::registry::ExecutorRegistry;
 use super::store::{
     AcceptedEffect, DedupOutcome, DedupScope, EffectDedupStore, EffectFingerprint, EffectId,
-    EffectStateStore, EffectStoreError, TerminalReason, Timestamp,
+    EffectState, EffectStateStore, EffectStoreError, StoredEffect, TerminalReason, Timestamp,
 };
 
 /// AD-7: bounded number of times a flat, un-backed-off bookkeeping write
@@ -196,6 +197,12 @@ pub(crate) struct DeliveryRunner {
     /// [`timestamp_after`] by [`Self::retry_or_give_up`] and
     /// [`Self::finish_success`].
     clock: Arc<dyn Clock>,
+    /// PROD-002 G13: where `effect.claim.event` is emitted. `None` when no
+    /// sink was registered, which makes every metric site below a no-op
+    /// rather than driving a discarding implementation on every reclaim
+    /// tick — same posture as `RetentionWorker`/`EffectRetentionWorker`'s own
+    /// `Option<Arc<dyn Observability>>`.
+    observability: Option<Arc<dyn Observability>>,
 }
 
 impl DeliveryRunner {
@@ -228,7 +235,18 @@ impl DeliveryRunner {
             tasks: AsyncMutex::new(JoinSet::new()),
             executor_aborts: AsyncMutex::new(Vec::new()),
             clock,
+            observability: None,
         }
+    }
+
+    /// Additive builder step (PROD-002 G13), mirroring `RuntimeBuilder::
+    /// with_observability`'s naming: registers the sink `reclaim_due` emits
+    /// `effect.claim.event` through. `new`'s signature and behavior are
+    /// unchanged — a caller that never calls this gets a runner with no
+    /// observability, exactly as before this method existed.
+    pub(crate) fn with_observability(mut self, observability: Arc<dyn Observability>) -> Self {
+        self.observability = Some(observability);
+        self
     }
 
     /// Test-only read access to the injected clock, so a test can prove which
@@ -587,6 +605,7 @@ impl DeliveryRunner {
             // nature (crash-recovery/orphan-reclaim, not the primary path).
             Err(_) => return true,
         };
+        self.record_claim_metrics(&due);
         for stored in due {
             if let Err(err) = self.state.mark_in_flight(stored.id).await {
                 // Expected, harmless race: something else (e.g. the direct
@@ -618,6 +637,52 @@ impl DeliveryRunner {
             }
         }
         true
+    }
+
+    /// PROD-002 G13: `effect.claim.event`, bucketed by what `claim_due`
+    /// actually returned.
+    ///
+    /// A row still carrying `Pending`/`RetryableFailed` is a fresh
+    /// acquisition; one still carrying `InFlight` is a row `claim_due` took
+    /// over because its lease had expired (design.md AD-2/AD-14 — only
+    /// Postgres's `claim_due` ever produces the latter; the in-memory and
+    /// Stoolap providers never re-claim an `InFlight` row through
+    /// `claim_due` at all, so this bucket is simply always empty for them).
+    ///
+    /// Read entirely from the trait-level [`StoredEffect::state`] this call
+    /// already returned — no owner, epoch, or lease timestamp crosses this
+    /// boundary, which is what the cardinality rule (design.md AD-14) requires
+    /// of this metric's only attribute. `log_claim_acquired`/
+    /// `log_claim_reclaimed_after_expiry` (`observability.rs`) stay unwired:
+    /// they need the previous/new owner and epoch, and `EffectStateStore`'s
+    /// `claim_due` contract does not carry that through `StoredEffect` for
+    /// any provider — only a provider's own internals see it, and exposing it
+    /// here would mean widening the frozen port.
+    fn record_claim_metrics(&self, due: &[StoredEffect]) {
+        let Some(obs) = self.observability.as_ref() else {
+            return;
+        };
+        let (mut acquired, mut reclaimed) = (0u64, 0u64);
+        for stored in due {
+            match stored.state {
+                EffectState::InFlight => reclaimed += 1,
+                _ => acquired += 1,
+            }
+        }
+        if acquired > 0 {
+            obs.counter(
+                "effect.claim.event",
+                acquired as f64,
+                &[MetricAttribute::new("event", "acquired")],
+            );
+        }
+        if reclaimed > 0 {
+            obs.counter(
+                "effect.claim.event",
+                reclaimed as f64,
+                &[MetricAttribute::new("event", "reclaimed_after_expiry")],
+            );
+        }
     }
 
     /// One full attempt of one freshly-accepted effect (design.md §5 data
@@ -866,12 +931,29 @@ impl DeliveryRunner {
     /// Fix 8: `mark_terminal` then release the dedup reservation — the
     /// shape every genuinely-terminal-after-reserving call site shares.
     /// HIGH-3: logs each bookkeeping failure instead of silently discarding it.
+    ///
+    /// G15: `dedup.release()` is causally gated on `mark_terminal()` having
+    /// succeeded. `mark_terminal` is the authority check for whether this
+    /// attempt still owns the effect; if it's rejected (`Conflict`,
+    /// `InvalidTransition`, or any other error — a superseded attempt whose
+    /// claim was already reclaimed), this attempt has no standing to perform
+    /// the destructive `release()` either. Releasing anyway would delete a
+    /// reservation a newer attempt may have already flipped to `succeeded`,
+    /// letting a later, unrelated submission see `Fresh` instead of
+    /// `OtherSucceeded` (design.md §3.4). Does not apply to `commit_success`
+    /// (see `finish_success`): that mutation is monotonic and idempotent, so
+    /// a stale call cannot un-succeed a reservation the way a stale release
+    /// can delete one.
     async fn abandon_and_release(&self, id: EffectId, reason: TerminalReason, scope: DedupScope) {
-        if let Err(err) = self.state.mark_terminal(id, reason).await {
-            tracing::warn!(effect_id = %id, error = %err, "mark_terminal failed while abandoning effect");
-        }
-        if let Err(err) = self.dedup.release(&scope).await {
-            tracing::warn!(effect_id = %id, error = %err, "dedup release failed after abandoning effect");
+        match self.state.mark_terminal(id, reason).await {
+            Ok(()) => {
+                if let Err(err) = self.dedup.release(&scope).await {
+                    tracing::warn!(effect_id = %id, error = %err, "dedup release failed after abandoning effect");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(effect_id = %id, error = %err, "mark_terminal failed while abandoning effect; skipping dedup release — this attempt no longer has authority over the reservation");
+            }
         }
     }
 
@@ -2965,6 +3047,88 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stale_terminal_abandonment_does_not_release_a_dedup_reservation_another_attempt_already_succeeded(
+    ) {
+        // Scenario (verbatim from the bug report): A claims; A's lease
+        // expires; B reclaims the same row and completes successfully
+        // (dedup is now `OtherSucceeded` for anyone else); A then lands late
+        // and its own terminal write is no longer legal — the row already
+        // resolved without it. `abandon_and_release` MUST NOT then release
+        // the dedup reservation B's success depends on, or a later,
+        // genuinely new submission under the same scope would wrongly see
+        // `Fresh` instead of `OtherSucceeded`.
+        //
+        // A and B are the SAME `EffectId` here: a lease reclaim hands the
+        // SAME row to a different worker, it doesn't mint a new one. That is
+        // deliberately NOT the same-`worker_id` double-claim window (G2, a
+        // separate accepted residual risk) — A and B are two genuinely
+        // different completions of the row (a reclaim-and-succeed, followed
+        // by the original claimant's stale write), never the same worker
+        // claiming the same row twice.
+        let store = Arc::new(InMemoryEffectStore::new());
+        let state: Arc<dyn EffectStateStore> = store.clone();
+        let dedup: Arc<dyn EffectDedupStore> = store.clone();
+        let (runner, _queue) = runner_with(
+            state.clone(),
+            dedup.clone(),
+            ExecutorRegistry::new(),
+            RetryPolicy::default(),
+        );
+
+        let scope = DedupScope {
+            tenant: TenantId::new("tenant-a").unwrap(),
+            effect_type: "invoice.created".to_string(),
+            key: IdempotencyKey::new("uow-1:0").unwrap(),
+        };
+        let fp = EffectFingerprint::compute(&[1, 2, 3], "https://example.com");
+
+        let id = EffectId::new();
+        let effect = accepted(id, "invoice.created", "uow-1:0");
+        store.accept(effect).await.unwrap();
+
+        // A claims: reserves the scope and starts dispatching.
+        store.mark_in_flight(id).await.unwrap();
+        assert_eq!(
+            dedup.reserve(&scope, id, fp).await.unwrap(),
+            DedupOutcome::Fresh
+        );
+
+        // A's lease expires without A knowing it — recovery hands the row
+        // back to `Pending`.
+        store.recover_in_flight(Timestamp::now()).await.unwrap();
+
+        // B reclaims the same row and completes successfully.
+        store.mark_in_flight(id).await.unwrap();
+        dedup.commit_success(&scope).await.unwrap();
+        store.mark_succeeded(id).await.unwrap();
+
+        // A lands late: its own terminal write is rejected by the in-memory
+        // store's ownership-conflict signal for this scenario —
+        // `InvalidTransition { from: Succeeded, .. }`, not the `Conflict`
+        // variant named in the bug report (this in-memory double never
+        // produces `Conflict` from `mark_terminal` at all; see the module
+        // doc investigation note). `abandon_and_release` must treat this
+        // rejection as "someone else already resolved this effect" and skip
+        // the dedup release.
+        runner
+            .abandon_and_release(
+                id,
+                TerminalReason::Other("stale worker landed late".into()),
+                scope.clone(),
+            )
+            .await;
+
+        // A future, genuinely new submission under the same scope must
+        // still be told it's already settled — never `Fresh`.
+        let future_id = EffectId::new();
+        assert_eq!(
+            dedup.reserve(&scope, future_id, fp).await.unwrap(),
+            DedupOutcome::OtherSucceeded,
+            "a stale abandonment must not release a reservation another attempt already succeeded"
+        );
+    }
+
     // --- HIGH-2: shutdown/abort-triggered cancellation is not charged as a
     // retryable delivery failure -------------------------------------------
 
@@ -3220,6 +3384,299 @@ mod tests {
             bounded_policy(),
             clock,
         ))
+    }
+
+    // -----------------------------------------------------------------
+    // PROD-002 G13: effect.claim.event
+    // -----------------------------------------------------------------
+
+    /// One recorded metric emission, whole — kind, name, value, and
+    /// dimensions as `(key, value)` pairs.
+    type RecordedMetricCall = (
+        ego_domain::MetricKind,
+        &'static str,
+        f64,
+        Vec<(&'static str, String)>,
+    );
+
+    /// Records every metric emission, whole, so a test can assert on all
+    /// four fields without a separate fixture per assertion shape.
+    #[derive(Default)]
+    struct RecordingObservability {
+        metrics: std::sync::Mutex<Vec<RecordedMetricCall>>,
+    }
+
+    impl RecordingObservability {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        fn calls(&self) -> Vec<RecordedMetricCall> {
+            self.metrics.lock().unwrap().clone()
+        }
+    }
+
+    impl Observability for RecordingObservability {
+        fn trace(&self, _event: ego_domain::SemanticEvent) {}
+        fn record_metric(&self, observation: ego_domain::MetricObservation<'_>) {
+            self.metrics.lock().unwrap().push((
+                observation.kind,
+                observation.name,
+                observation.value,
+                observation
+                    .attributes
+                    .iter()
+                    .map(|a| (a.key, a.value.to_string()))
+                    .collect(),
+            ));
+        }
+        fn log(&self, _level: ego_domain::Level, _message: &str) {}
+    }
+
+    fn runner_with_observability(obs: Arc<dyn Observability>) -> Arc<DeliveryRunner> {
+        let store = Arc::new(RecordingStore::new());
+        Arc::new(
+            DeliveryRunner::new(
+                store.clone() as Arc<dyn EffectStateStore>,
+                store as Arc<dyn EffectDedupStore>,
+                Arc::new(ExecutorRegistry::new()),
+                bounded_policy(),
+                pinned_clock(),
+            )
+            .with_observability(obs),
+        )
+    }
+
+    fn stored_effect(state: EffectState) -> StoredEffect {
+        StoredEffect {
+            id: EffectId::new(),
+            tenant: TenantId::new("tenant-a").unwrap(),
+            description: Arc::new(description("invoice.created", "uow-1:0")),
+            attempt: 0,
+            state,
+            next_at: Timestamp::from_utc(pinned_instant()),
+        }
+    }
+
+    /// A batch of only fresh acquisitions (`Pending`/`RetryableFailed`) emits
+    /// exactly one `acquired` counter, sized to the batch — never the
+    /// `reclaimed_after_expiry` bucket.
+    #[test]
+    fn a_purely_fresh_batch_emits_only_the_acquired_bucket() {
+        let obs = RecordingObservability::new();
+        let runner = runner_with_observability(obs.clone() as Arc<dyn Observability>);
+        let due = vec![
+            stored_effect(EffectState::Pending),
+            stored_effect(EffectState::RetryableFailed),
+        ];
+
+        runner.record_claim_metrics(&due);
+
+        assert_eq!(
+            obs.calls(),
+            vec![(
+                ego_domain::MetricKind::Counter,
+                "effect.claim.event",
+                2.0,
+                vec![("event", "acquired".to_string())],
+            )],
+            "two fresh acquisitions must report one counter of value 2, event=acquired"
+        );
+    }
+
+    /// A batch of only reclaimed rows (`InFlight`, lease expired) emits
+    /// exactly one `reclaimed_after_expiry` counter — never `acquired`.
+    #[test]
+    fn a_purely_reclaimed_batch_emits_only_the_reclaimed_bucket() {
+        let obs = RecordingObservability::new();
+        let runner = runner_with_observability(obs.clone() as Arc<dyn Observability>);
+        let due = vec![stored_effect(EffectState::InFlight)];
+
+        runner.record_claim_metrics(&due);
+
+        assert_eq!(
+            obs.calls(),
+            vec![(
+                ego_domain::MetricKind::Counter,
+                "effect.claim.event",
+                1.0,
+                vec![("event", "reclaimed_after_expiry".to_string())],
+            )],
+            "one reclaimed row must report one counter of value 1, event=reclaimed_after_expiry"
+        );
+    }
+
+    /// A mixed batch reports both buckets, each with its own correct count —
+    /// proving the two are not conflated into a single total.
+    #[test]
+    fn a_mixed_batch_reports_both_buckets_with_their_own_counts() {
+        let obs = RecordingObservability::new();
+        let runner = runner_with_observability(obs.clone() as Arc<dyn Observability>);
+        let due = vec![
+            stored_effect(EffectState::Pending),
+            stored_effect(EffectState::InFlight),
+            stored_effect(EffectState::InFlight),
+            stored_effect(EffectState::RetryableFailed),
+        ];
+
+        runner.record_claim_metrics(&due);
+
+        let mut calls = obs.calls();
+        calls.sort_by(|a, b| a.3.cmp(&b.3));
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    ego_domain::MetricKind::Counter,
+                    "effect.claim.event",
+                    2.0,
+                    vec![("event", "acquired".to_string())],
+                ),
+                (
+                    ego_domain::MetricKind::Counter,
+                    "effect.claim.event",
+                    2.0,
+                    vec![("event", "reclaimed_after_expiry".to_string())],
+                ),
+            ],
+            "two acquired and two reclaimed must land as two independent counters"
+        );
+    }
+
+    /// An empty batch (nothing was due) emits nothing at all — a `0.0` sample
+    /// would be indistinguishable from "the tick never ran".
+    #[test]
+    fn an_empty_batch_emits_nothing() {
+        let obs = RecordingObservability::new();
+        let runner = runner_with_observability(obs.clone() as Arc<dyn Observability>);
+
+        runner.record_claim_metrics(&[]);
+
+        assert!(
+            obs.calls().is_empty(),
+            "nothing was due, so no counter of either bucket may be emitted: {:?}",
+            obs.calls()
+        );
+    }
+
+    /// No `Observability` registered at all: the metric site is a silent
+    /// no-op, exactly like `RetentionWorker`'s and `EffectRetentionWorker`'s
+    /// own `Option<Arc<dyn Observability>>` sites.
+    #[test]
+    fn no_observability_registered_is_a_silent_no_op() {
+        let store = Arc::new(RecordingStore::new());
+        let runner = recording_runner(store, pinned_clock());
+        let due = vec![
+            stored_effect(EffectState::Pending),
+            stored_effect(EffectState::InFlight),
+        ];
+
+        // Must not panic.
+        runner.record_claim_metrics(&due);
+    }
+
+    /// Cardinality rule (design.md AD-14): `owner`/`previous_owner`/
+    /// `new_owner`/`epoch`/`expires_at` must never appear as attributes on
+    /// this metric — `event` is the only key, and its values are drawn from
+    /// the closed two-member set the counter's contract declares.
+    #[test]
+    fn only_the_closed_event_attribute_ever_appears_never_owner_or_epoch_or_timestamps() {
+        let obs = RecordingObservability::new();
+        let runner = runner_with_observability(obs.clone() as Arc<dyn Observability>);
+        let due = vec![
+            stored_effect(EffectState::Pending),
+            stored_effect(EffectState::InFlight),
+        ];
+
+        runner.record_claim_metrics(&due);
+
+        let forbidden = [
+            "owner",
+            "previous_owner",
+            "new_owner",
+            "epoch",
+            "previous_epoch",
+            "new_epoch",
+            "expires_at",
+        ];
+        for (_, _, _, attributes) in obs.calls() {
+            assert_eq!(
+                attributes.len(),
+                1,
+                "effect.claim.event carries exactly one dimension: {attributes:?}"
+            );
+            let (key, value) = &attributes[0];
+            assert_eq!(*key, "event", "the only attribute key must be \"event\"");
+            assert!(
+                value == "acquired" || value == "reclaimed_after_expiry",
+                "event must be one of the closed set, got {value:?}"
+            );
+            assert!(
+                !forbidden.contains(key),
+                "a forbidden, unbounded dimension leaked onto the metric: {key}"
+            );
+        }
+    }
+
+    /// End-to-end: the periodic reclaim loop itself — not a direct call to
+    /// `record_claim_metrics` — emits `effect.claim.event{event=acquired}`
+    /// for a `Pending` effect nothing ever pushed through the queue. Proves
+    /// `with_observability` actually reaches `reclaim_due` when driven
+    /// through `run_inner`, the real production path.
+    #[tokio::test]
+    async fn the_reclaim_loop_itself_emits_effect_claim_event_for_a_pending_effect() {
+        let store = Arc::new(InMemoryEffectStore::new());
+        let mut registry = ExecutorRegistry::new();
+        let executor = Arc::new(ScriptedExecutor::new(vec![AttemptOutcome::Success]));
+        registry
+            .register("invoice.created", executor.clone())
+            .unwrap();
+        let (_queue, receiver) = EffectQueue::bounded(4);
+        let obs = RecordingObservability::new();
+        let runner = Arc::new(
+            DeliveryRunner::new(
+                store.clone() as Arc<dyn EffectStateStore>,
+                store.clone() as Arc<dyn EffectDedupStore>,
+                Arc::new(registry),
+                RetryPolicy::default(),
+                Arc::new(SystemClock),
+            )
+            .with_observability(obs.clone() as Arc<dyn Observability>),
+        );
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let id = EffectId::new();
+        // Accepted but never sent through the queue: only the periodic
+        // reclaim tick (claim_due) can ever find and dispatch this effect.
+        store
+            .accept(accepted(id, "invoice.created", "uow-1:0"))
+            .await
+            .unwrap();
+
+        let loop_handle =
+            tokio::spawn(runner.run_inner(receiver, 1, shutdown_rx, StdDuration::from_millis(10)));
+
+        tokio::time::timeout(StdDuration::from_secs(2), async {
+            while obs.calls().is_empty() {
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reclaim loop must emit effect.claim.event for the pending effect");
+
+        shutdown_tx.send(true).unwrap();
+        let _ = tokio::time::timeout(StdDuration::from_secs(1), loop_handle).await;
+
+        let calls = obs.calls();
+        assert!(
+            calls.iter().any(|(kind, name, value, attrs)| {
+                *kind == ego_domain::MetricKind::Counter
+                    && *name == "effect.claim.event"
+                    && *value >= 1.0
+                    && attrs.as_slice() == [("event", "acquired".to_string())]
+            }),
+            "expected an acquired effect.claim.event from the real reclaim loop, got {calls:?}"
+        );
     }
 
     fn scope_of(effect: &AcceptedEffect) -> DedupScope {
