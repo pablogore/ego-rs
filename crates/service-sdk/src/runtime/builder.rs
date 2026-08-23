@@ -473,9 +473,12 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Registers the single durable effect store this runtime's external-
-    /// effects subsystem uses in place of the default `InMemoryEffectStore`
-    /// (PROD-002 PR5 Phase 7).
+    /// Registers the effect store this runtime's external-effects subsystem
+    /// uses in place of the default `InMemoryEffectStore` (PROD-002 PR5 Phase
+    /// 7). The generic bound below does not require durability — a
+    /// non-durable third-party implementation is equally valid; callers who
+    /// need a durability guarantee get it from which concrete type they pass
+    /// in, not from this method's contract.
     ///
     /// Takes ONE concrete type implementing both [`EffectStateStore`] and
     /// [`EffectDedupStore`] and splits it into both trait-object handles from
