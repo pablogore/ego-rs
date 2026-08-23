@@ -819,6 +819,7 @@ dependencies = [
  "chrono",
  "ego-domain",
  "ego-runtime",
+ "ego-testkit",
  "sqlx",
  "stoolap",
  "tempfile",
