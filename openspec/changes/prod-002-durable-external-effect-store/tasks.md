@@ -288,9 +288,159 @@ through `App::builder()`, not `RuntimeBuilder` directly, and `AppBuilder` had
 no delegation for `RuntimeBuilder::with_effect_store`/
 `with_effect_retention_store`. Phase 8 itself resumes unstarted below.
 
-- [ ] 8.1 RED — reference-app e2e: an accepted effect survives a simulated restart against the embedded `StoolapEffectStore` (new process/store instance over the same on-disk file).
-- [ ] 8.2 GREEN — wire `examples/reference-app` to register `StoolapEffectStore` in place of `InMemoryEffectStore` — no external server dependency.
-- [ ] 8.3 Run `cargo test -p reference-app` — 0 regressions.
+- [x] 8.1 RED — reference-app e2e: an accepted effect survives a
+  simulated restart against the embedded `StoolapEffectStore` (new
+  process/store instance over the same on-disk file).
+
+  `examples/reference-app/tests/stoolap_restart_persistence.rs`
+  (`an_effect_accepted_before_a_restart_is_delivered_only_by_the_process_that_restarts`).
+  "Process A" and "process B" are each built through
+  `reference_app::build_runtime_with` (the real public composition path)
+  over the SAME on-disk Stoolap directory (a fresh `tempfile::tempdir()`).
+  Process A registers a real user through the real write path
+  (`entities.user.entity_ref(...).send_command(UserCommand::Register {..})`
+  — the identical `entity_ref`/`send_command` path `RegisterUserImpl`
+  itself calls, per `tests/effects_e2e.rs`'s own precedent), asserts the
+  welcome-email effect was ACCEPTED (`CommandResult::Events`, never
+  `EffectsAcceptanceFailed`), then is dropped WITHOUT ever calling
+  `App::start()`. Process B reopens the identical on-disk directory with a
+  brand-new `StoolapEffectStore::open` handle, builds through the same
+  composition path, and DOES call `App::start()`.
+
+  Confirmed RED for the correct reason before the implementation existed:
+  temporarily reverted `lib.rs`/`main.rs`/`Cargo.toml`/`domain/user.rs`
+  (via `git stash`) while keeping only this test file — `cargo test -p
+  reference-app --test stoolap_restart_persistence` failed to COMPILE
+  (`E0061`: `build_runtime_with` takes 4 arguments, 5 were supplied;
+  `E0433`/`E0432`: no `ExternalEffectsWiring`, no `reference_app::effects`
+  module) — the exact missing-API shape this phase adds. Restoring the
+  stashed changes made it compile and pass (see 8.3's evidence below).
+
+  Finding (the actual hard part of this phase, beyond simple config
+  wiring): `Runtime::effect_acceptor()` (`service-sdk/src/runtime/
+  builder.rs:1300`) deliberately returns `None` until `start_effects()`
+  has actually run — by design, so nothing can hold an acceptor whose
+  drain loop was never spawned. A naive "build a scratch `RuntimeBuilder`,
+  call `start_effects()` on it, take the acceptor" (as first sketched)
+  would spawn a REAL, live `DeliveryRunner` against the shared on-disk
+  store for the sole purpose of extracting an acceptor — which would then
+  itself race to claim and deliver the effect via its `Deferred`-mode
+  admission channel almost immediately, defeating the entire "process A
+  never delivers" premise this test depends on, and would leak an orphan
+  polling task with no lifecycle owner in production. The actual fix
+  (`build_runtime_with` in `lib.rs`): construct `ego_runtime::effects::
+  RuntimeEffectAcceptor::new(state, dedup, registry, DeliveryConfig::
+  default())` DIRECTLY — a type `ego-runtime`'s own doc comment already
+  describes as "constructible from any crate depending on ego-runtime",
+  bypassing `RuntimeBuilder`/`AppBuilder` entirely for this one narrow
+  need. `RuntimeEffectAcceptor::new` never spawns a task and is safe
+  outside Tokio (confirmed from its own doc comment and `RuntimeBuilder::
+  build`'s "construct only, never `.start()`, here" comment) — `accept()`
+  durably writes into the store via `EffectStateStore::accept` regardless
+  of whether a runner was ever started; only `.start()` (never called on
+  this standalone instance) would spawn one. This is handed to `User`'s
+  `EntityRuntimeBuilder::with_effect_acceptor` before that runtime's
+  `Arc` is built (required — `EntityRuntime::effect_acceptor` has no
+  interior mutability). The REAL, started delivery path is entirely
+  separate: the same `store`/`executor` are ALSO registered on the real
+  `AppBuilder` chain via `.effect_store()`/`.effect_executor()` (PR6a's
+  facade), and only THAT runtime's `DeliveryRunner` — spawned by
+  `App::start()` → `Runtime::start_effects()` in process B — ever claims
+  and delivers anything. Confirmed by reading `runner.rs`: `run_inner`
+  deliberately resets/skips its first reclaim tick
+  (`RECLAIM_INTERVAL` = 5s) so a fresh runner never reclaims before
+  anything could possibly be due — this is also why the test's polling
+  timeout is 8s (mirroring `tests/effects_e2e.rs`'s own margin for the
+  identical reason), not a shorter one: `claim_due` matches plain
+  `pending` rows too (confirmed against
+  `crates/effect-store/src/postgres/mod.rs`'s `claim_due` SQL), so
+  process B's runner picks up process A's row on its very first reclaim
+  tick, consistently landing at ~5.0-5.2s across repeated runs.
+
+- [x] 8.2 GREEN — wire `examples/reference-app` to register
+  `StoolapEffectStore` in place of `InMemoryEffectStore` — no external
+  server dependency.
+
+  `ego-effect-store` (features = ["stoolap"]) added as a regular
+  (non-dev) dependency of `examples/reference-app` — `main.rs` uses it in
+  production, not only in tests. `build_runtime_with` gained a 5th
+  parameter, `effects: ExternalEffectsWiring` (`None` | `Stoolap { store,
+  executor }` — declared visibly, mirroring `IdempotencyWiring`'s
+  "reachable only by explicit choice, never by omission" shape); all 3
+  existing call sites (`build_runtime_observed_in_memory`,
+  `tests/idempotency_wiring.rs`, and `main.rs`) updated. `main.rs` opens
+  `StoolapEffectStore::open(path)` at a new deterministic directory
+  (`examples/reference-app/data/effects`, default via
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/data/effects")`), overridable via
+  `EGO_REFERENCE_APP_EFFECT_STORE_PATH` — read exactly once, at the
+  composition root, mirroring the existing `CRASH_FAILPOINT_VAR` idiom
+  already documented in `lib.rs`. Directory added to a new
+  `examples/reference-app/.gitignore` (never committing runtime DB
+  files); README documents the path and reset instructions (delete the
+  directory).
+
+  A new `src/effects.rs` module holds `WelcomeEmailExecutor` — a real
+  (but log-only, no actual mailer, mirroring the existing "no real
+  network call, deliberately in-memory/log-only dogfood" convention
+  `providers/pricing_lookup.rs` already sets) `ExternalEffectExecutor`
+  that always logs the destination/idempotency key via `println!` (this
+  crate has no `tracing`/`log` dependency to reach for instead) and
+  returns `AttemptOutcome::Success`. The real, already-existing effect
+  this dogfoods is `UserEntity::external_effects`'s "welcome email"
+  (`effect_type: "user.welcome_email"`, now named once as
+  `domain::user::WELCOME_EMAIL_EFFECT_TYPE` so the description side and
+  every registration site can never silently drift apart) — no fake demo
+  effect was invented.
+
+  `build_runtime_with`'s internals (composition-root code, the diff
+  briefly): computes `user_effect_acceptor` via the directly-constructed
+  `RuntimeEffectAcceptor` described in 8.1's finding when `effects` is
+  `Stoolap`; builds `org`/`user` `EntityRuntime`s directly via the
+  (now 3-arg) private `observed_entity_runtime` helper instead of via
+  `compose_entity_runtimes` (whose public 2-arg signature is unchanged —
+  it always passes `None` for both aggregates, since
+  `TenantOrganization` never describes external effects and nothing else
+  in the codebase needs it wired) — `org` always gets `None`, `user`
+  gets the computed acceptor; and, on the REAL `AppBuilder` chain that
+  actually gets `.build()`'d/`.start()`'d, calls
+  `.effect_store(store.clone()).effect_executor([WELCOME_EMAIL_EFFECT_TYPE],
+  executor.clone())` (PR6a's facade — this is the concrete production
+  dogfood of `AppBuilder::effect_store`/`effect_executor` Phase 8 exists
+  to prove).
+
+- [x] 8.3 Run `cargo test -p reference-app` — 0 regressions.
+
+  `cargo test -p reference-app`: every existing test file green
+  (guard-chain, dual-write, observability, read-side projection, HTTP
+  round trip, `effects_e2e.rs`'s real-actor-spawn path, the
+  `external_data_provider_lint` — after rewording one doc comment in
+  `effects.rs` that happened to contain the literal substring
+  `PricingLookupProvider`, which the lint's line-based scan flags
+  wherever it appears — all 4 lint sub-tests pass) plus the new
+  `stoolap_restart_persistence.rs`, 1 passed, 0 failed. Zero regressions.
+
+  Full validation, all green: `cargo fmt --check` (workspace); `cargo
+  build --workspace --all-features`; `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`; `cargo test --workspace
+  --all-features` (every crate, no failures, no Docker/testcontainer
+  anywhere in the run); `cargo test -p reference-app`; `bash scripts/
+  detect-integration-tests.sh` PASS; `bash scripts/
+  detect-integration-tests-selftest.sh` PASS (all 11 self-test
+  assertions). The restart test itself re-run 3× standalone, consistently
+  ~5.07-5.17s, comfortably inside its 8s timeout.
+
+  Restart guarantee demonstrated, mapped exactly to proposal.md's
+  criterion #1 ("an accepted effect survives a real process restart and
+  is delivered exactly as the spec's reconstructability requirement
+  demands") — and ONLY that criterion. Criterion #2
+  (in-flight-at-crash redispatch via `recover_in_flight`) and criterion
+  #3 (multi-node claim exclusivity) are deliberately NOT exercised here —
+  both already covered by Tier 2/3 conformance (Phases 4.6-4.8,
+  5.15-5.18) — and `recover_in_flight` was correctly never needed: the
+  effect in this test is accepted but never claimed by process A (no
+  runner ever ran there), so process B's ordinary `claim_due` (not
+  `recover_in_flight`) is what picks it up, exactly as the brief
+  predicted. No recovery/lifecycle gap encountered.
 
 ## Phase 9: Docs + Spec Finalization
 

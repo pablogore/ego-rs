@@ -11,6 +11,12 @@ use persistent_entity::persistent_entity::PersistentEntity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The effect type [`UserEntity::external_effects`] describes, and the one
+/// [`crate::effects::WelcomeEmailExecutor`]/the durable effect store are
+/// registered for. Named once so the description side and the registration
+/// side can never silently drift apart.
+pub const WELCOME_EMAIL_EFFECT_TYPE: &str = "user.welcome_email";
+
 /// Commands accepted by [`UserEntity`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UserCommand {
@@ -214,11 +220,11 @@ impl PersistentEntity for UserEntity {
     /// but the command result is `CommandResult::EffectsAcceptanceFailed`;
     /// the effect is never silently discarded.
     ///
-    /// `main.rs` currently registers no effect executor, so registrations
-    /// commit normally while surfacing that post-commit acceptance warning.
     /// This method exists to prove the real
     /// `EntityRuntimeBuilder::with_effect_acceptor` wiring end-to-end (see
-    /// `tests/effects_e2e.rs`).
+    /// `tests/effects_e2e.rs`) and, since PROD-002 Phase 8, `main.rs`'s real
+    /// durable Stoolap-backed wiring (`build_runtime_with`'s
+    /// `ExternalEffectsWiring::Stoolap`).
     async fn external_effects(
         &self,
         _command: &Self::Command,
@@ -235,7 +241,7 @@ impl PersistentEntity for UserEntity {
                         event.user_id
                     ))
                     .ok()?,
-                    effect_type: "user.welcome_email".to_string(),
+                    effect_type: WELCOME_EMAIL_EFFECT_TYPE.to_string(),
                     payload: event.payload().clone().to_string().into_bytes(),
                     destination: format!("mailer://welcome/{}", event.user_id),
                 })

@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 pub mod application;
 pub mod domain;
+pub mod effects;
 pub mod outbound;
 pub mod ports;
 pub mod providers;
@@ -49,6 +50,10 @@ pub mod read_side;
 use ego_domain::persistence::EventStore;
 use ego_domain::{Clock, ConfigError, SystemClock, Validate};
 use ego_persistence::DatabaseConfig;
+use ego_runtime::effects::{
+    DeliveryConfig, EffectDedupStore, EffectStateStore, ExecutorRegistry, ExternalEffectExecutor,
+    RuntimeEffectAcceptor,
+};
 use ego_scheduler::event_bus::EventBusConfig;
 use ego_security_sdk::{
     AccessRequest, AuthenticationProvider, AuthorizationDecision, AuthorizationProvider, Principal,
@@ -58,6 +63,7 @@ use ego_service_sdk::{build_logger, App, ConfigurationProvider};
 use ego_transport::GrpcServerConfig;
 use kit_config::ConfigLoader;
 use persistent_entity::builder::EntityRuntimeBuilder;
+use persistent_entity::effect_acceptor::EffectAcceptor;
 use persistent_entity::runtime::RuntimeConfig;
 use security_jwt::{
     Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, KeyResolver, LocalKeyResolver,
@@ -450,21 +456,39 @@ pub fn compose_entity_runtimes(
     // AD-4: two independent EntityRuntimes, one per aggregate. Both get the
     // sink, or whichever misses it goes dark on its own — and both get their
     // store explicitly, so neither can fall back to memory by omission.
+    // Neither gets an effect acceptor here — this is the plain public entry
+    // point tests reach for directly (`metrics_reach_one_backend.rs`); the
+    // durable-effects wiring only [`build_runtime_with`] can supply lives at
+    // that call site instead (see [`observed_entity_runtime`]).
     ObservedEntityRuntimes {
-        org: Arc::new(observed_entity_runtime(stores.org, observability.clone())),
-        user: Arc::new(observed_entity_runtime(stores.user, observability)),
+        org: Arc::new(observed_entity_runtime(
+            stores.org,
+            observability.clone(),
+            None,
+        )),
+        user: Arc::new(observed_entity_runtime(stores.user, observability, None)),
     }
 }
 
-/// One entity runtime, carrying the sink if there is one.
+/// One entity runtime, carrying the sink and effect acceptor if there are
+/// any.
 ///
 /// Generic rather than a closure: each aggregate has its own event type, so a
 /// closure would be monomorphised to whichever it was first called with — and
 /// the second aggregate would not compile, which is a better failure than the
 /// alternative but not one worth arranging on purpose.
+///
+/// `effect_acceptor` exists because [`persistent_entity::runtime::EntityRuntime::effect_acceptor`]
+/// has no interior mutability — it can only be set here, at
+/// [`EntityRuntimeBuilder`] build time, before the `Arc<EntityRuntime>` this
+/// function returns is ever constructed. [`build_runtime_with`] is the only
+/// caller that ever passes `Some` (only for `User` — see
+/// [`ExternalEffectsWiring`]); [`compose_entity_runtimes`] always passes
+/// `None` for both aggregates.
 fn observed_entity_runtime<E>(
     event_store: Arc<dyn EventStore<E> + Send + Sync>,
     observability: Option<Arc<dyn ego_domain::Observability>>,
+    effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
 ) -> persistent_entity::runtime::EntityRuntime<E>
 where
     E: ego_domain::DomainEvent
@@ -475,12 +499,14 @@ where
         + Sync
         + 'static,
 {
-    let builder = EntityRuntimeBuilder::<E>::new().with_event_store(event_store);
-    match observability {
-        Some(sink) => builder.with_observability(sink),
-        None => builder,
+    let mut builder = EntityRuntimeBuilder::<E>::new().with_event_store(event_store);
+    if let Some(sink) = observability {
+        builder = builder.with_observability(sink);
     }
-    .build()
+    if let Some(acceptor) = effect_acceptor {
+        builder = builder.with_effect_acceptor(acceptor);
+    }
+    builder.build()
 }
 
 /// [`build_runtime_in_memory`], with an observability sink threaded through
@@ -502,7 +528,34 @@ pub fn build_runtime_observed_in_memory(
         EntityEventStores::in_memory(),
         IdempotencyWiring::Compatibility,
         observability,
+        ExternalEffectsWiring::None,
     )
+}
+
+/// Which durable external-effects posture this host runs under (PROD-002
+/// Phase 8 — mirrors [`IdempotencyWiring`]'s "declared, not defaulted"
+/// shape).
+///
+/// There is no variant carrying a bare `Arc<dyn EffectAcceptor>`: the
+/// acceptor `User`'s `EntityRuntimeBuilder` needs is derived from `store`
+/// and `executor` right here in [`build_runtime_with`] (via a directly
+/// constructed [`RuntimeEffectAcceptor`] that is never started — see the
+/// call site), never handed in ready-made, so a caller cannot pass an
+/// acceptor wired to a different store than the one the real `App` also
+/// receives.
+pub enum ExternalEffectsWiring {
+    /// No external-effect store or executor is registered — the original
+    /// zero-cost path. Every registration this workflow describes
+    /// (`UserEntity::external_effects`) then fails closed with
+    /// `CommandResult::EffectsAcceptanceFailed`, exactly as it always has.
+    None,
+    /// `UserEntity`'s described "welcome email" effects are durably
+    /// persisted through `store` and, once the built [`App`] is started,
+    /// delivered by `executor`.
+    Stoolap {
+        store: Arc<ego_effect_store::StoolapEffectStore>,
+        executor: Arc<dyn ExternalEffectExecutor>,
+    },
 }
 
 /// [`build_runtime_observed_in_memory`], over event stores the caller chose.
@@ -516,6 +569,7 @@ pub fn build_runtime_with(
     stores: EntityEventStores,
     idempotency: IdempotencyWiring,
     observability: Option<Arc<dyn ego_domain::Observability>>,
+    effects: ExternalEffectsWiring,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
 
@@ -554,10 +608,54 @@ pub fn build_runtime_with(
     let settings = ConfigurationProvider::from_value(serde_json::to_value(map)?).logging()?;
     let logger = build_logger(&settings)?;
 
-    let ObservedEntityRuntimes {
-        org: org_runtime,
-        user: user_runtime,
-    } = compose_entity_runtimes(stores, observability.clone());
+    // The `User` runtime's effect acceptor, if this host declared durable
+    // effects (PROD-002 Phase 8). Constructed directly from `ego-runtime`'s
+    // already-public `RuntimeEffectAcceptor` — deliberately NOT obtained via
+    // `RuntimeBuilder`/`AppBuilder`, and deliberately never `.start()`ed:
+    // `EntityRuntime::effect_acceptor` has no interior mutability, so it must
+    // be ready before `observed_entity_runtime` builds `user_runtime` below,
+    // long before the real `App` (built further down, from the SAME `store`/
+    // `executor` via `.effect_store()`/`.effect_executor()`) exists to be
+    // started. `RuntimeEffectAcceptor::new` only ever writes durably into
+    // `store` when `accept()` is called — it never spawns a delivery task on
+    // its own — so this acceptor can describe/accept effects here without
+    // ever delivering any of them itself. Delivery is exclusively the real
+    // `App`'s job, once `App::start()` calls `Runtime::start_effects()`.
+    let user_effect_acceptor: Option<Arc<dyn EffectAcceptor>> = match &effects {
+        ExternalEffectsWiring::None => None,
+        ExternalEffectsWiring::Stoolap { store, executor } => {
+            let mut registry = ExecutorRegistry::new();
+            registry
+                .register(
+                    crate::domain::user::WELCOME_EMAIL_EFFECT_TYPE,
+                    executor.clone(),
+                )
+                .expect("single registration for this effect type, cannot conflict");
+            let state: Arc<dyn EffectStateStore> = store.clone();
+            let dedup: Arc<dyn EffectDedupStore> = store.clone();
+            Some(Arc::new(RuntimeEffectAcceptor::new(
+                state,
+                dedup,
+                Arc::new(registry),
+                DeliveryConfig::default(),
+            )) as Arc<dyn EffectAcceptor>)
+        }
+    };
+
+    // AD-4: two independent EntityRuntimes, one per aggregate — built
+    // directly here (not via [`compose_entity_runtimes`]) because only
+    // `User` ever receives an effect acceptor; `TenantOrganization` never
+    // describes external effects.
+    let org_runtime = Arc::new(observed_entity_runtime(
+        stores.org,
+        observability.clone(),
+        None,
+    ));
+    let user_runtime = Arc::new(observed_entity_runtime(
+        stores.user,
+        observability.clone(),
+        user_effect_acceptor,
+    ));
     // Kept so the caller can see what this build composed; the services below
     // get the same `Arc`s.
     let composed = ObservedEntityRuntimes {
@@ -612,6 +710,21 @@ pub fn build_runtime_with(
     // The same sink the entity runtimes were given, for the SDK's own signals.
     if let Some(sink) = observability {
         builder = builder.observability(sink);
+    }
+    // The REAL `App` this builder ultimately produces — the one that gets
+    // `.build()`'d and, in `main.rs`/the restart test, `.start()`'d.
+    // `App::start()` calls `Runtime::start_effects()`, which is what
+    // actually spawns the delivery runner that claims and delivers the
+    // effect `user_effect_acceptor` above already durably wrote into
+    // `store`. Registered from the exact same `store`/`executor` the
+    // acceptor above was built from (PROD-002 PR6a's `AppBuilder` facade —
+    // see design.md AD-1: `AppBuilder` delegates to `RuntimeBuilder`, it
+    // does not replace it).
+    if let ExternalEffectsWiring::Stoolap { store, executor } = &effects {
+        builder = builder.effect_store(store.clone()).effect_executor(
+            [crate::domain::user::WELCOME_EMAIL_EFFECT_TYPE],
+            executor.clone(),
+        );
     }
     // CORE-028 Stage 2 (AD-5): registers the DI *handle-access* path for the
     // query-side `UsersByTenantStore` — distinct from the untouched read-side
