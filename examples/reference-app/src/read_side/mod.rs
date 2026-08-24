@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use ego_domain::read_side::config::ReadSideConfig;
 use ego_domain::read_side::event_tag::EventTag;
-use ego_runtime::read_side::scheduler::{ProjectionSpec, TagSchedulerImpl};
+use ego_runtime::read_side::scheduler::{ProjectionSpec, ReadSideStopOutcome, TagSchedulerImpl};
 use ego_runtime::read_side::ReadSideProjectionHandle;
 use kitlogger::KITLogger;
 use kitlogger_log_domain::Severity;
@@ -71,6 +71,10 @@ pub(crate) fn tenant_from_tag(tag: &EventTag) -> Option<&str> {
 /// pull-based assumption (see the archived read-side-projections spec's
 /// Assumptions section).
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Bound on how long `ReadSideRuntime::stop` waits for the poll loop to
+/// drain before aborting it — see `ReadSideProjectionHandle::stop`.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Not-yet-spawned read-side wiring, returned by `build_runtime`.
 ///
@@ -175,23 +179,31 @@ impl ReadSideHandles {
 }
 
 /// Handle to the spawned polling loop — a thin adapter over the framework's
-/// `ReadSideProjectionHandle`, mapping its raw `JoinError` to this app's own
-/// `RuntimeInfraError::Teardown` so `Runtime::shutdown_async` (which awaits
-/// this as a registered async teardown hook) can report the failure instead
-/// of printing "shutdown complete" regardless (CORE-018 Finding F-02).
+/// `ReadSideProjectionHandle`, mapping a non-`Stopped` outcome to this app's
+/// own `RuntimeInfraError::Teardown` so `Runtime::shutdown_async` (which
+/// awaits this as a registered async teardown hook) can report the failure
+/// instead of printing "shutdown complete" regardless (CORE-018 Finding
+/// F-02, extended to also report a stop that timed out).
 pub struct ReadSideRuntime {
     handle: ReadSideProjectionHandle,
 }
 
 impl ReadSideRuntime {
-    /// Signals the loop to stop and awaits the in-flight batch's drain —
-    /// see `ReadSideProjectionHandle::stop`.
+    /// Signals the loop to stop and awaits the in-flight batch's drain,
+    /// bounded by [`SHUTDOWN_DEADLINE`] — see `ReadSideProjectionHandle::stop`.
     pub async fn stop(self) -> Result<(), ego_service_sdk::RuntimeInfraError> {
-        self.handle
-            .stop()
-            .await
-            .map_err(|join_err| ego_service_sdk::RuntimeInfraError::Teardown {
-                reason: format!("read-side scheduler task failed to drain: {join_err}"),
-            })
+        match self.handle.stop(SHUTDOWN_DEADLINE).await {
+            ReadSideStopOutcome::Stopped => Ok(()),
+            ReadSideStopOutcome::Panicked(join_err) => {
+                Err(ego_service_sdk::RuntimeInfraError::Teardown {
+                    reason: format!("read-side scheduler task panicked: {join_err}"),
+                })
+            }
+            ReadSideStopOutcome::TimedOut => Err(ego_service_sdk::RuntimeInfraError::Teardown {
+                reason: format!(
+                    "read-side scheduler task did not stop within {SHUTDOWN_DEADLINE:?} and was aborted"
+                ),
+            }),
+        }
     }
 }
