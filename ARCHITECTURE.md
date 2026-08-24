@@ -17,11 +17,11 @@ This is the single architecture reference for the workspace. It replaces the for
 
 ## Layer & Crate Map
 
-The workspace has **16 crates + 1 example app** (root `Cargo.toml`, `[workspace] members`):
+The workspace has **17 crates + 1 example app** (root `Cargo.toml`, `[workspace] members`):
 
 ```
 domain, application, infrastructure, persistence, transport, runtime, runtime-tokio,
-event-adapter, persistent-entity, ego-scheduler, service-sdk, service-sdk-macros,
+effect-store, event-adapter, persistent-entity, ego-scheduler, service-sdk, service-sdk-macros,
 security-sdk, security-jwt, security-apikey, testkit
 + examples/reference-app
 ```
@@ -42,6 +42,7 @@ flowchart LR
 
     runtime["ego-runtime"] --> domain
     runtime_tokio["ego-runtime-tokio"] --> runtime
+    effect_store["ego-effect-store<br/>(sqlx | stoolap, feature-gated)"] --> runtime
     event_adapter["ego-event-adapter"] --> domain
     persistent_entity["persistent-entity"] --> domain
     scheduler["ego-scheduler"] --> domain
@@ -84,6 +85,7 @@ Directory names and package names differ for several crates — always check `[p
 | `crates/transport` | `ego-transport` | `ego-domain`, `ego-application`, `ego-service-sdk`, `ego-security-sdk` | HTTP transport: `AppState`, JWT extraction, error mapping, `serve()` |
 | `crates/runtime` | `ego-runtime` | `ego-domain` | Platform-agnostic `Runtime` trait, `EffectInterpreter`, CQRS read-side engine |
 | `crates/runtime-tokio` | `ego-runtime-tokio` | `ego-runtime` | The real Tokio-backed `Runtime` implementation |
+| `crates/effect-store` | `ego-effect-store` | `ego-runtime`, `ego-domain`, `sqlx` (feature `postgres`), `stoolap` (feature `stoolap`) | Durable `EffectStateStore`/`EffectDedupStore` providers (PROD-002) — `PostgresEffectStore`, `StoolapEffectStore`, plus the shared conformance harness. No default backend feature; no dependency on `ego-persistence` |
 | `crates/event-adapter` | `ego-event-adapter` | `ego-domain` | Event adapter support over domain |
 | `crates/persistent-entity` | `persistent-entity` (no `ego-` prefix) | `ego-domain` | Event-sourced actor-per-entity execution — see [Persistent Entity Runtime](#persistent-entity-runtime-core-006) below |
 | `crates/ego-scheduler` | `ego-scheduler` | `ego-domain` | Pure 6-stage actor-activation scheduling pipeline |
@@ -140,6 +142,7 @@ Treat `layers.toml` as a design intent, not a build gate. The dependency graph a
 - `ServiceContext` is propagated explicitly between components — no ambient/`TaskLocal` read. This was an explicit invariant of the `2026-06-22-remove-ambient-service-context` change: "there is exactly one mechanism for a component to access a `ServiceContext` — it was given one explicitly."
 - Cross-cutting SDKs (`ego-security-sdk`) MUST NOT appear as dependencies of `ego-domain` — verified true today.
 - Dependency direction is documented by `layers.toml` and the graph above; it is **not** enforced by CI (see [Layer enforcement reality](#layer-enforcement-reality)).
+- `ego-effect-store` (PROD-002) adds no dependency edge into `ego-persistence` — it depends on `ego-runtime` + `ego-domain` plus its own feature-gated backend drivers only. The `EffectStateStore`/`EffectDedupStore` port definitions stay in `ego-runtime`; concrete durable providers (`PostgresEffectStore`, `StoolapEffectStore`) live only in `ego-effect-store`. `ego-service-sdk` depends on `ego-effect-store` as a `[dev-dependencies]` entry only (composition/registration tests) — verified in its `Cargo.toml` — never as a production dependency; a host composes a concrete provider itself and registers it through `RuntimeBuilder::with_effect_store`.
 
 ---
 
@@ -384,6 +387,7 @@ ego-rs/
 │   ├── transport/             # ego-transport
 │   ├── runtime/               # ego-runtime
 │   ├── runtime-tokio/         # ego-runtime-tokio
+│   ├── effect-store/          # ego-effect-store (durable EffectStateStore/EffectDedupStore, PROD-002)
 │   ├── event-adapter/         # ego-event-adapter
 │   ├── persistent-entity/     # persistent-entity
 │   ├── ego-scheduler/         # ego-scheduler

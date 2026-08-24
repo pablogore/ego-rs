@@ -81,8 +81,8 @@ use ego_testkit::{TestClock, TestJwtBuilder};
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
 use reference_app::{
-    build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, IdempotencyWiring,
-    CRASH_FAILPOINT_VAR,
+    build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, ExternalEffectsWiring,
+    IdempotencyWiring, CRASH_FAILPOINT_VAR,
 };
 use reference_app::{DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
 use serde_json::Value;
@@ -254,6 +254,7 @@ async fn productive_app(
             clock,
         },
         observability,
+        ExternalEffectsWiring::None,
     )
     .expect("the reference app builds")
 }

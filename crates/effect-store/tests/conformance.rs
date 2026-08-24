@@ -2,8 +2,8 @@
 //! shared harness from [`ego_effect_store::conformance`] against providers
 //! that need no external resource — [`InMemoryEffectStore`] (Tier 1 only)
 //! and, feature-gated, the embedded Stoolap provider (Tiers 1-2). The
-//! Postgres tiers need a real container and live in
-//! `crates/integration-tests/tests/effect_store_postgres_conformance.rs`
+//! Postgres tiers need a real container and live in the top-level
+//! `integration-tests/tests/infrastructure/effect_store_postgres_conformance.rs`
 //! instead (`ego-rs-testing`: tests needing a real external resource must
 //! live there, not inline in a production crate's own test binary).
 
