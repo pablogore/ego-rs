@@ -444,10 +444,52 @@ no delegation for `RuntimeBuilder::with_effect_store`/
 
 ## Phase 9: Docs + Spec Finalization
 
-- [ ] 9.1 Confirm `specs/external-effects/spec.md` (already written) merge-readiness: verify ADDED/MODIFIED requirements match the shipped `capabilities()` shape, claim/lease semantics, cleanup, and TestKit double — do not re-author.
-- [ ] 9.2 Update `ARCHITECTURE.md` §2.1: add `ego-effect-store` node, edges `ego-effect-store → ego-runtime` and `ego-effect-store → {sqlx | stoolap}`; confirm no new edge into `ego-persistence`.
-- [ ] 9.3 Update `proposal.md` Success Criteria checkboxes once demonstrably true.
-- [ ] 9.4 Run `cargo test --workspace` (default no-backend-feature build included) — 0 failures.
+- [x] 9.1 Confirmed `specs/external-effects/spec.md` merge-readiness against
+  shipped code, requirement by requirement: capability shape
+  (`crates/runtime/src/effects/store.rs:215-253` matches AD-3 exactly),
+  claim/lease semantics (`crates/effect-store/src/postgres/mod.rs` claim SQL
+  + G15 causal gate), Stoolap `MultiNodeSafe: false` declaration, cleanup/
+  retention (`RetentionMaintenance`, G12), TestKit double
+  (`FaultInjectingEffectStore`). No re-authoring; no UNSHIPPED requirement
+  found. Found and fixed 3 stale doc comments misrepresenting shipped
+  behavior as not-yet-implemented: `crates/runtime/src/effects/mod.rs`
+  (still said "a durable backend is a future extension"),
+  `crates/effect-store/src/conformance.rs` and `crates/effect-store/tests/
+  conformance.rs` (both referenced the pre-G11 `crates/integration-tests`
+  path). `ROADMAP.md` §7.2 checklist (all 10 items) updated `[ ]` → `[x]`.
+- [x] 9.2 `ARCHITECTURE.md` updated: crate count 16→17, `ego-effect-store`
+  added to the crate list, dependency-graph mermaid diagram, crate-boundaries
+  table, and repository-layout tree; one new Runtime & Dependency Rules
+  bullet confirms no new edge into `ego-persistence` and that
+  `ego-service-sdk` depends on `ego-effect-store` only as `[dev-dependencies]`
+  (verified against `crates/service-sdk/Cargo.toml:46`).
+- [x] 9.3 `proposal.md` Success Criteria reviewed individually with evidence
+  (test name/file cited per item), not blindly checked: 9 of 11 marked `[x]`.
+  2 left unchecked and flagged, not weakened: graceful-shutdown-against-the-
+  durable-store (no test drives `shutdown_and_drain` against a live
+  `PostgresEffectStore`/`StoolapEffectStore`, only against
+  `InMemoryEffectStore`/doubles); living-spec non-goal retirement (delta is
+  merge-ready per 9.1, but the merge into `openspec/specs/external-effects/
+  spec.md` is `sdd-archive`'s job, not `sdd-apply`'s).
+- [x] 9.4 `cargo test --workspace` (default, no backend feature) — 134
+  `test result: ok` blocks, 0 failures, 0 non-`ok` results.
+- [x] 9.5 Final verification: `cargo fmt --check`, `cargo build --workspace
+  --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings`, `cargo test --workspace --all-features` (1879 passed, 1 ignored,
+  documented G1/Tier-1 tension), `cargo test --workspace` (1825 passed) all
+  green. `sdd-verify` found the Docker-gated real-Postgres suite
+  (`integration-tests/`) failed to compile: two pre-existing PROD-012 call
+  sites (`dual_aggregate_crash_recovery_postgres.rs:247`,
+  `durable_entity_progress_postgres.rs:112`) still called
+  `reference_app::build_runtime_with` with the old 4-argument signature after
+  commit ab23d16 (#340, Phase 8.2) added a 5th `ExternalEffectsWiring`
+  parameter — invisible to `cargo test --workspace` because that crate sits
+  outside the root workspace (PROD-012 hermetic-root invariant). Fixed both
+  call sites with `ExternalEffectsWiring::None` (same pattern as the 3
+  existing call sites); re-ran `cargo run --manifest-path
+  integration-tests/Cargo.toml --bin run-suite` against a real Postgres
+  container — 35 passed, 1 ignored (same documented tension), 0 failed.
+  `cargo fmt --check` on both edited files: clean.
 
 ## Phase 10: G15 — Causal Gating of Destructive Dedup Release (post-audit fix)
 

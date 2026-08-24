@@ -334,34 +334,95 @@ non-goal reverts with the change folder.
 
 ## Success Criteria
 
-- [ ] Kill-the-process test: an accepted effect survives a real process
+- [x] Kill-the-process test: an accepted effect survives a real process
       restart and is delivered exactly as the spec's reconstructability
       requirement demands — the inverse of CORE-019's documented in-memory
-      loss boundary.
-- [ ] Mid-delivery (in-flight) effect at crash time is redispatched after
-      restart, never silently treated as delivered.
-- [ ] Two concurrent claimers never hold overlapping *valid* claims on the
+      loss boundary. Evidence: `examples/reference-app/tests/
+      stoolap_restart_persistence.rs` (real two-process simulation over the
+      same on-disk Stoolap directory, tasks.md 8.1-8.3); `run_durable_conformance`
+      against `StoolapDurableStoreFactory` (4.6-4.8) and
+      `PostgresDurableStoreFactory` (5.15-5.16).
+- [x] Mid-delivery (in-flight) effect at crash time is redispatched after
+      restart, never silently treated as delivered. Evidence:
+      `run_durable_conformance`'s in-flight-at-drop assertion
+      (`crates/effect-store/src/conformance.rs`), run against Stoolap
+      (4.6-4.8) and Postgres (5.15-5.16).
+- [x] Two concurrent claimers never hold overlapping *valid* claims on the
       same effect: proven cross-process against PostgreSQL (`MultiNodeSafe`,
       under the decided lease model) and locally against Stoolap
       (`ConcurrentLocalSafe` only — not a multi-node claim). After a lease
       expires, redispatch — and therefore possible duplicate external
       execution — is expected and is covered by the at-least-once +
-      idempotency contract, not prevented by claim exclusivity.
-- [ ] Retry bookkeeping (attempt count, next-due) survives restart; backoff
-      resumes, not resets.
-- [ ] Scoped dedup identity holds across restart: a replayed scoped key is
+      idempotency contract, not prevented by claim exclusivity. Evidence:
+      `run_multi_node_conformance` (3.3) against two live
+      `PostgresEffectStore` instances (5.17-5.18); Stoolap local exclusivity
+      via the shared Tier 1 harness (4.5) plus
+      `crates/testkit/src/effects.rs`'s
+      `claim_due_and_mark_in_flight_together_guarantee_exclusivity_and_post_abandonment_redispatch`
+      (6.4).
+- [x] Retry bookkeeping (attempt count, next-due) survives restart; backoff
+      resumes, not resets. Evidence is combined, not one single restart+retry
+      test: Tier 1 conformance proves `mark_retryable` resumes `attempt`
+      rather than resetting it on a live instance
+      (`crates/effect-store/src/conformance.rs`, tasks.md 3.1); `attempt`/
+      `next_at` are ordinary columns of the same `effect_state` row written
+      by the same `UPDATE` mechanism whose cross-restart persistence
+      `run_durable_conformance` (Tier 2) directly proves for `state`
+      (5.7's `mark_retryable` SQL sets `state`, `attempt`, `next_at` in one
+      statement) — no separate, non-durable bookkeeping path exists.
+- [x] Scoped dedup identity holds across restart: a replayed scoped key is
       deduplicated, a reused key with different payload/destination is still
-      rejected as invalid.
-- [ ] Both ports satisfied independently by the durable implementation (no
-      composite requirement), per the existing spec scenario.
-- [ ] Both the PostgreSQL and Stoolap providers pass the same set of
+      rejected as invalid. Evidence, also combined: `run_durable_conformance`
+      directly proves a replayed scoped key survives reopen as
+      `OwnedInProgress`, never `Fresh` (4.6-4.8, 5.15-5.16); fingerprint-
+      mismatch → `Conflict` classification is proven by Tier 1 (3.1) against
+      the identical `reserve` upsert-and-classify mechanism each durable
+      provider's `EffectDedupStore` half implements (AD-8).
+- [x] Both ports satisfied independently by the durable implementation (no
+      composite requirement), per the existing spec scenario. Evidence: the
+      Tier 1 harness invokes `run_state_store_conformance` and
+      `run_dedup_conformance` as two independent calls against the same
+      store instance (3.1-3.2, 4.5, 5.19).
+- [x] Both the PostgreSQL and Stoolap providers pass the same set of
       durability/recovery/idempotency criteria above — proving the port
-      contract, not a single backend's incidental behavior.
+      contract, not a single backend's incidental behavior. Evidence: 4.5
+      (Stoolap Tier 1), 4.8 (Stoolap Tier 2), 5.19 (Postgres Tier 1/2/3).
+      One Postgres Tier 1 sub-assertion (`claim_due` "respects limit") is
+      `#[ignore]`d with a documented rationale (5.14) — a structural
+      incompatibility with the G1 exclusivity guard, not a silent skip —
+      flagged here for visibility, not hidden.
 - [ ] Graceful shutdown against the durable store drains or emits
-      `drain_incomplete`; nothing is lost either way.
-- [ ] TestKit double exists and is used by the above tests where a real
-      Postgres is not.
+      `drain_incomplete`; nothing is lost either way. **Not directly
+      demonstrated.** `DeliveryRunner`'s drain/shutdown logic
+      (`shutdown_and_drain`, `crates/runtime/src/effects/runner.rs`) is
+      store-agnostic and unchanged per AD-11 (lease expiry is the sole
+      release mechanism; no store-specific drain path exists), and its own
+      test suite is green — but every one of those tests drives an
+      `InMemoryEffectStore`/test double, not a live `PostgresEffectStore` or
+      `StoolapEffectStore`. No PROD-002 task exercises `shutdown_and_drain`
+      against a durable-store-backed runner. Left unchecked rather than
+      inferred; flagged for a maintainer decision (accept the store-agnostic
+      argument, or add the missing test).
+- [x] TestKit double exists and is used by the above tests where a real
+      Postgres is not. Evidence: `FaultInjectingEffectStore`
+      (`crates/testkit/src/effects.rs`, tasks.md 6.1-6.6) drives retry-
+      absorption, crash-simulation, and idempotency-window tests without any
+      real durable backend; proven as a genuine Tier 1 harness subject
+      (6.7).
 - [ ] `openspec/specs/external-effects/spec.md` no longer lists the durable
       store as a non-goal; "exactly once" still appears nowhere in the public
-      contract.
-- [ ] `cargo test --workspace` green.
+      contract. **Partially true, not yet complete.** "Exactly once" appears
+      nowhere in the shipped code's public contract (verified: no delivery-
+      guarantee use of the phrase in `crates/effect-store`, `crates/runtime/
+      src/effects`, or `crates/testkit/src/effects.rs` — only unrelated
+      "exactly once" call-count assertions in `service-sdk`). The durable-
+      store non-goal retirement is written and ready in this change's own
+      delta (`specs/external-effects/spec.md`, confirmed merge-ready in
+      §9.1) but has not yet been merged into the living
+      `openspec/specs/external-effects/spec.md` — that non-goal is still
+      present there today. Per this repo's OpenSpec convention, that merge
+      happens at `sdd-archive`, not `sdd-apply`; left unchecked until then,
+      not weakened to pass early.
+- [x] `cargo test --workspace` green. Evidence: `cargo test --workspace`
+      (default, no backend feature) run 2026-08-23 — 134 `test result: ok`
+      blocks, 0 failures, 0 non-`ok` results.
