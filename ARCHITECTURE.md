@@ -26,7 +26,7 @@ security-sdk, security-jwt, security-apikey, testkit
 + examples/reference-app
 ```
 
-There is **no `runtime-slice` crate** anywhere in the workspace — an old `layers.toml` entry references it, but it is a dead config line, not a crate that ever existed here.
+There is **no `runtime-slice` crate** anywhere in the workspace, and `layers.toml` has no entry for one — a dead entry naming a nonexistent crate would fail `cargo run -p xtask -- verify-layers` (see [Layer enforcement](#layer-enforcement)).
 
 ### Dependency graph (verified against each crate's `[dependencies]`)
 
@@ -108,16 +108,15 @@ Checked each candidate against its real `Cargo.toml`:
 - **`ego-testkit`** — not cross-cutting. It depends *upward* on `ego-service-sdk`, and every consumer pulls it in only as a `[dev-dependencies]` test-support crate, not a production dependency.
 - **`ego-service-sdk`** — not cross-cutting despite being widely depended on. It is a framework layer in its own right (registry, DI, interceptors) that other crates build services on top of, not a leaf utility.
 
-### Layer enforcement reality
+### Layer enforcement
 
-`layers.toml` exists at the repo root and documents intended layer assignments, but it is a **documented-but-unenforced convention**:
+`layers.toml` at the repo root is the **declared** architecture: it assigns exactly one layer (`domain`, `foundation`, `cross-cutting`, `application`, `infrastructure`, `sdk`, `transport`, or `tooling`) to every crate under `crates/`, plus the allowed-dependency matrix in its header comment. A config file does not enforce itself — the **enforcing** mechanism is a separate tool, the `xtask` crate shipped by CORE-027 (contract: `openspec/specs/foundation-integrity/spec.md`):
 
-- It covers only 9 of the 16 crates (missing `ego-persistence`, `ego-event-adapter`, `persistent-entity`, `ego-service-sdk`, `ego-service-sdk-macros`, `ego-security-sdk`, `security-apikey`, `ego-testkit`).
-- It contains a dead entry, `"runtime-slice" = "domain"`, for a crate that does not exist in the workspace.
-- Its own header comment says rules are "enforced by `scripts/verify-layers.sh`" — that script **does not exist** anywhere in the repo (confirmed: `scripts/` holds `detect-integration-tests.sh`, `detect-missing-docs.sh`, `detect-mock-only-tests.sh`, `detect-test-smells.sh`, `detect-violations.sh`, `validate-constitution.sh`, `verify-constitution-mapping.sh`, `verify-coverage.sh` — no `verify-layers.sh`).
-- Neither `.github/workflows/claude-code-review.yml` nor `.github/workflows/claude.yml` (the only two CI workflows in the repo) reference `layers.toml` or layer verification in any form.
+- `cargo run -p xtask -- verify-layers` — every crate under `crates/` has exactly one `layers.toml` entry (no unmapped crate, no dead entry naming a crate that doesn't exist), no dependency crosses a forbidden layer direction, and the dependency graph has no cycles.
+- `cargo run -p xtask -- verify-isolation` — every crate under `crates/` compiles under its own narrowest feature set, independent of workspace-wide feature unification.
+- `cargo run -p xtask -- verify-hygiene` — no un-archived `openspec/changes/` entry duplicates one already under `openspec/changes/archive/`.
 
-Treat `layers.toml` as a design intent, not a build gate. The dependency graph above is the current, real source of truth; nothing today would stop a new crate from violating it.
+Each is a **local-only** command, by design (FR-004): this repository has no CI at all (no `.github/workflows/`, no equivalent) — `xtask` itself is the gate, and a contributor or reviewer runs it by hand. On a violation the command exits non-zero and prints a human-readable report naming each offending crate; none of this is compile-time — an otherwise-green `cargo build`/`cargo test` does not run it. `examples/reference-app` and `xtask` itself are intentionally outside `layers.toml`'s scope: the completeness check only looks at packages under `crates/` (`xtask/src/metadata.rs`), since the reference app is a composition root, not a layered library crate, and `xtask` is the checker's own package.
 
 ---
 
@@ -141,7 +140,7 @@ Treat `layers.toml` as a design intent, not a build gate. The dependency graph a
 - `ego-service-sdk-macros` depends only on `syn`, `quote`, `proc-macro2` — verified, no runtime dependencies.
 - `ServiceContext` is propagated explicitly between components — no ambient/`TaskLocal` read. This was an explicit invariant of the `2026-06-22-remove-ambient-service-context` change: "there is exactly one mechanism for a component to access a `ServiceContext` — it was given one explicitly."
 - Cross-cutting SDKs (`ego-security-sdk`) MUST NOT appear as dependencies of `ego-domain` — verified true today.
-- Dependency direction is documented by `layers.toml` and the graph above; it is **not** enforced by CI (see [Layer enforcement reality](#layer-enforcement-reality)).
+- Dependency direction is documented by `layers.toml` and the graph above, and locally enforced by `cargo run -p xtask -- verify-layers` (see [Layer enforcement](#layer-enforcement)) — there is no CI in this repository.
 - `ego-effect-store` (PROD-002) adds no dependency edge into `ego-persistence` — it depends on `ego-runtime` + `ego-domain` plus its own feature-gated backend drivers only. The `EffectStateStore`/`EffectDedupStore` port definitions stay in `ego-runtime`; concrete durable providers (`PostgresEffectStore`, `StoolapEffectStore`) live only in `ego-effect-store`. `ego-service-sdk` depends on `ego-effect-store` as a `[dev-dependencies]` entry only (composition/registration tests) — verified in its `Cargo.toml` — never as a production dependency; a host composes a concrete provider itself and registers it through `RuntimeBuilder::with_effect_store`.
 
 ---
@@ -409,7 +408,7 @@ ego-rs/
 │   └── specs/                  # living, per-domain specs — the current source of truth
 ├── scripts/                    # detect-*.sh / validate-constitution.sh / verify-*.sh (no verify-layers.sh)
 ├── docs/                       # remaining docs (constitution-mapping.md, etc.)
-└── layers.toml                 # documented, unenforced layer intent (see above)
+└── layers.toml                 # declared layer map; enforced by xtask, not CI (see above)
 ```
 
 ---
