@@ -87,7 +87,7 @@ rather than starting up with an enforcement promise it cannot keep.
 | `ego-event-adapter` | Runtime | Converts between protobuf events, CloudEvents, and EventStore format |
 | `persistent-entity` | Runtime | Event-sourced entity runtime and SDK (Command/Event/State, `EntityRuntimeBuilder`) |
 | `ego-scheduler` | Runtime | Actor mailbox scheduling and event bus (dispatch, backpressure, gap detection) |
-| `ego-service-sdk` | Service SDK | `RuntimeBuilder`/`Runtime`, service registry, DI, interceptors — the public surface most applications build on |
+| `ego-service-sdk` | Service SDK | `App`/`AppBuilder`, service registry, DI, interceptors — the public surface most applications build on (built on the lower-level `RuntimeBuilder`/`Runtime`, for advanced/direct runtime composition) |
 | `ego-service-sdk-macros` | Service SDK | Proc-macros: `#[service]`, `#[operation]`, `#[authorize]`, `#[tenant_scoped]`, `#[idempotent]` |
 | `ego-security-sdk` | Security | Transport- and provider-agnostic security primitives (`SecurityContext`, `AuthenticationProvider`, `AuthorizationProvider`) |
 | `security-jwt` | Security | JWT authentication providers (HS256/RS256/ES256) |

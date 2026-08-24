@@ -202,7 +202,7 @@ flowchart LR
 
 ## 🚀 Quick Start
 
-The canonical, currently-working minimal example is `crates/service-sdk/examples/hello_service.rs` (verified to compile and run: `cargo run --example hello_service -p ego-service-sdk`). It uses the real `#[service]`/`#[operation]` macros plus the `App::builder().service_instance` / `App::resolve` path — this is the CORE-028 canonical developer journey, **not** the old `ServiceDescriptor`/`Service::descriptor()`/`initialize()`/`shutdown()` pattern (that trait shape no longer exists — see [Service SDK](#-service-sdk)). `App::builder()` is the composition entrypoint; it builds on the lower-level `RuntimeBuilder` primitive, which you rarely need directly.
+The canonical, currently-working minimal example is `crates/service-sdk/examples/hello_service.rs` (verified to compile and run: `cargo run --example hello_service -p ego-service-sdk`). It uses the real `#[service]`/`#[operation]` macros plus the `App::builder().service_instance` / `App::resolve` path — this is the CORE-028 canonical developer journey, **not** the old `ServiceDescriptor`/`Service::descriptor()`/`initialize()`/`shutdown()` pattern (that trait shape no longer exists — see [Service SDK](#-service-sdk)). `App::builder()` is the composition entrypoint; it builds on the lower-level `RuntimeBuilder` primitive, which you rarely need directly (for direct runtime composition without the application lifecycle facade, see [Advanced: Direct RuntimeBuilder Composition](#advanced-direct-runtimebuilder-composition-runtimebuilderrs)).
 
 ```rust
 use std::sync::Arc;
@@ -534,35 +534,6 @@ pub trait Service: Send + Sync {
 
 > **Correction:** the previous doc revision claimed `Service` has `async fn initialize()` / `async fn shutdown()`. That is **wrong** — `crates/service-sdk/src/implementation.rs` explicitly documents that lifecycle hooks are intentionally absent from `Service`; they live on a separate `LifecycleManaged` trait instead (`implementation.rs:42-54`).
 
-### RuntimeBuilder & Runtime (`runtime/builder.rs`)
-
-The real DI/registration entry point lives at `crates/service-sdk/src/runtime/builder.rs` — **not** `src/builder.rs` (that file does not exist).
-
-```rust
-impl RuntimeBuilder {
-    pub fn new() -> Self;
-    pub fn with_security(self, authn: Arc<dyn AuthenticationProvider>, authz: Arc<dyn AuthorizationProvider>) -> Self;
-    pub fn with_logger(self, logger: Arc<KITLogger>) -> Self;
-    pub fn with_adapter<A: Send + Sync + 'static>(self, adapter: Arc<A>) -> Self;
-    pub fn with_config<C: Send + Sync + 'static>(self, value: Arc<C>) -> Self;
-    pub fn with_service<Tag: Resolvable + 'static>(self, svc: Arc<Tag::Service>) -> Result<Self, RegistryError>;
-    pub fn with_injectable<S: Injectable>(self) -> Self;
-    pub fn with_tenant_enforcement_mode(self, mode: TenantEnforcementMode) -> Self;
-    pub fn with_observability(self, obs: Arc<dyn Observability>) -> Self;
-    pub fn build(self) -> Runtime;
-    pub fn try_build(self) -> Result<Runtime, RuntimeError>;
-}
-
-impl Runtime {
-    pub fn resolve<Tag: Resolvable + 'static>(&self) -> Result<Tag::Proxy, RuntimeError>;
-    pub fn shutdown(&self);
-    pub async fn shutdown_async(&self);
-    pub fn register_async_teardown(&self, ..);
-}
-```
-
-`Runtime::resolve` resolves `Tag` to its macro-generated proxy type by looking it up in the internal `ServiceRegistry`; it is not cached — each call constructs a fresh proxy wrapping the same `Arc`-backed instance.
-
 ### Service SDK Macro Generated Output
 
 `#[service]` (`crates/service-sdk-macros/src/lib.rs`) dispatches on what it's attached to:
@@ -622,6 +593,37 @@ Fail-closed behavior (default `AuthenticatedOnly`, set via `RuntimeBuilder::with
 - Authenticated principal with no tenant claim → `MissingContext`, even if a hint is present.
 - Authenticated hint disagreeing with the principal's tenant, with no matching cross-tenant grant → `SecurityError::TenantMismatch { expected, actual }` (hard error — never silently picks one side).
 - `AllowSystemInternal` additionally lets an *unauthenticated* caller-supplied hint resolve a tenant, but still fails closed if no hint is given at all.
+
+### Advanced: Direct RuntimeBuilder Composition (`runtime/builder.rs`)
+
+Normal applications compose through `App::builder()` (see [Quick Start](#-quick-start)) — `AppBuilder` owns normal application composition and delegates to `RuntimeBuilder` internally. `RuntimeBuilder` remains a fully supported, lower-level composition API for advanced/direct runtime composition — e.g. a host or framework integration that needs the runtime without the `App`/`RunningApp` lifecycle facade.
+
+The real DI/registration entry point lives at `crates/service-sdk/src/runtime/builder.rs` — **not** `src/builder.rs` (that file does not exist).
+
+```rust
+impl RuntimeBuilder {
+    pub fn new() -> Self;
+    pub fn with_security(self, authn: Arc<dyn AuthenticationProvider>, authz: Arc<dyn AuthorizationProvider>) -> Self;
+    pub fn with_logger(self, logger: Arc<KITLogger>) -> Self;
+    pub fn with_adapter<A: Send + Sync + 'static>(self, adapter: Arc<A>) -> Self;
+    pub fn with_config<C: Send + Sync + 'static>(self, value: Arc<C>) -> Self;
+    pub fn with_service<Tag: Resolvable + 'static>(self, svc: Arc<Tag::Service>) -> Result<Self, RegistryError>;
+    pub fn with_injectable<S: Injectable>(self) -> Self;
+    pub fn with_tenant_enforcement_mode(self, mode: TenantEnforcementMode) -> Self;
+    pub fn with_observability(self, obs: Arc<dyn Observability>) -> Self;
+    pub fn build(self) -> Runtime;
+    pub fn try_build(self) -> Result<Runtime, RuntimeError>;
+}
+
+impl Runtime {
+    pub fn resolve<Tag: Resolvable + 'static>(&self) -> Result<Tag::Proxy, RuntimeError>;
+    pub fn shutdown(&self);
+    pub async fn shutdown_async(&self);
+    pub fn register_async_teardown(&self, ..);
+}
+```
+
+`Runtime::resolve` resolves `Tag` to its macro-generated proxy type by looking it up in the internal `ServiceRegistry`; it is not cached — each call constructs a fresh proxy wrapping the same `Arc`-backed instance.
 
 ---
 
