@@ -943,7 +943,7 @@ v1.0 — Stable Production Framework
 CORE-028 Stage 2B — Service-to-Tag Binding (shipped)
 CORE-028 Stage 2C — Entity Composition (shipped)
 CORE-028 Stage 2D — Final DX (shipped)
-DOC-001/002/003 — Documentation synchronization
+DOC-001/002/003 — Documentation synchronization (DONE)
 ```
 
 ## Phase 2 — Production Foundation
@@ -1047,10 +1047,10 @@ CORE-028 Stage 2C  ✅ shipped (archived 2026-07-19, #196/#197)
 CORE-028 Stage 2D  ✅ shipped (2026-08-24, PRs #344–#352; exit gate PASS 10/10)
         │
         ▼
-Documentation Sync  ← current priority
+Documentation Sync  ✅ done (DOC-001/002/003, PRs #345, #353–#362; Documentation Exit Gate PASS 10/10)
         │
         ▼
-Mandatory CI + Production Foundation
+Mandatory CI + Production Foundation  ← current priority
         │
         ▼
 Distributed Messaging SPI
@@ -1083,5 +1083,10 @@ Multi-Node Runtime
 ```
 
 **CORE-028 Stage 2B — Service-to-Tag Binding**, **Stage 2C — Entity Composition**, and
-**Stage 2D — Final Application DX** have all shipped — CORE-028 Stage 2 is complete. The
-current priority is **Documentation Sync** (DOC-001/002/003).
+**Stage 2D — Final Application DX** have all shipped — CORE-028 Stage 2 is complete.
+**Documentation Sync** (DOC-001/002/003) is also done: README.md, ARCHITECTURE.md,
+COOKBOOK.md, PRD.md, and ROADMAP.md were cross-checked against each other, the living
+specs, and the real workspace by a 10-criterion Documentation Exit Gate, which passed
+10/10 after two correction rounds (crate inventory gaps and a PRD/ROADMAP phase
+mismatch, both closed). The current priority is **Production Foundation**
+(PROD-001 — Mandatory CI, the first item on the path to Single-Node Production Ready).
