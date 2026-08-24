@@ -172,28 +172,18 @@ Two service-registration mechanisms coexist, selected by what `#[service]` is ap
 
 ## 9. Roadmap
 
-### Active
+**[`ROADMAP.md`](ROADMAP.md) is the source of truth for current priority, exact sequencing, and shipped/planned status.** This section only describes the product's high-level direction and does not track individual work items — see ROADMAP.md for that.
 
-| Change | Status |
-|--------|--------|
-| CORE-013: JWT Providers + KeyResolver (Hs256/Rs256/Es256) | ✅ Archived |
+ego.rs's evolution moves through six capability phases, in order:
 
-### Planned
+1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation, service composition, test infrastructure
+2. **Application Composition** — the `App`/`AppBuilder` developer-facing composition surface, with `RuntimeBuilder` as the supported lower-level primitive
+3. **Production Foundation** — mandatory CI gates, observability, security hardening, health/readiness/startup for single-node deployment
+4. **Reliable Distributed Integration** — a distributed-messaging SPI with broker adapters, transactional outbox, and optional CDC
+5. **Durable Workflows** — saga/process-manager orchestration built on stable persistence and messaging
+6. **Multi-Node Runtime** — distributed deployment guarantees, pursued only after single-node production readiness is proven
 
-| Change | Description |
-|--------|-------------|
-| CORE-014 | `#[authorize]` macro — declarative authorization at the operation level |
-| CORE-011B | JWKS remote key resolver (OIDC discovery, cache-backed, multi-issuer) |
-| CORE-015 | Telemetry SDK — `ego-telemetry-sdk` cross-cutting observability primitive |
-
-### Deferred
-
-| Item | Reason |
-|------|--------|
-| `CompositeAuthenticationProvider` | Multi-algorithm dispatch deferred until real consumer exists |
-| EdDSA algorithm support | Blocked on JWKS resolver for practical use |
-| gRPC transport implementation | Transport layer exists, gRPC adapter not started |
-| `ego-config-sdk` | Deferred until service SDK adoption grows |
+Phases 1 and 2 have shipped. Durable external effect delivery — a Production Foundation-adjacent capability — shipped ahead of sequence. Everything from Production Foundation onward is future work.
 
 ---
 
