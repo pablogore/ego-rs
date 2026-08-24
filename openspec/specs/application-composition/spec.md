@@ -245,6 +245,49 @@ starting and shutting down the application. Only starting background
 processes and administering their shutdown ordering belong to this
 capability.
 
+### Requirement: Successful Startup Emits Observable Lifecycle Signals
+
+When an `Observability` sink is configured, `App::start()` MUST emit
+exactly two `SemanticEvent` signals via `Observability::trace(SemanticEvent)`
+around a successful start: `app.starting`, emitted before the startup work
+begins, and `app.started`, emitted after that work succeeds. `app.starting`
+metadata MUST carry `lifecycle_state = "Starting"`. `app.started` metadata
+MUST carry `lifecycle_state = "Started"` and `elapsed_ms` (a `String`)
+measuring the full `App::start()` body span, from immediately before
+`app.starting` is emitted to immediately before `app.started` is emitted.
+Metadata keys MUST be closed and fixed — no free-text or unbounded-cardinality
+labels. When no `Observability` is configured, both emissions MUST no-op and
+`App::start()` MUST still succeed normally. A panicking `Observability` sink
+MUST NOT fail or unwind `App::start()`.
+
+#### Scenario: A successful start records both lifecycle signals in order
+
+- GIVEN an application configured with a `RecordingObservability` sink
+- WHEN `App::start()` is called and succeeds
+- THEN exactly two events are recorded, `app.starting` followed by `app.started`
+- AND `app.starting`'s metadata has `lifecycle_state = "Starting"`
+- AND `app.started`'s metadata has `lifecycle_state = "Started"` and an
+  `elapsed_ms` key
+
+#### Scenario: No Observability configured emits nothing and startup still succeeds
+
+- GIVEN an application with no `Observability` configured
+- WHEN `App::start()` is called
+- THEN no `app.starting` or `app.started` event is emitted
+- AND `App::start()` still succeeds
+
+#### Scenario: A panicking Observability sink does not fail or unwind startup
+
+- GIVEN an application configured with a `PanickingObservability` sink
+- WHEN `App::start()` is called
+- THEN `App::start()` does not fail or unwind as a result of the sink panicking
+
+*Non-goal for this requirement*: no `app.start_failed` signal is defined or
+emitted — `Runtime::start_effects()` has no reachable failure path today, and
+this requirement set MUST NOT manufacture one. `CompositionError::Startup`
+remains unchanged. This requirement introduces no new production dependency
+for `crates/service-sdk`.
+
 ### Requirement: Read-Model Ownership Is Preserved (Hard Constraint)
 
 Integrating a spawned read-side lifecycle handle (e.g. stage 0's
@@ -431,3 +474,19 @@ Registering a second retention store through `AppBuilder::effect_retention_store
   macro argument only, never inferred from a struct's name.
 - A deprecation window or migration deadline for the renamed explicit-Tag
   registration form — it is a permanent, first-class path.
+- A reusable Module/Bundle composition abstraction for grouping `AppBuilder`
+  registrations (CORE-028D3 spike, 2026-08-24) — investigated and dropped:
+  Rule of Two failed, since the repo has exactly one non-trivial composition
+  root and its only other independent consumer shares no registration group
+  with it. A plain host-side composition function already covers the case
+  without any core API. Reopen only if two independent, non-test hosts
+  require the same cohesive registration group.
+- Framework-owned projection spawning/scheduling ergonomics — `.projection()`
+  remains DI-registration only and never spawns anything (investigated and
+  dropped, 2026-08-24 spike): Rule of Two failed (a single real projection
+  exists in the repo) and the reusable portion of the spawn wiring is already
+  factored into `ProjectionSpec`/`TagSchedulerImpl`; the remainder is domain
+  config, host policy, or lifecycle (host-owned, per the "Read-Model
+  Ownership" requirement above). Reopen only if a second independent
+  projection appears and duplicates wiring not already covered by those
+  primitives.
