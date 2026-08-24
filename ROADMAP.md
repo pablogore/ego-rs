@@ -225,13 +225,14 @@ Backlog (non-blocking, deferred): `#[service]`'s argument parser currently allow
 
 ## 3.4 CORE-028 Stage 2C — Entity Composition
 
-Status: PLANNED
+Status: SHIPPED (archived `2026-07-19-core-028-stage2c-entity-composition`, #196/#197)
 
 Goal:
 
 Make persistent entities first-class application composition units.
 
-Target direction:
+Target direction (shipped as `AppBuilder::entity::<E>()`,
+`crates/service-sdk/src/app/mod.rs:374`):
 
 ```rust
 App::builder()
@@ -242,26 +243,20 @@ App::builder()
 
 Scope:
 
-* [ ] Define stable entity registration contract
-* [ ] Add entity registration to application composition
-* [ ] Integrate `EntityRuntimeBuilder<E>`
-* [ ] Wire persistence dependencies
-* [ ] Wire snapshot storage
-* [ ] Wire external effect acceptor
-* [ ] Define entity runtime lifecycle ownership
-* [ ] Integrate startup
-* [ ] Integrate shutdown
-* [ ] Define entity handle resolution
-* [ ] Support entity dependencies from services
-* [ ] Preserve runtime abstraction
-* [ ] Add reference application proof
-* [ ] Add end-to-end lifecycle tests
-
-Open design question:
-
-Entity composition must not leak Tokio-specific runtime behavior into `AppBuilder`.
-
-The design must first establish the minimum stable contract between application composition and `EntityRuntimeBuilder<E>`.
+* [x] Define stable entity registration contract
+* [x] Add entity registration to application composition
+* [x] Integrate `EntityRuntimeBuilder<E>`
+* [x] Wire persistence dependencies
+* [x] Wire snapshot storage
+* [x] Wire external effect acceptor
+* [x] Define entity runtime lifecycle ownership
+* [x] Integrate startup
+* [x] Integrate shutdown
+* [x] Define entity handle resolution
+* [x] Support entity dependencies from services
+* [x] Preserve runtime abstraction
+* [x] Add reference application proof
+* [x] Add end-to-end lifecycle tests
 
 ---
 
@@ -946,7 +941,7 @@ v1.0 — Stable Production Framework
 
 ```text
 CORE-028 Stage 2B — Service-to-Tag Binding (shipped)
-CORE-028 Stage 2C — Entity Composition
+CORE-028 Stage 2C — Entity Composition (shipped)
 CORE-028 Stage 2D — Final DX
 DOC-001/002/003 — Documentation synchronization
 ```
@@ -1046,10 +1041,10 @@ The immediate execution path is:
 CORE-028 Stage 2B  ✅ shipped (PR #192 merged to develop; PR #193 rebased, green, mergeable)
         │
         ▼
-CORE-028 Stage 2C  ← current priority (blocked until CORE-006 entity ownership/lifecycle questions
-        │            are resolved for application-composition integration)
+CORE-028 Stage 2C  ✅ shipped (archived 2026-07-19, #196/#197)
+        │
         ▼
-CORE-028 Stage 2D
+CORE-028 Stage 2D  ← current priority
         │
         ▼
 Documentation Sync
@@ -1087,7 +1082,5 @@ Single-Node Production Ready
 Multi-Node Runtime
 ```
 
-**CORE-028 Stage 2B — Service-to-Tag Binding** has shipped. The current priority is
-**CORE-028 Stage 2C — Entity Composition**, which stays blocked until CORE-006's entity
-ownership/lifecycle questions are resolved before any application-composition integration work
-begins.
+**CORE-028 Stage 2B — Service-to-Tag Binding** and **Stage 2C — Entity Composition** have both
+shipped. The current priority is **CORE-028 Stage 2D — Final Application DX**.
