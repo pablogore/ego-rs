@@ -12,9 +12,10 @@
 //!   a no-op unless the factory's store declares `multi_node_safe: true`.
 //!
 //! Public so both this crate's own `tests/conformance.rs` (in-memory,
-//! Stoolap) and `crates/integration-tests` (Postgres, which needs a real
-//! container and therefore cannot live in this crate — see `ego-rs-testing`)
-//! can run the identical harness against every provider.
+//! Stoolap) and the top-level `integration-tests/` workspace (Postgres,
+//! which needs a real container and therefore cannot live in this crate —
+//! see `ego-rs-testing`) can run the identical harness against every
+//! provider.
 
 use async_trait::async_trait;
 use chrono::Duration;

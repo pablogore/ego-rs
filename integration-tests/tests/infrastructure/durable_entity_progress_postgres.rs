@@ -48,7 +48,7 @@ use reference_app::domain::tenant_org::{
     OrganizationEnsured, TenantOrgCommand, TenantOrgState, TenantOrganizationEntity,
 };
 use reference_app::domain::user::{UserCommand, UserEntity, UserRegistered, UserState};
-use reference_app::{AppConfig, EntityEventStores};
+use reference_app::{AppConfig, EntityEventStores, ExternalEffectsWiring};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -115,6 +115,7 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
         // E0's claim is about the event stores; the reservation posture is E1's.
         reference_app::IdempotencyWiring::Compatibility,
         None,
+        ExternalEffectsWiring::None,
     )
     .expect("the reference app builds")
     .entities

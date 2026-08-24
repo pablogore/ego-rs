@@ -589,20 +589,21 @@ Additional gates:
 
 Priority: P0
 
-CORE-019 provides the execution model.
+CORE-019 provides the execution model. Shipped: PostgreSQL and Stoolap
+durable providers in `crates/effect-store` (`ego-effect-store`).
 
 Production requires durable implementations of:
 
-* [ ] `EffectStateStore`
-* [ ] `EffectDedupStore`
-* [ ] PostgreSQL persistence
-* [ ] Atomic state transitions
-* [ ] Claim ownership
-* [ ] Lease/fencing semantics
-* [ ] Retry persistence
-* [ ] Crash recovery
-* [ ] Stale claim recovery
-* [ ] Cleanup
+* [x] `EffectStateStore`
+* [x] `EffectDedupStore`
+* [x] PostgreSQL persistence
+* [x] Atomic state transitions
+* [x] Claim ownership
+* [x] Lease/fencing semantics
+* [x] Retry persistence
+* [x] Crash recovery
+* [x] Stale claim recovery
+* [x] Cleanup
 
 ---
 
@@ -974,7 +975,6 @@ At least one broker adapter must reach production quality before building higher
 
 ```text
 CORE-030 — Transactional Outbox
-PROD-002 — Durable External Effect Store
 CORE-031 — CDC Integration
 ```
 
@@ -1069,7 +1069,7 @@ Transactional Outbox
         ├──────────────► CDC
         │
         ▼
-Durable Effects
+Durable Effects  ✅ shipped out of sequence (PROD-002, archived 2026-08-23)
         │
         ▼
 Saga / Process Manager

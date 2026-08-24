@@ -19,10 +19,11 @@
 //! [`crate::effects::executor::ExternalEffectExecutor`], and retries
 //! transient failures under [`crate::effects::policy::RetryPolicy`]'s
 //! bounded backoff (AD-5). [`crate::effects::store::InMemoryEffectStore`] is
-//! the only shipped `EffectStateStore`/`EffectDedupStore` implementation —
-//! convenience only: it loses every `Pending`/`InFlight` effect on process
-//! crash (see its own doc comment); a durable backend is a future
-//! extension, not part of this slice.
+//! the non-durable convenience implementation shipped in this crate: it
+//! loses every `Pending`/`InFlight` effect on process crash (see its own
+//! doc comment). Durable `EffectStateStore`/`EffectDedupStore` providers
+//! (PostgreSQL, Stoolap) ship in the sibling `ego-effect-store` crate
+//! (PROD-002), implementing the same two ports from outside this crate.
 //!
 //! Delivery order (design.md §7): [`crate::effects::policy::DeliveryConfig::default`]
 //! runs the `Deferred` runner mode (a spawned background loop);
