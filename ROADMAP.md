@@ -272,7 +272,7 @@ After service and entity composition stabilize:
 * [ ] Improve startup diagnostics
 * [ ] Improve duplicate-registration diagnostics
 * [ ] Review projection spawning ergonomics
-* [ ] Review application module/bundle composition
+* [x] Review application module/bundle composition — **DROPPED** (CORE-028D3 spike, 2026-08-24): Rule of Two not satisfied. The repo has exactly one non-trivial composition root (`reference-app`); its only other independent consumer (`hello_service`) shares no registration group with it. `AppBuilder` already lets any host write a plain `fn configure_x(AppBuilder, Config) -> AppBuilder` without core changes. Reconsider only when two independent, non-test application hosts require the same cohesive `AppBuilder` registration group — prefer ordinary Rust composition functions until then.
 * [ ] Update Quick Start to use `App::builder()`
 * [ ] Move `RuntimeBuilder` documentation to advanced usage
 * [ ] Final reference application dogfood
