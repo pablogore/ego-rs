@@ -129,6 +129,11 @@ pub struct AppBuilder {
     /// First error encountered by an infallible-signature registration call
     /// (e.g. a duplicate adapter, AD-4) — surfaced at `build()` rather than
     /// changing `.adapter()`'s `Self`-returning chain shape.
+    ///
+    /// First-error-wins: every chainable registration method checks this
+    /// before doing any work and returns immediately once it is `Some` — a
+    /// builder that has already latched an error accepts no further
+    /// registrations, and `build()` returns exactly this first error.
     pending_error: Option<CompositionError>,
 }
 
@@ -467,6 +472,9 @@ impl AppBuilder {
     /// posture that needs no decision at bootstrap, while this one refuses to start
     /// until the decision is made.
     pub fn idempotency_enforcement_mode(mut self, mode: IdempotencyEnforcementMode) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.runtime_builder = self.runtime_builder.with_idempotency_enforcement_mode(mode);
         self
     }
@@ -480,6 +488,9 @@ impl AppBuilder {
         mut self,
         store: Arc<dyn OperationReservationStore>,
     ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.runtime_builder = self.runtime_builder.with_operation_reservation_store(store);
         self
     }
@@ -525,6 +536,9 @@ impl AppBuilder {
         lease_duration: std::time::Duration,
         clock: Arc<dyn ego_domain::time::Clock>,
     ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.runtime_builder = self
             .runtime_builder
             .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::MandatoryKey)
@@ -667,6 +681,9 @@ impl AppBuilder {
     where
         S: Injectable + HasServiceTag + 'static,
     {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.service_registrars.push(Box::new(
             move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
                 S::validate(scratch)
@@ -712,6 +729,9 @@ impl AppBuilder {
         Tag: Resolvable + 'static,
         S: Injectable + 'static,
     {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.service_registrars.push(Box::new(
             move |scratch: &RuntimeInner, builder: RuntimeBuilder| {
                 // Same attribution `RuntimeBuilder::try_build` already provides
@@ -750,6 +770,9 @@ impl AppBuilder {
     /// the default registration path (G1) — prefer [`Self::service`]
     /// whenever construction can be expressed through `Injectable`.
     pub fn service_instance<Tag: Resolvable + 'static>(mut self, svc: Arc<Tag::Service>) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
         self.service_registrars.push(Box::new(
             move |_scratch: &RuntimeInner, builder: RuntimeBuilder| {
                 builder
@@ -1897,6 +1920,38 @@ mod enforced_idempotency_wiring {
             )
             .build()
             .expect("a complete enforced configuration builds")
+    }
+
+    // Final API Consistency Cleanup: `pending_error` is documented as
+    // first-error-wins (see the field's doc comment on `AppBuilder`) — once
+    // latched, no later registration call may overwrite it. Pins that rule
+    // across the three setters in this module that previously mutated
+    // `runtime_builder` even after an error had already latched.
+    #[test]
+    fn once_latched_a_pending_error_survives_idempotency_and_reservation_setters() {
+        struct DupAdapter;
+
+        let result = App::builder()
+            .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+            .adapter(Arc::new(DupAdapter))
+            .adapter(Arc::new(DupAdapter)) // latches DuplicateAdapter
+            .idempotency_enforcement_mode(IdempotencyEnforcementMode::MandatoryKey)
+            .operation_reservation_store(Arc::new(InertStore))
+            .enforced_idempotency(
+                Arc::new(InertStore),
+                OwnerId::new(OWNER),
+                LEASE,
+                Arc::new(FrozenClock),
+            )
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateAdapter { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<DupAdapter>());
+            }
+            Err(other) => panic!("expected the first-latched DuplicateAdapter, got {other:?}"),
+            Ok(_) => panic!("expected the first-latched DuplicateAdapter, got Ok"),
+        }
     }
 
     /// One call turns enforcement on **and** gives it somewhere to reserve.

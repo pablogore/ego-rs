@@ -392,3 +392,34 @@ async fn runtime_builder_direct_and_app_builder_resolve_identical_services_under
          identical services under the same Tag (AD-10 same-contract proof)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Final API Consistency Cleanup: `pending_error` first-error-wins.
+// ---------------------------------------------------------------------------
+
+/// Once `AppBuilder` has latched an error, no later registration overrides
+/// it — including the three service-registration methods, which previously
+/// kept pushing registrars onto `service_registrars` even after an earlier
+/// call had already condemned the build to fail.
+#[test]
+fn once_latched_a_pending_error_survives_every_service_registration_method() {
+    let instance: Arc<dyn GreetingService> = Arc::new(PreBuiltGreeter);
+    let result = App::builder()
+        .idempotency_enforcement_mode(
+            ego_service_sdk::runtime::IdempotencyEnforcementMode::Compatibility,
+        )
+        .adapter(Arc::new(GreeterAdapter("hello".to_string())))
+        .adapter(Arc::new(GreeterAdapter("world".to_string()))) // latches DuplicateAdapter
+        .service_with_tag::<GreetingServiceImpl, GreetingServiceTag>(|arc| arc)
+        .service::<LinkedGreetingServiceImpl>()
+        .service_instance::<GreetingServiceTag>(instance)
+        .build();
+
+    match result {
+        Err(ego_service_sdk::app::CompositionError::DuplicateAdapter { type_name }) => {
+            assert_eq!(type_name, std::any::type_name::<GreeterAdapter>());
+        }
+        Ok(_) => panic!("expected the first-latched DuplicateAdapter, got Ok"),
+        Err(other) => panic!("expected the first-latched DuplicateAdapter, got {other:?}"),
+    }
+}
