@@ -119,14 +119,43 @@ pub struct ReadSideProjectionHandle {
 }
 
 impl ReadSideProjectionHandle {
-    /// Signals the loop to stop, then awaits the in-flight batch to drain
-    /// before returning. Surfaces (does not swallow) a `JoinError` — the
-    /// explicit callback to CORE-018's Finding F-02, where a spawned
-    /// scheduler task's panic used to vanish silently.
-    pub async fn stop(self) -> Result<(), tokio::task::JoinError> {
+    /// Signals the loop to stop and waits, bounded by `deadline`, for the
+    /// in-flight batch to drain. On timeout the task is **aborted and then
+    /// awaited**, not dropped — dropping a `JoinHandle` detaches the task in
+    /// Tokio rather than cancelling it, which would leave the loop polling
+    /// past a shutdown that already reported `TimedOut`.
+    ///
+    /// A panic still surfaces via [`ReadSideStopOutcome::Panicked`] rather
+    /// than being swallowed — the explicit callback to CORE-018's Finding
+    /// F-02, where a spawned scheduler task's panic used to vanish silently.
+    /// This is the one deliberate difference from the sibling retention
+    /// workers' `stop`, which isolate a panic instead of propagating it.
+    pub async fn stop(self, deadline: Duration) -> ReadSideStopOutcome {
         let _ = self.stop_tx.send(true);
-        self.task.await
+
+        let mut task = self.task;
+        match tokio::time::timeout(deadline, &mut task).await {
+            Ok(Ok(())) => ReadSideStopOutcome::Stopped,
+            Ok(Err(joined)) => ReadSideStopOutcome::Panicked(joined),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                ReadSideStopOutcome::TimedOut
+            }
+        }
     }
+}
+
+/// What a [`ReadSideProjectionHandle::stop`] observed.
+#[derive(Debug)]
+pub enum ReadSideStopOutcome {
+    /// The loop acknowledged the stop signal and exited within the deadline.
+    Stopped,
+    /// The loop's task panicked — surfaced, not swallowed (CORE-018 F-02).
+    Panicked(tokio::task::JoinError),
+    /// The loop did not exit within the deadline, so it was **aborted and
+    /// then awaited** — reported only once the task is genuinely gone.
+    TimedOut,
 }
 
 /// Grouped configuration for spawning a projection poll loop via
@@ -564,7 +593,10 @@ mod tests {
             expect_signal(&mut calls_rx, &format!("tag_provider iteration {i}")).await;
         }
 
-        handle.stop().await.expect("task joins cleanly");
+        assert!(matches!(
+            handle.stop(SIGNAL_TIMEOUT).await,
+            ReadSideStopOutcome::Stopped
+        ));
     }
 
     /// The `ProjectionSpec::reporter` type-changing builder swaps the default
@@ -591,7 +623,10 @@ mod tests {
 
         expect_signal(&mut reported_rx, "custom reporter driven").await;
 
-        handle.stop().await.expect("task joins cleanly");
+        assert!(matches!(
+            handle.stop(SIGNAL_TIMEOUT).await,
+            ReadSideStopOutcome::Stopped
+        ));
     }
 
     /// `stop()` drains any in-flight batch before returning: stop is requested
@@ -627,7 +662,10 @@ mod tests {
 
         // Request stop mid-batch and await the loop's task. If the in-flight
         // batch was drained (not aborted), its handler ran — proven by the signal.
-        handle.stop().await.expect("task joins cleanly");
+        assert!(matches!(
+            handle.stop(SIGNAL_TIMEOUT).await,
+            ReadSideStopOutcome::Stopped
+        ));
         expect_signal(
             &mut ran_rx,
             "in-flight batch handler must run (drained, not aborted)",
@@ -723,10 +761,50 @@ mod tests {
         // this the task is guaranteed to panic — no fixed sleep needed.
         expect_signal(&mut entered_rx, "panicking handler reached").await;
 
-        let result = handle.stop().await;
+        match handle.stop(SIGNAL_TIMEOUT).await {
+            ReadSideStopOutcome::Panicked(e) => {
+                assert!(e.is_panic(), "expected a panic JoinError, got {e:?}")
+            }
+            other => panic!("expected Panicked, got {other:?}"),
+        }
+    }
+
+    /// A loop parked mid-batch in an await that never resolves must not block
+    /// `stop()` forever: past a deadline the task is aborted (dropping it at
+    /// that await point) and awaited, and the outcome reports `TimedOut`
+    /// rather than hanging the caller.
+    #[tokio::test]
+    async fn spawn_stop_times_out_and_aborts_a_hung_loop() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel::<()>();
+        let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+
+        let spec = ProjectionSpec::new(
+            "proj",
+            || vec![(EventTag::new("tenant-a"), "tenant-a".to_string())],
+            NoopHandler,
+            InFlightSignalingStore {
+                started_tx,
+                // Never resolves within the test's lifetime: proves the
+                // timeout path, not the drain path.
+                delay: Duration::from_secs(u64::MAX),
+            },
+            FakeDedup,
+            FakeOffset,
+        )
+        .interval(FAST_INTERVAL);
+
+        let handle = scheduler.spawn(spec);
+
+        // The batch is now provably parked inside the never-resolving fetch.
+        expect_signal(&mut started_rx, "fetch in flight").await;
+
+        let outcome = tokio::time::timeout(SIGNAL_TIMEOUT, handle.stop(Duration::from_millis(50)))
+            .await
+            .expect("stop() must itself return within its own deadline, not hang the caller");
+
         assert!(
-            result.as_ref().is_err_and(|e| e.is_panic()),
-            "expected the handler panic to surface as a JoinError from stop(), got {result:?}"
+            matches!(outcome, ReadSideStopOutcome::TimedOut),
+            "expected TimedOut for a hung loop, got {outcome:?}"
         );
     }
 
