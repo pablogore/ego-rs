@@ -203,7 +203,7 @@ flowchart TB
         PE["PersistentEntity&lt;C,E,S&gt;<br/>handle_command + apply_event"]
     end
 
-    subgraph Runtime["Persistent Entity Runtime (ego-persistent-entity)"]
+    subgraph Runtime["Persistent Entity Runtime (persistent-entity)"]
         ER["EntityRuntime<br/>Top-level lifecycle manager"]
         ERB["EntityRuntimeBuilder<br/>Config: mailbox, concurrency,<br/>passivation, backends"]
 
