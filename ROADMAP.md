@@ -1,6 +1,6 @@
 # ego.rs Roadmap
 
-> Updated: 2026-08-19
+> Updated: 2026-08-24
 > Status: Active
 > Source of truth: current `develop` branch, archived OpenSpec changes, and living specs.
 
@@ -262,11 +262,11 @@ Scope:
 
 ## 3.5 CORE-028 Stage 2D — Final Application DX
 
-Status: PLANNED
+Status: SHIPPED (2026-08-24, PRs #344, #345, #346, #347, #348, #349, #350, #351, #352 — no single OpenSpec change to archive, since most of Stage 2D closed as direct PRs or DROP verdicts rather than full SDD cycles; the one exception, CORE-028D4, is archived as `sdd/core-028d4-application-startup-diagnostics/*` in Engram and synced into `openspec/specs/application-composition/spec.md`)
 
 After service and entity composition stabilize:
 
-* [ ] **Exit gate** — Review complete public application API (audit gate, 2026-08-24 spike): reformulated from an open-ended "review" into a closing gate, not a feature. Acceptance criterion: every public `App`/`AppBuilder` method is classified as deliberate, advanced, deprecated/removed, or has explicit registered debt — no anonymous architectural TODOs remain. Runs last, after items below settle.
+* [x] **Exit gate** — Review complete public application API (audit gate, 2026-08-24 spike): reformulated from an open-ended "review" into a closing gate, not a feature. Acceptance criterion: every public `App`/`AppBuilder` method is classified as deliberate, advanced, deprecated/removed, or has explicit registered debt — no anonymous architectural TODOs remain. **PASS (10/10 criteria), re-verified independently against `develop@702fbc7`** — full classification found 0 anonymous gaps after PR #352 removed the dead `CompositionError::Logger` variant and made `pending_error`'s first-error-wins guard uniform across all 18 chainable `AppBuilder` setters.
 * [x] Reduce generic boilerplate — **CLOSED / NO FURTHER ACTION** (2026-08-24 spike): Stage 2B's `.service::<S>()` already removed the actionable boilerplate. Remaining explicit generics (`.entity::<E>()`, `.resolve::<Tag>()`) express types the compiler cannot infer from the received value — part of the typed composition contract, not unresolved DX debt.
 * [x] Improve composition error diagnostics — **DONE** (PR #350): `DuplicateAdapter`'s message now points to `.replace_adapter()`; `DuplicateEffectStore`/`DuplicateEffectRetentionStore` state "register exactly one effect store/retention store" and deliberately do not suggest a replace API (CORE-028D1's no-escape-hatch decision preserved, pinned by tests asserting the message never contains "replace").
 * [x] Improve startup diagnostics — **DONE** (CORE-028D4, PR #349): `App::start()` emits `app.starting`/`app.started` (with `elapsed_ms`) via `Observability::trace`, mirroring the existing `RuntimeInner::record_security_denial`/`record_completion_lost` pattern. `app.start_failed` deliberately deferred — `start_effects()` is infallible today, so a failure signal has no reachable trigger; ships when a real fallible startup operation exists.
@@ -276,7 +276,7 @@ After service and entity composition stabilize:
 * [x] Update Quick Start to use `App::builder()` — **DONE** (2026-08-24 spike): `README.md` Quick Start already shows `App::builder().service_instance(...).build()`.
 * [x] Move `RuntimeBuilder` documentation to advanced usage — **DONE** (#345): README and COOKBOOK both frame `RuntimeBuilder` as advanced/direct composition, `App::builder()` as the normal path.
 * [x] Final reference application dogfood — **DONE**, criterion reformulated (2026-08-24 spike): not "call 17/17 public methods" (bad test design — `replace_adapter()` and `service_with_tag()` are deliberate escape hatches reference-app has no reason to exercise). Criterion: reference-app demonstrates the main composition paths for capabilities it actually uses, without bypassing `AppBuilder` for them. It does — security, idempotency, observability, durable effects, effect executor, projection DI, entity, service, logger. `data_provider`/`effect_retention_store`/adapters only warrant dogfooding if a real capability need arises.
-* [ ] Archive CORE-028 Stage 2 — last step, blocked on the exit gate and the two remaining real gaps above.
+* [x] Archive CORE-028 Stage 2 — **DONE** (2026-08-24): exit gate passed 10/10; `application-composition` living spec synced with CORE-028D4's requirement and the two DROP non-goals (module/bundle composition, projection spawning ergonomics). CORE-028 Stage 2 (Stages 1 through 2D) is complete.
 
 ---
 
@@ -942,7 +942,7 @@ v1.0 — Stable Production Framework
 ```text
 CORE-028 Stage 2B — Service-to-Tag Binding (shipped)
 CORE-028 Stage 2C — Entity Composition (shipped)
-CORE-028 Stage 2D — Final DX
+CORE-028 Stage 2D — Final DX (shipped)
 DOC-001/002/003 — Documentation synchronization
 ```
 
@@ -1044,10 +1044,10 @@ CORE-028 Stage 2B  ✅ shipped (PR #192 merged to develop; PR #193 rebased, gree
 CORE-028 Stage 2C  ✅ shipped (archived 2026-07-19, #196/#197)
         │
         ▼
-CORE-028 Stage 2D  ← current priority
+CORE-028 Stage 2D  ✅ shipped (2026-08-24, PRs #344–#352; exit gate PASS 10/10)
         │
         ▼
-Documentation Sync
+Documentation Sync  ← current priority
         │
         ▼
 Mandatory CI + Production Foundation
@@ -1082,5 +1082,6 @@ Single-Node Production Ready
 Multi-Node Runtime
 ```
 
-**CORE-028 Stage 2B — Service-to-Tag Binding** and **Stage 2C — Entity Composition** have both
-shipped. The current priority is **CORE-028 Stage 2D — Final Application DX**.
+**CORE-028 Stage 2B — Service-to-Tag Binding**, **Stage 2C — Entity Composition**, and
+**Stage 2D — Final Application DX** have all shipped — CORE-028 Stage 2 is complete. The
+current priority is **Documentation Sync** (DOC-001/002/003).
