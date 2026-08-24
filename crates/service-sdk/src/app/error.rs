@@ -25,6 +25,21 @@ pub enum CompositionError {
         /// The concrete adapter type name that was already registered.
         type_name: &'static str,
     },
+    /// A second effect store was registered through
+    /// `AppBuilder::effect_store(...)` (CORE-028D1). Single-slot: rejected
+    /// even for a different concrete type on the second call — `type_name`
+    /// names the *rejected* registration, not the first-registered one.
+    #[error("effect store already registered; second registration of `{type_name}` rejected")]
+    DuplicateEffectStore {
+        /// The concrete effect store type name that was rejected.
+        type_name: &'static str,
+    },
+    /// A second effect retention store was registered through
+    /// `AppBuilder::effect_retention_store(...)` (CORE-028D1). No
+    /// `type_name`: the parameter is `Arc<dyn RetentionMaintenance>`, so no
+    /// concrete type identity is available.
+    #[error("effect retention store already registered")]
+    DuplicateEffectRetentionStore,
     /// A service registration was rejected by the underlying registry
     /// (e.g. a duplicate `(Tag, version)` pair).
     #[error("service registration failed: {0}")]
@@ -154,5 +169,28 @@ mod tests {
             }
             other => panic!("expected Entity(DuplicateEntity), got {other:?}"),
         }
+    }
+
+    // CORE-028D1 task 1.1 (RED): `CompositionError::DuplicateEffectStore`
+    // carries `type_name`, mirroring `duplicate_adapter_carries_type_name`.
+    #[test]
+    fn duplicate_effect_store_carries_type_name() {
+        let err = CompositionError::DuplicateEffectStore {
+            type_name: "MyEffectStore",
+        };
+        match err {
+            CompositionError::DuplicateEffectStore { type_name } => {
+                assert_eq!(type_name, "MyEffectStore");
+            }
+            other => panic!("expected DuplicateEffectStore, got {other:?}"),
+        }
+    }
+
+    // CORE-028D1 task 1.3 (RED): pins the fieldless
+    // `DuplicateEffectRetentionStore` variant's `Display` message.
+    #[test]
+    fn duplicate_effect_retention_store_display_text() {
+        let err = CompositionError::DuplicateEffectRetentionStore;
+        assert_eq!(err.to_string(), "effect retention store already registered");
     }
 }

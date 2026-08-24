@@ -118,6 +118,13 @@ fn attribute_to<S: 'static>(err: crate::runtime::RuntimeError) -> crate::runtime
 pub struct AppBuilder {
     runtime_builder: RuntimeBuilder,
     adapter_types: HashSet<TypeId>,
+    /// Presence guard for `.effect_store()` (CORE-028D1): single-slot, so a
+    /// `bool` — unlike `adapter_types`, a second call is rejected even for a
+    /// different concrete type.
+    effect_store_registered: bool,
+    /// Presence guard for `.effect_retention_store()` (CORE-028D1),
+    /// independent of `effect_store_registered`.
+    effect_retention_store_registered: bool,
     service_registrars: Vec<ServiceRegistrar>,
     /// First error encountered by an infallible-signature registration call
     /// (e.g. a duplicate adapter, AD-4) — surfaced at `build()` rather than
@@ -284,6 +291,8 @@ impl AppBuilder {
         Self {
             runtime_builder: RuntimeBuilder::new(),
             adapter_types: HashSet::new(),
+            effect_store_registered: false,
+            effect_retention_store_registered: false,
             service_registrars: Vec::new(),
             pending_error: None,
         }
@@ -534,6 +543,16 @@ impl AppBuilder {
     where
         T: EffectStateStore + EffectDedupStore + 'static,
     {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        if self.effect_store_registered {
+            self.pending_error = Some(CompositionError::DuplicateEffectStore {
+                type_name: std::any::type_name::<T>(),
+            });
+            return self;
+        }
+        self.effect_store_registered = true;
         self.runtime_builder = self.runtime_builder.with_effect_store(store);
         self
     }
@@ -544,6 +563,14 @@ impl AppBuilder {
     /// [`Self::effect_store`]: a type implementing both composes via
     /// `.effect_store(store.clone()).effect_retention_store(store)`.
     pub fn effect_retention_store(mut self, store: Arc<dyn RetentionMaintenance>) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        if self.effect_retention_store_registered {
+            self.pending_error = Some(CompositionError::DuplicateEffectRetentionStore);
+            return self;
+        }
+        self.effect_retention_store_registered = true;
         self.runtime_builder = self.runtime_builder.with_effect_retention_store(store);
         self
     }
@@ -1546,6 +1573,83 @@ mod tests {
             .effect_retention_store(store.clone() as Arc<dyn RetentionMaintenance>)
             .build()
             .expect("build succeeds composing effect_store with effect_retention_store");
+    }
+
+    // CORE-028D1 task 2.2 (RED): registering an effect store twice returns
+    // `CompositionError::DuplicateEffectStore`, mirroring
+    // `duplicate_adapter_registration_is_rejected`.
+    #[test]
+    fn duplicate_effect_store_registration_is_rejected() {
+        let result = compat_app()
+            .effect_store(RecordingEffectStore::new())
+            .effect_store(RecordingEffectStore::new())
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateEffectStore { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<RecordingEffectStore>());
+            }
+            Err(other) => panic!("expected DuplicateEffectStore, got {other:?}"),
+            Ok(_) => panic!("expected duplicate effect store registration to fail"),
+        }
+    }
+
+    // CORE-028D1 task 2.4 (TRIANGULATE): a second effect store of a
+    // *different* concrete type is still rejected — proves the guard is
+    // presence-based, not `TypeId`-keyed.
+    #[test]
+    fn second_effect_store_of_a_different_type_is_still_rejected() {
+        let other_store = Arc::new(InMemoryEffectStore::new());
+        let result = compat_app()
+            .effect_store(RecordingEffectStore::new())
+            .effect_store(other_store)
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateEffectStore { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<InMemoryEffectStore>());
+            }
+            Err(other) => panic!("expected DuplicateEffectStore, got {other:?}"),
+            Ok(_) => panic!("expected duplicate effect store registration to fail"),
+        }
+    }
+
+    // CORE-028D1 task 2.5 (RED): registering an effect retention store twice
+    // returns `CompositionError::DuplicateEffectRetentionStore`.
+    #[test]
+    fn duplicate_effect_retention_store_registration_is_rejected() {
+        let store = RecordingEffectStore::new();
+        let other = RecordingEffectStore::new();
+        let result = compat_app()
+            .effect_retention_store(store as Arc<dyn RetentionMaintenance>)
+            .effect_retention_store(other as Arc<dyn RetentionMaintenance>)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(CompositionError::DuplicateEffectRetentionStore)
+        ));
+    }
+
+    // CORE-028D1 task 2.7 (RED): both new methods short-circuit on a
+    // pre-existing `pending_error` — mirrors `.adapter()`'s short-circuit
+    // proof shape.
+    #[test]
+    fn effect_store_and_retention_store_short_circuit_on_a_pending_error() {
+        let result = compat_app()
+            .adapter(Arc::new(StubAdapter(1)))
+            .adapter(Arc::new(StubAdapter(2)))
+            .effect_store(RecordingEffectStore::new())
+            .effect_retention_store(RecordingEffectStore::new() as Arc<dyn RetentionMaintenance>)
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateAdapter { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<StubAdapter>());
+            }
+            Err(other) => panic!("expected the original DuplicateAdapter, got {other:?}"),
+            Ok(_) => panic!("expected the pre-existing pending_error to surface"),
+        }
     }
 
     // Regression: the default in-memory path (no custom store registered)
