@@ -93,7 +93,7 @@ Directory names and package names **differ** for several crates — always check
 | `crates/testkit` | `ego-testkit` |
 | `examples/reference-app` | `reference-app` |
 
-There is **no `runtime-slice` crate** — an old `layers.toml` entry references it, but it does not exist anywhere in the workspace (dead config, not dead code).
+There is **no `runtime-slice` crate**, and `layers.toml` has no entry for one — see [Layer Checks](#layer-checks-layerstoml) for the enforcement mechanism.
 
 ### Crate Dependency Flow
 
@@ -140,41 +140,17 @@ flowchart LR
 
 Note the `ego-service-sdk` ↔ `ego-testkit` relationship is **not a real cycle**: `ego-service-sdk`'s `Cargo.toml` pulls in `ego-testkit` only under `[dev-dependencies]` (for its own test suite), while `ego-testkit`'s normal `[dependencies]` depend on `ego-service-sdk`. See `crates/service-sdk/Cargo.toml:19-26` for the explanatory comment.
 
-### Layer Rules (`layers.toml`)
+### Layer Checks (`layers.toml`)
 
-`layers.toml` exists at the repo root and is a **documented-but-unenforced convention** — `scripts/verify-layers.sh` (referenced in its own header comment, and in `ARCHITECTURE.md` and `PRD.md`) **does not exist**, and no test/CI/xtask reads `layers.toml` at all. Treat it as a design intent, not a build gate.
+`layers.toml` assigns every crate a layer and is locally enforced by `xtask`:
 
-It also only covers 9 of the 16 crates:
-
-```toml
-[layers]
-"ego-domain" = "domain"
-"ego-application" = "application"
-"ego-infrastructure" = "infrastructure"
-"ego-transport" = "transport"
-"runtime-slice" = "domain"        # dead entry — crate does not exist
-"ego-runtime" = "foundation"
-"ego-runtime-tokio" = "infrastructure"
-"ego-scheduler" = "foundation"
-"security-jwt" = "infrastructure"
+```bash
+cargo run -p xtask -- verify-layers      # every crate mapped, no forbidden dependency direction, no cycles
+cargo run -p xtask -- verify-isolation   # every crate compiles under its narrowest feature set
+cargo run -p xtask -- verify-hygiene     # no un-archived change duplicates an archived one
 ```
 
-Missing from `layers.toml` entirely: `ego-persistence`, `ego-event-adapter`, `persistent-entity`, `ego-service-sdk`, `ego-service-sdk-macros`, `ego-security-sdk`, `security-apikey`, `ego-testkit`.
-
-```mermaid
-flowchart LR
-    subgraph Layer["Documented Intent (unenforced)"]
-        direction LR
-        L1["domain"] -->|"nothing internal"| X1[" "]
-        L2["application"] -->|"domain"| X1
-        L3["infrastructure"] -->|"application, domain"| X1
-        L4["transport"] -->|"application, domain"| X1
-        L5["foundation (runtime, ego-scheduler)"] -->|"domain"| X1
-        style X1 fill:#0000,stroke:#0000
-    end
-```
-
-`ARCHITECTURE.md`'s "Crate Boundaries" section is the more current/complete crate-boundary reference — it documents `ego-security-sdk` as a **cross-cutting** crate that other layers may depend on, consistent with the real dependency graph above (e.g. `ego-transport` depends directly on it).
+These are local-only (no CI in this repository) — run them by hand before a review. For the layer model, the allowed-dependency matrix, and why it's shaped this way, see [`ARCHITECTURE.md` → Layer enforcement](./ARCHITECTURE.md#layer-enforcement).
 
 ### Crate Responsibilities
 
@@ -1205,7 +1181,7 @@ cargo test -p ego-domain
 |------|-------------|
 | Domain-neutral (nuanced) | `ego-domain`'s core write-side contracts (`Actor`/`Command`/`DomainEvent`/`Query`) are synchronous; its `read_side/` module uses `async fn` via `async-trait` for I/O-shaped SPIs, but has zero runtime (`tokio`) dependency in production |
 | Cross-cutting SDKs | Only `ego-security-sdk` genuinely qualifies (a dependency leaf other layers may depend on directly) |
-| Layer enforcement (documented, not enforced) | `layers.toml` states intended dependency direction for 9 of 16 crates; `scripts/verify-layers.sh` does not exist, so nothing currently checks it in CI |
+| Layer enforcement | `layers.toml` maps every crate to a layer; locally enforced by `cargo run -p xtask -- verify-layers` (see [Layer Checks](#layer-checks-layerstoml)) |
 | Patch over rewrite | Extend existing modules before creating new ones |
 | Concrete first | Prefer concrete over abstraction; extract only when a 2nd use case emerges — "abstractions require evidence" |
 | Avoid duplication | "Rule of Two" — don't generalize from a single example |
@@ -1391,7 +1367,7 @@ Note: `crates/service-sdk/src/testing.rs` and `crates/service-sdk/src/reference.
 | File | Contents |
 |------|----------|
 | `ARCHITECTURE.md` | Unified runtime + engineering architecture reference (root) — `docs/architecture.md` no longer exists, its content was merged in here |
-| `layers.toml` | Documented-but-unenforced layer intent (see [Architecture Map](#-architecture-map)) |
+| `layers.toml` | Per-crate layer map, enforced by `xtask` (see [Layer Checks](#layer-checks-layerstoml)) |
 | `AGENTS.md` | Skills index — points to `PRD.md` and `ARCHITECTURE.md` as canonical sources |
 | `CONTRIBUTING.md` | Contribution guidelines |
 | `openspec/specs/` | Living per-domain specs |
