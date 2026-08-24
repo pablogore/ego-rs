@@ -744,6 +744,45 @@ impl RuntimeInner {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obs.trace(event)));
     }
 
+    /// Records the `app.starting` lifecycle signal (CORE-028D4). A silent
+    /// no-op when no `Observability` implementor is configured, same contract
+    /// as [`RuntimeInner::record_security_denial`].
+    ///
+    /// `pub(crate)` because the only caller is `crate::app::App::start`, which
+    /// owns *when* the transition happened; this method owns the event
+    /// vocabulary and the sink isolation. No metadata: nothing an operator can
+    /// act on is known at this point, and an unbounded label (app name, host)
+    /// is exactly what the closed-key rule exists to keep out.
+    pub(crate) fn record_app_starting(&self) {
+        let Some(obs) = &self.observability else {
+            return;
+        };
+        let event = SemanticEvent::without_metadata("app.starting", "", "", "Starting", "")
+            .expect("event_name is a fixed non-empty literal");
+        // Same reasoning as `record_security_denial`: a caller-supplied sink is
+        // untrusted, and a panicking one must not unwind through startup.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obs.trace(event)));
+    }
+
+    /// Records the `app.started` lifecycle signal with how long startup took
+    /// (CORE-028D4). Silent no-op without an `Observability`, panic-isolated,
+    /// same as its sibling above.
+    ///
+    /// Takes a `Duration`, not a pre-converted number: the metadata key is
+    /// named `elapsed_ms`, and the only way key and value cannot disagree is
+    /// if the same function owns both. The caller hands over a measurement and
+    /// never a unit.
+    pub(crate) fn record_app_started(&self, elapsed: Duration) {
+        let Some(obs) = &self.observability else {
+            return;
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("elapsed_ms".to_string(), elapsed.as_millis().to_string());
+        let event = SemanticEvent::new("app.started", "", "", "Started", "", metadata)
+            .expect("event_name is a fixed non-empty literal");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obs.trace(event)));
+    }
+
     /// Resolves and enforces the canonical tenant for this call (CORE-008A
     /// AD-009). On success, writes the resolved [`super::tenant::CanonicalTenant`]
     /// into `ctx` via `ctx.set_resolved_tenant` and returns `Ok(())`. On
@@ -2146,6 +2185,74 @@ mod tests {
 
         // Must not panic; there is no sink to assert on, which is the point.
         rt.record_security_denial("Svc", "op", SecurityDenialKind::MissingContext);
+    }
+
+    // -- CORE-028D4: app startup lifecycle helpers --
+
+    #[test]
+    fn record_app_starting_emits_one_event_with_the_starting_state() {
+        let obs = Arc::new(RecordingObservability::new());
+        let rt = RuntimeInner::for_test_with_observability(obs.clone());
+
+        rt.record_app_starting();
+
+        let events = obs.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one recorded event");
+        assert_eq!(events[0].event_name, "app.starting");
+        assert_eq!(events[0].lifecycle_state, "Starting");
+        assert!(
+            events[0].metadata.is_empty(),
+            "app.starting carries no metadata; an unbounded label must not creep in: {:?}",
+            events[0].metadata
+        );
+    }
+
+    /// The key names a unit, so the value must actually be in that unit. A
+    /// helper that took a pre-converted number could disagree with its own key
+    /// and nothing would notice; this pins both together.
+    #[test]
+    fn record_app_started_reports_the_elapsed_span_in_milliseconds() {
+        let obs = Arc::new(RecordingObservability::new());
+        let rt = RuntimeInner::for_test_with_observability(obs.clone());
+
+        rt.record_app_started(Duration::from_millis(42));
+
+        let events = obs.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one recorded event");
+        assert_eq!(events[0].event_name, "app.started");
+        assert_eq!(events[0].lifecycle_state, "Started");
+        assert_eq!(
+            events[0].metadata.get("elapsed_ms").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            events[0].metadata.len(),
+            1,
+            "metadata is closed: exactly one key, got {:?}",
+            events[0].metadata
+        );
+    }
+
+    #[test]
+    fn app_lifecycle_events_are_a_silent_no_op_without_observability() {
+        // observability: None (AD-2 default) — for_test() already yields this.
+        let rt = RuntimeInner::for_test();
+
+        // Must not panic; there is no sink to assert on, which is the point.
+        rt.record_app_starting();
+        rt.record_app_started(Duration::from_millis(1));
+    }
+
+    /// Same isolation as a security denial: a caller-supplied sink is untrusted,
+    /// and a panic here would unwind through a startup that already succeeded.
+    #[test]
+    fn app_lifecycle_events_isolate_a_panicking_observability_sink() {
+        use crate::test_support::PanickingObservability;
+
+        let rt = RuntimeInner::for_test_with_observability(Arc::new(PanickingObservability));
+
+        rt.record_app_starting();
+        rt.record_app_started(Duration::from_millis(1));
     }
 
     /// The three losses call for different responses, and an operator must not

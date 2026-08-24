@@ -261,10 +261,16 @@ impl App {
     /// start leaves nothing running; the cleanup's own result is best-effort
     /// (the original startup error is what the caller needs to act on).
     pub async fn start(self) -> Result<RunningApp, CompositionError> {
+        // CORE-028D4: the span is the whole method, not `start_effects()`
+        // alone. Those coincide today; the metric means "how long App startup
+        // took", so it stays correct when `start()` grows a second step.
+        let started_at = std::time::Instant::now();
+        self.runtime.inner().record_app_starting();
         if let Err(startup_err) = self.runtime.start_effects().await {
             let _ = self.runtime.shutdown_async().await;
             return Err(CompositionError::Startup(startup_err));
         }
+        self.runtime.inner().record_app_started(started_at.elapsed());
         Ok(RunningApp {
             runtime: self.runtime,
         })
@@ -1273,6 +1279,53 @@ mod tests {
             running.runtime.effect_acceptor().is_some(),
             "App::start() must call Runtime::start_effects"
         );
+    }
+
+    // -- CORE-028D4: App::start() lifecycle diagnostics ----------------------
+
+    /// Order is the assertion that matters. An implementation that emitted both
+    /// after `start_effects()` would satisfy a set-membership check while
+    /// telling an operator nothing about a start that hung halfway.
+    #[tokio::test]
+    async fn start_records_starting_then_started() {
+        use crate::test_support::RecordingObservability;
+
+        let obs = Arc::new(RecordingObservability::new());
+        let app = compat_app()
+            .observability(obs.clone())
+            .build()
+            .expect("build succeeds");
+
+        let _running = app.start().await.expect("start succeeds");
+
+        let events = obs.events.lock().unwrap();
+        let names: Vec<&str> = events.iter().map(|e| e.event_name.as_str()).collect();
+        assert_eq!(names, vec!["app.starting", "app.started"]);
+        let elapsed = events[1]
+            .metadata
+            .get("elapsed_ms")
+            .expect("app.started carries elapsed_ms");
+        // Not a value assertion — a real span is not reproducible. What is
+        // checkable is that the field is a number an aggregator can consume.
+        assert!(
+            elapsed.parse::<u128>().is_ok(),
+            "elapsed_ms must parse as a number, got {elapsed:?}"
+        );
+    }
+
+    /// A hostile sink must not take startup down with it. This exercises the
+    /// whole `App::start()` path, not just the helper in isolation.
+    #[tokio::test]
+    async fn start_survives_a_panicking_observability_sink() {
+        use crate::test_support::PanickingObservability;
+
+        let app = compat_app()
+            .observability(Arc::new(PanickingObservability))
+            .build()
+            .expect("build succeeds");
+
+        let running = app.start().await;
+        assert!(running.is_ok(), "a panicking sink must not fail startup");
     }
 
     // -- PR6a: AppBuilder::effect_store / effect_retention_store delegation --
