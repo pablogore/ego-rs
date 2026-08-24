@@ -174,14 +174,16 @@ Two service-registration mechanisms coexist, selected by what `#[service]` is ap
 
 **[`ROADMAP.md`](ROADMAP.md) is the source of truth for current priority, exact sequencing, and shipped/planned status.** This section only describes the product's high-level direction and does not track individual work items — see ROADMAP.md for that.
 
-ego.rs's evolution moves through six capability phases, in order:
+ego.rs's evolution moves through eight capability phases. Phases 2-8 map one-to-one onto ROADMAP.md's own Execution Order (§9) — phase 4 below groups two adjacent ROADMAP phases under one product-level heading, called out explicitly so no ROADMAP phase is silently dropped:
 
-1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation, service composition, test infrastructure
-2. **Application Composition** — the `App`/`AppBuilder` developer-facing composition surface, with `RuntimeBuilder` as the supported lower-level primitive
-3. **Production Foundation** — mandatory CI gates, observability, security hardening, health/readiness/startup for single-node deployment
-4. **Reliable Distributed Integration** — a distributed-messaging SPI with broker adapters, transactional outbox, and optional CDC
-5. **Durable Workflows** — saga/process-manager orchestration built on stable persistence and messaging
-6. **Multi-Node Runtime** — distributed deployment guarantees, pursued only after single-node production readiness is proven
+1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation, service composition, test infrastructure. Predates ROADMAP's Execution Order (see ROADMAP.md §2, Completed Foundation).
+2. **Application Composition** (ROADMAP Execution Order Phase 1 — Final Developer Experience) — the `App`/`AppBuilder` developer-facing composition surface, with `RuntimeBuilder` as the supported lower-level primitive
+3. **Production Foundation** (ROADMAP Phase 2) — mandatory CI gates, observability, security hardening, health/readiness/startup for single-node deployment
+4. **Reliable Distributed Integration** (ROADMAP Phases 3-4: Distributed Messaging + Reliable Integration) — a distributed-messaging SPI with broker adapters, transactional outbox, and optional CDC
+5. **Durable Workflows** (ROADMAP Phase 5) — saga/process-manager orchestration built on stable persistence and messaging
+6. **Production Proof** (ROADMAP Phase 6) — HTTP hardening, a production reference deployment, and a crash/recovery integration suite; closes single-node production readiness
+7. **Multi-Node Runtime** (ROADMAP Phase 7) — distributed deployment guarantees, pursued only after single-node production readiness is proven
+8. **Distribution and Stability** (ROADMAP Phase 8) — release engineering and performance/capacity hardening once multi-node is stable
 
 Phases 1 and 2 have shipped. Durable external effect delivery — a Production Foundation-adjacent capability — shipped ahead of sequence. Everything from Production Foundation onward is future work.
 
