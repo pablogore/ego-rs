@@ -1,7 +1,7 @@
 # ego-rs — Product Requirements Document
 
 **Status**: Living document  
-**Last updated**: 2026-06-25  
+**Last updated**: 2026-08-24  
 **Owner**: @pablogore
 
 ---
@@ -56,33 +56,40 @@ ego-rs is organized as a workspace of layered crates. Each crate owns a defined 
 
 ```
 domain ← application ← infrastructure
+domain ← persistence
 domain ← transport
 domain ← runtime
-domain ← service-sdk (cross-cutting)
+domain ← service-sdk (sdk layer)
 domain ← security-sdk (cross-cutting)
 ```
 
 ### Crates
 
+17 crates + `examples/reference-app` (root `Cargo.toml` workspace members):
+
 | Crate | Layer | Responsibility |
 |-------|-------|---------------|
-| `ego-domain` | Domain | Core contracts: Actor, Command, Event, Query, persistence SPI, auth types |
+| `ego-domain` | Domain | Core contracts: Actor, Command, Event, Query, persistence SPI, CQRS read-side traits, auth types |
 | `ego-application` | Application | Command/Query handlers, ports, use case orchestration |
-| `ego-infrastructure` | Infrastructure | Adapters: in-memory, PostgreSQL persistence, migrations |
-| `ego-transport` | Transport | HTTP/gRPC protocol handlers |
-| `ego-runtime` | Foundation | Actor system, mailbox, supervision, scheduling |
+| `ego-persistence` | Infrastructure | PostgreSQL event-store/read-side adapters |
+| `ego-infrastructure` | Infrastructure | In-memory persistence adapters, migrations |
+| `ego-transport` | Transport | HTTP protocol handlers |
+| `ego-runtime` | Foundation | Actor system, mailbox, supervision, scheduling, effect ports |
 | `ego-runtime-tokio` | Infrastructure | Tokio-backed runtime implementation |
+| `ego-effect-store` | Infrastructure | Durable external-effect providers: `PostgresEffectStore`, `StoolapEffectStore` |
 | `ego-event-adapter` | Infrastructure | CloudEvent ↔ domain event translation |
-| `ego-persistent-entity` | Foundation | Persistent actor lifecycle: load, execute, snapshot, save |
-| `ego-ego-scheduler` | Foundation | Tag-based event scheduling, backpressure, dedup |
-| `ego-service-sdk` | Cross-cutting | Service contracts, registry, DI, interceptors, context propagation |
-| `ego-service-sdk-macros` | Cross-cutting | `#[service]`, `#[operation]` proc-macro attributes |
+| `persistent-entity` | Foundation | Persistent actor-per-entity lifecycle: recover, execute, passivate |
+| `ego-scheduler` | Foundation | Tag-based event scheduling, backpressure, dedup |
+| `ego-service-sdk` | SDK | Service contracts, registry, DI, interceptors, context propagation |
+| `ego-service-sdk-macros` | Tooling | `#[service]`, `#[operation]`, `#[authorize]`, `#[tenant_scoped]` proc-macros |
 | `ego-security-sdk` | Cross-cutting | AuthN/AuthZ, Principal, Credential, RBAC, SecurityContext, Claims |
-| `ego-security-jwt` | Cross-cutting (impl) | HS256/RS256/ES256 JWT providers over KeyResolver abstraction |
+| `security-jwt` | Infrastructure | JWT authentication (HS256/RS256/ES256 via one algorithm-parameterized provider) |
+| `security-apikey` | Infrastructure | API-key authentication provider |
+| `ego-testkit` | Tooling | Shared test doubles/fixtures for building services against the SDK |
 
 ### Layering Enforcement
 
-Dependency direction is enforced at CI time via `layers.toml` and `scripts/verify-layers.sh`. A PR that introduces a layering violation fails CI.
+Dependency direction is declared in `layers.toml` and locally enforced by `cargo run -p xtask -- verify-layers` — this repository has no CI at all; see [`ARCHITECTURE.md` → Layer enforcement](ARCHITECTURE.md#layer-enforcement) for the full model.
 
 ---
 
@@ -93,34 +100,39 @@ Dependency direction is enforced at CI time via `layers.toml` and `scripts/verif
 - `Actor` trait: stateless message handler with typed `Message` associated type
 - `DomainEvent`: append-only event contract
 - `Command` / `Query`: CQRS command and query types
-- Persistence SPI: `EventStore`, `Repository`, `SnapshotStore`, `PersistenceError`
-- Pure value types: no runtime types, no async, no serialization frameworks in domain contracts
+- Persistence SPI: `EventStore`, `Repository`, `Snapshot`, `PersistenceError`
+- CQRS read-side traits (`read_side/`): projection handlers, read-model stores, offset/dedup ports — the read half of the CQRS split
+- Pure value types: domain contracts carry no runtime types and no serialization frameworks; `EventStore`'s I/O-shaped methods are `async fn` via `async-trait` as a trait *signature* only — `tokio` itself is not a production dependency of `ego-domain`
 
-### 6.2 Authentication & Authorization (security-sdk + security-jwt)
+### 6.2 Authentication & Authorization (security-sdk + security-jwt + security-apikey)
 
 - `AuthenticationProvider` trait: synchronous, object-safe, injectable
 - `AuthorizationProvider` trait: async, RBAC-capable
 - `SecurityContext`: carries `Principal` + `Claims`, explicit propagation via `ServiceContext`
-- JWT providers: `Hs256AuthenticationProvider`, `Rs256AuthenticationProvider`, `Es256AuthenticationProvider`
-- `KeyResolver` abstraction: cache-first, async, pluggable key backends
+- JWT: one algorithm-parameterized authenticator (`JwtAlgorithm::{Hs256,Rs256,Es256}`) over a `KeyResolver` abstraction (`LocalKeyResolver`, `JwksKeyResolver`)
+- API-key: `ApiKeyAuthenticationProvider` with constant-time key-hash verification and a pluggable `ApiKeyResolver`
 - No ambient security state — `SecurityContext` travels explicitly through `ServiceContext`
 
 ### 6.3 Service SDK
 
-- `ServiceContract` trait + `ServiceDescriptor` for declarative service definition
-- `ServiceRegistry` for service discovery and wiring
+Two service-registration mechanisms coexist, selected by what `#[service]` is applied to:
+
+- On a **trait** — generates `ServiceContract` + `ServiceDescriptor` (declarative, discovered/wired through `ServiceRegistry`)
+- On a **struct** — generates `Injectable` (constructor-based DI; the primary path for `App::builder()`/`AppBuilder`)
 - `ServiceContext`: carries tenant, correlation, causation, security — propagated explicitly
 - `Interceptor` / `InterceptorChain`: cross-cutting concerns without framework coupling
-- `#[service]` / `#[operation]` proc-macros for ergonomic service declaration
-- `RuntimeBuilder` extension for wiring services at startup
+- `#[service]` / `#[operation]` / `#[authorize]` / `#[tenant_scoped]` proc-macros — the authorization macros are compile-time enforced (used outside a `#[service]` trait, they fail to compile)
+- Idempotency enforcement: fail-closed `IdempotencyEnforcementMode` (default `MandatoryKey`), configured via `RuntimeBuilder`/`AppBuilder`
+- Composition: `App::builder()` → `AppBuilder` → `RuntimeBuilder` is the normal application composition path — see [`ARCHITECTURE.md` → Application Composition](ARCHITECTURE.md#application-composition); `RuntimeBuilder` remains the lower-level, directly supported primitive
 
 ### 6.4 Runtime & Scheduling
 
 - `Runtime` trait: backend-neutral actor spawn and messaging
 - `ExecutionState`: supervised actor lifecycle (Active → Draining → Terminated/Failed)
-- `BatchExecutor`: deterministic batch processing with backpressure
+- `BatchExecutor`: deterministic read-side/projection batch execution with backpressure
 - `TagSchedulerImpl`: tag-based projection scheduling
 - `EffectInterpreter`: async trait for interpreting domain effects
+- Persistent Entity Runtime (`persistent-entity`): actor-per-entity execution with a 5-state lifecycle (Recovering → Active → Passivating → Passivated/Failed), single-flight activation, deterministic recovery — see [`ARCHITECTURE.md` → Persistent Entity Runtime](ARCHITECTURE.md#persistent-entity-runtime-core-006)
 - Fail-closed execution: panics terminate the unit of work, not the runtime
 
 ### 6.5 Persistence
@@ -129,6 +141,12 @@ Dependency direction is enforced at CI time via `layers.toml` and `scripts/verif
 - PostgreSQL adapter via `sqlx`
 - Atomic commit: offset + dedup persisted in one transaction
 - Append-only event store enforced by type system
+
+### 6.6 External Effect Delivery (PROD-002)
+
+- `EffectStateStore` / `EffectDedupStore` ports defined in `ego-runtime`
+- Concrete durable providers in `ego-effect-store`: `PostgresEffectStore`, `StoolapEffectStore` (feature-gated, no default backend)
+- Delivered through the `App`/`Runtime` effect-acceptor lifecycle — see [`ARCHITECTURE.md` → Application Composition](ARCHITECTURE.md#application-composition)
 
 ---
 
@@ -185,7 +203,7 @@ A version of ego-rs is ready for broader adoption when:
 
 1. `cargo test --workspace` passes with ≥ 85% coverage
 2. A non-trivial service (3+ operations, auth, persistence) can be built using only ego-rs primitives
-3. The layering enforcement script catches all known violation patterns
+3. `cargo run -p xtask -- verify-layers` catches all known violation patterns
 4. All public APIs carry `rustdoc` documentation
 5. A new contributor can understand the architecture from `docs/` alone without reading source code
 
