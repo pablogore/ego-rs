@@ -20,7 +20,7 @@ use crate::runtime::{RuntimeError, RuntimeInfraError};
 pub enum CompositionError {
     /// A second adapter of the same concrete type was registered without
     /// using the explicit `.replace_adapter()` escape hatch (AD-4).
-    #[error("adapter already registered for type `{type_name}`")]
+    #[error("adapter already registered for type `{type_name}` — use `.replace_adapter(...)` to override it")]
     DuplicateAdapter {
         /// The concrete adapter type name that was already registered.
         type_name: &'static str,
@@ -29,7 +29,11 @@ pub enum CompositionError {
     /// `AppBuilder::effect_store(...)` (CORE-028D1). Single-slot: rejected
     /// even for a different concrete type on the second call — `type_name`
     /// names the *rejected* registration, not the first-registered one.
-    #[error("effect store already registered; second registration of `{type_name}` rejected")]
+    /// Deliberately has no replace escape hatch (CORE-028D1) — the message
+    /// must not invent one.
+    #[error(
+        "effect store already registered; second registration of `{type_name}` rejected — register exactly one effect store"
+    )]
     DuplicateEffectStore {
         /// The concrete effect store type name that was rejected.
         type_name: &'static str,
@@ -37,8 +41,11 @@ pub enum CompositionError {
     /// A second effect retention store was registered through
     /// `AppBuilder::effect_retention_store(...)` (CORE-028D1). No
     /// `type_name`: the parameter is `Arc<dyn RetentionMaintenance>`, so no
-    /// concrete type identity is available.
-    #[error("effect retention store already registered")]
+    /// concrete type identity is available. Deliberately has no replace
+    /// escape hatch (CORE-028D1) — the message must not invent one.
+    #[error(
+        "effect retention store already registered — register exactly one effect retention store"
+    )]
     DuplicateEffectRetentionStore,
     /// A service registration was rejected by the underlying registry
     /// (e.g. a duplicate `(Tag, version)` pair).
@@ -191,6 +198,52 @@ mod tests {
     #[test]
     fn duplicate_effect_retention_store_display_text() {
         let err = CompositionError::DuplicateEffectRetentionStore;
-        assert_eq!(err.to_string(), "effect retention store already registered");
+        assert_eq!(
+            err.to_string(),
+            "effect retention store already registered — register exactly one effect retention store"
+        );
+    }
+
+    // Composition Error Diagnostics Cleanup: `DuplicateAdapter` has a real
+    // escape hatch (`.replace_adapter()`), so its message must point to it.
+    #[test]
+    fn duplicate_adapter_message_points_to_replace_adapter() {
+        let err = CompositionError::DuplicateAdapter {
+            type_name: "MyAdapter",
+        };
+        assert_eq!(
+            err.to_string(),
+            "adapter already registered for type `MyAdapter` — use `.replace_adapter(...)` to override it"
+        );
+    }
+
+    // Composition Error Diagnostics Cleanup: `DuplicateEffectStore` has no
+    // replace escape hatch (CORE-028D1 deliberate decision) — the message
+    // must not invent or imply one, only state the actual contract.
+    #[test]
+    fn duplicate_effect_store_message_states_the_contract_without_a_replace_api() {
+        let err = CompositionError::DuplicateEffectStore {
+            type_name: "MyEffectStore",
+        };
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "effect store already registered; second registration of `MyEffectStore` rejected — register exactly one effect store"
+        );
+        assert!(
+            !text.contains("replace"),
+            "must not suggest a non-existent replace API: {text:?}"
+        );
+    }
+
+    // Composition Error Diagnostics Cleanup: same non-goal as the effect
+    // store above — no replace API exists for the retention store either.
+    #[test]
+    fn duplicate_effect_retention_store_message_has_no_replace_api() {
+        let text = CompositionError::DuplicateEffectRetentionStore.to_string();
+        assert!(
+            !text.contains("replace"),
+            "must not suggest a non-existent replace API: {text:?}"
+        );
     }
 }
