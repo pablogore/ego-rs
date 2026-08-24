@@ -174,7 +174,7 @@ Two service-registration mechanisms coexist, selected by what `#[service]` is ap
 
 **[`ROADMAP.md`](ROADMAP.md) is the source of truth for current priority, exact sequencing, and shipped/planned status.** This section only describes the product's high-level direction and does not track individual work items — see ROADMAP.md for that.
 
-ego.rs's evolution moves through eight capability phases. Phases 2-8 map one-to-one onto ROADMAP.md's own Execution Order (§9) — phase 4 below groups two adjacent ROADMAP phases under one product-level heading, called out explicitly so no ROADMAP phase is silently dropped:
+ego.rs's evolution moves through eight capability phases. Phases 2-8 trace onto ROADMAP.md's own Execution Order (§9) — every ROADMAP phase is represented, either directly or, for phase 4 below, grouped explicitly under one product-level heading, so none is silently dropped:
 
 1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation, service composition, test infrastructure. Predates ROADMAP's Execution Order (see ROADMAP.md §2, Completed Foundation).
 2. **Application Composition** (ROADMAP Execution Order Phase 1 — Final Developer Experience) — the `App`/`AppBuilder` developer-facing composition surface, with `RuntimeBuilder` as the supported lower-level primitive
