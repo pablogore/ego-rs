@@ -374,6 +374,64 @@ crates/persistent-entity/
 
 ---
 
+## Application Composition
+
+The sections above describe how a single entity actor and a single crate boundary work. This section describes how a whole application is assembled — the composition root that wires entities, projections, services, and external effects into a process.
+
+### App and AppBuilder
+
+The application-facing composition path is:
+
+```
+App::builder() → AppBuilder → RuntimeBuilder → Runtime → App → App::start() → RunningApp → RunningApp::shutdown()
+```
+
+`AppBuilder` is a thin facade over `RuntimeBuilder`: it wraps a `RuntimeBuilder` internally, adds its own duplicate-registration guards and a fail-closed error latch, and at `build()` delegates the actual validation and construction to `RuntimeBuilder::try_build()`. `App` is a validated, *unstarted* application — a distinct type from `RunningApp`, which represents a started application's lifecycle. Building an `App` starts nothing; only `App::start()` does.
+
+`RuntimeBuilder` remains the lower-level, directly supported composition API — it is not deprecated, and `AppBuilder` does not replace it. Normal application code should prefer `App::builder()`. `RuntimeBuilder` stays useful for direct/advanced runtime composition — for example, the reference app builds one entity's effect acceptor straight from `RuntimeEffectAcceptor` because that acceptor must exist before the real `App`/`Runtime` does.
+
+### What the composition root registers
+
+`AppBuilder` registers, by category:
+
+- **Services** — `.service()` / `.service_with_tag()` queue `Injectable` construction, run at `build()` against a scratch runtime; `.service_instance()` is the explicit escape hatch for a collaborator that cannot implement `Injectable`.
+- **Entities** — `.entity::<E>()` registers an already-constructed `EntityRuntime<E::Event>`, keyed by type. It constructs and spawns nothing; individual actor activation happens later, on demand, through the entity runtime itself.
+- **Projections** — `.projection()` registers a query-side handle for DI resolution only. It never spawns a read-side scheduler (see Lifecycle ownership below).
+- **External effects** — `.effect_store()`, `.effect_retention_store()`, `.effect_executor()` are independent, fail-closed, single-slot registrations, not one combined mechanism.
+- **External data providers** — `.data_provider()` registers a provider and its async teardown participation.
+- **Cross-cutting policy** — `.config()`, `.logger()`, `.security()`, `.observability()`, `.idempotency_enforcement_mode()` / `.enforced_idempotency()`, `.operation_reservation_store()` register application-wide policy and infrastructure ports.
+- **Adapters** — `.adapter()` registers a typed dependency for DI resolution; `.replace_adapter()` is the one explicit "replace" escape hatch (AD-4), meant for bootstrap/composition, not routine runtime operation.
+
+### Composition and lifecycle ownership
+
+Registering something into `AppBuilder` is not the same as starting it — that distinction is the whole point of the model. `AppBuilder` composes the application's dependency graph; it does not automatically own every registered component's lifecycle:
+
+| Capability | Registered through | Starts/spawns when | Owner |
+|---|---|---|---|
+| Service (`Injectable`) | `service()` / `service_with_tag()` / `service_instance()` | `AppBuilder::build()` (construction only — no background task) | passive, resolved on demand |
+| Entity actor | `entity()` | on demand, via the entity runtime, independent of registration | the `EntityRuntime` — not App/AppBuilder |
+| Effect delivery acceptor | `effect_executor()` (gate) + `effect_store()` | `App::start()` → `Runtime::start_effects()` | `Runtime` / `App` |
+| Effect retention worker | `effect_retention_store()` | not started by `AppBuilder` at all — a registered retention store alone is inert; an actual worker requires `RuntimeBuilder::with_effect_retention_policy`, which `AppBuilder` does not currently forward | whoever calls `RuntimeBuilder` directly |
+| Data provider teardown | `data_provider()` | `RunningApp::shutdown()` → `Runtime::shutdown_async()` | `Runtime` |
+| Read-side projection scheduler | `projection()` registers the DI value only | never, through App/AppBuilder | **host** application code, per the CORE-028D2 decision |
+
+The projection row is the sharpest example: a projection value may be registered in `AppBuilder` for DI resolution, but spawning and stopping its read-side scheduler remains the host's responsibility (the reference app constructs its `ReadSideHandles` outside `AppBuilder` and its caller decides when to start/stop the poller).
+
+### Failure semantics
+
+`AppBuilder` is fail-closed and first-error-wins: every chainable registration method checks a `pending_error` latch before doing any work, and once it is set, later calls become no-ops that fall through to `build()`, which surfaces that first error. Duplicate handling differs by design, not by oversight: adapters, the effect store, the effect retention store, projections, entities, effect executors, data providers, and tagged services are fail-closed on a duplicate; `config`, `logger`, `security`, `observability`, and `operation_reservation_store` are explicitly last-write-wins. `replace_adapter()` is the only method that exists to bypass a duplicate rejection — the effect store and effect retention store deliberately have no equivalent `replace_*` escape hatch.
+
+### Composition vs. lifecycle
+
+Four phases, kept distinct on purpose — "register" does not mean "start":
+
+- **Composition** (`AppBuilder` calls, `build()`) — declares and constructs what the application contains; starts nothing.
+- **Startup** (`App::start()`) — starts the runtime participants that `App`/`Runtime` itself owns (today: effect delivery).
+- **Runtime** (`RunningApp`) — serves resolution and operations.
+- **Shutdown** (`RunningApp::shutdown()`) — drains the participants `Runtime` owns; anything host-owned, like a projection scheduler, is drained separately by the host.
+
+---
+
 ## Repository Layout
 
 ```
