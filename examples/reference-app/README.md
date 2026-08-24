@@ -4,8 +4,8 @@ The **Production Reference Service** (CORE-018) — a dogfooding milestone provi
 
 Built using *only* ego-rs's public surface:
 
-- **Runtime / Service SDK** — `RuntimeBuilder`, `#[service]`/`#[operation]`, `with_service`/`resolve` (CORE-025's canonical path)
-- **Config + Logging** — `kit-config`-materialized `LoggingSettings` → `build_logger` → `RuntimeBuilder::with_logger`
+- **Application composition** — `App::builder()` (CORE-028's canonical composition path; `AppBuilder` delegates to the lower-level `RuntimeBuilder` internally)
+- **Config + Logging** — `kit-config`-materialized `LoggingSettings` → `build_logger` → `App::builder().logger(...)`
 - **Security / JWT** — `Hs256AuthenticationProvider`, `#[authorize]`, `#[tenant_scoped]`
 - **Tenant enforcement** — fail-closed by default; the query route checks the authenticated principal's tenant against the requested one
 - **CQRS read-side engine** — a real `UsersByTenant` projection (not the unrelated DI `resolve_projection`), with per-tenant tag isolation
