@@ -85,6 +85,7 @@ rather than starting up with an enforcement promise it cannot keep.
 | `ego-runtime` | Runtime | Platform abstraction for executing actors; the `Runtime` trait plus the read-side (CQRS) tag scheduler |
 | `ego-runtime-tokio` | Runtime | Tokio-backed `Runtime` implementation (`TokioRuntime`, `TokioRuntimeBuilder`) |
 | `ego-event-adapter` | Runtime | Converts between protobuf events, CloudEvents, and EventStore format |
+| `ego-effect-store` | Infrastructure | Durable external-effect providers (`PostgresEffectStore`, `StoolapEffectStore`, feature-gated) |
 | `persistent-entity` | Runtime | Event-sourced entity runtime and SDK (Command/Event/State, `EntityRuntimeBuilder`) |
 | `ego-scheduler` | Runtime | Actor mailbox scheduling and event bus (dispatch, backpressure, gap detection) |
 | `ego-service-sdk` | Service SDK | `App`/`AppBuilder`, service registry, DI, interceptors — the public surface most applications build on (built on the lower-level `RuntimeBuilder`/`Runtime`, for advanced/direct runtime composition) |

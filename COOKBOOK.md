@@ -62,11 +62,11 @@ Verified against `crates/domain/src/effect.rs`, `crates/runtime/src/lib.rs`, `cr
 
 ## 🗺 Architecture Map
 
-The workspace has **16 crates + 1 example app** (root `Cargo.toml`, `[workspace] members`):
+The workspace has **17 crates + 1 example app** (root `Cargo.toml`, `[workspace] members`):
 
 ```
 domain, application, infrastructure, persistence, transport, runtime, runtime-tokio,
-event-adapter, persistent-entity, ego-scheduler, service-sdk, service-sdk-macros,
+effect-store, event-adapter, persistent-entity, ego-scheduler, service-sdk, service-sdk-macros,
 security-sdk, security-jwt, security-apikey, testkit
 + examples/reference-app
 ```
@@ -82,6 +82,7 @@ Directory names and package names **differ** for several crates — always check
 | `crates/transport` | `ego-transport` |
 | `crates/runtime` | `ego-runtime` |
 | `crates/runtime-tokio` | `ego-runtime-tokio` |
+| `crates/effect-store` | `ego-effect-store` |
 | `crates/event-adapter` | `ego-event-adapter` |
 | `crates/persistent-entity` | `persistent-entity` (no `ego-` prefix) |
 | `crates/ego-scheduler` | `ego-scheduler` |
@@ -111,6 +112,8 @@ flowchart LR
 
     runtime["ego-runtime"] --> domain
     runtime_tokio["ego-runtime-tokio"] --> runtime
+    effect_store["ego-effect-store"] --> runtime
+    effect_store --> domain
     event_adapter["ego-event-adapter"] --> domain
     persistent_entity["persistent-entity"] --> domain
     scheduler["ego-scheduler"] --> domain
@@ -163,6 +166,7 @@ These are local-only (no CI in this repository) — run them by hand before a re
 | `crates/transport` | `ego-transport` | HTTP transport: `AppState`, JWT extraction, error mapping, `serve()` |
 | `crates/runtime` | `ego-runtime` | Platform-agnostic `Runtime` trait, `EffectInterpreter`, CQRS read-side engine (`TagSchedulerImpl`, `BatchExecutor`, `Backpressure`) |
 | `crates/runtime-tokio` | `ego-runtime-tokio` | The real Tokio-backed `Runtime` implementation (`TokioRuntime`, `TokioRuntimeBuilder`, `DefaultRuntime`) |
+| `crates/effect-store` | `ego-effect-store` | Durable external-effect providers (`PostgresEffectStore`, `StoolapEffectStore`, feature-gated; no default backend) |
 | `crates/event-adapter` | `ego-event-adapter` | Event adapter support over domain |
 | `crates/persistent-entity` | `persistent-entity` | Event-sourced actor-per-entity execution (`PersistentEntity`, `EntityRef`, `EntityActor`) |
 | `crates/ego-scheduler` | `ego-scheduler` | Pure 6-stage actor-activation scheduling pipeline (ingest→detect→route→reduce→evaluate→emit) |
