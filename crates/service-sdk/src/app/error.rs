@@ -71,9 +71,6 @@ pub enum CompositionError {
     /// type, CORE-028 Stage 2C AD-4).
     #[error("entity registration failed: {0}")]
     Entity(#[from] DuplicateEntity),
-    /// The config-to-logger pipeline failed during initialization.
-    #[error("logger initialization failed: {0}")]
-    Logger(RuntimeInfraError),
     /// Starting the application's background effects failed.
     #[error("application startup failed: {0}")]
     Startup(RuntimeInfraError),
