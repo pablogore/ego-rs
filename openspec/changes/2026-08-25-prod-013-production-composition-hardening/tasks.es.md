@@ -49,11 +49,11 @@ las dos es comprimible de forma segura sin ocultar riesgo.
 
 ## Fase 1: Fundamento — `Profile` y el Predicado Compartido (AD-1, AD-2, AD-3)
 
-- [ ] 1.1 RED — `crates/persistent-entity/src/profile.rs`: test tabulado `require_configured_matrix` sobre {Dev, Production} × {configurado, no} (4 casos); falla al compilar.
-- [ ] 1.2 GREEN — crear `profile.rs`: enum `Profile` (`Dev` por defecto, `Production`), `require_configured(profile, configured, capability, fix)` (AD-1, AD-3).
-- [ ] 1.3 RED — `crates/persistent-entity/src/error.rs`: test que verifica que el mensaje de `PersistenceCompositionError::NotConfigured` nombra la capacidad Y la llamada de corrección (mismo patrón que `the_refusal_names_the_registration_and_the_opt_out` de PROD-012).
-- [ ] 1.4 GREEN — agregar `PersistenceCompositionError` (AD-2, `thiserror`) a `error.rs`.
-- [ ] 1.5 Cablear `pub mod profile;` en `persistent-entity/src/lib.rs`; agregar `pub use persistent_entity::profile::Profile;` en `service-sdk/src/runtime/mod.rs` (re-exportación de AD-1).
+- [x] 1.1 RED — `crates/persistent-entity/src/profile.rs`: test tabulado `require_configured_matrix` sobre {Dev, Production} × {configurado, no} (4 casos); falla al compilar.
+- [x] 1.2 GREEN — crear `profile.rs`: enum `Profile` (`Dev` por defecto, `Production`), `require_configured(profile, configured, capability, fix)` (AD-1, AD-3).
+- [x] 1.3 RED — `crates/persistent-entity/src/error.rs`: test que verifica que el mensaje de `PersistenceCompositionError::NotConfigured` nombra la capacidad Y la llamada de corrección (mismo patrón que `the_refusal_names_the_registration_and_the_opt_out` de PROD-012).
+- [x] 1.4 GREEN — agregar `PersistenceCompositionError` (AD-2, `thiserror`) a `error.rs`.
+- [x] 1.5 Cablear `pub mod profile;` en `persistent-entity/src/lib.rs`; agregar `pub use persistent_entity::profile::Profile;` en `service-sdk/src/runtime/mod.rs` (re-exportación de AD-1).
 
 ## Fase 2: Gate de `EntityRuntimeBuilder` + `try_build()` (AD-4, AD-6, AD-7)
 

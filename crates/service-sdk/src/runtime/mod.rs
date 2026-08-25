@@ -21,6 +21,7 @@ pub use idempotency::{
 };
 pub use logger::build_logger;
 pub use permit::CrossTenantPermit;
+pub use persistent_entity::profile::Profile;
 pub use resolvable::{HasServiceTag, Resolvable, ResolvableContainer};
 pub use retention::{RetentionPolicy, RetentionPolicyError};
 pub use runtime_builder::{DependencyKind, RuntimeError, RuntimeInner, SecurityDenialKind};

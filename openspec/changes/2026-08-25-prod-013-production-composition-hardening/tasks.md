@@ -47,11 +47,11 @@ not padding, and cannot be skipped once WU4 ships. Neither is safely compressibl
 
 ## Phase 1: Foundation — `Profile` and the Shared Predicate (AD-1, AD-2, AD-3)
 
-- [ ] 1.1 RED — `crates/persistent-entity/src/profile.rs`: table-driven test `require_configured_matrix` over {Dev, Production} × {configured, not} (4 cases); fails to compile.
-- [ ] 1.2 GREEN — create `profile.rs`: `Profile` enum (`Dev` default, `Production`), `require_configured(profile, configured, capability, fix)` (AD-1, AD-3).
-- [ ] 1.3 RED — `crates/persistent-entity/src/error.rs`: test asserting `PersistenceCompositionError::NotConfigured`'s message names the capability AND the fix call (mirrors PROD-012's `the_refusal_names_the_registration_and_the_opt_out`).
-- [ ] 1.4 GREEN — add `PersistenceCompositionError` (AD-2, `thiserror`) to `error.rs`.
-- [ ] 1.5 Wire `pub mod profile;` in `persistent-entity/src/lib.rs`; add `pub use persistent_entity::profile::Profile;` in `service-sdk/src/runtime/mod.rs` (AD-1 re-export).
+- [x] 1.1 RED — `crates/persistent-entity/src/profile.rs`: table-driven test `require_configured_matrix` over {Dev, Production} × {configured, not} (4 cases); fails to compile.
+- [x] 1.2 GREEN — create `profile.rs`: `Profile` enum (`Dev` default, `Production`), `require_configured(profile, configured, capability, fix)` (AD-1, AD-3).
+- [x] 1.3 RED — `crates/persistent-entity/src/error.rs`: test asserting `PersistenceCompositionError::NotConfigured`'s message names the capability AND the fix call (mirrors PROD-012's `the_refusal_names_the_registration_and_the_opt_out`).
+- [x] 1.4 GREEN — add `PersistenceCompositionError` (AD-2, `thiserror`) to `error.rs`.
+- [x] 1.5 Wire `pub mod profile;` in `persistent-entity/src/lib.rs`; add `pub use persistent_entity::profile::Profile;` in `service-sdk/src/runtime/mod.rs` (AD-1 re-export).
 
 ## Phase 2: `EntityRuntimeBuilder` Gate + `try_build()` (AD-4, AD-6, AD-7)
 
