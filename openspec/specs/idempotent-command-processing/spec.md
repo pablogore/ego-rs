@@ -286,7 +286,7 @@ vector, not merely a correctness defect.
 - THEN the real tenant's request is evaluated independently; the systemwide
   response is never replayed to it, and vice versa
 
-### Requirement: The Guarantee Is Protocol-Neutral, Demonstrated By Two Adapters
+### Requirement: The Guarantee Is Protocol-Neutral, Demonstrated By Two Key Carriers
 
 Idempotency MUST NOT depend on any protocol type. `OperationKey`,
 `OperationFingerprint`, key validation and the missing-key policy MUST live in the
@@ -299,12 +299,27 @@ accident, two cannot. HTTP and gRPC are the required minimum for this capability
 Every adapter MUST report the same three states, `Absent`, `Present` and
 `Unreadable`, and MUST NOT redefine validation or enforcement for its protocol.
 
+This requirement is about key-carrier conformance, not about a second working
+command-dispatch transport: only the HTTP adapter dispatches real commands through
+the idempotency-aware path today. The gRPC carrier (`GrpcMetadataCarrier`)
+implements `OperationKeyCarrier` and passes the shared harness for
+`idempotency-key` metadata extraction, but no gRPC service, socket, or command
+dispatch path exists in the workspace — a claim of "two working transports for
+commands" would be false.
+
 #### Scenario: Two adapters resolve identically for every input class
 - GIVEN an HTTP carrier and a gRPC metadata carrier
 - WHEN each is presented with an absent key, a valid key, an invalid key and a value
   that cannot be read as text
 - THEN both resolve to the identical outcome for every class, under both the
   fail-closed and the compatibility enforcement modes
+
+#### Scenario: gRPC conformance is extraction-only, not a dispatch claim
+- GIVEN the gRPC metadata carrier's `OperationKeyCarrier` implementation
+- WHEN its conformance-harness result is cited as evidence
+- THEN it establishes only that its key extraction matches HTTP's for every input
+  class — it is never read as evidence of a working gRPC command-dispatch path,
+  because none exists in the workspace
 
 #### Scenario: No protocol type reaches the core
 - GIVEN the domain layer, the entity runtime, and the reservation and receipt surfaces

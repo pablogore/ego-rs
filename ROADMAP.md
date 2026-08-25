@@ -843,7 +843,7 @@ transaction as its events.
 Delivered:
 
 * [x] `OperationKey` / `OperationFingerprint` / `OperationIdentity`, distinct from `IdempotencyKey` with no conversion between them
-* [x] Protocol-neutral extraction, demonstrated by two conforming adapters — HTTP `Idempotency-Key` and gRPC `idempotency-key` metadata — judged by one shared conformance harness
+* [x] Protocol-neutral key extraction, judged by one shared conformance harness. Only the HTTP adapter dispatches real commands under `Idempotency-Key`; the gRPC adapter contributes `GrpcMetadataCarrier`'s `idempotency-key` metadata extraction only — the harness proves its key-reading behaviour matches HTTP's, but there is no real gRPC service/socket/command dispatch path in the workspace (`crates/transport/src/lib.rs:10-32` self-documents this). This is not a second working transport for commands, only a conforming key carrier.
 * [x] Protocol neutrality enforced structurally: no transport type reaches the domain, reservation or receipt surfaces
 * [x] `IdempotencyEnforcementMode`, fail-closed by default, with a bounded compatibility variant as the operational kill switch
 * [x] `OperationReservationStore` port, in-memory double and PostgreSQL implementation, with lease, owner, fencing token and atomic takeover
@@ -859,11 +859,19 @@ Delivered:
 * [x] `aggregate_type` promoted to a real column, with an abort-on-ambiguity backfill and an exact reverse migration
 * [x] Dual-aggregate recovery after mid-operation process death, proven against real PostgreSQL
 
+2026-08-25 hardening pass — a follow-up audit found one structural bypass and three test-coverage gaps against the guarantees above; all four are now closed with real evidence (see `openspec/changes/archive/2026-08-25-PROD-012A-idempotency-closure-hardening/`):
+
+* [x] Structural bypass closed: `#[idempotent]` was a fully optional attribute with nothing at the SDK level enforcing `mutating ⇒ idempotent`. `crates/service-sdk/tests/idempotent_marker_lint.rs` now structurally fails the build if any `#[operation]` lacks `#[idempotent]`, scanning `crates/*/src` and `examples/*/src`.
+* [x] Real multi-node race proof: `integration-tests/tests/infrastructure/concurrent_replicas_postgres.rs` now has both racing replicas write through a real, shared `EntityEventStores::open(pool.clone())` and the production `compose_entity_runtimes` wiring (previously each replica's writes went through a private in-memory store), proving exactly one durable event set and one confirmed receipt exists for the contended key.
+* [x] Single-aggregate crash-after-commit proof, previously only proven for the dual-aggregate case: `integration-tests/tests/infrastructure/single_aggregate_crash_recovery_postgres.rs` kills a real child process (`std::process::abort()`) after a real Postgres commit and proves a retry from a fresh process/pool/owner replays the result with zero handler re-execution and zero duplicate rows.
+* [x] Real-Postgres isolation proof for tenant / aggregate_type / aggregate_id, previously only structural/catalog-level: `integration-tests/tests/infrastructure/receipt_identity_isolation_postgres.rs` holds 3 of the 4 identity fields fixed and varies one at a time against real Postgres receipts, including a negative control and the NULL/systemwide-tenant partition.
+
 Deliberately **not** promised, and documented as such:
 
 * The dual-aggregate write is **not** atomic. A retry after a partial failure resumes; it does not repeat.
 * A key arriving more than once, or coalesced by an intermediary into one comma-separated value, is admitted first-value-wins. The behaviour is measured and asserted on both adapters rather than closed; every candidate rule was a non-retryable `400` that the compatibility mode cannot admit.
-* The reservation conformance harness is not driven against PostgreSQL; the durable adapter's multi-scope tenant predicates have no test reaching them with two scopes.
+* The durable adapter's multi-scope tenant predicates are now proven against real Postgres receipts, holding tenant/aggregate_type/aggregate_id fixed pairwise (`integration-tests/tests/infrastructure/receipt_identity_isolation_postgres.rs`). The reservation conformance harness itself — the generic, parametrized suite that both the in-memory double and the Postgres adapter run through — is still not driven against PostgreSQL as one of its parametrized targets; that narrower harness-parametrization gap remains open.
+* `EntityRuntimeBuilder::build()` (`crates/persistent-entity/src/builder.rs:279-281`) still silently defaults to a non-durable in-memory event store when `.with_event_store()` is never called. No production path hits this today, but it is an unguarded footgun for a future host. Newly noted by the 2026-08-25 audit; scoped as future composition-root hardening, not a PROD-012 blocker.
 
 No PROD-013 was created. The identifier stays reserved for the next topic.
 
