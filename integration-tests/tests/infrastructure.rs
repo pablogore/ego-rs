@@ -69,10 +69,17 @@ mod infrastructure {
     mod fencing_window_postgres;
     mod oldest_completed_postgres;
     mod purge_progress_postgres;
+    mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;
     /// Not named `*_postgres` like its neighbours, because it is not a scenario
     /// traversing the framework at all: it reads PostgreSQL's own catalog and
     /// asserts the shape of the indexes the other modules depend on.
     mod schema_index_assertion;
+    /// Unix only, structurally rather than by accident — same reasoning as
+    /// `dual_aggregate_crash_recovery_postgres`: the scenario's whole point is
+    /// that the child dies by **SIGABRT**, and reading a signal from an exit
+    /// status is `std::os::unix`.
+    #[cfg(unix)]
+    mod single_aggregate_crash_recovery_postgres;
     mod takeover_fencing_postgres;
 }

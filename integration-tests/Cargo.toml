@@ -53,7 +53,9 @@ ego-domain = { path = "../crates/domain" }
 ego-effect-store = { path = "../crates/effect-store", features = ["postgres"] }
 ego-persistence = { path = "../crates/persistence" }
 ego-runtime = { path = "../crates/runtime" }
+ego-security-sdk = { path = "../crates/security-sdk" }
 ego-service-sdk = { path = "../crates/service-sdk" }
+ego-service-sdk-macros = { path = "../crates/service-sdk-macros" }
 ego-testkit = { path = "../crates/testkit" }
 ego-transport = { path = "../crates/transport" }
 persistent-entity = { path = "../crates/persistent-entity" }

@@ -7,7 +7,17 @@
 //! guards, twice over) → the generated `#[idempotent]` dispatch → two separate
 //! `PostgresOperationReservationStore` instances on two separate connection pools
 //! → one `INSERT … ON CONFLICT DO NOTHING` against a real PostgreSQL, with real
-//! migrations.
+//! migrations → for whichever replica the reservation admits, the same
+//! `EntityEventStores::open` + `compose_entity_runtimes` composition production
+//! uses, so its `TenantOrganization`/`User` writes land as real events and real
+//! confirmed receipts, not an in-memory stand-in.
+//!
+//! Earlier, only the reservation race above was real: both replicas' aggregate
+//! writes went through `EntityRuntimeBuilder::new().build()`'s in-memory default,
+//! and the two replicas did not even share that memory — so nothing here could
+//! have told "the winner's write is durable" apart from "the winner's closure
+//! ran". The assertions after the reservation race now read the real `events`
+//! and `operation_receipts` tables to close that gap.
 //!
 //! **Why in-process cannot show this.** Two concurrently released reservation
 //! attempts resolving to one durable winner is a database outcome. The two runtimes
@@ -86,14 +96,14 @@ use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::{IdempotencyEnforcementMode, RuntimeBuilder};
 use ego_testkit::{ScriptedAuthorizationProvider, TestJwtBuilder};
 use ego_transport::AppState;
-use persistent_entity::builder::EntityRuntimeBuilder;
 use reference_app::application::{
     RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserImpl,
     RegisterUserTag,
 };
 use reference_app::ports::http::build_router;
 use reference_app::{
-    build_runtime_in_memory, AppConfig, BuiltRuntime, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
+    build_runtime_in_memory, compose_entity_runtimes, AppConfig, BuiltRuntime, EntityEventStores,
+    DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -242,7 +252,7 @@ struct Replica {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn replica(
+async fn replica(
     owner: &str,
     pool: PgPool,
     start_line: Arc<Barrier>,
@@ -258,11 +268,20 @@ fn replica(
         ..
     } = build_runtime_in_memory(&AppConfig::default()).expect("build_runtime succeeds");
 
-    let real: Arc<dyn RegisterUser> = Arc::new(RegisterUserImpl::new(
-        Arc::new(EntityRuntimeBuilder::new().build()),
-        Arc::new(EntityRuntimeBuilder::new().build()),
-        None,
-    ));
+    // Real durable event stores, on this replica's own pool — the exact
+    // composition `dual_aggregate_crash_recovery_postgres.rs` and production's
+    // own `build_runtime_with` use (`EntityEventStores::open` +
+    // `compose_entity_runtimes`), not a hand-rolled substitute. Before this,
+    // each replica's aggregate writes went through an in-memory
+    // `EntityRuntimeBuilder::new().build()` that the two replicas did not even
+    // share, so only the reservation-ownership race was ever real; the
+    // aggregate write itself was mocked into always looking safe.
+    let stores = EntityEventStores::open(pool.clone())
+        .await
+        .expect("the event stores open against the migrated database");
+    let runtimes = compose_entity_runtimes(stores, None);
+    let real: Arc<dyn RegisterUser> =
+        Arc::new(RegisterUserImpl::new(runtimes.org, runtimes.user, None));
     let observed: Arc<dyn RegisterUser> = Arc::new(ObservedRegister {
         inner: real,
         calls,
@@ -359,6 +378,28 @@ async fn rows_for(pool: &PgPool, key: &str) -> i64 {
         .expect("the count comes back")
 }
 
+/// How many events a real aggregate durably holds, across the whole test — the
+/// database is fresh per test, so this is exactly what this run wrote.
+async fn event_count(pool: &PgPool, aggregate_type: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE aggregate_type = $1")
+        .bind(aggregate_type)
+        .fetch_one(pool)
+        .await
+        .expect("the count comes back")
+}
+
+/// How many confirmed receipts a real aggregate holds under one operation key.
+async fn receipt_count(pool: &PgPool, aggregate_type: &str, key: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operation_receipts WHERE aggregate_type = $1 AND operation_key = $2",
+    )
+    .bind(aggregate_type)
+    .bind(key)
+    .fetch_one(pool)
+    .await
+    .expect("the count comes back")
+}
+
 async fn state_and_response(pool: &PgPool, key: &str) -> (String, Option<Vec<u8>>) {
     sqlx::query_as("SELECT state, response FROM operation_reservations WHERE operation_key = $1")
         .bind(key)
@@ -400,7 +441,8 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
         completes.clone(),
         calls.clone(),
         Some(gate.clone()),
-    );
+    )
+    .await;
     let b = replica(
         "replica-b",
         pool_b.clone(),
@@ -410,7 +452,8 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
         completes.clone(),
         calls.clone(),
         Some(gate.clone()),
-    );
+    )
+    .await;
 
     let task_a = tokio::spawn(async move { send(a.router, CONTENDED_KEY).await });
     let task_b = tokio::spawn(async move { send(b.router, CONTENDED_KEY).await });
@@ -503,6 +546,38 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
         "and that answer is durable, not just returned"
     );
 
+    // --- What "one execution" actually wrote -----------------------------
+    //
+    // Everything above proves the reservation row admits exactly one winner.
+    // This proves what the winner's execution *did*: a real Postgres event
+    // append and a real confirmed receipt per aggregate — and, by the same
+    // counts, that the loser (refused before `RegisterUserImpl::register` ever
+    // ran) durably wrote nothing at all. An in-memory event store — what both
+    // replicas used before this test's fix — could not tell "one real append"
+    // apart from "one closure ran"; only a real, shared-nothing durable store
+    // can.
+    assert_eq!(
+        event_count(&observer, "tenant_organization").await,
+        1,
+        "the winner's org write is a real, durable event — exactly once"
+    );
+    assert_eq!(
+        event_count(&observer, "user").await,
+        1,
+        "the winner's user write is a real, durable event — exactly once"
+    );
+    assert_eq!(
+        receipt_count(&observer, "tenant_organization", CONTENDED_KEY).await,
+        1,
+        "one confirmed org receipt under the contended key; the loser reached \
+         no aggregate to confirm one against"
+    );
+    assert_eq!(
+        receipt_count(&observer, "user", CONTENDED_KEY).await,
+        1,
+        "one confirmed user receipt under the contended key, for the same reason"
+    );
+
     // -----------------------------------------------------------------------
     // The control: different keys must both execute
     // -----------------------------------------------------------------------
@@ -529,7 +604,8 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
         control_completes.clone(),
         control_calls.clone(),
         None,
-    );
+    )
+    .await;
     let cb = replica(
         "replica-b",
         pool_b.clone(),
@@ -539,7 +615,8 @@ async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
         control_completes.clone(),
         control_calls.clone(),
         None,
-    );
+    )
+    .await;
 
     let ct_a = tokio::spawn(async move { send(ca.router, CONTROL_KEY_A).await });
     let ct_b = tokio::spawn(async move { send(cb.router, CONTROL_KEY_B).await });
