@@ -69,6 +69,7 @@ mod infrastructure {
     mod fencing_window_postgres;
     mod oldest_completed_postgres;
     mod purge_progress_postgres;
+    mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;
     /// Not named `*_postgres` like its neighbours, because it is not a scenario
     /// traversing the framework at all: it reads PostgreSQL's own catalog and
