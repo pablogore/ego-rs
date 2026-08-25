@@ -331,26 +331,36 @@ fn input() -> EnsureOrgInput {
 }
 
 // --- durable observations ---------------------------------------------------
+//
+// None of the three helpers below filter by tenant_id. `isolated_database()`
+// gives this test its own PostgreSQL *database* (`CREATE DATABASE ... TEMPLATE
+// ...`), not merely its own rows in a shared one, so there is no other
+// tenant's data anywhere in it to leak into these counts — the isolation this
+// scenario needs is enforced one level up, not by this filter.
+//
+// It would also be the wrong filter to add: `productive_app` below never
+// disables `EntityRuntimeBuilder`'s `single_tenant_mode` (default `true`), so
+// `org_runtime` stamps every event and receipt it writes with the literal
+// tenant `"default"` — not `TENANT` ("tenant-e2"), which only reaches the
+// *reservation* store, through `ServiceContext`'s principal. Filtering
+// `events`/`operation_receipts` on `TENANT` would silently read back zero
+// rows regardless of whether the write succeeded.
 
 async fn event_count(pool: &PgPool, aggregate_type: &str) -> i64 {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE aggregate_type = $1 AND tenant_id = $2",
-    )
-    .bind(aggregate_type)
-    .bind(TENANT)
-    .fetch_one(pool)
-    .await
-    .expect("the count comes back")
+    sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE aggregate_type = $1")
+        .bind(aggregate_type)
+        .fetch_one(pool)
+        .await
+        .expect("the count comes back")
 }
 
 async fn receipt_count(pool: &PgPool, aggregate_type: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM operation_receipts \
-         WHERE aggregate_type = $1 AND operation_key = $2 AND tenant_id = $3",
+         WHERE aggregate_type = $1 AND operation_key = $2",
     )
     .bind(aggregate_type)
     .bind(KEY)
-    .bind(TENANT)
     .fetch_one(pool)
     .await
     .expect("the count comes back")
@@ -359,15 +369,11 @@ async fn receipt_count(pool: &PgPool, aggregate_type: &str) -> i64 {
 /// `(state, response)` for the one reservation row this scenario writes, or
 /// `None` if it does not exist yet.
 async fn reservation_state(pool: &PgPool) -> Option<(String, Option<Vec<u8>>)> {
-    sqlx::query_as(
-        "SELECT state, response FROM operation_reservations \
-         WHERE operation_key = $1 AND tenant_id = $2",
-    )
-    .bind(KEY)
-    .bind(TENANT)
-    .fetch_optional(pool)
-    .await
-    .expect("the reservation reads back")
+    sqlx::query_as("SELECT state, response FROM operation_reservations WHERE operation_key = $1")
+        .bind(KEY)
+        .fetch_optional(pool)
+        .await
+        .expect("the reservation reads back")
 }
 
 /// Everything this process's `idempotency.reservation.outcome` counted.
