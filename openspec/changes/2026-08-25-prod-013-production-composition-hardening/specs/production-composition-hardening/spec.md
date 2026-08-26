@@ -114,18 +114,29 @@ app's own production composition root, `observed_entity_runtime`
 - THEN it succeeds, falling back to `InMemorySnapshotStore` for the
   unconfigured capability, byte-for-byte as before this change
 
-### Requirement: One Validator Is The Single Source Of Truth
+### Requirement: One Shared Predicate Is The Single Source Of Truth For The Rule
 
-Exactly one private validator MUST implement the rule across all three
-capabilities (event store, snapshot store, effect store). No second,
-parallel check MUST exist anywhere in the composition path.
+Exactly one shared predicate MUST decide "declared production + capability
+not durably configured = refuse" for all three capabilities (event store,
+snapshot store, effect store). Because the capabilities live across a
+one-way crate boundary (`persistent-entity` cannot see `service-sdk`'s
+effect-store types), this predicate cannot itself inspect either builder
+directly: each composition surface (`EntityRuntimeBuilder`'s
+`validate_persistence()`, `RuntimeBuilder`'s
+`validate_persistence_profile()`) MUST compute its own capability's answer
+locally and pass it to the one shared predicate — never restate the
+refuse/allow decision itself. No second, independently-maintained
+definition of the decision MUST exist anywhere in the composition path.
 
-#### Scenario: All three capabilities route through the same validator
+#### Scenario: All three capabilities' decision routes through the same predicate
 - GIVEN the composition path from `EntityRuntimeBuilder` and
   `RuntimeBuilder`/`AppBuilder`
 - WHEN the codebase is inspected for capability-gating logic
-- THEN exactly one validator per composition surface implements the rule;
-  no duplicate, independently-maintained check exists
+- THEN every gate call site computes its own local answer (is a durable
+  implementation configured for *this* capability?) and passes it to the
+  one shared predicate that decides refuse-or-allow; no call site
+  reimplements that decision itself, and no duplicate, independently
+  drifting definition of "refuse" exists
 
 ### Requirement: Rejections Are Actionable
 

@@ -121,20 +121,31 @@ composición de producción de la reference app, `observed_entity_runtime`
 - ENTONCES tiene éxito, cayendo a `InMemorySnapshotStore` para la
   capacidad sin configurar, byte a byte como antes de este cambio
 
-### Requisito: Un Validador Es la Única Fuente de Verdad
+### Requisito: Un Predicado Compartido Es la Única Fuente de Verdad de la Regla
 
-Exactamente un validador privado DEBE implementar la regla a través de las
-tres capacidades (event store, snapshot store, effect store). NO DEBE
-existir ningún segundo chequeo paralelo en ningún punto del camino de
-composición.
+Exactamente un predicado compartido DEBE decidir "producción declarada +
+capacidad no configurada con durabilidad = rechazo" para las tres
+capacidades (event store, snapshot store, effect store). Como las
+capacidades viven a través de un límite de crates de una sola dirección
+(`persistent-entity` no puede ver los tipos de effect store de
+`service-sdk`), este predicado no puede inspeccionar ninguno de los dos
+builders directamente: cada superficie de composición (`validate_persistence()`
+de `EntityRuntimeBuilder`, `validate_persistence_profile()` de
+`RuntimeBuilder`) DEBE calcular localmente la respuesta de su propia
+capacidad y pasarla al único predicado compartido — nunca reformular la
+decisión de rechazar/permitir por sí misma. NO DEBE existir ninguna
+segunda definición, mantenida de forma independiente, de esa decisión en
+ningún punto del camino de composición.
 
-#### Escenario: Las tres capacidades pasan por el mismo validador
+#### Escenario: La decisión de las tres capacidades pasa por el mismo predicado
 - DADO el camino de composición desde `EntityRuntimeBuilder` y
   `RuntimeBuilder`/`AppBuilder`
 - CUANDO se inspecciona el código en busca de lógica de puerta de capacidad
-- ENTONCES exactamente un validador por superficie de composición implementa
-  la regla; no existe ningún chequeo duplicado mantenido de forma
-  independiente
+- ENTONCES cada call site del gate calcula su propia respuesta local
+  (¿hay una implementación durable configurada para *esta* capacidad?) y
+  se la pasa al único predicado compartido que decide rechazar-o-permitir;
+  ningún call site reimplementa esa decisión por sí mismo, y no existe
+  ninguna definición duplicada y divergente de "rechazar"
 
 ### Requisito: Los Rechazos Son Accionables
 
