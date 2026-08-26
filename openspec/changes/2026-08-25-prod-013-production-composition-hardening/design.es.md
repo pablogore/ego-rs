@@ -14,9 +14,13 @@
 ## Enfoque Técnico
 
 Un enum `Profile` vive en el crate más bajo que lo necesita (`persistent-entity`) y se
-reexporta hacia arriba. Un único predicado compartido — `require_configured` — es el
-único lugar donde se decide "producción declarada + capacidad no configurada = rechazo";
-ambos builders lo invocan en lugar de reformular la regla cada uno. Hay dos builders
+reexporta hacia arriba. Un único predicado compartido — `require_durably_configured` —
+es el único lugar donde se decide "producción declarada + capacidad no configurada *con
+durabilidad* = rechazo"; ambos builders lo invocan en lugar de reformular la regla cada
+uno. La señal de durabilidad en sí proviene de una declaración de capability mínima en
+el propio trait de cada store (`is_durable()` para event/snapshot store, reutilizando el
+`EffectStoreCapabilities.durable` ya existente de PROD-002 para el effect store) —
+nunca de si un store simplemente estaba *presente*. Hay dos builders
 porque las capacidades viven en dos crates y el límite de capas es de una sola
 dirección: `EntityRuntimeBuilder` para los stores de eventos y snapshots,
 `RuntimeBuilder` para el effect store. `EntityRuntimeBuilder` gana un hermano
@@ -116,9 +120,17 @@ cierto de lo que el proposal afirmaba, no menos. Cambia dos cosas:
 ## Mapa de Componentes
 
 ```
+crates/domain                                     (traits que implementan ambos stores)
+├── src/persistence/event_store.rs        MOD   + EventStore::is_durable() (default false)
+└── src/persistence/snapshot.rs           MOD   + Snapshot::is_durable() (default false)
+                                                   ↑ implementado por
+crates/persistence                                (implementaciones Postgres)
+├── src/postgres/event_store.rs           MOD   is_durable() -> true
+└── src/postgres/snapshot.rs              MOD   is_durable() -> true
+                                                   ↑ leído por
 crates/persistent-entity                          (capa baja, sin dep de service-sdk)
 ├── src/profile.rs                        NUEVO Profile { Dev, Production }
-│                                               require_configured(...)  ← LA regla
+│                                               require_durably_configured(...)  ← LA regla
 ├── src/error.rs                          MOD   + PersistenceCompositionError
 └── src/builder.rs                        MOD   + .profile(), validate_persistence(),
                                                 try_build(); build() valida+panickea
@@ -147,14 +159,16 @@ Host                                  Framework                       Resultado
 EntityRuntimeBuilder::new()
   .profile(Production)
   .with_event_store(pg)          ──▶  validate_persistence()
-  .with_snapshot_store(pg)              require_configured × 2   ──▶  Ok  → EntityRuntime
-  .try_build()                                                        Err → PersistenceCompositionError
+  .with_snapshot_store(pg)              ¿is_durable()? × 2, luego
+  .try_build()                          require_durably_configured × 2   ──▶  Ok  → EntityRuntime
+                                                                            Err → PersistenceCompositionError
                                                                             (lo maneja el host; AD-6)
 
 App::builder()
   .profile(Production)
   .effect_executor(...)          ──▶  RuntimeBuilder::validate_persistence_profile()
-  .effect_store(pg)                     require_configured × 1   ──▶  Ok  → App
+  .effect_store(pg)                     ¿capabilities().durable?, luego
+                                         require_durably_configured × 1   ──▶  Ok  → App
   .build()                                                            Err → RuntimeError::PersistenceNotConfigured
                                                                             → CompositionError::Validation
 ```
@@ -259,11 +273,14 @@ cualquier actor.
 mensaje difiere en dos `&'static str`; tres variantes significan tres cadenas `#[error]`
 que mantener consistentes, que es exactamente la deriva que SC-8 existe para prevenir.
 
-### AD-3 — Un único predicado compartido, `require_configured`, es la fuente única de verdad a través del límite de capas (IS-6 / SC-8)
+### AD-3 — Un único predicado compartido, `require_durably_configured`, decide rechazar-o-permitir; cada capacidad aporta su propia señal de durabilidad (IS-6 / SC-8)
 
 **Decisión**: la regla es una función libre junto a `Profile`, y todo gate la invoca.
-Es el único lugar del workspace donde las palabras "Production" y "no configurado" se
-encuentran.
+Es el único lugar del workspace donde las palabras "Production" y "no configurado con
+durabilidad" se encuentran. El booleano que recibe DEBE representar durabilidad, nunca
+mera presencia — `Some(store_volátil).is_some()` es `true`, y ese es exactamente el
+error que el nombre del argumento de este predicado existe para volver difícil de
+cometer por accidente.
 
 ```rust
 // crates/persistent-entity/src/profile.rs
@@ -278,14 +295,18 @@ use crate::error::PersistenceCompositionError;
 /// `EffectStateStore`. Reformular la regla una vez por crate crearía exactamente
 /// el segundo chequeo paralelo que SC-8 prohíbe; pasar los tres hechos variables
 /// como argumentos la mantiene única.
-pub fn require_configured(
+///
+/// `durably_configured`, no `configured`: cada call site DEBE calcular esto a
+/// partir de la propia declaración de durabilidad de la capacidad (abajo), nunca
+/// solo de `.is_some()` — presencia y durabilidad son propiedades distintas.
+pub fn require_durably_configured(
     profile: Profile,
-    configured: bool,
+    durably_configured: bool,
     capability: &'static str,
     fix: &'static str,
 ) -> Result<(), PersistenceCompositionError> {
     match profile {
-        Profile::Production if !configured => {
+        Profile::Production if !durably_configured => {
             Err(PersistenceCompositionError::NotConfigured { capability, fix })
         }
         _ => Ok(()),
@@ -293,11 +314,12 @@ pub fn require_configured(
 }
 ```
 
-**Criterios**: (a) SC-8 exige un validador único como fuente de verdad "a través de las
-tres capacidades"; (b) debe seguir siendo cierto a través de un límite de capas que
-ninguna función validadora puede cruzar si inspecciona campos del builder directamente
-— por eso la función toma la *respuesta* (`configured: bool`) y no el builder, y cada
-crate conserva solo el acceso a campo de una línea que únicamente él puede hacer;
+**Criterios**: (a) SC-8 exige un predicado compartido único como fuente de verdad para
+la *decisión* de rechazar/permitir "a través de las tres capacidades"; (b) debe seguir
+siendo cierto a través de un límite de capas que ninguna función puede cruzar si
+inspecciona campos del builder directamente — por eso la función toma la *respuesta*
+(`durably_configured: bool`) y no el builder, y cada superficie de composición conserva
+solo el chequeo de capacidad de una línea que únicamente ella puede hacer;
 (c) `persistent-entity` genuinamente no puede ver el effect store: `EffectStateStore` y
 `EffectDedupStore` son tipos de `ego-runtime` alcanzados vía `service-sdk`
 (`builder.rs:12`), e importarlos hacia abajo invertiría la dependencia que
@@ -306,21 +328,62 @@ crate conserva solo el acceso a campo de una línea que únicamente él puede ha
 **Esta es la respuesta honesta a la pregunta que el proposal difirió** ("¿hay una forma
 de unificarlo en un solo punto pese al layering?"): sí, pero solo extrayendo la
 *decisión* en lugar de la *inspección*. La decisión es la parte que podría derivar y la
-parte de la que trata SC-8. La inspección es `self.event_store.is_none()` — un acceso a
-campo sin nada que equivocar y sin nada que mantener sincronizado.
+parte de la que trata SC-8. La inspección es la respuesta de dos partes de abajo.
 
-**Consecuencia**: los call sites por capacidad se vuelven declaraciones de hecho, y las
-cadenas de capacidad/arreglo viven en el sitio dueño de la llamada que se recomienda:
+**De dónde viene la señal de durabilidad en sí** (la propiedad que este predicado puede
+recibir pero no puede fabricar): una declaración de capability mínima en el propio
+trait de cada store, espejando el patrón que PROD-002 ya estableció para el effect
+store.
+
+```rust
+// crates/domain/src/persistence/event_store.rs — EventStore<E>, y el método
+// estructuralmente idéntico en crates/domain/src/persistence/snapshot.rs's Snapshot
+fn is_durable(&self) -> bool {
+    false   // default: honesto para toda implementación existente y de terceros
+}
+```
+
+`InMemoryEventStore`/`InMemorySnapshotStore`/`NoopEventStore`/`NoopSnapshotStore`
+heredan este default sin tocar — nada de ellos cambia. `PostgreSQLEventStore`/
+`PostgreSQLSnapshotStore` lo sobreescriben a `true`. El effect store no necesita ningún
+método de trait nuevo en absoluto: `EffectStateStore::capabilities() ->
+EffectStoreCapabilities { durable, ... }` ya existe (PROD-002 AD-3,
+`crates/runtime/src/effects/store.rs:238-244`), tiene default `durable: false`, y toda
+implementación Postgres del effect store ya lo sobreescribe a `true`
+(`crates/effect-store/src/postgres/mod.rs:379-386`, `:690-697`) — el AD-5 de abajo
+reutiliza `capabilities().durable` directamente.
+
+**Por qué un método de trait, y no un downcast, un tipo marcador, o un registro
+separado**: (a) un downcast a un tipo concreto `InMemoryEventStore`/
+`PostgreSQLEventStore` haría que el gate no pudiera reconocer ninguna implementación
+durable de terceros — tendría que enumerar por nombre cada tipo concreto del workspace,
+para siempre; un método de trait lo responde la propia implementación, así que un store
+durable de un crate externo simplemente lo sobreescribe y queda reconocido sin ningún
+cambio del lado del gate. (b) Ningún método de trait existente necesitó cambiar firma
+ni comportamiento — esto es aditivo, así que nada que ya implemente
+`EventStore`/`Snapshot` se rompe al heredar el default. (c) Un solo `bool` es
+proporcional: ninguno de los dos traits declara hoy ninguna otra capability, así que
+una struct `Capabilities` completa (como ya tiene el effect store, para cuatro
+preocupaciones *distintas* — durabilidad, seguridad de concurrencia local, seguridad
+multi-nodo, soporte de leases) sería una ceremonia de un solo campo copiada sin
+motivo; si alguna vez se necesita acá una segunda preocupación de capability, ese es el
+momento de introducir una struct, no antes.
+
+**Consecuencia**: los call sites por capacidad se vuelven declaraciones de hecho —
+calculadas a partir de la durabilidad, nunca de la presencia — y las cadenas de
+capacidad/arreglo viven en el sitio dueño de la llamada que se recomienda:
 
 ```rust
 // crates/persistent-entity/src/builder.rs
 fn validate_persistence(&self) -> Result<(), PersistenceCompositionError> {
-    require_configured(
-        self.profile, self.event_store.is_some(),
+    require_durably_configured(
+        self.profile,
+        self.event_store.as_ref().is_some_and(|s| s.is_durable()),
         "event store", "EntityRuntimeBuilder::with_event_store(store)",
     )?;
-    require_configured(
-        self.profile, self.snapshot_store.is_some(),
+    require_durably_configured(
+        self.profile,
+        self.snapshot_store.as_ref().is_some_and(|s| s.is_durable()),
         "snapshot store", "EntityRuntimeBuilder::with_snapshot_store(store)",
     )
 }
@@ -330,6 +393,14 @@ El event store se chequea primero, deliberadamente: cuando faltan ambos, quien l
 el que con mucha más probabilidad quería configurar, y PROD-012 estableció que un
 rechazo reporta la primera violación y no una lista
 (`try_build_fails_before_startup_when_declared_entity_dependency_is_missing`).
+
+**Nota de revisión**: un borrador anterior de esta sección calculaba el argumento a
+partir de `self.event_store.is_some()` — presencia, no durabilidad — lo cual un revisor
+marcó correctamente antes de que se implementara nada: `Some(InMemoryEventStore::new())`
+y `Some(PostgreSQLEventStore::open(pool))` son indistinguibles bajo `.is_some()`, así
+que `Profile::Production` habría aceptado un store volátil cableado explícitamente.
+Cerrado acá, en esta misma decisión, antes de que WU2 la implemente — no como un parche
+posterior.
 
 ### AD-4 — `EntityRuntimeBuilder` gana `try_build()`, espejando PROD-012 exactamente (resuelve R-3)
 
@@ -411,9 +482,11 @@ fn validate_persistence_profile(&self) -> Result<(), RuntimeError> {
     if self.effect_executors.is_empty() {
         return Ok(());
     }
-    require_configured(
+    require_durably_configured(
         self.profile,
-        self.effect_state_store.is_some(),
+        self.effect_state_store
+            .as_ref()
+            .is_some_and(|s| s.capabilities().durable),
         "effect store",
         "RuntimeBuilder::with_effect_store(store) (or AppBuilder::effect_store(store))",
     )?;
@@ -787,8 +860,8 @@ antes de GREEN, cada vía de error aseverando el error específico y no `is_err(
 
 | Nivel | Ubicación | Qué prueba |
 |---|---|---|
-| Unit | `crates/persistent-entity/src/profile.rs` `#[cfg(test)]` | `require_configured` sobre la matriz completa: {Dev, Production} × {configurado, no} — cuatro casos, un test table-driven |
-| Unit | `crates/persistent-entity/src/builder.rs` `#[cfg(test)]` | SC-1, SC-2 (`try_build` rechaza, nombrando la capacidad **y** la llamada de arreglo), SC-5 (Dev + nada configurado igual construye), y que `build()` panickea con el mismo input que `try_build()` rechaza |
+| Unit | `crates/persistent-entity/src/profile.rs` `#[cfg(test)]` | `require_durably_configured` sobre la matriz completa: {Dev, Production} × {configurado con durabilidad, no} — cuatro casos, un test table-driven; más un test de regresión fijado probando que la presencia sola (`is_some()`) nunca se acepta como durabilidad |
+| Unit | `crates/persistent-entity/src/builder.rs` `#[cfg(test)]` | SC-1, SC-2 (`try_build` rechaza, nombrando la capacidad **y** la llamada de arreglo), SC-5 (Dev + nada configurado igual construye), que `build()` panickea con el mismo input que `try_build()` rechaza, y que un store en memoria explícito bajo `Profile::Production` se rechaza exactamente igual que uno faltante |
 | Unit | `crates/persistent-entity/src/error.rs` `#[cfg(test)]` | el mensaje nombra la capacidad y la llamada exacta de arreglo, espejando `the_refusal_names_the_registration_and_the_opt_out` de PROD-012 (IS-7) |
 | Unit | `crates/service-sdk/src/runtime/builder.rs` `#[cfg(test)]` | SC-3; que sin executor registrado no hay rechazo (AD-5); que `build()`/`try_build()` coinciden |
 | Integración | `crates/service-sdk/tests/` | el rechazo emerge como `CompositionError::Validation` a través de `AppBuilder::build()` |

@@ -23,7 +23,7 @@
 //! - [`passivation_signal`]: Runtime-agnostic passivation signal trait
 //! - [`snapshot`]: Snapshot strategy definitions
 //! - [`error`]: Error types for the persistent entity system
-//! - [`profile`]: `Profile` and the `require_configured` composition gate (PROD-013)
+//! - [`profile`]: `Profile` and the `require_durably_configured` composition gate (PROD-013)
 //! - [`testing`]: Test helpers and utilities
 
 pub mod actor;

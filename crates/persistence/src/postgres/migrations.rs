@@ -32,6 +32,11 @@ const MIGRATION_010_CREATE_OPERATION_RESERVATIONS: &str =
 const MIGRATION_011_CREATE_OPERATION_RECEIPTS: &str =
     include_str!("migrations/011_create_operation_receipts.sql");
 
+/// Migration SQL for the pair of partial unique indexes that fix the
+/// snapshots table's tenant-null uniqueness (PROD-013).
+const MIGRATION_012_FIX_SNAPSHOTS_TENANT_NULL_UNIQUENESS: &str =
+    include_str!("migrations/012_fix_snapshots_tenant_null_uniqueness.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -76,6 +81,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "011_create_operation_receipts",
             MIGRATION_011_CREATE_OPERATION_RECEIPTS,
+        ),
+        (
+            "012_fix_snapshots_tenant_null_uniqueness",
+            MIGRATION_012_FIX_SNAPSHOTS_TENANT_NULL_UNIQUENESS,
         ),
     ]
 }

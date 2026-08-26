@@ -45,6 +45,16 @@ use crate::persistence::{PersistenceError, StoredEvent};
 /// would add a boxed future per call to describe a constant.
 #[async_trait]
 pub trait EventStore<E: DomainEvent> {
+    /// Declares whether this store's writes survive a process restart
+    /// (PROD-013). Defaulted to `false` so no existing or third-party
+    /// implementation is silently promoted to "durable" by omission — a
+    /// durable provider overrides this to report its truthful capability.
+    /// Synchronous — a static declaration, no I/O — so it does not disturb
+    /// the `#[async_trait]` / `Send + Sync` shape.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     /// Append events to the event stream for the given aggregate.
     ///
     /// - `aggregate_type`: The registered type this stream belongs to.
