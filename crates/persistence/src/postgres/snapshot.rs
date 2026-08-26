@@ -73,7 +73,7 @@ impl Snapshot for PostgreSQLSnapshotStore {
         let existing_version: Option<i64> = self
             .block_on(async {
                 sqlx::query_scalar(
-                    r#"SELECT version FROM snapshots \
+                    r#"SELECT version FROM snapshots
                        WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
                 )
                 .bind(aggregate_id)
