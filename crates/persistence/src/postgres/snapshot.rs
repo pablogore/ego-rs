@@ -49,6 +49,10 @@ impl PostgreSQLSnapshotStore {
 }
 
 impl Snapshot for PostgreSQLSnapshotStore {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn save_snapshot(
         &mut self,
         aggregate_id: &str,
@@ -58,11 +62,19 @@ impl Snapshot for PostgreSQLSnapshotStore {
     ) -> Result<(), PersistenceError> {
         let tenant = resolve_tenant(tenant_id)?;
 
-        // Check if a snapshot exists for this aggregate
+        // Check if a snapshot exists for this aggregate.
+        //
+        // `tenant_id IS NOT DISTINCT FROM $2`, never `= $2`: a systemwide
+        // scope binds SQL NULL here, and `tenant_id = NULL` is never true
+        // even against a row whose own `tenant_id` is also NULL. `IS NOT
+        // DISTINCT FROM` treats two NULLs as equal while still comparing
+        // non-NULL values with ordinary equality — the same pattern already
+        // used throughout `event_store.rs` for the identical reason.
         let existing_version: Option<i64> = self
             .block_on(async {
                 sqlx::query_scalar(
-                    r#"SELECT version FROM snapshots WHERE aggregate_id = $1 AND tenant_id = $2"#,
+                    r#"SELECT version FROM snapshots
+                       WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
                 )
                 .bind(aggregate_id)
                 .bind(tenant.clone())
@@ -80,22 +92,49 @@ impl Snapshot for PostgreSQLSnapshotStore {
             }
         }
 
-        self.block_on(async {
-            sqlx::query(
-                r#"INSERT INTO snapshots (aggregate_id, tenant_id, version, payload, created_at)
-                   VALUES ($1, $2, $3, $4, NOW())
-                   ON CONFLICT (aggregate_id, tenant_id) DO UPDATE
-                   SET version = $3, payload = $4, created_at = NOW()
-                   WHERE snapshots.aggregate_id = $1 AND snapshots.tenant_id = $2"#,
-            )
-            .bind(aggregate_id)
-            .bind(tenant)
-            .bind(version)
-            .bind(payload)
-            .execute(&self.pool)
-            .await
-        })
-        .map_err(|e| PersistenceError::Internal(format!("failed to save snapshot: {}", e)))?;
+        // `ON CONFLICT` infers the partial index matching this row's own
+        // tenant scope (migration 012: one partial unique index per side of
+        // the `tenant_id IS NULL` split) — branching the statement is what
+        // makes conflict inference exact for each side; a single
+        // `ON CONFLICT (aggregate_id, tenant_id)` cannot target a partial
+        // index at all, and a plain `WHERE tenant_id = $2` in the `DO
+        // UPDATE` guard would go back to being always-false for the
+        // systemwide case.
+        let insert_result = match &tenant {
+            Some(_) => {
+                self.block_on(async {
+                    sqlx::query(
+                        r#"INSERT INTO snapshots (aggregate_id, tenant_id, version, payload, created_at)
+                           VALUES ($1, $2, $3, $4, NOW())
+                           ON CONFLICT (tenant_id, aggregate_id) WHERE tenant_id IS NOT NULL DO UPDATE
+                           SET version = $3, payload = $4, created_at = NOW()"#,
+                    )
+                    .bind(aggregate_id)
+                    .bind(tenant.clone())
+                    .bind(version)
+                    .bind(payload.clone())
+                    .execute(&self.pool)
+                    .await
+                })
+            }
+            None => {
+                self.block_on(async {
+                    sqlx::query(
+                        r#"INSERT INTO snapshots (aggregate_id, tenant_id, version, payload, created_at)
+                           VALUES ($1, NULL, $2, $3, NOW())
+                           ON CONFLICT (aggregate_id) WHERE tenant_id IS NULL DO UPDATE
+                           SET version = $2, payload = $3, created_at = NOW()"#,
+                    )
+                    .bind(aggregate_id)
+                    .bind(version)
+                    .bind(payload)
+                    .execute(&self.pool)
+                    .await
+                })
+            }
+        };
+        insert_result
+            .map_err(|e| PersistenceError::Internal(format!("failed to save snapshot: {}", e)))?;
 
         Ok(())
     }
@@ -111,7 +150,7 @@ impl Snapshot for PostgreSQLSnapshotStore {
             .block_on(async {
                 sqlx::query_as(
                     r#"SELECT id, aggregate_id, tenant_id, version, payload, created_at
-                   FROM snapshots WHERE aggregate_id = $1 AND tenant_id = $2
+                   FROM snapshots WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2
                    ORDER BY version DESC LIMIT 1"#,
                 )
                 .bind(aggregate_id)

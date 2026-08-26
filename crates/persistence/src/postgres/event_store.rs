@@ -123,6 +123,10 @@ where
         + Send
         + Sync,
 {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     async fn append(
         &self,
         aggregate_type: &str,

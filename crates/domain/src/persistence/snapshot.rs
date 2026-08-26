@@ -12,6 +12,14 @@ use serde_json::Value;
 /// Snapshots capture the full state of an aggregate at a given version,
 /// allowing faster reconstruction without replaying all events.
 pub trait Snapshot {
+    /// Declares whether this store's writes survive a process restart
+    /// (PROD-013). Defaulted to `false` so no existing or third-party
+    /// implementation is silently promoted to "durable" by omission — a
+    /// durable provider overrides this to report its truthful capability.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     /// Save a snapshot for the given aggregate.
     ///
     /// - `aggregate_id`: The unique identifier of the aggregate.

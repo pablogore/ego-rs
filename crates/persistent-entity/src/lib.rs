@@ -23,6 +23,7 @@
 //! - [`passivation_signal`]: Runtime-agnostic passivation signal trait
 //! - [`snapshot`]: Snapshot strategy definitions
 //! - [`error`]: Error types for the persistent entity system
+//! - [`profile`]: `Profile` and the `require_durably_configured` composition gate (PROD-013)
 //! - [`testing`]: Test helpers and utilities
 
 pub mod actor;
@@ -45,6 +46,9 @@ pub mod passivation;
 pub mod passivation_signal;
 pub mod persistence;
 pub mod persistent_entity;
+/// What a composition declares about the deployment it is being built for
+/// (PROD-013), and the shared predicate that enforces it.
+pub mod profile;
 pub mod publisher;
 pub mod recovery;
 pub mod registry;

@@ -231,6 +231,21 @@ const EXPECTED_PAIRS: &[ExpectedPair] = &[
         ),
         nullable_keys: &[],
     },
+    ExpectedPair {
+        table: "snapshots",
+        tenant_half: (
+            "ux_snapshots_identity_tenant",
+            &["tenant_id", "aggregate_id"],
+        ),
+        systemwide_half: ("ux_snapshots_identity_systemwide", &["aggregate_id"]),
+        probes: (
+            "INSERT INTO snapshots (aggregate_id, tenant_id, version, payload) \
+             VALUES ('probe-tenant', 'tenant-1', 1, '{}'::jsonb)",
+            "INSERT INTO snapshots (aggregate_id, tenant_id, version, payload) \
+             VALUES ('probe-systemwide', NULL, 1, '{}'::jsonb)",
+        ),
+        nullable_keys: &[],
+    },
 ];
 
 /// One catalog row as `pg_index` yields it: index name, uniqueness, the partial

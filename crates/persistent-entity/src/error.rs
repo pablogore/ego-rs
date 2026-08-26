@@ -77,3 +77,54 @@ impl fmt::Display for EntityError {
 }
 
 impl std::error::Error for EntityError {}
+
+/// A composition was declared production and a persistent capability it uses
+/// has no explicitly configured implementation.
+///
+/// Deliberately not an [`EntityError`] variant: `EntityError` reports what
+/// went wrong while an entity was *running* a command. This one reports that
+/// the runtime must not be built at all, and nothing that handles a command
+/// failure should have to consider it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PersistenceCompositionError {
+    /// `Profile::Production` is declared but `capability` has no configured
+    /// implementation. `fix` names the exact call that configures it.
+    #[error(
+        "Profile::Production is declared but no {capability} is configured — a \
+         production composition must never fall back to volatile storage. \
+         Configure one with {fix}, or state that this composition is not \
+         production with .profile(Profile::Dev)"
+    )]
+    NotConfigured {
+        /// The capability with no configured implementation.
+        capability: &'static str,
+        /// The exact call that fixes it.
+        fix: &'static str,
+    },
+}
+
+#[cfg(test)]
+mod persistence_composition_error_tests {
+    use super::*;
+
+    /// Mirrors PROD-012's `the_refusal_names_the_registration_and_the_opt_out`:
+    /// the message must name both the missing capability and the exact call
+    /// that fixes it, not just that something is wrong (IS-7).
+    #[test]
+    fn the_refusal_names_the_capability_and_the_fix() {
+        let message = PersistenceCompositionError::NotConfigured {
+            capability: "event store",
+            fix: "EntityRuntimeBuilder::with_event_store(store)",
+        }
+        .to_string();
+
+        assert!(
+            message.contains("event store"),
+            "the error must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("EntityRuntimeBuilder::with_event_store(store)"),
+            "the error must name the exact fixing call: {message}"
+        );
+    }
+}
