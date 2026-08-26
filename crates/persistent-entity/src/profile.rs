@@ -11,8 +11,16 @@ pub enum Profile {
     /// valid here, because that is what dev and test are for.
     #[default]
     Dev,
-    /// Every persistent capability this composition uses must be configured
-    /// explicitly. Nothing volatile is reachable by omission.
+    /// Every composition-root-observable persistent capability governed by
+    /// this profile must be configured explicitly. Nothing volatile is
+    /// reachable by omission for those capabilities.
+    ///
+    /// Today that means the event store, snapshot store, and effect store
+    /// (PROD-013) — the only capabilities with a real, generic
+    /// composition-root registration slot to observe. Read-side/projection
+    /// persistence has no such slot yet and is deliberately not governed
+    /// here; PROD-014 introduces it and extends this same policy to cover
+    /// it. See PROD-013/PROD-014.
     Production,
 }
 
