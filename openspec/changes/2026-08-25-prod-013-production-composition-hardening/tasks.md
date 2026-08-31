@@ -104,11 +104,11 @@ profile and calls `.build()`; `compose_entity_runtimes` (line 452) and `build_ru
 
 ## Phase 7: Documentation (IS-9, IS-10)
 
-- [ ] 7.1 Document the persistence completeness rule verbatim (proposal's Architecture Principle section) as forward-looking guidance; explicitly state PostgreSQL is not in violation today (SC-10).
-- [ ] 7.2 Document the PROD-005 boundary: this spec rejects the bootstrap itself before anything starts; PROD-005 signals the health of an application that already started (SC-10).
+- [x] 7.1 Document the persistence completeness rule verbatim (proposal's Architecture Principle section) as forward-looking guidance; explicitly state PostgreSQL is not in violation today (SC-10).
+- [x] 7.2 Document the PROD-005 boundary: this spec rejects the bootstrap itself before anything starts; PROD-005 signals the health of an application that already started (SC-10).
 
 ## Phase 8: Final Verification
 
 - [ ] 8.1 Run `cargo test --workspace`; confirm zero new failures (SC-7); confirm all 67 `EntityRuntimeBuilder::new()` call sites across 25 files compile unmodified.
 - [ ] 8.2 Run `cargo clippy --workspace -- -D warnings`; confirm no function introduced exceeds cyclomatic complexity 10.
-- [ ] 8.3 Verification only, no implementation — confirm AD-11 (Approach C) remains recorded as evaluated-and-deferred in design.md; nothing to implement here.
+- [x] 8.3 Verification only, no implementation — confirm AD-11 (Approach C) remains recorded as evaluated-and-deferred in design.md; nothing to implement here.

@@ -189,6 +189,25 @@ All domain data structures are immutable values. Changes produce new commands, e
 
 Ambiguous states produce rejection, never silent continuation. Unknown inputs, undefined transitions, and partial failures are explicit errors.
 
+### Persistence Completeness Rule (PROD-013)
+
+> A database is not considered supported by `ego-rs` until it implements EVERY persistent
+> capability that a production composition declares it uses. Missing capabilities may not be
+> completed by falling back to in-memory storage. Backend support is all-or-nothing across the
+> durable capabilities a composition enables.
+
+This is forward-looking guidance, not a report of a current violation: PostgreSQL is the only
+backend that exists today (`crates/persistence/src/postgres/`), and it is not in violation. The
+rule exists so the first partially-implemented second backend is refused as a backend, rather
+than shipped as a production composition quietly completed by in-memory parts.
+
+The enforcement mechanism is `Profile::Production` (`crates/persistent-entity/src/profile.rs`,
+re-exported through `service-sdk`): an explicit opt-in on the composition root that rejects the
+bootstrap — naming the missing capability and the exact call that configures it — when the event
+store, snapshot store, or effect store lacks an explicitly configured durable implementation.
+`Profile::Dev` (the default) preserves the historical in-memory-fallback behavior unchanged, so
+none of the 67 pre-existing `EntityRuntimeBuilder::new()` call sites are affected.
+
 ---
 
 ## Persistent Entity Runtime (CORE-006)
@@ -429,6 +448,13 @@ Four phases, kept distinct on purpose — "register" does not mean "start":
 - **Startup** (`App::start()`) — starts the runtime participants that `App`/`Runtime` itself owns (today: effect delivery).
 - **Runtime** (`RunningApp`) — serves resolution and operations.
 - **Shutdown** (`RunningApp::shutdown()`) — drains the participants `Runtime` owns; anything host-owned, like a projection scheduler, is drained separately by the host.
+
+`Profile::Production`'s bootstrap rejection (PROD-013, see the Persistence Completeness Rule
+above) belongs entirely to the **Composition** phase — it decides whether the application may
+start at all. This is a distinct concern from PROD-005 (Health, Readiness and Startup), which
+signals the health of an application that has *already* started, with degraded mode permitted
+for optional dependencies. The two never overlap: PROD-013 runs before Startup; PROD-005
+describes what happens after it.
 
 ---
 

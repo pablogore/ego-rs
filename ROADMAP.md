@@ -672,6 +672,11 @@ Readiness may include:
 
 Optional dependencies must support degraded-mode semantics where appropriate.
 
+Boundary with PROD-013 (Production Composition Hardening, delivered — see 7.13): PROD-005
+signals the health of an application that has already started; it does not decide whether the
+application may start at all. That decision belongs to PROD-013's composition-root profile
+gate, which runs strictly before startup and never overlaps this section's readiness endpoints.
+
 ---
 
 ## 7.6 PROD-006 — HTTP Hardening
@@ -873,7 +878,59 @@ Deliberately **not** promised, and documented as such:
 * The durable adapter's multi-scope tenant predicates are now proven against real Postgres receipts, holding tenant/aggregate_type/aggregate_id fixed pairwise (`integration-tests/tests/infrastructure/receipt_identity_isolation_postgres.rs`). The reservation conformance harness itself — the generic, parametrized suite that both the in-memory double and the Postgres adapter run through — is still not driven against PostgreSQL as one of its parametrized targets; that narrower harness-parametrization gap remains open.
 * `EntityRuntimeBuilder::build()` (`crates/persistent-entity/src/builder.rs:279-281`) still silently defaults to a non-durable in-memory event store when `.with_event_store()` is never called. No production path hits this today, but it is an unguarded footgun for a future host. Newly noted by the 2026-08-25 audit; scoped as future composition-root hardening, not a PROD-012 blocker.
 
-No PROD-013 was created. The identifier stays reserved for the next topic.
+---
+
+## 7.13 PROD-013 — Production Composition Hardening
+
+Priority: P0
+Status: **Delivered.**
+
+A composition declared as production must never start on volatile storage because a durable
+persistent capability was not explicitly wired. `Profile::Production` is an explicit opt-in gate
+that rejects the bootstrap — with an actionable error — when any of the three
+composition-root-observable persistent capabilities (event store, snapshot store, effect store)
+lacks an explicitly configured durable implementation.
+
+Delivered:
+
+* [x] `Profile` enum (`Profile::Dev` default, `Profile::Production`) declared in
+      `persistent-entity` and re-exported through `service-sdk`, with zero blast radius across
+      all 67 existing `EntityRuntimeBuilder::new()` call sites
+* [x] `EntityRuntimeBuilder::try_build()` plus a profile-gated `build()`: under
+      `Profile::Production`, a missing event store or snapshot store refuses the bootstrap,
+      naming the capability and its configuration call; under `Profile::Dev`, today's in-memory
+      fallback is unchanged
+* [x] The same gate on the effect store (`RuntimeBuilder::with_effect_store()` /
+      `AppBuilder::effect_store()`), closing a silent `InMemoryEffectStore` fallback discovered
+      during implementation — the same class of defect as the event/snapshot store, not a
+      separate one
+* [x] `examples/reference-app`'s production composition wired for real:
+      `EntityEventStores::open(pool)` declares `Profile::Production` and constructs two real
+      `PostgreSQLSnapshotStore` instances (organization and user), replacing the in-memory
+      snapshot store the production path silently used before
+* [x] A structural regression guard, not a one-time example: the profile field on
+      `EntityEventStores` is private, so only `open()`/`in_memory()` can set it, backed by
+      `examples/reference-app/tests/production_profile_guard.rs` and an assertion in the
+      Postgres integration suite
+* [x] The persistence completeness rule documented as forward-looking architecture guidance
+      (`ARCHITECTURE.md`) — backend support is all-or-nothing across the durable capabilities a
+      composition enables; PostgreSQL is not in violation today
+* [x] The PROD-005 boundary documented explicitly (`ARCHITECTURE.md`, and 7.5 above): PROD-013
+      rejects the bootstrap itself, before anything starts; PROD-005 signals the health of an
+      application that already started
+
+Deliberately **not** promised, and documented as such:
+
+* Read-side / projection persistence has no gate at all, real or pseudo. No generic read-side
+  registration exists at the composition root today — inventing one just to have something to
+  gate would have broken this spec's own atomicity. Carried forward as a binding constraint on
+  **PROD-014 — Read-Side Persistence Composition & Durable Store**: from its first introduction,
+  Production must apply the same fail-closed policy this spec established.
+* Approach C (flip the default to fail-closed with a named opt-out, mirroring
+  `IdempotencyEnforcementMode`) is evaluated and deferred, not rejected on merit — it breaks
+  ~14 files / ~32 call sites immediately and needs its own sized migration.
+* A second database engine is not supported today; the persistence completeness rule has
+  nothing to validate against yet.
 
 ---
 

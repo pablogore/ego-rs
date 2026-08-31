@@ -107,11 +107,11 @@ snapshot store ni perfil y llama a `.build()`; `compose_entity_runtimes` (línea
 
 ## Fase 7: Documentación (IS-9, IS-10)
 
-- [ ] 7.1 Documentar la regla de completitud de persistencia textualmente (sección de Principio de Arquitectura de la propuesta) como guía prospectiva; indicar explícitamente que PostgreSQL no está en violación hoy (SC-10).
-- [ ] 7.2 Documentar el límite con PROD-005: esta spec rechaza el bootstrap en sí antes de que nada arranque; PROD-005 señala la salud de una aplicación que ya arrancó (SC-10).
+- [x] 7.1 Documentar la regla de completitud de persistencia textualmente (sección de Principio de Arquitectura de la propuesta) como guía prospectiva; indicar explícitamente que PostgreSQL no está en violación hoy (SC-10).
+- [x] 7.2 Documentar el límite con PROD-005: esta spec rechaza el bootstrap en sí antes de que nada arranque; PROD-005 señala la salud de una aplicación que ya arrancó (SC-10).
 
 ## Fase 8: Verificación Final
 
 - [ ] 8.1 Correr `cargo test --workspace`; confirmar cero fallas nuevas (SC-7); confirmar que los 67 call sites de `EntityRuntimeBuilder::new()` en 25 archivos compilan sin modificación.
 - [ ] 8.2 Correr `cargo clippy --workspace -- -D warnings`; confirmar que ninguna función nueva supera complejidad ciclomática 10.
-- [ ] 8.3 Solo verificación, sin implementación — confirmar que AD-11 (Enfoque C) sigue registrado como evaluado y diferido en design.md; no hay nada que implementar aquí.
+- [x] 8.3 Solo verificación, sin implementación — confirmar que AD-11 (Enfoque C) sigue registrado como evaluado y diferido en design.md; no hay nada que implementar aquí.
