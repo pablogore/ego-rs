@@ -57,13 +57,13 @@ las dos es comprimible de forma segura sin ocultar riesgo.
 
 ## Fase 2: Gate de `EntityRuntimeBuilder` + `try_build()` (AD-4, AD-6, AD-7)
 
-- [ ] 2.1 RED — `builder.rs`: `try_build_rejects_missing_event_store_under_production` nombra el event store + `.with_event_store()` (SC-1).
-- [ ] 2.2 RED — `try_build_rejects_missing_snapshot_store_under_production` (SC-2).
-- [ ] 2.3 RED — `try_build_rejects_partial_configuration_under_production` — event configurado / snapshot faltante Y el caso inverso, identificando el que falta en cada caso (SC-6, subsunción de AD-7, la asimetría del sitio 15 de EC-1).
-- [ ] 2.4 RED — `dev_profile_builds_on_nothing_configured` — `Profile::Dev`, nada configurado, sigue construyendo sobre in-memory (SC-5).
-- [ ] 2.5 RED — `build_panics_on_same_condition_try_build_refuses` — `Profile::Production`, capacidad faltante, `build()` entra en pánico con el mensaje de la negativa.
-- [ ] 2.6 GREEN — agregar `.profile()`, `validate_persistence()` (event store verificado antes que snapshot store, según el orden de AD-3), `try_build()` (validar antes de delegar); `build()` llama a `validate_persistence()` y entra en pánico en `Err` (AD-4/AD-6). No se agrega ningún puente `From<PersistenceCompositionError>` — la negativa de event/snapshot vuelve solo al host (AD-6).
-- [ ] 2.7 Verificación de migración SC-7 — correr `cargo build --workspace` y `cargo test --workspace`; confirmar que los 67 call sites existentes de `EntityRuntimeBuilder::new()` (25 archivos, re-verificados en design.md) compilan y pasan sin **ninguna edición de código fuente**. El valor por defecto `Profile::Dev` es lo que hace esto cierto; cualquier falla aquí es una desviación de diseño para señalar, no para parchear en silencio.
+- [x] 2.1 RED — `builder.rs`: `try_build_rejects_missing_event_store_under_production` nombra el event store + `.with_event_store()` (SC-1).
+- [x] 2.2 RED — `try_build_rejects_missing_snapshot_store_under_production` (SC-2).
+- [x] 2.3 RED — `try_build_rejects_partial_configuration_under_production` — event configurado / snapshot faltante Y el caso inverso, identificando el que falta en cada caso (SC-6, subsunción de AD-7, la asimetría del sitio 15 de EC-1).
+- [x] 2.4 RED — `dev_profile_builds_on_nothing_configured` — `Profile::Dev`, nada configurado, sigue construyendo sobre in-memory (SC-5).
+- [x] 2.5 RED — `build_panics_on_same_condition_try_build_refuses` — `Profile::Production`, capacidad faltante, `build()` entra en pánico con el mensaje de la negativa.
+- [x] 2.6 GREEN — agregar `.profile()`, `validate_persistence()` (event store verificado antes que snapshot store, según el orden de AD-3), `try_build()` (validar antes de delegar); `build()` llama a `validate_persistence()` y entra en pánico en `Err` (AD-4/AD-6). No se agrega ningún puente `From<PersistenceCompositionError>` — la negativa de event/snapshot vuelve solo al host (AD-6).
+- [x] 2.7 Verificación de migración SC-7 — correr `cargo build --workspace` y `cargo test --workspace`; confirmar que los 67 call sites existentes de `EntityRuntimeBuilder::new()` (25 archivos, re-verificados en design.md) compilan y pasan sin **ninguna edición de código fuente**. El valor por defecto `Profile::Dev` es lo que hace esto cierto; cualquier falla aquí es una desviación de diseño para señalar, no para parchear en silencio.
 
 ## Fase 3: Gate del Effect Store en `RuntimeBuilder`/`AppBuilder` (AD-5)
 

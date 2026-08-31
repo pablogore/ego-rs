@@ -55,13 +55,13 @@ not padding, and cannot be skipped once WU4 ships. Neither is safely compressibl
 
 ## Phase 2: `EntityRuntimeBuilder` Gate + `try_build()` (AD-4, AD-6, AD-7)
 
-- [ ] 2.1 RED — `builder.rs`: `try_build_rejects_missing_event_store_under_production` names event store + `.with_event_store()` (SC-1).
-- [ ] 2.2 RED — `try_build_rejects_missing_snapshot_store_under_production` (SC-2).
-- [ ] 2.3 RED — `try_build_rejects_partial_configuration_under_production` — event set / snapshot missing AND the reverse, identifying whichever is missing (SC-6, AD-7 subsumption, EC-1's asymmetric site 15).
-- [ ] 2.4 RED — `dev_profile_builds_on_nothing_configured` — `Profile::Dev`, nothing configured, still succeeds on in-memory (SC-5).
-- [ ] 2.5 RED — `build_panics_on_same_condition_try_build_refuses` — `Profile::Production`, missing capability, `build()` panics with the refusal's message.
-- [ ] 2.6 GREEN — add `.profile()`, `validate_persistence()` (event store checked before snapshot store, per AD-3's ordering), `try_build()` (validate-before-delegate); `build()` calls `validate_persistence()` and panics on `Err` (AD-4/AD-6). No `From<PersistenceCompositionError>` bridge added — the event/snapshot refusal returns to the host only (AD-6).
-- [ ] 2.7 SC-7 migration check — run `cargo build --workspace` and `cargo test --workspace`; confirm all 67 existing `EntityRuntimeBuilder::new()` call sites (25 files, re-verified in design.md) compile and pass with **zero source edits**. `Profile::Dev` defaulting is what makes this true; any failure here is a design deviation to flag, not to silently patch.
+- [x] 2.1 RED — `builder.rs`: `try_build_rejects_missing_event_store_under_production` names event store + `.with_event_store()` (SC-1).
+- [x] 2.2 RED — `try_build_rejects_missing_snapshot_store_under_production` (SC-2).
+- [x] 2.3 RED — `try_build_rejects_partial_configuration_under_production` — event set / snapshot missing AND the reverse, identifying whichever is missing (SC-6, AD-7 subsumption, EC-1's asymmetric site 15).
+- [x] 2.4 RED — `dev_profile_builds_on_nothing_configured` — `Profile::Dev`, nothing configured, still succeeds on in-memory (SC-5).
+- [x] 2.5 RED — `build_panics_on_same_condition_try_build_refuses` — `Profile::Production`, missing capability, `build()` panics with the refusal's message.
+- [x] 2.6 GREEN — add `.profile()`, `validate_persistence()` (event store checked before snapshot store, per AD-3's ordering), `try_build()` (validate-before-delegate); `build()` calls `validate_persistence()` and panics on `Err` (AD-4/AD-6). No `From<PersistenceCompositionError>` bridge added — the event/snapshot refusal returns to the host only (AD-6).
+- [x] 2.7 SC-7 migration check — run `cargo build --workspace` and `cargo test --workspace`; confirm all 67 existing `EntityRuntimeBuilder::new()` call sites (25 files, re-verified in design.md) compile and pass with **zero source edits**. `Profile::Dev` defaulting is what makes this true; any failure here is a design deviation to flag, not to silently patch.
 
 ## Phase 3: Effect-Store Gate on `RuntimeBuilder`/`AppBuilder` (AD-5)
 
