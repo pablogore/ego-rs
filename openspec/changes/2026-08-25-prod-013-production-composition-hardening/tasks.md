@@ -99,8 +99,8 @@ profile and calls `.build()`; `compose_entity_runtimes` (line 452) and `build_ru
 
 ## Phase 6: AD-10 Regression Guards
 
-- [ ] 6.1 RED+GREEN — new `examples/reference-app/tests/production_profile_guard.rs`: asserts `EntityEventStores::in_memory().profile() == Profile::Dev` AND that `build_runtime_with` over in-memory stores still builds (Dev-path guard, SC-5 at the composition root).
-- [ ] 6.2 RED+GREEN — add one assertion in the existing `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs`, immediately after its existing `EntityEventStores::open()` call (`:94`): `assert_eq!(stores.profile(), Profile::Production);` (Production-path guard).
+- [x] 6.1 RED+GREEN — new `examples/reference-app/tests/production_profile_guard.rs`: asserts `EntityEventStores::in_memory().profile() == Profile::Dev` AND that `build_runtime_with` over in-memory stores still builds (Dev-path guard, SC-5 at the composition root).
+- [x] 6.2 RED+GREEN — add one assertion in the existing `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs`, immediately after its existing `EntityEventStores::open()` call (`:94`): `assert_eq!(stores.profile(), Profile::Production);` (Production-path guard).
 
 ## Phase 7: Documentation (IS-9, IS-10)
 

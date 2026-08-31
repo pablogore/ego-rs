@@ -102,8 +102,8 @@ snapshot store ni perfil y llama a `.build()`; `compose_entity_runtimes` (línea
 
 ## Fase 6: Guardas de Regresión de AD-10
 
-- [ ] 6.1 RED+GREEN — nuevo `examples/reference-app/tests/production_profile_guard.rs`: verifica que `EntityEventStores::in_memory().profile() == Profile::Dev` Y que `build_runtime_with` sobre stores in-memory sigue construyendo (guarda del lado Dev, SC-5 en la raíz de composición).
-- [ ] 6.2 RED+GREEN — agregar una aserción en el `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs` existente, justo después de su llamada existente a `EntityEventStores::open()` (`:94`): `assert_eq!(stores.profile(), Profile::Production);` (guarda del lado Producción).
+- [x] 6.1 RED+GREEN — nuevo `examples/reference-app/tests/production_profile_guard.rs`: verifica que `EntityEventStores::in_memory().profile() == Profile::Dev` Y que `build_runtime_with` sobre stores in-memory sigue construyendo (guarda del lado Dev, SC-5 en la raíz de composición).
+- [x] 6.2 RED+GREEN — agregar una aserción en el `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs` existente, justo después de su llamada existente a `EntityEventStores::open()` (`:94`): `assert_eq!(stores.profile(), Profile::Production);` (guarda del lado Producción).
 
 ## Fase 7: Documentación (IS-9, IS-10)
 
