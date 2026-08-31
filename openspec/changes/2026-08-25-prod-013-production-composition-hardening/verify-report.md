@@ -213,10 +213,11 @@ tests that needed internal adjustment without weakening their assertions).
 **PASS.** AD-12 is genuinely closed: the gate now checks `is_durable()`/`capabilities().durable`,
 not mere presence, at all three call sites, verified against real source and exercised by tests
 that call the actual builder chain end to end rather than a stand-in for the gate. Migration 012's
-dedup step is correctly ordered and behavior-preserving. All 5 gates are green on the final 8-work-unit
-branch state, with results identical to the prior verify pass except for the new WU8 tests
-themselves. No new CRITICAL, WARNING, or SUGGESTION beyond the one pre-existing `cargo fmt` diff
-already recorded and re-confirmed unrelated to this change.
+dedup step is correctly ordered and behavior-preserving. 4 of 5 gates exit 0 on the final
+8-work-unit branch state; `cargo fmt` remains non-zero solely because of the verified pre-existing
+baseline drift. Results are identical to the prior verify pass except for the new WU8 tests
+themselves. WU8 introduces no new CRITICAL/WARNING/SUGGESTION; the previously recorded baseline
+suggestions remain unchanged.
 
 **Next recommended phase**: `sdd-archive` — once the architect merges the PR chain, the full
 8-work-unit change is ready to close.

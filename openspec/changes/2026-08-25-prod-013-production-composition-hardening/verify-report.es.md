@@ -223,10 +223,11 @@ debilitar sus afirmaciones).
 `capabilities().durable`, no mera presencia, en los tres call sites, verificado contra el código
 fuente real y ejercitado por tests que llaman a la cadena real del builder de punta a punta en vez
 de un sustituto del gate. El paso de dedup de la migración 012 está correctamente ordenado y
-preserva el comportamiento. Los 5 gates están en verde sobre el estado final de la rama con las 8
-work units, con resultados idénticos a la corrida de verify previa salvo por los tests nuevos de
-WU8 mismos. Ningún CRITICAL, WARNING o SUGGESTION nuevo más allá del único diff preexistente de
-`cargo fmt` ya registrado y re-confirmado como no relacionado con este cambio.
+preserva el comportamiento. 4 de 5 gates salen con exit 0 sobre el estado final de la rama con las
+8 work units; `cargo fmt` sigue en non-zero únicamente por el drift preexistente del baseline ya
+verificado. Los resultados son idénticos a la corrida de verify previa salvo por los tests nuevos
+de WU8 mismos. WU8 no introduce ningún CRITICAL/WARNING/SUGGESTION nuevo; las suggestions de
+baseline previamente registradas permanecen sin cambios.
 
 **Próxima fase recomendada**: `sdd-archive` — una vez que el arquitecto mergee la cadena de PRs,
 el cambio completo de 8 work units queda listo para cerrarse.
