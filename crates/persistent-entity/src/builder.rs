@@ -6,7 +6,9 @@ use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::DomainEvent;
 
 use crate::effect_acceptor::EffectAcceptor;
+use crate::error::PersistenceCompositionError;
 use crate::persistence::{InMemoryEventStore, InMemorySnapshotStore, PersistenceFacade};
+use crate::profile::{require_durably_configured, Profile};
 use crate::publisher::EventPublisher;
 use crate::registry::EntityRegistry;
 use crate::runtime::{EntityRuntime, RuntimeConfig};
@@ -66,6 +68,10 @@ pub struct EntityRuntimeBuilder<
     /// it took before this existed and pays for no observation it does not
     /// make.
     observability: Option<Arc<dyn Observability>>,
+    /// What this composition declares about the deployment it is being built
+    /// for (PROD-013, AD-1). `Profile::Dev` by default, preserving today's
+    /// behavior byte-for-byte for every existing call site.
+    profile: Profile,
 }
 
 impl<
@@ -93,6 +99,7 @@ impl<
             snapshot_store: None,
             effect_acceptor: None,
             observability: None,
+            profile: Profile::Dev,
         }
     }
 
@@ -256,7 +263,69 @@ impl<
         self
     }
 
+    /// Declares what this composition is being built for (PROD-013, AD-1).
+    /// `Profile::Dev` by default. Under `Profile::Production`, [`Self::build`]
+    /// panics and [`Self::try_build`] refuses whenever the event store or the
+    /// snapshot store has no explicitly configured implementation.
+    pub fn profile(mut self, profile: Profile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Whether this configuration can honour the profile it declares.
+    ///
+    /// The **one** definition of that rule for this builder. `build` panics on
+    /// its error and `try_build` returns it, so the two cannot come to
+    /// disagree about what a valid configuration is.
+    ///
+    /// Event store is checked first, deliberately: when both are missing the
+    /// caller sees the one they are far more likely to have meant to
+    /// configure (AD-3).
+    fn validate_persistence(&self) -> Result<(), PersistenceCompositionError> {
+        require_durably_configured(
+            self.profile,
+            self.event_store.as_ref().is_some_and(|s| s.is_durable()),
+            "event store",
+            "EntityRuntimeBuilder::with_event_store(store)",
+        )?;
+        require_durably_configured(
+            self.profile,
+            self.snapshot_store
+                .as_ref()
+                .is_some_and(|s| s.lock().is_durable()),
+            "snapshot store",
+            "EntityRuntimeBuilder::with_snapshot_store(store)",
+        )
+    }
+
+    /// Consumes the builder and produces an [`EntityRuntime`], returning the
+    /// profile gate's refusal instead of panicking.
+    pub fn try_build(self) -> Result<EntityRuntime<E>, PersistenceCompositionError> {
+        // Before delegating, not after. `build` panics on this condition, so
+        // checking afterwards would mean this method could never return the
+        // error it exists to return — the panic would already have unwound.
+        self.validate_persistence()?;
+        Ok(self.build())
+    }
+
+    /// Consumes the builder and produces an [`EntityRuntime`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`Profile::Production`] is declared and a gated persistent
+    /// capability has no configured implementation.
+    ///
+    /// A panic rather than a `Result`, because this signature is what all 67
+    /// existing call sites already call, and because the alternative is worse
+    /// than a loud stop: a runtime that declares production and silently writes
+    /// every event into process memory loses them on the next restart, and
+    /// reports nothing. Bootstrap is the cheapest moment to refuse.
+    ///
+    /// [`Self::try_build`] returns the same condition as a structured error.
     pub fn build(self) -> EntityRuntime<E> {
+        if let Err(err) = self.validate_persistence() {
+            panic!("{err}");
+        }
         let publisher = self
             .publisher
             .unwrap_or_else(|| Arc::new(crate::testing::NoopPublisher::new()));
@@ -351,6 +420,95 @@ mod tests {
     use crate::snapshot::NoSnapshot;
     use crate::test_entity::TestEntity;
     use crate::testing::{TestCommand, TestEvent, TestState};
+    use ego_domain::operation::OperationReceipt;
+    use ego_domain::persistence::{EventStoreUnitOfWork, PersistenceError, StoredEvent};
+
+    /// A stub event store that declares itself durable without doing any
+    /// real I/O. Used only to isolate the *other* capability's check in a
+    /// partial-configuration test — `InMemoryEventStore` there would make
+    /// both capabilities register as "configured" but not durable, hiding
+    /// which one the test is actually about (AD-3: presence is not
+    /// durability).
+    struct DurableStubEventStore;
+
+    #[async_trait::async_trait]
+    impl EventStore<TestEvent> for DurableStubEventStore {
+        fn is_durable(&self) -> bool {
+            true
+        }
+
+        async fn append(
+            &self,
+            _aggregate_type: &str,
+            _aggregate_id: &str,
+            _tenant_id: Option<&str>,
+            _expected_version: i64,
+            _events: Vec<StoredEvent<TestEvent>>,
+        ) -> Result<i64, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+
+        async fn load(
+            &self,
+            _aggregate_type: &str,
+            _aggregate_id: &str,
+            _tenant_id: Option<&str>,
+        ) -> Result<Vec<StoredEvent<TestEvent>>, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+
+        async fn list_aggregate_ids(
+            &self,
+            _tenant_id: Option<&str>,
+        ) -> Result<Vec<(String, String)>, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+
+        async fn begin(
+            &self,
+        ) -> Result<Box<dyn EventStoreUnitOfWork<TestEvent>>, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+
+        async fn find_receipt(
+            &self,
+            _aggregate_type: &str,
+            _aggregate_id: &str,
+            _tenant_id: Option<&str>,
+            _operation_key: &str,
+        ) -> Result<Option<OperationReceipt>, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+    }
+
+    /// A stub snapshot store that declares itself durable without doing any
+    /// real I/O — the `Snapshot`-trait counterpart of
+    /// [`DurableStubEventStore`], for the same isolation reason.
+    struct DurableStubSnapshotStore;
+
+    impl Snapshot for DurableStubSnapshotStore {
+        fn is_durable(&self) -> bool {
+            true
+        }
+
+        fn save_snapshot(
+            &mut self,
+            _aggregate_id: &str,
+            _tenant_id: Option<&str>,
+            _version: i64,
+            _payload: serde_json::Value,
+        ) -> Result<(), PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+
+        fn load_snapshot(
+            &self,
+            _aggregate_id: &str,
+            _tenant_id: Option<&str>,
+        ) -> Result<Option<(i64, serde_json::Value)>, PersistenceError> {
+            unreachable!("stub only satisfies the durability check; never called")
+        }
+    }
 
     /// Advances Tokio's paused virtual clock by `step`, then yields
     /// repeatedly (bounded, not a guessed count) until the runtime reaches
@@ -484,6 +642,140 @@ mod tests {
         assert_eq!(
             runtime.config.passivation_timeout_secs, 1,
             "the informational config field must round up (never read a misleading 0)"
+        );
+    }
+
+    /// SC-1: `Profile::Production` with no event store configured must be
+    /// refused, naming the missing capability and the exact fixing call.
+    #[test]
+    fn try_build_rejects_missing_event_store_under_production() {
+        let result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_snapshot_store(Arc::new(Mutex::new(InMemorySnapshotStore::new())))
+            .try_build();
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("no event store configured under Profile::Production must refuse"),
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains("event store"),
+            "must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("EntityRuntimeBuilder::with_event_store(store)"),
+            "must name the exact fixing call: {message}"
+        );
+    }
+
+    /// SC-2: `Profile::Production` with no snapshot store configured must be
+    /// refused, naming the missing capability and the exact fixing call.
+    #[test]
+    fn try_build_rejects_missing_snapshot_store_under_production() {
+        let result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(DurableStubEventStore))
+            .try_build();
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("no snapshot store configured under Profile::Production must refuse"),
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains("snapshot store"),
+            "must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("EntityRuntimeBuilder::with_snapshot_store(store)"),
+            "must name the exact fixing call: {message}"
+        );
+    }
+
+    /// SC-6 / AD-7's subsumption / EC-1's asymmetric site 15: a partial
+    /// configuration — exactly one of the two stores configured — must be
+    /// refused under `Profile::Production`, identifying whichever store is
+    /// actually missing. Both orderings are exercised: event-only (mirroring
+    /// EC-1's real site 15, which wires an event store and forgets the
+    /// snapshot store) and snapshot-only.
+    #[test]
+    fn try_build_rejects_partial_configuration_under_production() {
+        let event_only_result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(DurableStubEventStore))
+            .try_build();
+        let event_only_err = match event_only_result {
+            Err(err) => err,
+            Ok(_) => panic!("event store configured, snapshot store missing, must refuse"),
+        };
+        assert!(
+            event_only_err.to_string().contains("snapshot store"),
+            "must identify the snapshot store as the missing one: {event_only_err}"
+        );
+
+        let snapshot_only_result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_snapshot_store(Arc::new(Mutex::new(InMemorySnapshotStore::new())))
+            .try_build();
+        let snapshot_only_err = match snapshot_only_result {
+            Err(err) => err,
+            Ok(_) => panic!("snapshot store configured, event store missing, must refuse"),
+        };
+        assert!(
+            snapshot_only_err.to_string().contains("event store"),
+            "must identify the event store as the missing one: {snapshot_only_err}"
+        );
+    }
+
+    /// SC-5: `Profile::Dev` (the default) must still build on nothing
+    /// configured, falling back to in-memory stores exactly as before this
+    /// change.
+    #[test]
+    fn dev_profile_builds_on_nothing_configured() {
+        EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Dev)
+            .try_build()
+            .expect("Profile::Dev with nothing configured must still build");
+    }
+
+    /// `build()` must panic on the exact same condition `try_build()`
+    /// refuses (AD-4/AD-6) — the gate must not be decorative on the
+    /// infallible path.
+    #[test]
+    #[should_panic(expected = "event store")]
+    fn build_panics_on_same_condition_try_build_refuses() {
+        let _ = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .build();
+    }
+
+    /// AD-3's central guarantee, the exact scenario a reviewer flagged
+    /// before this was implemented: `Profile::Production` must refuse an
+    /// *explicitly wired* volatile store, not just a missing one.
+    /// `is_some()` cannot tell `InMemoryEventStore` apart from
+    /// `PostgreSQLEventStore` — only `is_durable()` can, and this is what
+    /// proves the gate actually calls it.
+    #[test]
+    fn try_build_rejects_an_explicit_in_memory_store_under_production() {
+        let event_store_result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(InMemoryEventStore::new()))
+            .with_snapshot_store(Arc::new(Mutex::new(DurableStubSnapshotStore)))
+            .try_build();
+        assert!(
+            event_store_result.is_err(),
+            "an explicitly-wired InMemoryEventStore must not satisfy Profile::Production"
+        );
+
+        let snapshot_store_result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(DurableStubEventStore))
+            .with_snapshot_store(Arc::new(Mutex::new(InMemorySnapshotStore::new())))
+            .try_build();
+        assert!(
+            snapshot_store_result.is_err(),
+            "an explicitly-wired InMemorySnapshotStore must not satisfy Profile::Production"
         );
     }
 }
