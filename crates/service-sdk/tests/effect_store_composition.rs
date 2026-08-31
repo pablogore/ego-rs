@@ -499,3 +499,29 @@ async fn a_real_stoolap_effect_store_registered_via_with_effect_store_actually_r
     .await
     .expect("the registered Stoolap store must independently show the effect as succeeded");
 }
+
+// ---------------------------------------------------------------------------
+// 8. PROD-013 WU3 (AD-5): the refusal surfaces through `AppBuilder::build()`
+// as `CompositionError::Validation`, at zero extra plumbing cost — the
+// existing `CompositionError::Validation(#[from] RuntimeError)` bridge
+// already forwards it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn app_builder_surfaces_the_missing_effect_store_refusal_as_composition_validation_error() {
+    let executor = RecordingExecutor::new();
+    let err = ego_service_sdk::app::App::builder()
+        .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .profile(ego_service_sdk::runtime::Profile::Production)
+        .effect_executor(["invoice.created"], executor)
+        .build()
+        .err()
+        .expect("Production with an executor and no effect store must refuse");
+
+    match err {
+        ego_service_sdk::app::CompositionError::Validation(
+            ego_service_sdk::runtime::RuntimeError::PersistenceNotConfigured(_),
+        ) => {}
+        other => panic!("expected Validation(PersistenceNotConfigured), got {other:?}"),
+    }
+}

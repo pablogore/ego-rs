@@ -1507,6 +1507,13 @@ pub enum RuntimeError {
          .with_idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)"
     )]
     OperationReservationStoreNotRegistered,
+    /// A production composition left a persistent capability unconfigured
+    /// (PROD-013). Wraps the lower crate's refusal rather than restating it:
+    /// `persistent-entity` owns the rule (AD-3) and this layer owns only the
+    /// crossing, exactly as `CompositionError::Validation` owns the crossing
+    /// for this enum.
+    #[error("production composition validation failed: {0}")]
+    PersistenceNotConfigured(#[from] persistent_entity::error::PersistenceCompositionError),
 }
 
 // ---------------------------------------------------------------------------
