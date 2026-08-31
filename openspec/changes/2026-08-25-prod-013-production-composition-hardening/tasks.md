@@ -65,13 +65,13 @@ not padding, and cannot be skipped once WU4 ships. Neither is safely compressibl
 
 ## Phase 3: Effect-Store Gate on `RuntimeBuilder`/`AppBuilder` (AD-5)
 
-- [ ] 3.1 RED — `service-sdk/src/runtime/builder.rs`: `validate_persistence_profile_rejects_missing_effect_store_when_executor_registered` (SC-3).
-- [ ] 3.2 RED — `validate_persistence_profile_ok_when_no_executor_registered` (EC-2's conditional gate — no executor means nothing constructed, nothing volatile).
-- [ ] 3.3 RED — `build_and_try_build_agree_on_persistence_profile_validation`, mirroring the existing idempotency-agreement test.
-- [ ] 3.4 GREEN — add `profile` field + `.profile()` to `RuntimeBuilder`; add `validate_persistence_profile()` (AD-5), called from `build()` and `try_build()` in the same slot as `validate_idempotency()`; checks `effect_state_store` only (not `effect_dedup_store` — both are always set together by `with_effect_store`, per the existing `debug_assert_eq!`).
-- [ ] 3.5 GREEN — add `RuntimeError::PersistenceNotConfigured(#[from] PersistenceCompositionError)` in `runtime_builder.rs`.
-- [ ] 3.6 GREEN — add thin `AppBuilder::profile()` in `app/mod.rs`, mirroring `effect_store()`'s delegation shape; doc comment MUST state it does not propagate to already-built entity runtimes (`AppBuilder::entity()` receives a finished `Arc<EntityRuntime<E>>` — that gate already ran).
-- [ ] 3.7 RED+GREEN — integration test in `crates/service-sdk/tests/`: the effect-store refusal surfaces as `CompositionError::Validation` through `AppBuilder::build()`.
+- [x] 3.1 RED — `service-sdk/src/runtime/builder.rs`: `validate_persistence_profile_rejects_missing_effect_store_when_executor_registered` (SC-3).
+- [x] 3.2 RED — `validate_persistence_profile_ok_when_no_executor_registered` (EC-2's conditional gate — no executor means nothing constructed, nothing volatile).
+- [x] 3.3 RED — `build_and_try_build_agree_on_persistence_profile_validation`, mirroring the existing idempotency-agreement test.
+- [x] 3.4 GREEN — add `profile` field + `.profile()` to `RuntimeBuilder`; add `validate_persistence_profile()` (AD-5), called from `build()` and `try_build()` in the same slot as `validate_idempotency()`; checks `effect_state_store` only (not `effect_dedup_store` — both are always set together by `with_effect_store`, per the existing `debug_assert_eq!`).
+- [x] 3.5 GREEN — add `RuntimeError::PersistenceNotConfigured(#[from] PersistenceCompositionError)` in `runtime_builder.rs`.
+- [x] 3.6 GREEN — add thin `AppBuilder::profile()` in `app/mod.rs`, mirroring `effect_store()`'s delegation shape; doc comment MUST state it does not propagate to already-built entity runtimes (`AppBuilder::entity()` receives a finished `Arc<EntityRuntime<E>>` — that gate already ran).
+- [x] 3.7 RED+GREEN — integration test in `crates/service-sdk/tests/`: the effect-store refusal surfaces as `CompositionError::Validation` through `AppBuilder::build()`.
 
 ## Phase 4: Reference App — `EntityEventStores` Profile + Durable Snapshot Wiring (AD-8, AD-9)
 

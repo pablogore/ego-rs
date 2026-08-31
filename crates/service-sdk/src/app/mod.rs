@@ -69,7 +69,7 @@ use ego_domain::operation::OperationReservationStore;
 
 use crate::runtime::IdempotencyEnforcementMode;
 use crate::runtime::{
-    HasServiceTag, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver,
+    HasServiceTag, Profile, Resolvable, Runtime, RuntimeBuilder, RuntimeInner, RuntimeResolver,
 };
 
 pub use error::CompositionError;
@@ -476,6 +476,26 @@ impl AppBuilder {
             return self;
         }
         self.runtime_builder = self.runtime_builder.with_idempotency_enforcement_mode(mode);
+        self
+    }
+
+    /// Declares what deployment posture this composition is being built for
+    /// (PROD-013) — thin delegation to [`RuntimeBuilder::profile`], mirroring
+    /// how [`Self::effect_store`] delegates to
+    /// [`RuntimeBuilder::with_effect_store`].
+    ///
+    /// **Does not propagate to any entity runtime already registered via
+    /// [`Self::entity`].** `AppBuilder::entity()` receives an
+    /// already-built `Arc<EntityRuntime<E>>` — that entity runtime's own
+    /// persistence gate (`EntityRuntimeBuilder::profile`) already ran before
+    /// `AppBuilder` ever saw it, so a single call here cannot reach back and
+    /// change a decision that was already made. Set the profile on each
+    /// `EntityRuntimeBuilder` independently.
+    pub fn profile(mut self, profile: Profile) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        self.runtime_builder = self.runtime_builder.profile(profile);
         self
     }
 

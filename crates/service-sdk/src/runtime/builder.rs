@@ -220,6 +220,13 @@ pub struct RuntimeBuilder {
     /// runtime-owned [`HealthRegistry`] — a component that contributes none
     /// (the trait's default) leaves aggregation unaffected.
     lifecycle_components: Vec<Arc<dyn LifecycleManaged>>,
+    /// What deployment posture this composition declares (PROD-013, AD-1).
+    /// Defaults to `Profile::Dev` — behaviorally identical to today. Under
+    /// `Profile::Production`, [`Self::validate_persistence_profile`] refuses
+    /// an unconfigured effect store while at least one executor is
+    /// registered (AD-5). Independent of `EntityRuntimeBuilder::profile`,
+    /// which gates the event/snapshot stores one layer down.
+    profile: persistent_entity::profile::Profile,
 }
 
 impl RuntimeBuilder {
@@ -259,7 +266,22 @@ impl RuntimeBuilder {
             data_providers_for_teardown: Vec::new(),
             provider_health_pairs: Vec::new(),
             lifecycle_components: Vec::new(),
+            profile: persistent_entity::profile::Profile::default(),
         }
+    }
+
+    /// Declares what deployment posture this composition is being built for
+    /// (PROD-013, AD-1). Defaults to `Profile::Dev` — behaviorally identical
+    /// to today. Under `Profile::Production`, [`Self::build`]/
+    /// [`Self::try_build`] refuse an effect store left unconfigured while at
+    /// least one executor is registered (AD-5).
+    ///
+    /// Independent of `EntityRuntimeBuilder::profile`: that gate lives one
+    /// layer down and covers the event/snapshot stores, which this builder
+    /// never sees.
+    pub fn profile(mut self, profile: persistent_entity::profile::Profile) -> Self {
+        self.profile = profile;
+        self
     }
 
     /// Registers a lifecycle-managed component whose
@@ -748,12 +770,40 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Whether this configuration can honour the production posture it
+    /// declares for the effect store (PROD-013, AD-5). Mirrors
+    /// [`Self::validate_idempotency`]: one definition, checked from both
+    /// `build()` and `try_build()`, so the two paths cannot disagree.
+    fn validate_persistence_profile(&self) -> Result<(), RuntimeError> {
+        // Conditional on a registered executor because with none registered
+        // no effect store is constructed at all (see `build()`'s
+        // `effect_acceptor_impl` gate) — there is no volatile storage to
+        // refuse. Requiring one anyway would force every production host
+        // that describes no external effects to register a store it never
+        // reads or writes.
+        if self.effect_executors.is_empty() {
+            return Ok(());
+        }
+        persistent_entity::profile::require_durably_configured(
+            self.profile,
+            self.effect_state_store
+                .as_ref()
+                .is_some_and(|s| s.capabilities().durable),
+            "effect store",
+            "RuntimeBuilder::with_effect_store(store) (or AppBuilder::effect_store(store))",
+        )?;
+        Ok(())
+    }
+
     /// Consumes the builder and produces a [`Runtime`].
     ///
     /// # Panics
     ///
     /// Panics when [`IdempotencyEnforcementMode::MandatoryKey`] is in effect and no
-    /// [`OperationReservationStore`] was registered.
+    /// [`OperationReservationStore`] was registered, or (PROD-013, AD-5) when
+    /// [`Self::profile`] is `Production`, at least one effect executor is
+    /// registered, and no effect store was configured via
+    /// [`Self::with_effect_store`].
     ///
     /// A panic rather than a `Result`, because this signature is what every host and
     /// test already calls and because the alternative is worse than a loud stop: a
@@ -767,6 +817,9 @@ impl RuntimeBuilder {
     /// caller that would rather handle it.
     pub fn build(self) -> Runtime {
         if let Err(err) = self.validate_idempotency() {
+            panic!("{err}");
+        }
+        if let Err(err) = self.validate_persistence_profile() {
             panic!("{err}");
         }
         let security_providers = match (self.authn, self.authz) {
@@ -1090,6 +1143,7 @@ impl RuntimeBuilder {
         // afterwards would mean this method could never return the error it exists to
         // return — the panic would already have unwound.
         self.validate_idempotency()?;
+        self.validate_persistence_profile()?;
         let validators = std::mem::take(&mut self.validators);
         let rt = self.build();
         for (service_name, validate) in validators {
@@ -3486,6 +3540,7 @@ mod tests {
     use ego_domain::{ExternalEffectDescription, IdempotencyKey, TenantId};
     use ego_runtime::effects::{
         AttemptOutcome, DeliveryConfig, DuplicateEffectType, EffectContext, ExternalEffectExecutor,
+        InMemoryEffectStore,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -3597,6 +3652,108 @@ mod tests {
             err,
             DuplicateEffectType::AlreadyRegistered(t) if t == "invoice.created"
         ));
+    }
+
+    // -- PROD-013 WU3 (AD-5): the effect-store gate on `RuntimeBuilder` -----
+
+    use crate::runtime::Profile;
+
+    /// Under `Profile::Production`, with at least one effect executor
+    /// registered and no effect store configured, `build()`/`try_build()`
+    /// must refuse — the same silent `InMemoryEffectStore` fallback EC-2
+    /// found at `build()`'s `effect_acceptor_impl` gate is exactly what this
+    /// closes.
+    #[test]
+    fn validate_persistence_profile_rejects_missing_effect_store_when_executor_registered() {
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let err = compat()
+            .profile(Profile::Production)
+            .register_effect_executor(["invoice.created"], executor)
+            .expect("registration itself must succeed")
+            .try_build()
+            .err()
+            .expect("Production with an executor and no effect store must refuse");
+
+        assert!(
+            matches!(err, RuntimeError::PersistenceNotConfigured(_)),
+            "expected PersistenceNotConfigured, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("effect store"),
+            "the refusal must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("with_effect_store") || message.contains("effect_store("),
+            "the refusal must name the fix: {message}"
+        );
+    }
+
+    /// EC-2's conditional gate: with zero effect executors registered, no
+    /// store is constructed at all (`build()`'s `effect_acceptor_impl` gate),
+    /// so there is no volatile storage to refuse — even under
+    /// `Profile::Production` with no effect store configured.
+    #[test]
+    fn validate_persistence_profile_ok_when_no_executor_registered() {
+        let rt = compat().profile(Profile::Production).build();
+        assert!(
+            rt.effect_acceptor().is_none(),
+            "no executor was registered, so no acceptor may exist"
+        );
+    }
+
+    /// `build()` and `try_build()` must agree on this validation, mirroring
+    /// the existing idempotency-agreement test above: there is one
+    /// definition (`validate_persistence_profile`), `build()` panics on its
+    /// error and `try_build()` returns it.
+    #[test]
+    #[should_panic(expected = "effect store")]
+    fn build_and_try_build_agree_on_persistence_profile_validation() {
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let builder = compat()
+            .profile(Profile::Production)
+            .register_effect_executor(["invoice.created"], executor)
+            .expect("registration itself must succeed");
+
+        // `try_build` must return the same condition `build` panics on.
+        let err = builder
+            .clone()
+            .try_build()
+            .err()
+            .expect("try_build must report the same refusal build() panics on");
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+
+        // Now prove `build()` panics on the identical condition.
+        let _ = builder.build();
+    }
+
+    /// AD-3's central guarantee, the effect-store side: `Profile::Production`
+    /// with a registered executor must refuse an *explicitly wired*
+    /// `InMemoryEffectStore`, not just a missing one. `is_some()` cannot
+    /// tell it apart from a durable provider — only
+    /// `capabilities().durable` can, and this proves the gate actually
+    /// reads it.
+    #[test]
+    fn try_build_rejects_an_explicit_in_memory_effect_store_under_production() {
+        let executor: Arc<dyn ExternalEffectExecutor> = Arc::new(AlwaysSucceedsExecutor::new());
+        let store = Arc::new(InMemoryEffectStore::new());
+        let err = compat()
+            .profile(Profile::Production)
+            .register_effect_executor(["invoice.created"], executor)
+            .expect("registration itself must succeed")
+            .with_effect_store(store)
+            .try_build()
+            .err()
+            .expect("an explicitly-wired InMemoryEffectStore must not satisfy Profile::Production");
+
+        assert!(
+            matches!(err, RuntimeError::PersistenceNotConfigured(_)),
+            "expected PersistenceNotConfigured, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("effect store"),
+            "the refusal must still name the capability: {err}"
+        );
     }
 
     // -- CORE-019 PR4 review F-01: build() must never panic outside Tokio ---
