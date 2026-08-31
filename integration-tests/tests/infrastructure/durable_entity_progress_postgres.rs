@@ -184,7 +184,7 @@ async fn ensure_org(url: &str) -> CommandResult<OrganizationEnsured, TenantOrgSt
 }
 
 /// The organization's progress survives the runtime that wrote it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn an_organization_receipt_outlives_the_runtime_that_confirmed_it() {
     let (db, url) = postgres().await;
     let pool = connect(&url).await;
@@ -230,7 +230,7 @@ async fn an_organization_receipt_outlives_the_runtime_that_confirmed_it() {
 /// Not symmetry for its own sake. Two stores means two chances to wire one and
 /// forget the other, and a test covering only the organization would pass with
 /// `User` still writing to memory.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_user_receipt_outlives_the_runtime_that_confirmed_it() {
     let (db, url) = postgres().await;
     let pool = connect(&url).await;
@@ -286,7 +286,7 @@ async fn a_user_receipt_outlives_the_runtime_that_confirmed_it() {
 /// organization must be found confirmed while the user is not. If both shared a
 /// receipt — or if one store shadowed the other — that distinction would not
 /// exist, and recovery would have nothing to decide from.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn each_aggregate_keeps_its_own_receipt_under_one_operation_key() {
     let (db, url) = postgres().await;
     let pool = connect(&url).await;

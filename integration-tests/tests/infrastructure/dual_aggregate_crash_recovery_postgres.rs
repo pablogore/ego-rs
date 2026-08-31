@@ -346,7 +346,7 @@ async fn reservation(pool: &PgPool) -> Option<(String, i64)> {
 /// A no-op in an ordinary suite run: without the parent's environment there is no
 /// database to use, and aborting here would take the whole suite down with it.
 /// That guard is load-bearing, not defensive.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn child_crashes_after_the_org_receipt_is_confirmed() {
     let Ok(url) = std::env::var(CHILD_DB_URL) else {
         // Not a child. Nothing to do.
@@ -372,7 +372,7 @@ async fn child_crashes_after_the_org_receipt_is_confirmed() {
 // --- the parent -------------------------------------------------------------
 
 /// A crash between the two aggregates is recovered by takeover, not repeated.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_crash_between_the_aggregates_is_recovered_by_takeover() {
     let db = isolated_database().await;
     let pool = db.pool().await;

@@ -52,7 +52,7 @@ async fn opened_stores_declare_profile_production() {
 
 /// A snapshot written through one `open()` instance survives a fresh
 /// `open()` against the same pool, once the process that wrote it is gone.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_written_snapshot_survives_a_fresh_open_against_the_same_pool() {
     let db = isolated_database().await;
     let url = db.url().to_string();
