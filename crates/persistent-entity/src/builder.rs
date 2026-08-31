@@ -281,6 +281,12 @@ impl<
     /// Event store is checked first, deliberately: when both are missing the
     /// caller sees the one they are far more likely to have meant to
     /// configure (AD-3).
+    ///
+    /// Checks durability, not mere presence (PROD-013 AD-12): `is_some()`
+    /// alone answers "was *something* provided", never "is what was
+    /// provided durable" — an explicitly wired `InMemoryEventStore` or
+    /// `InMemorySnapshotStore` is "configured" but not durable, and must be
+    /// refused exactly like an unconfigured one.
     fn validate_persistence(&self) -> Result<(), PersistenceCompositionError> {
         require_durably_configured(
             self.profile,
@@ -671,6 +677,12 @@ mod tests {
 
     /// SC-2: `Profile::Production` with no snapshot store configured must be
     /// refused, naming the missing capability and the exact fixing call.
+    ///
+    /// Uses [`DurableStubEventStore`] rather than [`InMemoryEventStore`] to
+    /// configure the event store: after AD-12, an in-memory event store is
+    /// itself refused (it is not durable), which would make this test's
+    /// "only the snapshot store is missing" setup also fail on the event
+    /// store — the wrong capability for what this test isolates.
     #[test]
     fn try_build_rejects_missing_snapshot_store_under_production() {
         let result = EntityRuntimeBuilder::<TestEvent>::new()
@@ -699,6 +711,11 @@ mod tests {
     /// actually missing. Both orderings are exercised: event-only (mirroring
     /// EC-1's real site 15, which wires an event store and forgets the
     /// snapshot store) and snapshot-only.
+    ///
+    /// The event-only half uses [`DurableStubEventStore`], not
+    /// [`InMemoryEventStore`] — see
+    /// `try_build_rejects_missing_snapshot_store_under_production`'s doc
+    /// comment for why (AD-12).
     #[test]
     fn try_build_rejects_partial_configuration_under_production() {
         let event_only_result = EntityRuntimeBuilder::<TestEvent>::new()
@@ -739,6 +756,56 @@ mod tests {
             .expect("Profile::Dev with nothing configured must still build");
     }
 
+    /// AD-3's central guarantee: an explicitly configured but volatile event
+    /// store must be refused under `Profile::Production` — "configured"
+    /// alone (a plain `Option::is_some()`) is not the rule; "durable" is.
+    /// The snapshot store is a durable stub so only the event store's own
+    /// durability is under test.
+    #[test]
+    fn try_build_rejects_explicit_in_memory_event_store_under_production() {
+        let result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(InMemoryEventStore::new()))
+            .with_snapshot_store(Arc::new(Mutex::new(DurableStubSnapshotStore)))
+            .try_build();
+
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!(
+                "an explicit InMemoryEventStore under Profile::Production must be refused \
+                 — it is configured but not durable"
+            ),
+        };
+        assert!(
+            err.to_string().contains("event store"),
+            "must name the non-durable capability: {err}"
+        );
+    }
+
+    /// AD-3's same rule for the snapshot store. The event store is a
+    /// durable stub so only the snapshot store's own durability is under
+    /// test.
+    #[test]
+    fn try_build_rejects_explicit_in_memory_snapshot_store_under_production() {
+        let result = EntityRuntimeBuilder::<TestEvent>::new()
+            .profile(Profile::Production)
+            .with_event_store(Arc::new(DurableStubEventStore))
+            .with_snapshot_store(Arc::new(Mutex::new(InMemorySnapshotStore::new())))
+            .try_build();
+
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!(
+                "an explicit InMemorySnapshotStore under Profile::Production must be refused \
+                 — it is configured but not durable"
+            ),
+        };
+        assert!(
+            err.to_string().contains("snapshot store"),
+            "must name the non-durable capability: {err}"
+        );
+    }
+
     /// `build()` must panic on the exact same condition `try_build()`
     /// refuses (AD-4/AD-6) — the gate must not be decorative on the
     /// infallible path.
@@ -748,34 +815,5 @@ mod tests {
         let _ = EntityRuntimeBuilder::<TestEvent>::new()
             .profile(Profile::Production)
             .build();
-    }
-
-    /// AD-3's central guarantee, the exact scenario a reviewer flagged
-    /// before this was implemented: `Profile::Production` must refuse an
-    /// *explicitly wired* volatile store, not just a missing one.
-    /// `is_some()` cannot tell `InMemoryEventStore` apart from
-    /// `PostgreSQLEventStore` — only `is_durable()` can, and this is what
-    /// proves the gate actually calls it.
-    #[test]
-    fn try_build_rejects_an_explicit_in_memory_store_under_production() {
-        let event_store_result = EntityRuntimeBuilder::<TestEvent>::new()
-            .profile(Profile::Production)
-            .with_event_store(Arc::new(InMemoryEventStore::new()))
-            .with_snapshot_store(Arc::new(Mutex::new(DurableStubSnapshotStore)))
-            .try_build();
-        assert!(
-            event_store_result.is_err(),
-            "an explicitly-wired InMemoryEventStore must not satisfy Profile::Production"
-        );
-
-        let snapshot_store_result = EntityRuntimeBuilder::<TestEvent>::new()
-            .profile(Profile::Production)
-            .with_event_store(Arc::new(DurableStubEventStore))
-            .with_snapshot_store(Arc::new(Mutex::new(InMemorySnapshotStore::new())))
-            .try_build();
-        assert!(
-            snapshot_store_result.is_err(),
-            "an explicitly-wired InMemorySnapshotStore must not satisfy Profile::Production"
-        );
     }
 }
