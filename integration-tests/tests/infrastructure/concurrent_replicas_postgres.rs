@@ -408,7 +408,7 @@ async fn state_and_response(pool: &PgPool, key: &str) -> (String, Option<Vec<u8>
         .expect("exactly one reservation row for this key")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_racing_one_key_yield_exactly_one_execution() {
     // This test's own database, cloned from the run's already-migrated
     // template. No container starts here and no migration runs; the guard is
