@@ -27,11 +27,14 @@ for name in detect-violations detect-missing-docs detect-test-smells \
 done
 
 echo "test_runs_correctly_from_a_different_cwd"
-OUTPUT="$(cd /tmp && CHECKS_DIR="$FAKE_DIR" "$TARGET" 2>&1 || true)"
-if echo "$OUTPUT" | grep -q "No such file or directory"; then
-    fail "orchestrator could not locate a check script when invoked from outside the repo root"
+set +e
+OUTPUT="$(cd /tmp && CHECKS_DIR="$FAKE_DIR" "$TARGET" 2>&1)"
+EXIT_CODE=$?
+set -e
+if [ "$EXIT_CODE" -ne 0 ]; then
+    fail "orchestrator failed from a different cwd: $OUTPUT"
 else
-    pass "orchestrator locates all check scripts regardless of caller cwd"
+    pass "orchestrator runs successfully regardless of caller cwd"
 fi
 
 echo "test_missing_check_script_is_reported_as_unavailable_not_as_a_violation"
