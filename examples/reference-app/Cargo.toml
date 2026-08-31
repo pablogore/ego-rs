@@ -42,6 +42,10 @@ security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
 ego-scheduler = { path = "../../crates/ego-scheduler" }
 ego-persistence = { path = "../../crates/persistence" }
+# Matches `EntityRuntimeBuilder::with_snapshot_store`'s `Arc<Mutex<dyn Snapshot
+# + Send>>` field type exactly (persistent-entity/Cargo.toml) — a different
+# `Mutex` would not satisfy that signature.
+parking_lot = "0.12"
 # The host owns the pool: it opens Postgres, runs migrations, and refuses to
 # start without them. Nothing downstream degrades to memory on failure.
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }

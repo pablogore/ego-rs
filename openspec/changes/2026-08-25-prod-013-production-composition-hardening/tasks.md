@@ -80,16 +80,16 @@ Current baseline (verified in `examples/reference-app/src/lib.rs`): `EntityEvent
 profile and calls `.build()`; `compose_entity_runtimes` (line 452) and `build_runtime_with` (line
 567, calling `observed_entity_runtime` directly at lines 649/654) both need updating.
 
-- [ ] 4.1 RED — test: `EntityEventStores::in_memory().profile() == Profile::Dev`.
-- [ ] 4.2 RED (integration, Docker) — test: `EntityEventStores::open(pool).await?.profile() == Profile::Production`.
-- [ ] 4.3 GREEN — add private `profile: Profile` field + `pub fn profile(&self) -> Profile` to `EntityEventStores`; `in_memory()` sets `Profile::Dev`, `open()` sets `Profile::Production` (AD-8).
-- [ ] 4.4 RED — test: `EntityEventStores::open(pool)`'s snapshot stores are backed by `PostgreSQLSnapshotStore`, asserted behaviorally (e.g. a written snapshot survives a fresh read against the same pool), not by type-check alone.
-- [ ] 4.5 GREEN — add `org_snapshot`/`user_snapshot: Arc<Mutex<dyn Snapshot + Send>>` fields; `open(pool)` constructs **two typed** `PostgreSQLSnapshotStore` instances over the shared pool (not one shared `Arc` — mirrors the existing per-aggregate-typed-instance rationale on `EntityEventStores`); `in_memory()` constructs two `InMemorySnapshotStore`s (IS-13).
-- [ ] 4.6 GREEN — `observed_entity_runtime` (line 488) gains a snapshot-store parameter and calls `EntityRuntimeBuilder::try_build()`, returning `Result` (AD-8 consequence).
-- [ ] 4.7 GREEN — update both call sites: `compose_entity_runtimes` (line 452, calls at 464/469) and `build_runtime_with` (line 567, calls at 649/654) to pass the matching snapshot store and propagate the `Result`.
-- [ ] 4.8 Decision task — `compose_entity_runtimes` stays on `.build()` (infallible), since the profile field is private and `open()` always supplies every store, so no constructible input can make it refuse (AD-8's "tasks should pick one and say which"); document this choice in a code comment citing AD-8.
-- [ ] 4.9 GREEN — in `build_runtime_with`, capture `let profile = stores.profile();` **before** `stores.org`/`stores.user`/snapshot fields are moved into the `observed_entity_runtime` calls (lines 649/654), then call `.profile(profile)` on the `App::builder()` chain (line 683) instead of a hardcoded literal.
-- [ ] 4.10 Fix consequence call sites — update `metrics_reach_one_backend.rs:209` and any other caller of `compose_entity_runtimes`/`observed_entity_runtime` whose signature changed, with zero behavior change on the `Profile::Dev` path.
+- [x] 4.1 RED — test: `EntityEventStores::in_memory().profile() == Profile::Dev`.
+- [x] 4.2 RED (integration, Docker) — test: `EntityEventStores::open(pool).await?.profile() == Profile::Production`.
+- [x] 4.3 GREEN — add private `profile: Profile` field + `pub fn profile(&self) -> Profile` to `EntityEventStores`; `in_memory()` sets `Profile::Dev`, `open()` sets `Profile::Production` (AD-8).
+- [x] 4.4 RED — test: `EntityEventStores::open(pool)`'s snapshot stores are backed by `PostgreSQLSnapshotStore`, asserted behaviorally (e.g. a written snapshot survives a fresh read against the same pool), not by type-check alone.
+- [x] 4.5 GREEN — add `org_snapshot`/`user_snapshot: Arc<Mutex<dyn Snapshot + Send>>` fields; `open(pool)` constructs **two typed** `PostgreSQLSnapshotStore` instances over the shared pool (not one shared `Arc` — mirrors the existing per-aggregate-typed-instance rationale on `EntityEventStores`); `in_memory()` constructs two `InMemorySnapshotStore`s (IS-13).
+- [x] 4.6 GREEN — `observed_entity_runtime` (line 488) gains a snapshot-store parameter and calls `EntityRuntimeBuilder::try_build()`, returning `Result` (AD-8 consequence).
+- [x] 4.7 GREEN — update both call sites: `compose_entity_runtimes` (line 452, calls at 464/469) and `build_runtime_with` (line 567, calls at 649/654) to pass the matching snapshot store and propagate the `Result`.
+- [x] 4.8 Decision task — `compose_entity_runtimes` stays on `.build()` (infallible), since the profile field is private and `open()` always supplies every store, so no constructible input can make it refuse (AD-8's "tasks should pick one and say which"); document this choice in a code comment citing AD-8.
+- [x] 4.9 GREEN — in `build_runtime_with`, capture `let profile = stores.profile();` **before** `stores.org`/`stores.user`/snapshot fields are moved into the `observed_entity_runtime` calls (lines 649/654), then call `.profile(profile)` on the `App::builder()` chain (line 683) instead of a hardcoded literal.
+- [x] 4.10 Fix consequence call sites — update `metrics_reach_one_backend.rs:209` and any other caller of `compose_entity_runtimes`/`observed_entity_runtime` whose signature changed, with zero behavior change on the `Profile::Dev` path.
 
 ## Phase 5: Postgres `block_in_place` / Runtime-Flavor Risk (AD-9 landmine)
 

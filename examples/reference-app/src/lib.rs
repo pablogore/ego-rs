@@ -47,7 +47,7 @@ pub mod ports;
 pub mod providers;
 pub mod read_side;
 
-use ego_domain::persistence::EventStore;
+use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::{Clock, ConfigError, SystemClock, Validate};
 use ego_persistence::DatabaseConfig;
 use ego_runtime::effects::{
@@ -62,8 +62,10 @@ use ego_security_sdk::{
 use ego_service_sdk::{build_logger, App, ConfigurationProvider};
 use ego_transport::GrpcServerConfig;
 use kit_config::ConfigLoader;
+use parking_lot::Mutex;
 use persistent_entity::builder::EntityRuntimeBuilder;
 use persistent_entity::effect_acceptor::EffectAcceptor;
+use persistent_entity::profile::Profile;
 use persistent_entity::runtime::RuntimeConfig;
 use security_jwt::{
     Hs256AuthenticationProvider, JwtAlgorithm, JwtProviderConfig, KeyResolver, LocalKeyResolver,
@@ -345,13 +347,39 @@ pub struct EntityEventStores {
     pub org: Arc<dyn EventStore<crate::domain::tenant_org::OrganizationEnsured> + Send + Sync>,
     /// Where `User` writes.
     pub user: Arc<dyn EventStore<crate::domain::user::UserRegistered> + Send + Sync>,
+    /// `TenantOrganization`'s snapshot store (PROD-013 AD-9).
+    ///
+    /// A typed instance of its own, not shared with `user_snapshot` — mirrors
+    /// this struct's own event-store rationale: two aggregates over one pool,
+    /// never one `Arc` shared between them. A shared instance would serialize
+    /// both aggregates' snapshot I/O behind a single lock, which the
+    /// per-runtime default this replaces never did.
+    pub org_snapshot: Arc<Mutex<dyn Snapshot + Send>>,
+    /// `User`'s snapshot store. See `org_snapshot`.
+    pub user_snapshot: Arc<Mutex<dyn Snapshot + Send>>,
+    /// Which [`Profile`] this composition declares (PROD-013 AD-8).
+    ///
+    /// Private, and set only by the two constructors below: durable stores
+    /// and a production declaration are one decision in this host, so they
+    /// cannot drift apart. A `pub` field would let a caller assemble
+    /// `Profile::Production` over `in_memory()`'s volatile stores, which is
+    /// exactly the state this change exists to refuse.
+    profile: Profile,
 }
 
 impl EntityEventStores {
-    /// Opens both stores against one shared pool.
+    /// Which [`Profile`] this composition declares.
+    ///
+    /// `open()` always yields `Profile::Production`; `in_memory()` always
+    /// yields `Profile::Dev`.
+    pub fn profile(&self) -> Profile {
+        self.profile
+    }
+
+    /// Opens both stores — event and snapshot — against one shared pool.
     ///
     /// The host has already opened the pool and applied the migrations; this
-    /// only binds the two typed views onto it. Opening is fallible on purpose —
+    /// only binds the four typed views onto it. Opening is fallible on purpose —
     /// `PostgreSQLEventStore::open` refuses while any row is missing its
     /// aggregate type, and that refusal must stop startup rather than be
     /// swallowed into a memory-backed fallback.
@@ -368,7 +396,7 @@ impl EntityEventStores {
         )
         .await?;
         let user = ego_persistence::postgres::event_store::PostgreSQLEventStore::open(
-            pool,
+            pool.clone(),
             |_aggregate_type: &str,
              value: serde_json::Value,
              occurred_at: chrono::DateTime<chrono::Utc>| {
@@ -376,9 +404,18 @@ impl EntityEventStores {
             },
         )
         .await?;
+        // AD-9: two typed `PostgreSQLSnapshotStore` instances over the same
+        // pool — not one shared between the aggregates, for the reason on
+        // `org_snapshot` above.
+        let org_snapshot =
+            ego_persistence::postgres::snapshot::PostgreSQLSnapshotStore::new(pool.clone());
+        let user_snapshot = ego_persistence::postgres::snapshot::PostgreSQLSnapshotStore::new(pool);
         Ok(Self {
             org: Arc::new(org),
             user: Arc::new(user),
+            org_snapshot: Arc::new(Mutex::new(org_snapshot)),
+            user_snapshot: Arc::new(Mutex::new(user_snapshot)),
+            profile: Profile::Production,
         })
     }
 
@@ -392,6 +429,13 @@ impl EntityEventStores {
         Self {
             org: Arc::new(ego_infrastructure::persistence::in_memory::InMemoryEventStore::new()),
             user: Arc::new(ego_infrastructure::persistence::in_memory::InMemoryEventStore::new()),
+            org_snapshot: Arc::new(Mutex::new(
+                ego_infrastructure::persistence::in_memory::InMemorySnapshotStore::new(),
+            )),
+            user_snapshot: Arc::new(Mutex::new(
+                ego_infrastructure::persistence::in_memory::InMemorySnapshotStore::new(),
+            )),
+            profile: Profile::Dev,
         }
     }
 }
@@ -453,6 +497,10 @@ pub fn compose_entity_runtimes(
     stores: EntityEventStores,
     observability: Option<Arc<dyn ego_domain::Observability>>,
 ) -> ObservedEntityRuntimes {
+    // Captured before `stores.org`/`stores.user`/the snapshot fields below
+    // are moved: `stores.profile()` borrows the whole struct, which a
+    // partial move would make impossible to call afterward (PROD-013 AD-8).
+    let profile = stores.profile();
     // AD-4: two independent EntityRuntimes, one per aggregate. Both get the
     // sink, or whichever misses it goes dark on its own — and both get their
     // store explicitly, so neither can fall back to memory by omission.
@@ -460,13 +508,43 @@ pub fn compose_entity_runtimes(
     // point tests reach for directly (`metrics_reach_one_backend.rs`); the
     // durable-effects wiring only [`build_runtime_with`] can supply lives at
     // that call site instead (see [`observed_entity_runtime`]).
+    //
+    // `observed_entity_runtime` always calls `try_build()` and returns a
+    // `Result` (AD-8), but `.expect()` is safe here rather than propagated:
+    // `profile` is private and only `EntityEventStores::open`/`in_memory`
+    // ever produce a value, and both always set every store the profile
+    // they declare requires — so no `EntityEventStores` this function can
+    // actually receive can make `try_build()` refuse. Kept infallible on
+    // purpose: this is the plain entry point existing callers (e.g.
+    // `metrics_reach_one_backend.rs`) use with `in_memory()` and must keep
+    // compiling unmodified.
     ObservedEntityRuntimes {
-        org: Arc::new(observed_entity_runtime(
-            stores.org,
-            observability.clone(),
-            None,
-        )),
-        user: Arc::new(observed_entity_runtime(stores.user, observability, None)),
+        org: Arc::new(
+            observed_entity_runtime(
+                stores.org,
+                stores.org_snapshot,
+                profile,
+                observability.clone(),
+                None,
+            )
+            .expect(
+                "no constructible `EntityEventStores` leaves a declared profile \
+                 without every store it requires (AD-8)",
+            ),
+        ),
+        user: Arc::new(
+            observed_entity_runtime(
+                stores.user,
+                stores.user_snapshot,
+                profile,
+                observability,
+                None,
+            )
+            .expect(
+                "no constructible `EntityEventStores` leaves a declared profile \
+                     without every store it requires (AD-8)",
+            ),
+        ),
     }
 }
 
@@ -487,9 +565,14 @@ pub fn compose_entity_runtimes(
 /// `None` for both aggregates.
 fn observed_entity_runtime<E>(
     event_store: Arc<dyn EventStore<E> + Send + Sync>,
+    snapshot_store: Arc<Mutex<dyn Snapshot + Send>>,
+    profile: Profile,
     observability: Option<Arc<dyn ego_domain::Observability>>,
     effect_acceptor: Option<Arc<dyn EffectAcceptor>>,
-) -> persistent_entity::runtime::EntityRuntime<E>
+) -> Result<
+    persistent_entity::runtime::EntityRuntime<E>,
+    persistent_entity::error::PersistenceCompositionError,
+>
 where
     E: ego_domain::DomainEvent
         + Clone
@@ -499,14 +582,21 @@ where
         + Sync
         + 'static,
 {
-    let mut builder = EntityRuntimeBuilder::<E>::new().with_event_store(event_store);
+    let mut builder = EntityRuntimeBuilder::<E>::new()
+        .with_event_store(event_store)
+        .with_snapshot_store(snapshot_store)
+        .profile(profile);
     if let Some(sink) = observability {
         builder = builder.with_observability(sink);
     }
     if let Some(acceptor) = effect_acceptor {
         builder = builder.with_effect_acceptor(acceptor);
     }
-    builder.build()
+    // AD-8: `try_build()`, never `build()` — a refusal under
+    // `Profile::Production` must return here, not panic. `compose_entity_runtimes`
+    // proves this can never actually refuse for the callers it serves and
+    // `.expect()`s the result instead of propagating it further.
+    builder.try_build()
 }
 
 /// [`build_runtime_in_memory`], with an observability sink threaded through
@@ -642,20 +732,34 @@ pub fn build_runtime_with(
         }
     };
 
+    // Captured before `stores.org`/`stores.user`/the snapshot fields below
+    // are moved into the `observed_entity_runtime` calls: `stores.profile()`
+    // borrows the whole struct, which a partial move would make impossible
+    // to call afterward (PROD-013 AD-8/AD-9).
+    let profile = stores.profile();
     // AD-4: two independent EntityRuntimes, one per aggregate — built
     // directly here (not via [`compose_entity_runtimes`]) because only
     // `User` ever receives an effect acceptor; `TenantOrganization` never
     // describes external effects.
+    //
+    // `?`, not `.expect()`: unlike `compose_entity_runtimes`'s callers,
+    // `build_runtime_with` is reachable with `EntityEventStores::open`'s
+    // real, fallible-to-misconfigure stores, so a refusal here must reach
+    // this function's own `Result` rather than panic (AD-8).
     let org_runtime = Arc::new(observed_entity_runtime(
         stores.org,
+        stores.org_snapshot,
+        profile,
         observability.clone(),
         None,
-    ));
+    )?);
     let user_runtime = Arc::new(observed_entity_runtime(
         stores.user,
+        stores.user_snapshot,
+        profile,
         observability.clone(),
         user_effect_acceptor,
-    ));
+    )?);
     // Kept so the caller can see what this build composed; the services below
     // get the same `Arc`s.
     let composed = ObservedEntityRuntimes {
@@ -681,6 +785,11 @@ pub fn build_runtime_with(
     });
 
     let mut builder = App::builder()
+        // The same profile the entity runtimes above were built under
+        // (AD-8/AD-9) — never hardcoded here, because this function is the
+        // shared entry point for both `Profile::Dev` (`in_memory()`) and
+        // `Profile::Production` (`open()`) callers.
+        .profile(profile)
         // This service has not adopted operation-key enforcement yet, and says so.
         //
         // The builder's default is the enforcing variant, which refuses to start

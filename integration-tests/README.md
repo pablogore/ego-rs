@@ -68,7 +68,7 @@ rather than counted against the end-to-end budget:
 
 ```
 End-to-end scenarios ................. 4 / 4   (budget spent)
-Durability precondition .............. 1
+Durability precondition .............. 2
 Real-process-death recovery .......... 2
 PostgreSQL concurrency invariants .... 2
 SQL-expression invariants ............ 1
@@ -77,7 +77,7 @@ Schema/catalog assertions ............ 1
 PROD-002 backend conformance ......... 1
 PROD-002 backend-specific invariants . 1
 PROD-002 provider composition ........ 1
-Total infrastructure tests ........... 15
+Total infrastructure tests ........... 16
 ```
 
 **This block was wrong, and the correction is the point of keeping this note.** It
@@ -252,6 +252,7 @@ infrastructure risk none of the four carries.
 | Recovery after a real process death | After a process dies between the two halves of one dual-aggregate operation, a retry resumes rather than repeats: the confirmed half is not re-executed, and the missing half runs exactly once | The evidence **is** a real crash. A child process is killed by `SIGABRT` between the two aggregates, so the partial durable state is produced by an execution that genuinely stopped rather than by a fixture arranging one. No in-process test can leave a half-finished operation behind, because unwinding is not dying. Unix-only, structurally: reading a signal from an exit status is `std::os::unix`, and degrading it to "any non-zero exit" would admit a panic or a missing database as a crash | `tests/infrastructure/dual_aggregate_crash_recovery_postgres.rs` |
 | Recovery after a real process death, single-aggregate case | After a process dies once a single-aggregate operation's event, receipt and reservation have all already committed, a retry is answered by the reservation's own stored response — not by re-running the handler or writing a second event or receipt | Same reasoning as the dual-aggregate row, for the complementary shape: that scenario proves resumption of an *unfinished* operation; this one proves a *finished* one is never repeated after a real crash, which needs its own child process and its own `SIGABRT` — nothing here is inferred from the dual-aggregate case. Deliberately narrower than an HTTP round trip: it drives `EnsureOrg`, a minimal one-aggregate `#[idempotent]` operation over the same `TenantOrganization` domain type, directly through `Runtime::resolve`, because the property under test — durable reservation replay under a real crash — lives below the transport | `tests/infrastructure/single_aggregate_crash_recovery_postgres.rs` |
 | An entity's events and receipt outlive their runtime | What the composition root actually wires is durable — the events *and* the confirmed receipt are read back by a second runtime | This is the precondition the crash scenario rests on, and it was false when written: **no `EntityRuntime` anywhere was given a durable event store**, so production took `EntityRuntimeBuilder`'s in-memory default. Receipts live in the event store, so a crash destroyed the events and the receipt together. A recovery test over that would have failed for the wrong reason, and a passing one would have proved only that a fixture kept its own map. Nothing in-process can distinguish the two, because in-process is exactly the condition being ruled out | `tests/infrastructure/durable_entity_progress_postgres.rs` |
+| `EntityEventStores::open` declares `Profile::Production` and its snapshot stores are durable | `open(pool)` is the only thing that yields `Profile::Production` (PROD-013 AD-8), and the snapshot store it hands both aggregates is a real `PostgreSQLSnapshotStore` over that pool, not the in-memory default it replaced (AD-9) | The precondition was false here too: `open()` wired durable events but left both aggregates' snapshots in process memory, silently. A written snapshot must survive a fresh `open()` against the same pool after the writing instance is dropped — an in-memory store cast to the same `Arc<Mutex<dyn Snapshot + Send>>` field type would pass a type check and fail exactly this | `tests/infrastructure/entity_event_stores_wiring_postgres.rs` |
 
 The durability test earns its own slot rather than being folded into the crash
 scenario: if the two were one test, a regression that put the entity runtime back
