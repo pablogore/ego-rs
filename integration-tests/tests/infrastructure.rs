@@ -66,6 +66,7 @@ mod infrastructure {
     /// PROD-002 G11: `PostgresEffectStore`-specific unit tests, relocated
     /// alongside `effect_store_postgres_conformance` above.
     mod effect_store_postgres_unit;
+    mod entity_event_stores_wiring_postgres;
     mod fencing_window_postgres;
     mod oldest_completed_postgres;
     mod purge_progress_postgres;

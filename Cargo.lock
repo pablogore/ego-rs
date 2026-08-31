@@ -2843,6 +2843,7 @@ dependencies = [
  "kitlogger-log-domain",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "persistent-entity",
  "security-jwt",
  "serde",
