@@ -95,6 +95,12 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
         .await
         .expect("the stores open against a migrated database");
 
+    // PROD-013 AD-10: the production declaration where the pool it needs
+    // already exists — this is the Production half of IS-12's regression
+    // guard, mirroring the Dev half in
+    // `examples/reference-app/tests/production_profile_guard.rs`.
+    assert_eq!(stores.profile(), persistent_entity::profile::Profile::Production);
+
     // Through `build_runtime_with` — the composition root `main` calls — and the
     // runtimes are read back from what it composed.
     //
