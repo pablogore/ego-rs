@@ -5,68 +5,70 @@ set -euo pipefail
 #
 # CI-time validation for constitution mapping and governance requirements.
 #
-# Checks:
-#   1. All tasks have required fields
-#   2. Evidence requirements are met
-#   3. All tasks complete with evidence
-#   4. Coverage >= 85%
-#   5. cargo test, clippy, and fmt all pass
-#   6. No incomplete tasks
-#   7. Workflow stages not skipped
-#   8. Contract versions bumped on breaking changes
+# Actually enforced by this script:
+#   1. cargo test passes
+#   2. cargo clippy passes
+#   3. cargo fmt --check passes
+#   4. AGENTS.md exists and has no entries marked incomplete/pending
+#
+# NOT enforced by this script (documented here so its coverage claim
+# doesn't overstate itself — tracked as pre-existing, out-of-scope debt):
+#   - All tasks have required fields
+#   - Evidence-complete requirement
+#   - Coverage >= 85% floor (see verify-coverage.sh, which owns that check)
+#   - Workflow stages not skipped
+#   - Contract versions bumped on breaking changes
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+AGENTS_MD_PATH="${AGENTS_MD_PATH:-$ROOT/AGENTS.md}"
 EXIT_CODE=0
 
 echo "--- [G-R1 through G-R8] Verifying constitution mapping and governance..."
 
-# Check for evidence in tasks
-echo "Checking for evidence in tasks..."
-
-# Check if we have a tasks file or AGENTS.md
-if [ -f "$ROOT/AGENTS.md" ]; then
-    echo "Checking AGENTS.md for evidence requirements..."
-    # Basic check for evidence presence
-    evidence_count=$(grep -c "evidence:" "$ROOT/AGENTS.md" 2>/dev/null || echo 0)
-    echo "Found $evidence_count evidence entries in AGENTS.md"
-fi
-
-# Check for basic cargo commands
-echo "Running basic cargo checks..."
-
-# Test that cargo commands work
-echo "Checking cargo test..."
-if cargo test --workspace --quiet 2>/dev/null; then
-    echo "PASS: cargo test works"
-else
-    echo "WARN: cargo test failed (may be expected in some contexts)"
-fi
-
-echo "Checking cargo clippy..."
-if cargo clippy --workspace --quiet 2>/dev/null; then
-    echo "PASS: cargo clippy works"
-else
-    echo "WARN: cargo clippy failed (may be expected in some contexts)"
-fi
-
-echo "Checking cargo fmt..."
-if cargo fmt --check 2>/dev/null; then
-    echo "PASS: cargo fmt works"
-else
-    echo "WARN: cargo fmt failed (may be expected in some contexts)"
-fi
-
-# Check for incomplete tasks
-echo "Checking for incomplete tasks..."
-if [ -f "$ROOT/AGENTS.md" ]; then
-    incomplete_tasks=$(grep -c "incomplete\|pending" "$ROOT/AGENTS.md" 2>/dev/null || echo 0)
-    if [ "$incomplete_tasks" -gt 0 ]; then
-        echo "WARN: Found $incomplete_tasks incomplete tasks"
+run_check() {
+    local label="$1"
+    local cmd="$2"
+    echo "Checking $label..."
+    if eval "$cmd"; then
+        echo "PASS: $label"
     else
-        echo "PASS: No incomplete tasks found"
+        echo "FAIL: $label"
+        EXIT_CODE=1
+    fi
+}
+
+CARGO_TEST_CMD="${CARGO_TEST_CMD:-cargo test --workspace --quiet}"
+CARGO_CLIPPY_CMD="${CARGO_CLIPPY_CMD:-cargo clippy --workspace --quiet}"
+CARGO_FMT_CMD="${CARGO_FMT_CMD:-cargo fmt --check}"
+
+run_check "cargo test" "$CARGO_TEST_CMD"
+run_check "cargo clippy" "$CARGO_CLIPPY_CMD"
+run_check "cargo fmt" "$CARGO_FMT_CMD"
+
+echo "Checking evidence and incomplete-task entries..."
+if [ ! -f "$AGENTS_MD_PATH" ]; then
+    echo "FAIL: $AGENTS_MD_PATH not found"
+    EXIT_CODE=1
+else
+    evidence_count="$(grep -c "evidence:" "$AGENTS_MD_PATH" 2>/dev/null || true)"
+    evidence_count="${evidence_count:-0}"
+    echo "Found $evidence_count evidence entries in $AGENTS_MD_PATH"
+
+    incomplete_tasks="$(grep -c "incomplete\|pending" "$AGENTS_MD_PATH" 2>/dev/null || true)"
+    incomplete_tasks="${incomplete_tasks:-0}"
+    if [ "$incomplete_tasks" -gt 0 ]; then
+        echo "FAIL: found $incomplete_tasks incomplete/pending task entries"
+        EXIT_CODE=1
+    else
+        echo "PASS: no incomplete tasks found"
     fi
 fi
 
-echo "PASS: Constitution mapping and governance validation completed."
+if [ "$EXIT_CODE" -eq 0 ]; then
+    echo "PASS: Constitution mapping and governance validation completed."
+else
+    echo "FAIL: Constitution mapping and governance validation failed."
+fi
 
 exit "$EXIT_CODE"
