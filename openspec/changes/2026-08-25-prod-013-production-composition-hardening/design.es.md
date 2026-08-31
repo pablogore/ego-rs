@@ -913,3 +913,4 @@ realmente aseveran y ninguna es demostrable por un happy path que pasa:
    `PostgreSQLSnapshotStore` en la vía de producción de la reference app está en alcance
    (es cableado, no implementación, así que OOS-1 lo permite — pero es comportamiento
    nuevo en el host de referencia y expone un defecto de durabilidad vivo).
+

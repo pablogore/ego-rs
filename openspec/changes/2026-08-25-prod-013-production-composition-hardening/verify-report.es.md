@@ -113,3 +113,138 @@ Las 11 decisiones de arquitectura (AD-1 a AD-11) verificadas contra el código r
 3. `AppBuilder::profile()` deliberadamente no se propaga a runtimes de entidad ya construidos y registrados vía `.entity()` — es un límite arquitectónico documentado (AD-5), no un hueco silencioso, y el doc comment del código lo declara palabra por palabra como lo exigió design.md.
 4. La tabla `EXPECTED_PAIRS` de `schema_index_assertion.rs` no se extendió para cubrir el nuevo patrón de índice único parcial doble de `snapshots` de la migración 012, dejando un hueco de cobertura real (pero ya conocido, no bloqueante) en ese test de regresión.
 5. El único diff de `cargo fmt --check` encontrado en `app/mod.rs` es anterior a PROD-013 por completo (confirmado presente en el commit baseline de `develop`), por lo que no debe atribuírsele erróneamente a este cambio durante el archive.
+
+---
+
+## Verificación del Cierre de AD-12 (re-verify, WU8, `opsx/prod-013-wu8-durability-capability-check`)
+
+**Contexto**: esta sección complementa el PASS anterior. No repite los 10 checks ya confirmados
+allí — ese código no cambió. Verifica únicamente el trabajo nuevo de WU8: el fix de AD-12, el
+hueco configuración-vs-durabilidad que `/code-review` encontró después del PASS previo de
+`sdd-verify`, más el fix complementario de dedup en la migración 012. Base de esta corrida:
+`opsx/prod-013-wu8-durability-capability-check`, que apila las 8 work units (7 previas + WU8)
+sobre `develop @ a740d34`. Commits inspeccionados: `e0fa699`..`057470e` (12 commits, incluyendo
+la cadena de WU8 `e503a30`→`057470e`).
+
+### 1. El hueco es real y está cerrado — confirmado por lectura directa del código fuente, no confiando en el reporte de apply
+
+- `crates/domain/src/persistence/event_store.rs:112-124` — `EventStore::is_durable(&self) -> bool { false }`, método default con doc comment que nombra AD-12. Confirmado literalmente.
+- `crates/domain/src/persistence/snapshot.rs:39-49` — `Snapshot::is_durable(&self) -> bool { false }`, mismo patrón, misma referencia a AD-12. Confirmado literalmente.
+- `crates/persistence/src/postgres/event_store.rs:422-425` — sobreescribe a `true` ("A committed append survives process death"). Confirmado.
+- `crates/persistence/src/postgres/snapshot.rs:152-155` — sobreescribe a `true` ("A committed snapshot survives process death"). Confirmado.
+- `crates/persistent-entity/src/builder.rs::validate_persistence()` (líneas 290-305) — ambas llamadas a `require_configured` ahora pasan `self.event_store.as_ref().is_some_and(|s| s.is_durable())` y `self.snapshot_store.as_ref().is_some_and(|s| s.lock().is_durable())`, no `.is_some()`. Confirmado byte por byte contra el diff prescrito en design.md AD-12.
+- `crates/service-sdk/src/runtime/builder.rs::validate_persistence_profile()` (líneas 777-802) — chequea `self.effect_state_store.as_ref().is_some_and(|s| s.capabilities().durable)`, reutilizando el `EffectStoreCapabilities` existente de PROD-002 en vez de agregar un nuevo método de trait, exactamente como especifica AD-12. Confirmado.
+
+**El escenario motivador exacto ahora es rechazado, ejercitado por un test real, no por un mock que simula el gate:**
+
+```rust
+EntityRuntimeBuilder::<TestEvent>::new()
+    .profile(Profile::Production)
+    .with_event_store(Arc::new(InMemoryEventStore::new()))
+    .with_snapshot_store(Arc::new(Mutex::new(DurableStubSnapshotStore)))
+    .try_build()
+```
+
+es afirmado `Err` por `try_build_rejects_explicit_in_memory_event_store_under_production`
+(`crates/persistent-entity/src/builder.rs:763-782`), y el caso simétrico para el snapshot store
+por `try_build_rejects_explicit_in_memory_snapshot_store_under_production` (líneas 784-806).
+Ambos llaman a la cadena real `EntityRuntimeBuilder`/`require_configured`/`is_durable` de punta a
+punta — ningún test double reemplaza al gate en sí, solo a las implementaciones de store bajo
+prueba (`DurableStubEventStore`/`DurableStubSnapshotStore`, que existen únicamente para aislar un
+campo a la vez, según la instrucción del propio design.md). Ejecutados explícitamente:
+
+```
+cargo test -p ego-persistent-entity try_build_rejects_explicit_in_memory_event_store_under_production
+cargo test -p ego-persistent-entity try_build_rejects_explicit_in_memory_snapshot_store_under_production
+```
+→ ambos `ok`.
+
+El equivalente para el effect store es
+`validate_persistence_profile_rejects_explicit_in_memory_effect_store_when_executor_registered`
+(`crates/service-sdk/src/runtime/builder.rs:3705-3729`), que afirma
+`RuntimeError::PersistenceNotConfigured` para `Profile::Production` + un ejecutor registrado + un
+`InMemoryEffectStore` explícito. Confirmado del mismo modo: llamada real a
+`RuntimeBuilder::try_build()`, sin validador mockeado.
+
+**Regresión que el propio fix requirió y reveló** (tarea 9.6): dos de los 39 tests previos
+(`try_build_rejects_missing_snapshot_store_under_production` y la mitad "event-only" de
+`try_build_rejects_partial_configuration_under_production`) habían cableado incidentalmente un
+`InMemoryEventStore` explícito para aislar la afirmación del snapshot store; bajo la nueva regla de
+durabilidad, ese event store en memoria es rechazado primero (el event store se chequea antes del
+snapshot store, según el ordenamiento de AD-3), lo que habría invertido el mensaje de error
+esperado. Confirmado el fix: ambos ahora usan un `DurableStubEventStore` local al test en su lugar,
+y la afirmación original de cada test permanece sin cambios. Es un efecto secundario honesto y
+revelado de endurecer la regla, no un debilitamiento silencioso de la cobertura.
+
+### 2. Paso de dedup de la migración 012 — leído y sólido
+
+`crates/persistence/src/postgres/migrations/012_fix_snapshots_tenant_null_uniqueness.sql` ahora
+abre con un bloque `DELETE FROM snapshots ... USING (SELECT id, ROW_NUMBER() OVER (PARTITION BY
+aggregate_id ORDER BY version DESC, created_at DESC, id DESC) ...) WHERE tenant_id IS NULL AND
+rank > 1`, **antes** de `DROP INDEX IF EXISTS idx_snapshots_aggregate` y de las dos nuevas
+sentencias `CREATE UNIQUE INDEX ... ux_snapshots_identity_{tenant,systemwide}`. El orden es
+correcto: el dedup corre primero, por lo que un despliegue con filas duplicadas de tenant NULL
+preexistentes (el defecto exacto que esta migración corrige) ya no falla directamente en
+`CREATE UNIQUE INDEX`. El dedup conserva la fila con `version` más alto por `aggregate_id`
+(desempate por `created_at DESC, id DESC`), lo que coincide con el propio `ORDER BY version DESC
+LIMIT 1` de `load_snapshot` — por lo que ningún comportamiento observable cambia para ningún
+llamador que pase por `Snapshot::load_snapshot`. El alcance está correctamente restringido a filas
+con `tenant_id IS NULL`: el índice viejo ya garantizaba unicidad para tenants no nulos, por lo que
+ninguna fila no nula corre riesgo de ser un duplicado. Esto coincide exactamente con la descripción
+del fix complementario de AD-12 en design.md.
+
+### 3. Gates re-ejecutados sobre el estado final de la rama (las 8 work units)
+
+| Comando | Exit | Resultado |
+|---|---|---|
+| `cargo fmt --check` | 1 | Mismo diff preexistente único en `crates/service-sdk/src/app/mod.rs:275` (line-wrap de `record_app_started`) que en la corrida de verify previa — confirmado que sigue presente en el baseline de `develop`, sin tocar por ningún commit de PROD-013 incluyendo la cadena de WU8. SUGGESTION sin cambios, no es una regresión. |
+| `cargo check --workspace` | 0 | Limpio. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 | Limpio, cero warnings. |
+| `cargo test --workspace` | 0 | 137 bloques de resultado de test (unit + doc-tests en todos los crates), todos `0 failed`. Sin regresión por el diff de WU8. |
+| Docker `run-suite` (`DOCKER_HOST=unix:///Users/pablogore/.colima/default/docker.sock`) | 0 | 43 passed, 0 failed, 1 ignored (la misma exclusión Tier-1 preexistente/documentada) — conteo idéntico byte por byte a la corrida de verify previa, confirmando que la adición de dedup de la migración 012 no cambió nada observable para una base de datos fresca y que WU8 no introdujo ninguna regresión de infraestructura. |
+
+### 4. Las Fases 1-8 no se vieron afectadas por WU8
+
+Reconfirmado por la corrida completa de la suite arriba (0 fallos en ningún lado) más inspección
+directa del diff: los commits de WU8 (`e503a30`..`057470e`) solo tocan
+`crates/domain/src/persistence/{event_store,snapshot}.rs` (nuevo método default),
+`crates/persistence/src/postgres/{event_store,snapshot}.rs` (override),
+`crates/persistent-entity/src/builder.rs` (call-site + tests nuevos/ajustados),
+`crates/service-sdk/src/runtime/builder.rs` (call-site + tests nuevos), y el archivo SQL de la
+migración. Ningún archivo del diff de las Fases 1-8 (`e0fa699`..`3b1da9c`) fue tocado más allá de
+estos mismos archivos en los mismos call sites que el design ya describía cambiando. Los tests de
+las 39 tareas previamente verdes siguen todos pasando (confirmado vía la corrida completa arriba y
+la contabilización explícita de la tarea 9.6 de los dos tests que necesitaron ajuste interno sin
+debilitar sus afirmaciones).
+
+### Veredicto de esta re-verificación
+
+**PASS.** AD-12 está genuinamente cerrado: el gate ahora chequea `is_durable()`/
+`capabilities().durable`, no mera presencia, en los tres call sites, verificado contra el código
+fuente real y ejercitado por tests que llaman a la cadena real del builder de punta a punta en vez
+de un sustituto del gate. El paso de dedup de la migración 012 está correctamente ordenado y
+preserva el comportamiento. Los 5 gates están en verde sobre el estado final de la rama con las 8
+work units, con resultados idénticos a la corrida de verify previa salvo por los tests nuevos de
+WU8 mismos. Ningún CRITICAL, WARNING o SUGGESTION nuevo más allá del único diff preexistente de
+`cargo fmt` ya registrado y re-confirmado como no relacionado con este cambio.
+
+**Próxima fase recomendada**: `sdd-archive` — una vez que el arquitecto mergee la cadena de PRs,
+el cambio completo de 8 work units queda listo para cerrarse.
+
+## Aprendizajes Clave (re-verify WU8)
+
+1. El patrón de fix de AD-12 reutilizó el `EffectStoreCapabilities.durable` existente de PROD-002
+   para el effect store y agregó un método default mínimo equivalente `is_durable()` a
+   `EventStore`/`Snapshot`, en vez de inventar una nueva estructura de capacidades, manteniendo el
+   fix proporcional a un único booleano por trait.
+2. Endurecer el argumento booleano de `require_configured` de presencia a durabilidad invirtió
+   silenciosamente el mensaje de error esperado de dos tests preexistentes, porque habían cableado
+   incidentalmente un event store en memoria para aislar una afirmación del snapshot store —
+   revelado y corregido con un stub durable de test en vez de debilitar la afirmación.
+3. El paso de deduplicación de la migración 012 debe correr antes de `DROP INDEX`/
+   `CREATE UNIQUE INDEX`, y debe restringirse a filas con `tenant_id IS NULL`, ya que el índice no
+   nulo preexistente ya garantizaba que no hubiera duplicados ahí.
+4. Que los conteos exactos de passed/failed/ignored de la suite respaldada por Docker se mantengan
+   idénticos entre las corridas de verify de WU7 y WU8 (43/0/1) es en sí mismo evidencia de que
+   WU8 no cambió ningún comportamiento observable en tiempo de ejecución para una base de datos
+   fresca.
