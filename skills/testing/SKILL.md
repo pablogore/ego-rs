@@ -36,13 +36,21 @@ Dependencies that cross a crate or I/O boundary MUST be mocked:
 - Use `Arc<dyn Trait>` with a hand-rolled in-test stub when `mockall` is overkill.
 - Never instantiate a real `PgPool`, `sqlx::Pool`, or broker client in a unit test.
 
-### Rule 3 — Integration tests live in `crates/integration-tests/` only
+### Rule 3 — Integration tests live in `crates/integration-tests/` (default) or a documented independent root-level workspace
 
-The dedicated integration crate:
+The default integration crate:
 - Path: `crates/integration-tests/`
 - Must use `testcontainers` (or `testcontainers-modules`) for all external services.
 - Each test module spins up and tears down its own container — no shared state between tests.
 - Integration tests are excluded from the default `cargo test` run via `[[test]]` in `Cargo.toml` or a CI-only profile.
+
+**Documented architectural exception**: a root-level `integration-tests/` crate, deliberately excluded from the workspace `members` list, is allowed when a written, approved architecture decision requires it (e.g. keeping Docker/Testcontainers out of the default root build — see `integration-tests/README.md` and GitHub issue #275). Under that exception:
+- One shared external-service container (e.g. one PostgreSQL container) per test run, reused across test modules via a process-wide handle, is allowed in place of one container per test module — provided each test still runs against its own isolated database/schema within that shared container (e.g. `isolated_database()`), so tests remain independent even though the container is not.
+- The exception must be traceable to the approving decision (issue/ADR/design doc) referenced from the crate's own README or module docs — an undocumented shared container is still a violation.
+
+### Non-exceptions
+
+Speed or convenience is never grounds for the exception above — only an approved architecture decision citing a concrete constraint (e.g. no-Docker root build) qualifies.
 
 ### Rule 4 — No `#[ignore]` as a workaround
 
