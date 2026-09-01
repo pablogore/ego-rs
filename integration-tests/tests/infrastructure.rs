@@ -42,6 +42,11 @@
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 mod infrastructure {
+    /// PROD-015 T-04.1–T-04.4 (IS-4, full weight per D-9): the offline
+    /// `aggregate_type` backfill's four transactional-behavior cases —
+    /// preflight abort, post-verification rollback, zero-row commit, and the
+    /// revert round trip.
+    mod aggregate_type_backfill_postgres;
     mod concurrent_replicas_postgres;
     mod conflict_from_postgres;
     /// Unix only, structurally rather than by accident.
@@ -56,6 +61,13 @@ mod infrastructure {
     #[cfg(unix)]
     mod dual_aggregate_crash_recovery_postgres;
     mod durable_entity_progress_postgres;
+    /// PROD-015 T-01.1/T-01.2 (IS-1, foundational): `PostgreSQLEventStore` and
+    /// `PostgresOperationReservationStore` judged against the identical shared
+    /// conformance harnesses the in-memory adapters satisfy. IS-6 (uncommitted
+    /// staged writes are invisible; a dropped unit of work persists nothing) is
+    /// retired into this same run per D-4/AD-4 — demonstrated here, no separate
+    /// test or ledger row.
+    mod durable_store_conformance_postgres;
     /// PROD-002 PR5 Phase 7.5: composition-only validation that a real
     /// `PostgresEffectStore` composes with `RuntimeBuilder::with_effect_store`
     /// end to end — not a re-test of Tier 1/2/3 conformance below.
@@ -67,8 +79,24 @@ mod infrastructure {
     /// alongside `effect_store_postgres_conformance` above.
     mod effect_store_postgres_unit;
     mod entity_event_stores_wiring_postgres;
+    /// PROD-015 T-03.1/T-03.2 (IS-2 post-`23505` scope + IS-5, both P0/P1): an
+    /// N-way concurrent append race on one stream, and NULL-tenant identity
+    /// verified behaviorally under SQL's three-valued comparison.
+    mod events_identity_race_postgres;
     mod fencing_window_postgres;
+    /// PROD-015 T-02.1 (IS-3, P0): six real contenders racing one expired
+    /// lease under a real row lock leave exactly one `TakenOver` winner and
+    /// the fencing token advances by exactly one, never by the contender
+    /// count.
+    mod lease_contention_postgres;
     mod oldest_completed_postgres;
+    /// PROD-015 T-05.1–T-05.4 (IS-9, P1): the narrow PostgreSQL 14
+    /// compatibility slice — anti-vacuity guard, migration-set schema
+    /// completeness, the systemwide-duplicate `23505` refusal, and the
+    /// aggregate-type backfill/revert round trip, all against the run's
+    /// separate PG14 container. Deliberately not a second full run of the
+    /// main suite; see the file's own doc comment for what is excluded.
+    mod pg14_compatibility;
     mod purge_progress_postgres;
     mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;

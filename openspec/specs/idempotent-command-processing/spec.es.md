@@ -89,7 +89,12 @@ Una actualización presentada por un owner cuyo lease expiró DEBE ser
 rechazada con `StaleOwner`, y ese owner NO DEBE poder cerrar ni renovar la
 operación después de eso. Un caller posterior DEBE poder tomar el control de
 un lease expirado de forma atómica, dejando fuera de juego (fencing) al owner
-anterior.
+anterior. Esto DEBE sostenerse bajo concurrencia real de múltiples contendientes, no solo en
+el caso de un solo contendiente: cuando varios contendientes compiten por un lease expirado,
+exactamente uno DEBE ganar, y el fencing token DEBE avanzar exactamente uno — nunca la
+cantidad de contendientes.
+(Previamente: enunciaba solo la garantía de toma de control con un único contendiente; no
+enunciaba el resultado de la carrera con muchos contendientes.)
 
 #### Escenario: La actualización condicional rechaza a un owner obsoleto
 - DADA una reserva cuyo lease expiró y fue tomada por un nuevo owner
@@ -110,6 +115,26 @@ anterior.
 - CUANDO un owner obsoleto emite un renew después de una toma de control
 - ENTONCES este requisito NO está satisfecho — la comparación en la
   actualización condicional es obligatoria, no basta con almacenar el valor
+
+#### Escenario: Seis contendientes compitiendo por un lease expirado dejan exactamente un ganador
+- DADA una reserva con un lease expirado y seis contendientes concurrentes intentando la toma
+  de control
+- CUANDO los seis intentos compiten concurrentemente
+- ENTONCES exactamente un contendiente gana la toma de control, y el fencing token avanza
+  exactamente uno — no seis
+
+### Requisito: La Conformidad del Store de Reservas Se Extiende al Adaptador Durable
+
+`PostgresOperationReservationStore` DEBE satisfacer exactamente las mismas definiciones de
+`assert_reservation_store_conformance` que gobiernan a los llamadores existentes del harness.
+Pasar esas aserciones solo en un contexto de test no durable NO DEBE tratarse como evidencia
+suficiente de que el adaptador durable es conforme.
+
+#### Escenario: Un store de reservas durable que falla la conformidad es no conforme
+- DADO `PostgresOperationReservationStore` ejecutado a través de
+  `assert_reservation_store_conformance`
+- CUANDO cualquier aserción de ese harness falla
+- ENTONCES `PostgresOperationReservationStore` no es conforme con esta capability
 
 ### Requisito: Recibos Por Agregado Confirmados Atómicamente Con el Append
 

@@ -82,7 +82,12 @@ without verifying it on every mutating call does NOT satisfy this
 requirement. An update presented by an owner whose lease has expired MUST be
 rejected with `StaleOwner`, and that owner MUST NOT be able to close or renew
 the operation afterward. A later caller MUST be able to take over an expired
-lease atomically, fencing out the prior owner.
+lease atomically, fencing out the prior owner. This MUST hold under real
+multi-contender concurrency, not only the single-contender case: when multiple
+contenders race one expired lease, exactly one MUST win, and the fencing
+token MUST advance by exactly one — never by the number of contenders.
+(Previously: stated the single-contender takeover guarantee only; did not state the
+many-contender race outcome.)
 
 #### Scenario: Conditional update rejects a stale owner
 - GIVEN a reservation whose lease expired and was taken over by a new owner
@@ -102,6 +107,25 @@ lease atomically, fencing out the prior owner.
 - WHEN a stale owner issues a renew after takeover
 - THEN this requirement is NOT satisfied — the conditional-update comparison
   is mandatory, not merely storing the value
+
+#### Scenario: Six contenders racing one expired lease leave exactly one winner
+- GIVEN a reservation with an expired lease and six concurrent contenders attempting takeover
+- WHEN all six attempts race concurrently
+- THEN exactly one contender wins the takeover, and the fencing token advances by exactly one —
+  not by six
+
+### Requirement: Reservation Store Conformance Extends to the Durable Adapter
+
+`PostgresOperationReservationStore` MUST satisfy the identical
+`assert_reservation_store_conformance` definitions that govern the harness's existing callers.
+Passing those assertions in a non-durable test context alone MUST NOT be treated as sufficient
+evidence that the durable adapter is compliant.
+
+#### Scenario: A durable reservation store that fails conformance is non-compliant
+- GIVEN `PostgresOperationReservationStore` driven through
+  `assert_reservation_store_conformance`
+- WHEN any assertion in that harness fails
+- THEN `PostgresOperationReservationStore` is not compliant with this capability
 
 ### Requirement: Per-Aggregate Receipts Confirmed Atomically With the Append
 

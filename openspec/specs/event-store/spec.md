@@ -18,7 +18,12 @@ schema for the receipt index are design-phase decisions (see Non-Goals).
 The event store MUST reject a second event written for the same
 `(tenant_id, aggregate_type, aggregate_id, version)` tuple — including when
 `tenant_id` represents the NULL/systemwide tenant. A duplicate MUST be
-rejected by the store itself, not merely by application-level discipline.
+rejected by the store itself, not merely by application-level discipline. Against a real,
+concurrent writer population, a rejected duplicate MUST surface as a conflict reporting the
+**real current version** of the stream, and an N-way concurrent append race targeting one
+stream MUST leave exactly one winner.
+(Previously: stated only the rejection outcome; did not state what the rejection reports under
+real concurrent contention, nor the N-way race outcome.)
 
 #### Scenario: Duplicate version for the same tenant-scoped aggregate is rejected
 - GIVEN an event already stored for `(tenant-a, User, user-7, version=3)`
@@ -31,6 +36,41 @@ rejected by the store itself, not merely by application-level discipline.
 - WHEN a second event is appended for the identical systemwide tuple
 - THEN the store rejects the second append — NULL tenant identity does not
   exempt the tuple from uniqueness enforcement
+
+#### Scenario: An N-way concurrent append race leaves exactly one winner, each reporting the real version
+- GIVEN N concurrent callers each appending the next event to the identical stream
+- WHEN all N appends are attempted concurrently
+- THEN exactly one append succeeds, the remaining N-1 are rejected as conflicts, and each of
+  those N-1 conflicts reports the stream's real, winning current version — obtainable only
+  under genuine concurrent contention, past the point where the store's own transaction has
+  already aborted and must re-read the stream on another connection, not from the single-caller
+  stale-expected-version pre-check the conformance harness already exercises
+
+### Requirement: Event Store Conformance Extends to Durable Adapters
+
+`PostgreSQLEventStore` MUST satisfy the identical `assert_event_store_conformance` definitions
+that govern the in-memory implementation. Passing the in-memory conformance suite alone MUST
+NOT be treated as sufficient evidence that a durable implementation is compliant.
+
+#### Scenario: A durable event store that fails conformance is non-compliant
+- GIVEN `PostgreSQLEventStore` driven through `assert_event_store_conformance`
+- WHEN any assertion in that harness fails
+- THEN `PostgreSQLEventStore` is not compliant with this capability, regardless of the in-memory
+  implementation's status
+
+### Requirement: NULL-Tenant Stream Identity Honors SQL's Three-Valued Comparison Behaviorally
+
+Stream-identity comparisons involving a `NULL`/systemwide tenant (`Option::None`) MUST be
+verified behaviorally against real PostgreSQL, not only asserted from the schema/catalog.
+Ordinary equality comparison under three-valued logic (`NULL = NULL` is not true) MUST NOT
+cause a systemwide-tenant stream to be silently missed by, or silently merged with, another
+systemwide-tenant stream during identity resolution.
+
+#### Scenario: Two distinct systemwide-tenant streams resolve independently
+- GIVEN two events stored under distinct aggregates, both with `Option::None` tenant
+- WHEN each stream's identity is resolved
+- THEN each resolves independently to its own stream, with no false collision or false miss
+  caused by NULL's three-valued comparison behavior
 
 ### Requirement: Aggregate Type Is a Distinct Identity Component
 
