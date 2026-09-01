@@ -45,6 +45,11 @@ use testcontainers_modules::postgres::Postgres;
 const TEMPLATE: &str = "ego_template";
 const HOST_VAR: &str = "EGO_IT_PG_HOST";
 const PORT_VAR: &str = "EGO_IT_PG_PORT";
+/// The second, separately-owned container for the PG14 compatibility slice
+/// (IS-9, `design.md` AD-6). Not the main suite's container — the main suite
+/// (Groups 1–4) never touches this one.
+const PG14_HOST_VAR: &str = "EGO_IT_PG14_HOST";
+const PG14_PORT_VAR: &str = "EGO_IT_PG14_PORT";
 
 async fn connect(url: &str) -> PgPool {
     PgPoolOptions::new()
@@ -198,6 +203,22 @@ async fn main() -> ExitCode {
         .expect("the mapped port");
     let provisioned = started.elapsed();
 
+    // A second, independent container for the PG14 compatibility slice (IS-9).
+    // Not a departure from "one shared PostgreSQL per run" for the main suite —
+    // AC6's own reading in `tasks.md` Group 7 is that this is a distinct shared
+    // container for a distinct, narrow slice, not a per-test container.
+    let pg14_container = Postgres::default()
+        .with_tag("14")
+        .start()
+        .await
+        .expect("a PostgreSQL 14 container starts");
+    let pg14_host = pg14_container.get_host().await.expect("a host").to_string();
+    let pg14_port = pg14_container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("the mapped port");
+    let pg14_provisioned = started.elapsed();
+
     // The template is created and migrated exactly once, here. Both connections
     // are closed before the suite runs: PostgreSQL refuses
     // `CREATE DATABASE ... TEMPLATE t` while any session is connected to `t`, so
@@ -206,6 +227,8 @@ async fn main() -> ExitCode {
         "postgres://postgres:postgres@{host}:{port}/postgres"
     ))
     .await;
+    // SECURITY: identifier is not user-controlled — see ego-rs-security Rule 1 carve-out.
+    // `TEMPLATE` is a fixed constant, never external input.
     admin
         .execute(format!("CREATE DATABASE {TEMPLATE}").as_str())
         .await
@@ -251,31 +274,40 @@ async fn main() -> ExitCode {
         ])
         .env(HOST_VAR, &host)
         .env(PORT_VAR, port.to_string())
+        .env(PG14_HOST_VAR, &pg14_host)
+        .env(PG14_PORT_VAR, pg14_port.to_string())
         .status();
     let ran = started.elapsed();
 
     // Destroyed here, inside a live runtime — the whole reason this process
     // exists. Reached on **every** path: the suite passing, the suite failing, and
-    // the suite never starting. Awaited rather than left to `Drop` so a failure to
-    // reclaim is visible rather than silent.
+    // the suite never starting. Both awaited rather than left to `Drop` so a
+    // failure to reclaim either is visible rather than silent.
     let reclaimed = container.rm().await;
+    let pg14_reclaimed = pg14_container.rm().await;
+    let reclaimed_at = started.elapsed();
 
     // Visible and bounded, as #275 asks: the budget is a completion criterion,
     // so a run that does not report its cost cannot be checked against it.
     eprintln!(
-        "\n[integration-tests] provisioned in {:.2}s · template migrated at {:.2}s · \
-         suite finished at {:.2}s · reclaimed at {:.2}s",
+        "\n[integration-tests] provisioned in {:.2}s (PG16) / {:.2}s (PG14) · \
+         template migrated at {:.2}s · suite finished at {:.2}s · reclaimed at {:.2}s",
         provisioned.as_secs_f64(),
+        pg14_provisioned.as_secs_f64(),
         migrated.as_secs_f64(),
         ran.as_secs_f64(),
-        started.elapsed().as_secs_f64(),
+        reclaimed_at.as_secs_f64(),
     );
 
     // Reclamation is reported before the suite's verdict, and never in place of
     // it: a container left behind is the runner's own failure, and hiding it
     // behind a green suite would make the invariant unobservable.
     if let Err(e) = reclaimed {
-        eprintln!("[integration-tests] FAILED to reclaim the container: {e}");
+        eprintln!("[integration-tests] FAILED to reclaim the PG16 container: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = pg14_reclaimed {
+        eprintln!("[integration-tests] FAILED to reclaim the PG14 container: {e}");
         return ExitCode::FAILURE;
     }
 

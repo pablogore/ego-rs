@@ -232,6 +232,8 @@ impl IsolatedDatabase {
         }
 
         let admin = connect(&url_for(&self.shared.host, self.shared.port, "postgres")).await;
+        // SECURITY: identifier is not user-controlled — see ego-rs-security Rule 1 carve-out.
+        // `self.name` is generated from an internal atomic counter, never external input.
         let dropped = admin
             .execute(format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name).as_str())
             .await;
@@ -246,6 +248,138 @@ impl IsolatedDatabase {
             )
         });
     }
+}
+
+/// How long a contender is given to reach its blocked statement.
+///
+/// Generous, because exceeding it is a hard failure rather than a slow pass: if
+/// the contender never blocks, the window this test needs was never forced open
+/// and the test would be asserting something it did not arrange.
+const BLOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Blocks until `expected` backends are waiting on a lock while running a
+/// statement matching `statement_like` against **this** database, or fails at
+/// the deadline.
+///
+/// Promoted from `fencing_window_postgres.rs`'s original single-contender
+/// `wait_until_contender_is_blocked`, with two corrections that only matter once
+/// a second blocking test shares this cluster (`design.md` AD-3):
+///
+/// 1. **`AND datname = current_database()`.** Up to [`MAX_LIVE_DATABASES`]
+///    isolated databases share one cluster, so `pg_stat_activity` is
+///    cluster-wide. Without this predicate a contender blocked in a sibling
+///    test's own database would satisfy the count here, a false pass this
+///    module's single-database era could not expose.
+/// 2. **`statement_like` is a caller-supplied statement fragment, not a bare
+///    table name.** A table-name fragment matches every statement that
+///    mentions the table, including ones that were never meant to be counted
+///    as blocked; a statement fragment (e.g. `"%UPDATE operation_reservations%"`)
+///    proves the counted backend has already passed its pre-lock statements.
+///
+/// # Why this reads `pg_stat_activity` and not `pg_locks.relation`
+///
+/// A statement waiting for a *row* lock waits on the holder's transaction id, so
+/// its `pg_locks` row has `locktype = 'transactionid'` and a NULL `relation` — a
+/// join on `l.relation` matches nothing for exactly the wait this exists to
+/// observe. `wait_event_type = 'Lock'` states the wait directly.
+///
+/// The short sleep inside the loop is a poll interval, never a timeout standing
+/// in for a condition: the loop's exit is the condition itself, and the deadline
+/// fails the test rather than continuing on an unproven assumption.
+pub async fn wait_until_blocked(observer: &PgPool, statement_like: &str, expected: usize) {
+    let started = std::time::Instant::now();
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT pid) FROM pg_stat_activity \
+             WHERE wait_event_type = 'Lock' \
+               AND state = 'active' \
+               AND datname = current_database() \
+               AND query ILIKE $1 \
+               AND pid <> pg_backend_pid()",
+        )
+        .bind(statement_like)
+        .fetch_one(observer)
+        .await
+        .expect("pg_stat_activity is readable");
+
+        if waiting as usize >= expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < BLOCK_DEADLINE,
+            "only {waiting} of {expected} expected contender(s) blocked on \
+             {statement_like:?} within {BLOCK_DEADLINE:?}, so the window this \
+             test needs was never fully forced open and it would prove nothing"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Where the runner published the separate PG14 compatibility container.
+const PG14_HOST_VAR: &str = "EGO_IT_PG14_HOST";
+const PG14_PORT_VAR: &str = "EGO_IT_PG14_PORT";
+
+static PG14_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A fresh database on the run's separate PG14 container, migrated **in
+/// place** — no template, no clone.
+///
+/// Running the real migration set directly against a PostgreSQL 14 target is
+/// itself the invariant IS-9 proves (`design.md` AD-6), so this must not
+/// shortcut through the PG16 template's already-applied schema the way
+/// [`isolated_database`] deliberately does for the main suite.
+pub async fn pg14_database() -> IsolatedDatabase {
+    let host = std::env::var(PG14_HOST_VAR).unwrap_or_else(|_| missing_runner(PG14_HOST_VAR));
+    let port: u16 = std::env::var(PG14_PORT_VAR)
+        .unwrap_or_else(|_| missing_runner(PG14_PORT_VAR))
+        .parse()
+        .expect("the runner publishes a numeric PG14 port");
+
+    // A throwaway `Shared`, scoped to this one call. The PG14 slice is four
+    // sequential tests in one file (T0–T3), never a concurrent suite, so it
+    // needs no run-wide budget of its own — reusing `IsolatedDatabase`'s
+    // pool-tracking and `close()` is what this borrows `Shared` for.
+    let shared = Arc::new(Shared {
+        host,
+        port,
+        creating: Mutex::new(()),
+        budget: Arc::new(Semaphore::new(MAX_LIVE_DATABASES)),
+        next: std::sync::atomic::AtomicU64::new(0),
+    });
+    let permit = shared
+        .budget
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the budget semaphore is never closed");
+
+    let n = PG14_NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let name = format!("ego_pg14_test_{n}");
+
+    let admin = connect(&url_for(&shared.host, shared.port, "postgres")).await;
+    // SECURITY: identifier is not user-controlled — see ego-rs-security Rule 1 carve-out.
+    // `name` is generated from an internal atomic counter, never external input.
+    admin
+        .execute(format!("CREATE DATABASE {name}").as_str())
+        .await
+        .expect("a fresh database is created directly on the PG14 container");
+    admin.close().await;
+
+    let url = url_for(&shared.host, shared.port, &name);
+    let db = IsolatedDatabase {
+        shared,
+        name,
+        url,
+        pools: Mutex::new(Vec::new()),
+        _permit: permit,
+    };
+
+    let pool = db.pool().await;
+    ego_persistence::postgres::migrations::run(&pool)
+        .await
+        .expect("the real migration set applies directly to the PG14 database");
+
+    db
 }
 
 /// Starts the run's PostgreSQL if it is not running, and hands back a database
@@ -274,6 +408,8 @@ pub async fn isolated_database() -> IsolatedDatabase {
         // which is precisely how the first version of this starved itself.
         let _creating = shared.creating.lock().await;
         let admin = connect(&url_for(&shared.host, shared.port, "postgres")).await;
+        // SECURITY: identifier is not user-controlled — see ego-rs-security Rule 1 carve-out.
+        // `name` is generated from an internal atomic counter, `TEMPLATE` is a fixed constant.
         admin
             .execute(format!("CREATE DATABASE {name} TEMPLATE {TEMPLATE}").as_str())
             .await
