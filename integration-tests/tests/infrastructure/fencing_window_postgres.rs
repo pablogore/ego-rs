@@ -65,33 +65,25 @@
 //! That last property earned its keep immediately: the first version of the poll
 //! queried the wrong catalog view and matched nothing, and the hard deadline turned
 //! that into a loud failure instead of a green run over a window that was never
-//! opened. See `wait_until_contender_is_blocked` for the specifics.
+//! opened. See `ego_integration_tests::wait_until_blocked` for the specifics.
 //!
 //! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
 use std::sync::Arc;
-use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
 use ego_domain::operation::{
     OperationFingerprint, OperationKey, OperationReservationStore, OwnerId, ReservationOutcome,
     ReserveRequest,
 };
-use ego_integration_tests::isolated_database;
+use ego_integration_tests::{isolated_database, wait_until_blocked};
 use ego_persistence::postgres::reservation::PostgresOperationReservationStore;
 use ego_testkit::TestClock;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 const KEY: &str = "op-fencing-window-under-test";
-
-/// How long the contender is given to reach its blocked `UPDATE`.
-///
-/// Generous, because exceeding it is a hard failure rather than a slow pass: if
-/// the contender never blocks, the window was never forced and the test would be
-/// asserting something it did not arrange.
-const BLOCK_DEADLINE: StdDuration = StdDuration::from_secs(20);
 
 fn request(owner: &str, lease_until: chrono::DateTime<Utc>) -> ReserveRequest {
     ReserveRequest {
@@ -129,32 +121,11 @@ async fn connect(url: &str, max: u32) -> PgPool {
 /// `wait_event_type = 'Lock'` is the direct statement of "this backend is blocked
 /// on a lock", and matching the statement text keeps unrelated cluster activity
 /// from satisfying it.
-async fn wait_until_contender_is_blocked(observer: &PgPool) {
-    let started = Instant::now();
-    loop {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity \
-             WHERE wait_event_type = 'Lock' \
-               AND state = 'active' \
-               AND query ILIKE '%operation_reservations%' \
-               AND pid <> pg_backend_pid()",
-        )
-        .fetch_one(observer)
-        .await
-        .expect("pg_stat_activity is readable");
-
-        if waiting > 0 {
-            return;
-        }
-        assert!(
-            started.elapsed() < BLOCK_DEADLINE,
-            "the contender never blocked on the row lock within {BLOCK_DEADLINE:?}, so the \
-             read/write window was never forced open and this test would prove nothing"
-        );
-        tokio::time::sleep(StdDuration::from_millis(10)).await;
-    }
-}
-
+///
+/// Promoted to `ego_integration_tests::wait_until_blocked` (PROD-015, T-00.1) so
+/// `lease_contention_postgres.rs` and `events_identity_race_postgres.rs` share
+/// one definition instead of each growing their own copy.
+///
 /// The row as it stands: who owns it, under which token, until when.
 async fn owner_token_lease(pool: &PgPool) -> (String, i64, chrono::DateTime<Utc>) {
     sqlx::query_as(
@@ -233,7 +204,7 @@ async fn a_takeover_waiting_on_the_row_lock_rechecks_the_lease_it_finds_not_the_
         }
     });
 
-    wait_until_contender_is_blocked(&test_pool).await;
+    wait_until_blocked(&test_pool, "%UPDATE operation_reservations%", 1).await;
 
     // --- While it waits, the lease is renewed into the future ----------------
     //
