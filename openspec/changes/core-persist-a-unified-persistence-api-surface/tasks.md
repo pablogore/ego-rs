@@ -69,37 +69,37 @@ passing is necessary but not sufficient. Per PR, before merge:
 
 ## Phase 1: Crate Skeleton & Layer Gate (Foundation) — PR 1
 
-- [ ] 1.1 RED: add `#[cfg(test)]` in `xtask/src/layers.rs` asserting `domain → domain` passes `check_direction` and `domain → foundation`/`domain → infrastructure`/`domain → sdk` still fail, following the existing `graph_from`/`layers_from` test shape (`layers.rs:164-208`). Fails to compile/pass against today's `Some(&[])` (AD-1, SC-7).
-- [ ] 1.2 GREEN: `xtask/src/layers.rs:76` — change `"domain" => Some(&[])` to `"domain" => Some(&["domain"])`. Turns 1.1 green.
-- [ ] 1.3 Create `crates/persistence-api/` skeleton: `Cargo.toml` (package `ego-persistence-api`, deps derived from `ego-domain`'s block per AD-5 — no workspace `path` dependency), `src/lib.rs`. Add it as a workspace member in the root `Cargo.toml`.
-- [ ] 1.4 Add `layers.toml` entry: `"ego-persistence-api" = "domain"` (IS-5, FR-001).
-- [ ] 1.5 Add one `path` dependency edge in `crates/domain/Cargo.toml` on `ego-persistence-api` (D-2, the only new crate-graph edge this change makes).
+- [x] 1.1 RED: add `#[cfg(test)]` in `xtask/src/layers.rs` asserting `domain → domain` passes `check_direction` and `domain → foundation`/`domain → infrastructure`/`domain → sdk` still fail, following the existing `graph_from`/`layers_from` test shape (`layers.rs:164-208`). Fails to compile/pass against today's `Some(&[])` (AD-1, SC-7).
+- [x] 1.2 GREEN: `xtask/src/layers.rs:76` — change `"domain" => Some(&[])` to `"domain" => Some(&["domain"])`. Turns 1.1 green.
+- [x] 1.3 Create `crates/persistence-api/` skeleton: `Cargo.toml` (package `ego-persistence-api`, deps derived from `ego-domain`'s block per AD-5 — no workspace `path` dependency), `src/lib.rs`. Add it as a workspace member in the root `Cargo.toml`.
+- [x] 1.4 Add `layers.toml` entry: `"ego-persistence-api" = "domain"` (IS-5, FR-001).
+- [x] 1.5 Add one `path` dependency edge in `crates/domain/Cargo.toml` on `ego-persistence-api` (D-2, the only new crate-graph edge this change makes).
 
 ## Phase 2: RED — Re-export Identity Test, S1 Items — PR 1
 
-- [ ] 2.1 Create `crates/persistence-api/tests/reexport_identity.rs` with one identity witness per S1 item (`OffsetStore`, `Offset`, `OffsetStoreError`, `DedupStore`, `DedupStoreError`, `ReadSideStore`, `ReadSideStoreError`, `ProjectionStateStore`, `ProjectionStateStoreError`, `EventTag`, `ProjectionState`, `EventStreamElement`) — object-safe traits get an identity coercion, generic items a `where`-clause witness carrying both bounds. Fails to compile: none of these paths exist in `ego_persistence_api::*` yet (IS-6, SC-1).
+- [x] 2.1 Create `crates/persistence-api/tests/reexport_identity.rs` with one identity witness per S1 item (`OffsetStore`, `Offset`, `OffsetStoreError`, `DedupStore`, `DedupStoreError`, `ReadSideStore`, `ReadSideStoreError`, `ProjectionStateStore`, `ProjectionStateStoreError`, `EventTag`, `ProjectionState`, `EventStreamElement`) — object-safe traits get an identity coercion, generic items a `where`-clause witness carrying both bounds. Fails to compile: none of these paths exist in `ego_persistence_api::*` yet (IS-6, SC-1).
 
 ## Phase 3: GREEN — Relocate `read_side/` Files — PR 1
 
-- [ ] 3.1 Move `crates/domain/src/read_side/offset.rs` verbatim (doc comments, `#[cfg(test)]`, the `Arc<T>` forwarding impl at line 92) to `crates/persistence-api/src/read_side/offset.rs` (D-6, SC-4).
-- [ ] 3.2 Move `read_side/dedup.rs` verbatim (including the `Arc<T>` forwarding impl at line 60) to `crates/persistence-api/src/read_side/dedup.rs` (SC-4).
-- [ ] 3.3 Move `read_side/store.rs` verbatim to `crates/persistence-api/src/read_side/store.rs`.
-- [ ] 3.4 Move `read_side/projection_state_store.rs` verbatim to `crates/persistence-api/src/read_side/projection_state.rs` — zero implementations, zero consumers, unchanged (D-8, AD-7).
-- [ ] 3.5 Move `read_side/event_tag.rs`, `read_side/state.rs`, `read_side/event_stream.rs` verbatim to the same paths under `crates/persistence-api/src/read_side/` (AD-2, EC-1).
+- [x] 3.1 Move `crates/domain/src/read_side/offset.rs` verbatim (doc comments, `#[cfg(test)]`, the `Arc<T>` forwarding impl at line 92) to `crates/persistence-api/src/read_side/offset.rs` (D-6, SC-4).
+- [x] 3.2 Move `read_side/dedup.rs` verbatim (including the `Arc<T>` forwarding impl at line 60) to `crates/persistence-api/src/read_side/dedup.rs` (SC-4).
+- [x] 3.3 Move `read_side/store.rs` verbatim to `crates/persistence-api/src/read_side/store.rs`.
+- [x] 3.4 Move `read_side/projection_state_store.rs` verbatim to `crates/persistence-api/src/read_side/projection_state.rs` — zero implementations, zero consumers, unchanged (D-8, AD-7).
+- [x] 3.5 Move `read_side/event_tag.rs`, `read_side/state.rs`, `read_side/event_stream.rs` verbatim to the same paths under `crates/persistence-api/src/read_side/` (AD-2, EC-1).
 
 ## Phase 4: GREEN — Module Re-exports & Consumer Check, S1 — PR 1
 
-- [ ] 4.1 Replace each vacated `crates/domain/src/read_side/{offset,dedup,store,projection_state_store,event_tag,state,event_stream}.rs` with a module re-export (`pub use ego_persistence_api::read_side::{...};`), leaving existing item-level `pub use` lines byte-identical (AD-4, D-5).
-- [ ] 4.2 Confirm `read_side/scheduler.rs:5-10`, `session.rs:5-13`, `runner.rs:3-10` compile unedited — module re-export resolves their `super::`/`crate::` imports without any change (IS-4 collapses to zero edits, per AD-4).
+- [x] 4.1 Replace each vacated `crates/domain/src/read_side/{offset,dedup,store,projection_state_store,event_tag,state,event_stream}.rs` with a module re-export (`pub use ego_persistence_api::read_side::{...};`), leaving existing item-level `pub use` lines byte-identical (AD-4, D-5).
+- [x] 4.2 Confirm `read_side/scheduler.rs:5-10`, `session.rs:5-13`, `runner.rs:3-10` compile unedited — module re-export resolves their `super::`/`crate::` imports without any change (IS-4 collapses to zero edits, per AD-4).
 
 ## Phase 5: Verification — PR 1
 
-- [ ] 5.1 `cargo build -p ego-persistence-api` succeeds standalone (FR-005, AD-5).
-- [ ] 5.2 `cargo build --workspace` succeeds; turns 2.1's identity witnesses green (IS-6, SC-1).
-- [ ] 5.3 `cargo run -p xtask -- verify-layers` passes: `ego-persistence-api` mapped, edge permitted, no cycle (SC-6).
-- [ ] 5.4 `cargo test --workspace` passes, zero new failures, zero changed assertion counts in the moved `#[cfg(test)]` modules (SC-3, SC-5).
-- [ ] 5.5 Diff-read: no `use` or `Cargo.toml` edit outside `crates/domain/` and `crates/persistence-api/` (SC-2).
-- [ ] 5.6 Semantic zero-diff gate: diff public signatures and `ego_domain`'s re-export surface for every S1 item, old path vs. new path — identical apart from module path. Any non-move/import/re-export change halts the PR (change owner gate, 2026-09-02).
+- [x] 5.1 `cargo build -p ego-persistence-api` succeeds standalone (FR-005, AD-5).
+- [x] 5.2 `cargo build --workspace` succeeds; turns 2.1's identity witnesses green (IS-6, SC-1).
+- [x] 5.3 `cargo run -p xtask -- verify-layers` passes: `ego-persistence-api` mapped, edge permitted, no cycle (SC-6).
+- [x] 5.4 `cargo test --workspace` passes, zero new failures, zero changed assertion counts in the moved `#[cfg(test)]` modules (SC-3, SC-5).
+- [x] 5.5 Diff-read: no `use` or `Cargo.toml` edit outside `crates/domain/` and `crates/persistence-api/` (SC-2).
+- [x] 5.6 Semantic zero-diff gate: diff public signatures and `ego_domain`'s re-export surface for every S1 item, old path vs. new path — identical apart from module path. Any non-move/import/re-export change halts the PR (change owner gate, 2026-09-02).
 
 ## Phase 6: RED — Re-export Identity Test Extension, S2 Items — PR 2
 
