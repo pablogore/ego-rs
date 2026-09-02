@@ -12,18 +12,13 @@
 //! test double, durable Postgres-backed store) live outside `ego-domain`,
 //! per the hexagonal boundary this crate enforces.
 
-/// `OperationKey` / `OperationFingerprint` — validated operation identity.
-pub mod key;
-
 /// `OperationIdentity` — the two halves above, carried as one indivisible value.
 pub mod identity;
 
-/// `OperationReservationStore` port and its supporting types — lease,
-/// fencing, and reservation outcomes.
-pub mod reservation;
-
-/// `OperationReceipt` — the durable record that one operation already completed.
-pub mod receipt;
+// CORE-PERSIST-A S2 (AD-4): `key`, `receipt`, and `reservation` relocated to
+// `ego-persistence-api`, re-exported here at module granularity so every old
+// `ego_domain::operation::*` path keeps resolving to the identical item.
+pub use ego_persistence_api::operation::{key, receipt, reservation};
 
 pub use identity::OperationIdentity;
 pub use key::{OperationFingerprint, OperationKey, OperationKeyError, OperationKeyHash};
