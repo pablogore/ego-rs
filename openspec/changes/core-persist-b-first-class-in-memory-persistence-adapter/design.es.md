@@ -140,6 +140,38 @@ crate nuevo no es constante a través de las rebanadas: S1 necesita `chrono` sol
 dev-dependency, y S2 la promueve a dependencia normal. Se declara para que el límite de rebanada
 sea derivable y no adivinado. **AD-2, AD-9.**
 
+### EC-8 — `records` es privado, y un test colocado lo lee directamente: "byte-identical" (D-8/AD-8) y "los campos no cambian" (AD-8) chocan al cruzar de crate
+
+Descubierto en tiempo de apply (S2), no en tiempo de diseño — se registra aquí en vez de
+parchearse en silencio. `InMemoryOperationReservationStore.records` (`reservation.rs:79`) nunca
+fue `pub`; solo compilaba desde `testkit/src/reservation.rs`'s `#[cfg(test)] mod tests` porque
+struct y test compartían crate. `a_lock_wait_that_spans_expiry_rejects_the_lapsed_holder`
+(originalmente `:378-460` aprox.) bloquea `store.records` directamente para retener el mutex a
+través de una tarea `await`eada — un test de caja blanca del ordenamiento del lock del store, no
+del contrato `OperationReservationStore`. D-8 y AD-8 prometían ambos que este módulo queda
+byte-identical en `ego-testkit`; AD-8 por separado prometía que los campos del struct no cambian.
+Al mover el struct de crate, ambas promesas no pueden sostenerse a la vez sin ampliar la
+visibilidad de `records` (cambiando "los campos no cambian" de AD-8, y a `pub`, no `pub(crate)`,
+porque las restricciones de visibilidad no cruzan el límite de crate) o reubicar el test.
+
+**Resolución (consultada al usuario, una bifurcación arquitectónica genuina — no resuelta
+unilateralmente, misma postura que OQ-2): mover solo ese test.** Ahora vive colocado junto al
+struct, en el propio `#[cfg(test)] mod tests` de
+`crates/persistence-memory/src/operation/reservation.rs`, donde `records` es legalmente privado
+pero visible (mismo árbol de módulos). `records` en sí queda intacto — "los campos no cambian" de
+AD-8 se sostiene tal cual está escrito. `TestClock` y `the_in_memory_reservation_store_conforms`
+(el test de conformidad real de `OperationReservationStore`, que nunca toca `records`) se quedan
+en `ego-testkit` según el D-8/AD-5 original — solo se mueve el test de caja blanca. El crate nuevo
+necesita su propio doble de reloj mínimo (`FixedClock`, ~15 líneas) porque
+`ego-persistence-memory` (`foundation`) no puede depender de `ego-testkit` (`tooling`, un
+sumidero) para reusar `TestClock` — la dirección de capas va al revés. Esto agrega la feature dev
+`rt-multi-thread` de `tokio` (por el `flavor = "multi_thread")` del test) y una segunda línea
+`use ego_domain::Clock;`, esta vez tras `#[cfg(test)]`, lo que enmienda el criterio 4 de AD-2 a
+"exactamente una línea **no-test**" (ver AD-2 más abajo). **El D-8 de AD-8 queda enmendado en
+consecuencia: "ambos módulos `#[cfg(test)]` quedan en `ego-testkit`, byte-identical" pasa a ser
+"el módulo de conformidad queda en `ego-testkit`; el test de ordenamiento de lock se reubica junto
+al struct que inspecciona, con el cuerpo sin cambios."**
+
 ---
 
 ## Grafo de dependencias
@@ -284,9 +316,12 @@ tokio = { version = "1", features = ["macros", "rt"] }
    `ego-infrastructure` carga hoy todo eso (`infrastructure/Cargo.toml:8-20`) mientras su
    submódulo `in_memory` no importa nada de ello; esa brecha es lo concreto que este crate cierra.
 4. **La arista `ego-domain` es verificable, no afirmada.** `rg '^use ego_domain::|ego_domain::'
-   crates/persistence-memory/src` debe devolver exactamente una línea: el
+   crates/persistence-memory/src` debe devolver exactamente una línea **no-test**: el
    `use ego_domain::Clock;` de `operation/reservation.rs`. La reescritura de EC-2 en AD-5 es lo
    que hace que ese conteo sea uno y no dos, y Testing lo fija como propiedad del diff.
+   **Enmendado por EC-8**: existe una segunda línea `use ego_domain::Clock;`, bajo
+   `#[cfg(test)]`, dentro del módulo de test de caja blanca colocado, para su `FixedClock` local —
+   una propiedad de la superficie de test, no de producción, así que no debilita este criterio.
 5. **No existe una tercera arista.** Se pide confirmarlo en lugar de asumirlo: las listas de
    import de las otras seis implementaciones (`event_store.rs:1-8`, `repository.rs:1-4`,
    `snapshot.rs:1-5`, `read_side_store.rs:6-11`, `store.rs:7-19`) nombran solo `std`,

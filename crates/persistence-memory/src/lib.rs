@@ -6,5 +6,6 @@
 //! own paths keep resolving through a compatibility re-export at every old
 //! location (design.md AD-6, AD-5, AD-7).
 
+pub mod operation;
 pub mod persistence;
 pub mod read_side;
