@@ -103,27 +103,27 @@ passing is necessary but not sufficient. Per PR, before merge:
 
 ## Phase 6: RED — Re-export Identity Test Extension, S2 Items — PR 2
 
-- [ ] 6.1 Extend `reexport_identity.rs` with witnesses for `OperationKey`, `OperationKeyError`, `OperationFingerprint`, `OperationKeyHash`, `MAX_LEN`, `OperationReceipt`, `AggregateOutcome`, `AggregateOutcomeError`, `OperationReservationStore`, `ReservationError`, `ReserveRequest`, `ReservationOutcome`, `Lease`, `OwnerFence`, `FencingToken`, `OldestCompleted`, `OperationId`, `OwnerId`, `StoredServiceResponse`, `TenantId`, `TenantIdError`. Fails to compile until Phase 7/8 land (IS-6, SC-1).
+- [x] 6.1 Extend `reexport_identity.rs` with witnesses for `OperationKey`, `OperationKeyError`, `OperationFingerprint`, `OperationKeyHash`, `MAX_LEN`, `OperationReceipt`, `AggregateOutcome`, `AggregateOutcomeError`, `OperationReservationStore`, `ReservationError`, `ReserveRequest`, `ReservationOutcome`, `Lease`, `OwnerFence`, `FencingToken`, `OldestCompleted`, `OperationId`, `OwnerId`, `StoredServiceResponse`, `TenantId`, `TenantIdError`. Fails to compile until Phase 7/8 land (IS-6, SC-1).
 
 ## Phase 7: GREEN — Relocate `operation/` Files & `id_type!` Macro — PR 2
 
-- [ ] 7.1 Move `crates/domain/src/operation/key.rs` verbatim to `crates/persistence-api/src/operation/key.rs` (includes `MAX_LEN`, `OperationFingerprint`, `OperationKeyHash`, D-7).
-- [ ] 7.2 Move `operation/receipt.rs` verbatim to `crates/persistence-api/src/operation/receipt.rs`.
-- [ ] 7.3 Move `operation/reservation.rs` verbatim to `crates/persistence-api/src/operation/reservation.rs`.
-- [ ] 7.4 Move the `macro_rules! id_type` block (`context.rs:7-54`) verbatim into `ego-persistence-api`, add `#[macro_export]`, and invoke it there to generate `TenantId`/`TenantIdError` (AD-3, EC-2). One definition of the generator, not two.
+- [x] 7.1 Move `crates/domain/src/operation/key.rs` verbatim to `crates/persistence-api/src/operation/key.rs` (includes `MAX_LEN`, `OperationFingerprint`, `OperationKeyHash`, D-7).
+- [x] 7.2 Move `operation/receipt.rs` verbatim to `crates/persistence-api/src/operation/receipt.rs`.
+- [x] 7.3 Move `operation/reservation.rs` verbatim to `crates/persistence-api/src/operation/reservation.rs`.
+- [x] 7.4 Move the `macro_rules! id_type` block (`context.rs:7-54`) verbatim into `ego-persistence-api`, add `#[macro_export]`, and invoke it there to generate `TenantId`/`TenantIdError` (AD-3, EC-2). One definition of the generator, not two.
 
 ## Phase 8: GREEN — Module Re-exports & Macro Re-invocation, S2 — PR 2
 
-- [ ] 8.1 Replace `crates/domain/src/operation/{key,receipt,reservation}.rs` with module re-exports of `ego_persistence_api::operation::{key,receipt,reservation}` (AD-4).
-- [ ] 8.2 `crates/domain/src/context.rs`: remove the local `id_type!` definition, re-invoke the re-exported macro for `AggregateId`, `EntityId`, `CorrelationId`, `CausationId`, `RequestId`; re-export `TenantId`/`TenantIdError` at `ego_domain::context::TenantId` and `ego_domain::TenantId` (`lib.rs:103-107`) (AD-3).
+- [x] 8.1 Replace `crates/domain/src/operation/{key,receipt,reservation}.rs` with module re-exports of `ego_persistence_api::operation::{key,receipt,reservation}` (AD-4).
+- [x] 8.2 `crates/domain/src/context.rs`: remove the local `id_type!` definition, re-invoke the re-exported macro for `AggregateId`, `EntityId`, `CorrelationId`, `CausationId`, `RequestId`; re-export `TenantId`/`TenantIdError` at `ego_domain::context::TenantId` and `ego_domain::TenantId` (`lib.rs:103-107`) (AD-3).
 
 ## Phase 9: Verification — PR 2
 
-- [ ] 9.1 `cargo build -p ego-persistence-api` succeeds standalone.
-- [ ] 9.2 `cargo build --workspace` succeeds.
-- [ ] 9.3 `cargo run -p xtask -- verify-layers` still passes; `cargo test --workspace` zero new failures, zero changed assertion counts (SC-3, SC-5, SC-6).
-- [ ] 9.4 Diff-read: still no `use`/`Cargo.toml` edit outside the two crates; confirm exactly one `id_type!` definition workspace-wide (SC-2, spec's "only one `id_type!` definition exists workspace-wide" scenario).
-- [ ] 9.5 Semantic zero-diff gate: diff public signatures and `ego_domain`'s re-export surface for every S2 item + the relocated `id_type!` macro, old path vs. new path — identical apart from module path. This is also the check that decides the PR2 budget exception above: any non-move/import/re-export change voids the exception and halts the PR (change owner gate, 2026-09-02).
+- [x] 9.1 `cargo build -p ego-persistence-api` succeeds standalone.
+- [x] 9.2 `cargo build --workspace` succeeds.
+- [x] 9.3 `cargo run -p xtask -- verify-layers` still passes; `cargo test --workspace` zero new failures, zero changed assertion counts (SC-3, SC-5, SC-6). **`verify-layers` passes (18 crates, 0 violations). One trybuild golden required updating outside the strict two-crate boundary: `ego-service-sdk`'s `tests/compile_fail/cross_tenant_permit_new_external.stderr` hardcoded rustc's synthesized "help: provide the arguments" text, which spells a moved type's canonical defining path (`ego_domain::context::TenantId` → `ego_persistence_api::context::TenantId`), not its re-exported path. Change owner authorized a scoped one-file exception to SC-2 for this golden-only, diagnostics-text-only update (2026-09-02) — `TenantId`'s public signature, fields, and behavior are unchanged. Regenerated via `TRYBUILD=overwrite`, diff confirmed to touch only the two `TenantId` path occurrences; `cargo test -p ego-service-sdk` and full `cargo test --workspace` green.**
+- [x] 9.4 Diff-read: still no `use`/`Cargo.toml` edit outside the two crates; confirm exactly one `id_type!` definition workspace-wide (SC-2, spec's "only one `id_type!` definition exists workspace-wide" scenario). Confirmed: only `Cargo.lock` (generated) changed outside `crates/domain/`/`crates/persistence-api/`; exactly one `macro_rules! id_type` in the workspace (`crates/persistence-api/src/context.rs`).
+- [x] 9.5 Semantic zero-diff gate: diff public signatures and `ego_domain`'s re-export surface for every S2 item + the relocated `id_type!` macro, old path vs. new path — identical apart from module path. This is also the check that decides the PR2 budget exception above: any non-move/import/re-export change voids the exception and halts the PR (change owner gate, 2026-09-02). **PASS** — `key.rs`/`receipt.rs`/`reservation.rs` are byte-identical old vs. new path (verified via `diff`); the `id_type!` macro block is byte-identical apart from the explicitly-authorized `#[macro_export]` addition; `lib.rs`'s `TenantId`/`TenantIdError` re-export block and `operation/mod.rs`'s item-level `pub use` lines are byte-identical to the branch point. Total diff vs. branch point: 12 files, +277/-91 (well under both the 400-line default budget and the 1000-line ledger cap — git's rename detection on the verbatim `git mv`s keeps the authored diff small).
 
 ## Phase 10: RED — Re-export Identity Test Extension, S3 Items — PR 3
 
