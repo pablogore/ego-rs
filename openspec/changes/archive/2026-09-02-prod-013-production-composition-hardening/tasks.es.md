@@ -118,8 +118,8 @@ snapshot store ni perfil y llama a `.build()`; `compose_entity_runtimes` (línea
 
 ## Fase 8: Verificación Final
 
-- [ ] 8.1 Correr `cargo test --workspace`; confirmar cero fallas nuevas (SC-7); confirmar que los 67 call sites de `EntityRuntimeBuilder::new()` en 25 archivos compilan sin modificación.
-- [ ] 8.2 Correr `cargo clippy --workspace -- -D warnings`; confirmar que ninguna función nueva supera complejidad ciclomática 10.
+- [x] 8.1 Correr `cargo test --workspace`; confirmar cero fallas nuevas (SC-7); confirmar que los 67 call sites de `EntityRuntimeBuilder::new()` en 25 archivos compilan sin modificación.
+- [x] 8.2 Correr `cargo clippy --workspace -- -D warnings`; confirmar que ninguna función nueva supera complejidad ciclomática 10.
 - [x] 8.3 Solo verificación, sin implementación — confirmar que AD-11 (Enfoque C) sigue registrado como evaluado y diferido en design.md; no hay nada que implementar aquí.
 
 ## Fase 9: Reconciliación Final
