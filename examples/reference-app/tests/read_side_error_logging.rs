@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ego_testkit::CapturingLogger;
-use reference_app::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore};
+use reference_app::read_side::{
+    ReadSideHandles, ReadSideProgressStores, ReadSideSink, SharedReadSideStore,
+};
 
 #[tokio::test]
 async fn poll_loop_logs_errors_instead_of_silently_swallowing_them() {
@@ -32,7 +34,8 @@ async fn poll_loop_logs_errors_instead_of_silently_swallowing_them() {
     );
 
     let capturing = CapturingLogger::new();
-    let handles = ReadSideHandles::new(store).with_logger(Some(capturing.logger()));
+    let handles = ReadSideHandles::new(store, ReadSideProgressStores::in_memory())
+        .with_logger(Some(capturing.logger()));
     let runtime = handles.spawn();
 
     // One poll tick (50ms interval) is enough to hit the failure at least once.

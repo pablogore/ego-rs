@@ -87,6 +87,7 @@ fn mode_under(idempotency: IdempotencyWiring) -> IdempotencyEnforcementMode {
         idempotency,
         None,
         ExternalEffectsWiring::None,
+        None,
     )
     .expect("the reference app builds")
     .app

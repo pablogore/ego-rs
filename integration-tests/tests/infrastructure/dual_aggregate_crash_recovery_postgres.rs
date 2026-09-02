@@ -255,6 +255,7 @@ async fn productive_app(
         },
         observability,
         ExternalEffectsWiring::None,
+        None,
     )
     .expect("the reference app builds")
 }
