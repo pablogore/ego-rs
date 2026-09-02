@@ -49,15 +49,15 @@ Chain strategy: pending
 
 ## Phase 4: Reference-App Rewiring — PR 2
 
-- [ ] 4.1 RED+GREEN `examples/reference-app/src/read_side/store.rs`: `FakeDurableOffsetStore`/`FakeDurableDedupStore` delegate to `InMemory*`, override `is_durable() -> true` (AD-9)
-- [ ] 4.2 `read_side/mod.rs`: add `ReadSideProgressStores{offset,dedup}` with `in_memory()`/`fake_durable()`; change `ReadSideHandles::new(store, progress)` (AD-8)
-- [ ] 4.3 `lib.rs`: `build_runtime_with` gains `read_side_progress: Option<ReadSideProgressStores>`; `None` → `in_memory()` + no registration; `Some(pair)` registers via `AppBuilder::read_side_progress(PROJECTION_ID, ..)` and passes the same clone to `ReadSideHandles::new`
-- [ ] 4.4 `main.rs`: pass `None` (no durable backend exists — F-1)
-- [ ] 4.5 Mechanical: update the 13 call sites per design's Blast Radius list (5× `ReadSideHandles::new`, 8× `build_runtime_with`, across `tests/` and `integration-tests/`)
-- [ ] 4.6 `crates/persistent-entity/src/profile.rs`: replace `Profile::Production` doc comment verbatim (AD-10, IS-10) — no signature change
+- [x] 4.1 RED+GREEN `examples/reference-app/src/read_side/store.rs`: `FakeDurableOffsetStore`/`FakeDurableDedupStore` delegate to `InMemory*`, override `is_durable() -> true` (AD-9)
+- [x] 4.2 `read_side/mod.rs`: add `ReadSideProgressStores{offset,dedup}` with `in_memory()`/`fake_durable()`; change `ReadSideHandles::new(store, progress)` (AD-8)
+- [x] 4.3 `lib.rs`: `build_runtime_with` gains `read_side_progress: Option<ReadSideProgressStores>`; `None` → `in_memory()` + no registration; `Some(pair)` registers via `AppBuilder::read_side_progress(PROJECTION_ID, ..)` and passes the same clone to `ReadSideHandles::new`
+- [x] 4.4 `main.rs`: pass `None` (no durable backend exists — F-1)
+- [x] 4.5 Mechanical: update the 13 call sites per design's Blast Radius list (5× `ReadSideHandles::new`, 8× `build_runtime_with`, across `tests/` and `integration-tests/`)
+- [x] 4.6 `crates/persistent-entity/src/profile.rs`: replace `Profile::Production` doc comment verbatim (AD-10, IS-10) — no signature change
 
 ## Phase 5: End-to-End Verification — PR 2
 
-- [ ] 5.1 Update `examples/reference-app/tests/users_by_tenant_projection.rs`: erased pair flows through `ReadSideProgressStores` to the real scheduler (AD-3 works end to end)
-- [ ] 5.2 Update `examples/reference-app/tests/production_profile_guard.rs`: `None` still builds under Dev; `Some(fake_durable())` registers and builds under Production; a volatile registered pair is refused
-- [ ] 5.3 `cargo test --workspace` zero failures; `cargo clippy --workspace -- -D warnings` clean; confirm no function from 2.3 exceeds complexity 10
+- [x] 5.1 Update `examples/reference-app/tests/users_by_tenant_projection.rs`: erased pair flows through `ReadSideProgressStores` to the real scheduler (AD-3 works end to end)
+- [x] 5.2 Update `examples/reference-app/tests/production_profile_guard.rs`: `None` still builds under Dev; `Some(fake_durable())` registers and builds under Production; a volatile registered pair is refused
+- [x] 5.3 `cargo test --workspace` zero failures; `cargo clippy --workspace -- -D warnings` clean; confirm no function from 2.3 exceeds complexity 10
