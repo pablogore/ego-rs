@@ -10,3 +10,7 @@
 //! This crate depends on **no workspace crate**. `ego-domain` depends on it
 //! and, as each slice lands, re-exports the relocated items at their
 //! original path so no consumer outside these two crates observes the move.
+
+/// Read-side projection SPIs — offset tracking, dedup, event fetch, and
+/// state storage (S1, design.md AD-6).
+pub mod read_side;
