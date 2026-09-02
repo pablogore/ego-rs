@@ -11,3 +11,9 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Dev-only, for tests/reexport_identity.rs's compile-time proof that every
+# relocated item resolves to the same item at its old and new path (IS-6,
+# SC-1). Excluded from the layer/cycle graph like every dev edge
+# (xtask/src/metadata.rs) — same precedent as service-sdk's dev-only edge on
+# testkit. Never a normal/build dependency (AD-1, AD-5).
+ego-domain = { path = "../domain" }
