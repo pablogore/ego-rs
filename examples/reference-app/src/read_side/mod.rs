@@ -22,14 +22,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_domain::read_side::config::ReadSideConfig;
+use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
+use ego_domain::read_side::offset::OffsetStore;
 use ego_runtime::read_side::scheduler::{ProjectionSpec, ReadSideStopOutcome, TagSchedulerImpl};
 use ego_runtime::read_side::ReadSideProjectionHandle;
 use kitlogger::KITLogger;
 use kitlogger_log_domain::Severity;
 
 pub use projection::{TenantUsersView, UserSummary, UsersByTenantHandler, UsersByTenantStore};
-pub use store::{InMemoryDedupStore, InMemoryOffsetStore, ReadSideSink, SharedReadSideStore};
+pub use store::{
+    FakeDurableDedupStore, FakeDurableOffsetStore, InMemoryDedupStore, InMemoryOffsetStore,
+    ReadSideSink, SharedReadSideStore,
+};
 
 /// CORE-005 projection ID. Every `UsersByTenant`-relevant event is filed
 /// under a tenant-scoped tag (`tenant_tag`) — one tag stream per tenant,
@@ -76,6 +81,41 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// drain before aborting it — see `ReadSideProjectionHandle::stop`.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
+/// The durable progress pair a projection resumes from — offset and dedup
+/// together, because neither alone is resume state (PROD-014A IS-2/AD-8).
+///
+/// This type exists so the choice of progress storage is **stated** at the
+/// composition root, never defaulted inside the thing that uses it. Before
+/// it, `ReadSideHandles::new` constructed `InMemoryOffsetStore`/
+/// `InMemoryDedupStore` with no parameter and no composition-visible
+/// decision at all.
+#[derive(Clone)]
+pub struct ReadSideProgressStores {
+    pub offset: Arc<dyn OffsetStore + Send + Sync>,
+    pub dedup: Arc<dyn DedupStore + Send + Sync>,
+}
+
+impl ReadSideProgressStores {
+    /// Volatile. First-class and unchanged for Dev and tests (PROD-014A
+    /// IS-6/OOS-9); refused by `Profile::Production` once registered, which
+    /// is the point.
+    pub fn in_memory() -> Self {
+        Self {
+            offset: Arc::new(InMemoryOffsetStore::default()),
+            dedup: Arc::new(InMemoryDedupStore::default()),
+        }
+    }
+
+    /// See [`store::FakeDurableOffsetStore`] (PROD-014A AD-9). Never wire
+    /// this into a deployment — it loses every offset on restart.
+    pub fn fake_durable() -> Self {
+        Self {
+            offset: Arc::new(FakeDurableOffsetStore::default()),
+            dedup: Arc::new(FakeDurableDedupStore::default()),
+        }
+    }
+}
+
 /// Not-yet-spawned read-side wiring, returned by `build_runtime`.
 ///
 /// Splitting construction (`new`, sync) from `spawn` (requires a running
@@ -87,8 +127,7 @@ pub struct ReadSideHandles {
     pub query: UsersByTenantStore,
     store: SharedReadSideStore,
     handler: UsersByTenantHandler,
-    offset_store: InMemoryOffsetStore,
-    dedup_store: InMemoryDedupStore,
+    progress: ReadSideProgressStores,
     /// Logs poll-loop failures instead of letting them vanish silently.
     /// `None` by default (e.g. in tests that don't care); `build_runtime`
     /// wires the real `Runtime`'s logger, mirroring
@@ -99,15 +138,16 @@ pub struct ReadSideHandles {
 impl ReadSideHandles {
     /// `store` must be the same `SharedReadSideStore` given to the
     /// `ReadSideSink` wired into `RegisterUserImpl` — otherwise the
-    /// scheduler polls an empty store.
-    pub fn new(store: SharedReadSideStore) -> Self {
+    /// scheduler polls an empty store. `progress` is the durable progress
+    /// pair this composition states at the composition root (PROD-014A
+    /// IS-7/AD-8) — `ReadSideHandles` never constructs one itself.
+    pub fn new(store: SharedReadSideStore, progress: ReadSideProgressStores) -> Self {
         let query = UsersByTenantStore::default();
         Self {
             handler: UsersByTenantHandler::new(query.clone()),
             query,
             store,
-            offset_store: InMemoryOffsetStore::default(),
-            dedup_store: InMemoryDedupStore::default(),
+            progress,
             logger: None,
         }
     }
@@ -129,8 +169,8 @@ impl ReadSideHandles {
         let scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
         let store = self.store;
         let handler = self.handler;
-        let offset_store = self.offset_store;
-        let dedup_store = self.dedup_store;
+        let offset_store = self.progress.offset;
+        let dedup_store = self.progress.dedup;
         let logger = self.logger;
 
         // Tags are discovered dynamically (one per tenant, see `tenant_tag`)
