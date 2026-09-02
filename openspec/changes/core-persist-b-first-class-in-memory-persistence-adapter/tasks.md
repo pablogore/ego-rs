@@ -106,32 +106,32 @@ Chain strategy: stacked-to-main
 
 ## Phase 10: RED — Retarget Reference-App Imports Before the New Paths Exist — S3 — PR 3
 
-- [ ] 10.1 In `examples/reference-app/src/read_side/store.rs`, remove the `InMemoryOffsetStore`/`InMemoryDedupStore` declarations and replace the file's relevant imports with `use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};` (AD-7). `cargo build -p reference-app` fails: the paths do not exist in `ego-persistence-memory` yet.
-- [ ] 10.2 Add the `ego-persistence-memory` path dependency to `examples/reference-app/Cargo.toml`.
+- [x] 10.1 In `examples/reference-app/src/read_side/store.rs`, remove the `InMemoryOffsetStore`/`InMemoryDedupStore` declarations and replace the file's relevant imports with `use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};` (AD-7). `cargo build -p reference-app` fails: the paths do not exist in `ego-persistence-memory` yet.
+- [x] 10.2 Add the `ego-persistence-memory` path dependency to `examples/reference-app/Cargo.toml`.
 
 ## Phase 11: GREEN — Relocate the Two Read-Side Stores — S3 — PR 3
 
-- [ ] 11.1 Add `pub mod offset;` and `pub mod dedup;` to `src/read_side/mod.rs`.
-- [ ] 11.2 Create `src/read_side/offset.rs`: `InMemoryOffsetStore` + `OffsetKey` moved verbatim from reference-app `store.rs`; rewrite its import to `ego_persistence_api::read_side::{offset::{Offset, OffsetStore, OffsetStoreError}, event_tag::EventTag}` (AD-4 row 5).
-- [ ] 11.3 Create `src/read_side/dedup.rs`: `InMemoryDedupStore` + `DedupKey` moved verbatim; same rewrite shape for `dedup`/`event_tag` (AD-4 row 6).
-- [ ] 11.4 Update `examples/reference-app/src/read_side/mod.rs:36-39`: replace the two removed names with `pub use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};`; keep `pub use store::{FakeDurableDedupStore, FakeDurableOffsetStore, ReadSideSink, SharedReadSideStore};` (AD-7).
+- [x] 11.1 Add `pub mod offset;` and `pub mod dedup;` to `src/read_side/mod.rs`.
+- [x] 11.2 Create `src/read_side/offset.rs`: `InMemoryOffsetStore` + `OffsetKey` moved verbatim from reference-app `store.rs`; rewrite its import to `ego_persistence_api::read_side::{offset::{Offset, OffsetStore, OffsetStoreError}, event_tag::EventTag}` (AD-4 row 5).
+- [x] 11.3 Create `src/read_side/dedup.rs`: `InMemoryDedupStore` + `DedupKey` moved verbatim; same rewrite shape for `dedup`/`event_tag` (AD-4 row 6).
+- [x] 11.4 Update `examples/reference-app/src/read_side/mod.rs:36-39`: replace the two removed names with `pub use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};`; keep `pub use store::{FakeDurableDedupStore, FakeDurableOffsetStore, ReadSideSink, SharedReadSideStore};` (AD-7).
 
 ## Phase 12: Verification — S3 — PR 3
 
-- [ ] 12.1 `cargo build -p reference-app` succeeds — turns 10.1's RED green.
-- [ ] 12.2 `cargo build --workspace` succeeds.
-- [ ] 12.3 `cargo test --workspace` passes; the example's own `#[cfg(test)]` module (`store.rs:309+`) still exercises `SharedReadSideStore`, `ReadSideSink`, and both `FakeDurable*` wrappers unmodified (NG-8, R3).
-- [ ] 12.4 Diff-read: `FakeDurableOffsetStore`/`FakeDurableDedupStore` remain byte-identical, declared only in the example; `OffsetKey`/`DedupKey` moved with their structs (EC-5).
-- [ ] 12.5 Semantic zero-diff gate for both relocated read-side stores.
+- [x] 12.1 `cargo build -p reference-app` succeeds — turns 10.1's RED green.
+- [x] 12.2 `cargo build --workspace` succeeds.
+- [x] 12.3 `cargo test --workspace` passes; the example's own `#[cfg(test)]` module (`store.rs:309+`) still exercises `SharedReadSideStore`, `ReadSideSink`, and both `FakeDurable*` wrappers unmodified (NG-8, R3).
+- [x] 12.4 Diff-read: `FakeDurableOffsetStore`/`FakeDurableDedupStore` remain byte-identical, declared only in the example; `OffsetKey`/`DedupKey` moved with their structs (EC-5).
+- [x] 12.5 Semantic zero-diff gate for both relocated read-side stores.
 
 ## Phase 13: Whole-Change Verification & Diff Audit — PR 3
 
-- [ ] 13.1 `cargo run -p xtask -- verify-layers` passes end-to-end: new crate mapped, zero violations, matrix untouched (R11).
-- [ ] 13.2 Diff-read across all three PRs: zero SQL/migration/`crates/persistence/` file (R13); `crates/runtime/` and `crates/effect-store/` byte-identical, `InMemoryEffectStore` and its three ports untouched (R12); `crates/persistence-api/src/**` byte-identical (R15); `crates/persistent-entity/` untouched, both duplicates still forked (R17, EC-6).
-- [ ] 13.3 Confirm the workspace-wide `impl <Port> for` count per moved port is unchanged (R2, R10); the only surviving non-canonical declarations are `persistent-entity`'s two named duplicates and the declared test fakes.
-- [ ] 13.4 Confirm `ProjectionStateStore` still has zero implementations, no stub or `todo!()` anywhere in the new crate (R4).
-- [ ] 13.5 Confirm `presence_alone_is_not_durability` and both `try_build_rejects_explicit_in_memory_*` tests (`persistent-entity/src/builder.rs:768,793`, `profile.rs:99-117`) pass unmodified (R6).
-- [ ] 13.6 Confirm `crates/persistence-memory/Cargo.toml` names exactly `ego-persistence-api` and `ego-domain` as workspace path dependencies (R11); confirm no `sqlx`/Postgres/Stoolap/HTTP/Kafka token appears anywhere under `crates/persistence-memory/` (R7).
+- [x] 13.1 `cargo run -p xtask -- verify-layers` passes end-to-end: new crate mapped, zero violations, matrix untouched (R11).
+- [x] 13.2 Diff-read across all three PRs: zero SQL/migration/`crates/persistence/` file (R13); `crates/runtime/` and `crates/effect-store/` byte-identical, `InMemoryEffectStore` and its three ports untouched (R12); `crates/persistence-api/src/**` byte-identical (R15); `crates/persistent-entity/` untouched, both duplicates still forked (R17, EC-6).
+- [x] 13.3 Confirm the workspace-wide `impl <Port> for` count per moved port is unchanged (R2, R10); the only surviving non-canonical declarations are `persistent-entity`'s two named duplicates and the declared test fakes.
+- [x] 13.4 Confirm `ProjectionStateStore` still has zero implementations, no stub or `todo!()` anywhere in the new crate (R4).
+- [x] 13.5 Confirm `presence_alone_is_not_durability` and both `try_build_rejects_explicit_in_memory_*` tests (`persistent-entity/src/builder.rs:768,793`, `profile.rs:99-117`) pass unmodified (R6).
+- [x] 13.6 Confirm `crates/persistence-memory/Cargo.toml` names exactly `ego-persistence-api` and `ego-domain` as workspace path dependencies (R11); confirm no `sqlx`/Postgres/Stoolap/HTTP/Kafka token appears anywhere under `crates/persistence-memory/` (R7).
 
 ## Deferred / Out of Scope (named debt, not tasks)
 
