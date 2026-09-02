@@ -12,11 +12,11 @@
 | PRs encadenados recomendados | Sí |
 | División sugerida | PR 1 (framework) → PR 2 (host) |
 | Estrategia de entrega | ask-on-risk |
-| Estrategia de cadena | pendiente — preguntar al mantenedor: stacked-to-main o feature-branch-chain |
+| Estrategia de cadena | stacked-to-main — confirmada por la topología real de ramas (`opsx/prod-014a-pr2-host` apilada sobre `opsx/prod-014a-pr1-framework` sobre `develop`) |
 
 Decisión necesaria antes de aplicar: Sí
 PRs encadenados recomendados: Sí
-Estrategia de cadena: pendiente
+Estrategia de cadena: stacked-to-main
 Riesgo de presupuesto de 400 líneas: Alto
 
 ### Unidades de Trabajo Sugeridas

@@ -12,11 +12,11 @@
 | Chained PRs recommended | Yes |
 | Suggested split | PR 1 (framework) → PR 2 (host) |
 | Delivery strategy | ask-on-risk |
-| Chain strategy | pending — ask maintainer: stacked-to-main or feature-branch-chain |
+| Chain strategy | stacked-to-main — confirmed by actual branch topology (`opsx/prod-014a-pr2-host` stacked on `opsx/prod-014a-pr1-framework` on `develop`) |
 
 Decision needed before apply: Yes
 Chained PRs recommended: Yes
-Chain strategy: pending
+Chain strategy: stacked-to-main
 400-line budget risk: High
 
 ### Suggested Work Units
