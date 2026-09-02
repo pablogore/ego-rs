@@ -37,6 +37,14 @@ const MIGRATION_011_CREATE_OPERATION_RECEIPTS: &str =
 const MIGRATION_012_FIX_SNAPSHOTS_TENANT_NULL_UNIQUENESS: &str =
     include_str!("migrations/012_fix_snapshots_tenant_null_uniqueness.sql");
 
+/// Migration SQL for the durable read-side projection-offset table (PROD-014B).
+const MIGRATION_013_CREATE_PROJECTION_OFFSETS: &str =
+    include_str!("migrations/013_create_projection_offsets.sql");
+
+/// Migration SQL for the durable read-side projection-dedup table (PROD-014B).
+const MIGRATION_014_CREATE_PROJECTION_DEDUP: &str =
+    include_str!("migrations/014_create_projection_dedup.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -85,6 +93,14 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "012_fix_snapshots_tenant_null_uniqueness",
             MIGRATION_012_FIX_SNAPSHOTS_TENANT_NULL_UNIQUENESS,
+        ),
+        (
+            "013_create_projection_offsets",
+            MIGRATION_013_CREATE_PROJECTION_OFFSETS,
+        ),
+        (
+            "014_create_projection_dedup",
+            MIGRATION_014_CREATE_PROJECTION_DEDUP,
         ),
     ]
 }
