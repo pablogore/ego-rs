@@ -10,7 +10,9 @@
 //! `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs`,
 //! which already opens a real pool `EntityEventStores::open` needs.
 
-use ego_service_sdk::runtime::Profile;
+use ego_service_sdk::runtime::{IdempotencyEnforcementMode, Profile};
+use ego_service_sdk::App;
+use reference_app::read_side::{ReadSideProgressStores, PROJECTION_ID};
 use reference_app::{build_runtime_with, AppConfig, EntityEventStores, ExternalEffectsWiring};
 
 #[test]
@@ -30,6 +32,48 @@ fn dev_profile_still_builds_at_the_composition_root() {
         reference_app::IdempotencyWiring::Compatibility,
         None,
         ExternalEffectsWiring::None,
+        None,
     )
-    .expect("Profile::Dev over in-memory stores must still build (SC-5)");
+    .expect("Profile::Dev over in-memory stores must still build (SC-5), with no read-side progress registered");
+}
+
+// PROD-014A SC-2/SC-10: `Profile::Production` with a registered pair whose
+// `OffsetStore`/`DedupStore` are both durable builds successfully. Exercised
+// directly through `App::builder()` (not `build_runtime_with`, which can
+// only reach `Profile::Production` via `EntityEventStores::open` and a real
+// Postgres pool — see this file's Production-over-real-stores counterpart,
+// `integration-tests/tests/infrastructure/durable_entity_progress_postgres.rs`)
+// so this stays a plain `cargo test -p reference-app`, no Docker required.
+#[test]
+fn production_profile_with_durable_read_side_progress_registers_and_builds() {
+    let pair = ReadSideProgressStores::fake_durable();
+    App::builder()
+        .profile(Profile::Production)
+        .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .read_side_progress(PROJECTION_ID, pair.offset, pair.dedup)
+        .build()
+        .expect("a durable read-side progress pair must be accepted under Profile::Production");
+}
+
+// PROD-014A SC-3: `Profile::Production` with either store of a registered
+// pair volatile is refused at `AppBuilder::build()` — never deferred.
+#[test]
+fn production_profile_with_volatile_read_side_progress_is_refused() {
+    let pair = ReadSideProgressStores::in_memory();
+    let result = App::builder()
+        .profile(Profile::Production)
+        .idempotency_enforcement_mode(IdempotencyEnforcementMode::Compatibility)
+        .read_side_progress(PROJECTION_ID, pair.offset, pair.dedup)
+        .build();
+    let Err(err) = result else {
+        panic!(
+            "a volatile registered read-side progress pair must be refused under Profile::Production"
+        );
+    };
+
+    let message = err.to_string();
+    assert!(
+        message.contains("read-side progress"),
+        "the refusal must name the read-side progress capability, got: {message}"
+    );
 }
