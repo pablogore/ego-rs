@@ -51,36 +51,36 @@ Riesgo de presupuesto de 400 líneas: Alto
 
 ## Fase 1: Esqueleto del Crate y Puerta de Capas — S1 — PR 1
 
-- [ ] 1.1 Crear `crates/persistence-memory/Cargo.toml` (paquete `ego-persistence-memory`): deps `ego-persistence-api` (path), `async-trait` (workspace), `serde_json`; dev-deps `tokio` (`macros`, `rt`), `chrono` — solo dev en S1, promovida a normal en S2 (AD-2, EC-4, EC-7).
-- [ ] 1.2 Crear `crates/persistence-memory/src/lib.rs`: solo `pub mod persistence;` + `pub mod read_side;`, sin re-exports en la raíz del crate, sin `#![deny(missing_docs)]` (AD-3 Refinamientos 2–3).
-- [ ] 1.3 Crear los esqueletos de `src/persistence/mod.rs` y `src/read_side/mod.rs` declarando sus submódulos de S1 (AD-3).
-- [ ] 1.4 Agregar la entrada `"ego-persistence-memory" = "foundation"` a `layers.toml`. No abrir `xtask/src/layers.rs` (AD-1).
-- [ ] 1.5 Agregar `"crates/persistence-memory",` a los miembros del workspace en el `Cargo.toml` raíz.
-- [ ] 1.6 Agregar la dependencia de path `ego-persistence-memory` a `crates/infrastructure/Cargo.toml`.
+- [x] 1.1 Crear `crates/persistence-memory/Cargo.toml` (paquete `ego-persistence-memory`): deps `ego-persistence-api` (path), `async-trait` (workspace), `serde_json`; dev-deps `tokio` (`macros`, `rt`), `chrono` — solo dev en S1, promovida a normal en S2 (AD-2, EC-4, EC-7).
+- [x] 1.2 Crear `crates/persistence-memory/src/lib.rs`: solo `pub mod persistence;` + `pub mod read_side;`, sin re-exports en la raíz del crate, sin `#![deny(missing_docs)]` (AD-3 Refinamientos 2–3).
+- [x] 1.3 Crear los esqueletos de `src/persistence/mod.rs` y `src/read_side/mod.rs` declarando sus submódulos de S1 (AD-3).
+- [x] 1.4 Agregar la entrada `"ego-persistence-memory" = "foundation"` a `layers.toml`. No abrir `xtask/src/layers.rs` (AD-1).
+- [x] 1.5 Agregar `"crates/persistence-memory",` a los miembros del workspace en el `Cargo.toml` raíz.
+- [x] 1.6 Agregar la dependencia de path `ego-persistence-memory` a `crates/infrastructure/Cargo.toml`.
 
 ## Fase 2: RED — Test de Identidad de Compatibilidad, S1 — PR 1
 
-- [ ] 2.1 Crear `crates/infrastructure/tests/in_memory_reexport_identity.rs` con un testigo de identidad por cada fila de S1 de la matriz de compatibilidad restablecida: `InMemoryEventStore`, `InMemoryRepository`, `InMemorySnapshotStore`, `{InMemoryReadSideStore, paginate}` (los traits object-safe obtienen una coerción de identidad; `paginate` obtiene un test de igualdad de puntero a función, según AD-10). `InMemoryEventStoreUnitOfWork` no necesita ninguno — es privado, solo alcanzable vía `Box<dyn EventStoreUnitOfWork>`. Falla al compilar: ninguna de las rutas `ego_persistence_memory::…` existe todavía.
+- [x] 2.1 Crear `crates/infrastructure/tests/in_memory_reexport_identity.rs` con un testigo de identidad por cada fila de S1 de la matriz de compatibilidad restablecida: `InMemoryEventStore`, `InMemoryRepository`, `InMemorySnapshotStore`, `{InMemoryReadSideStore, paginate}` (los traits object-safe obtienen una coerción de identidad; `paginate` obtiene un test de igualdad de puntero a función, según AD-10). `InMemoryEventStoreUnitOfWork` no necesita ninguno — es privado, solo alcanzable vía `Box<dyn EventStoreUnitOfWork>`. Falla al compilar: ninguna de las rutas `ego_persistence_memory::…` existe todavía.
 
 ## Fase 3: GREEN — Reubicar las Cuatro Implementaciones de `ego-infrastructure` — S1 — PR 1
 
-- [ ] 3.1 Mover `event_store.rs` verbatim a `src/persistence/event_store.rs`; reescribir sus 4 líneas `use ego_domain::…` a `ego_persistence_api::…` según la fila 1 de AD-4.
-- [ ] 3.2 Mover `repository.rs` verbatim a `src/persistence/repository.rs`; reescritura de la fila 2 de AD-4.
-- [ ] 3.3 Mover `snapshot.rs` verbatim a `src/persistence/snapshot.rs`; reescritura de la fila 3 de AD-4 (`use serde_json::Value;` sin cambios).
-- [ ] 3.4 Mover `read_side_store.rs` verbatim — incluyendo su módulo `#[cfg(test)]` (EC-4) — a `src/read_side/store.rs` (renombrado del Refinamiento 1 de AD-3); reescritura de la fila 4 de AD-4.
+- [x] 3.1 Mover `event_store.rs` verbatim a `src/persistence/event_store.rs`; reescribir sus 4 líneas `use ego_domain::…` a `ego_persistence_api::…` según la fila 1 de AD-4.
+- [x] 3.2 Mover `repository.rs` verbatim a `src/persistence/repository.rs`; reescritura de la fila 2 de AD-4.
+- [x] 3.3 Mover `snapshot.rs` verbatim a `src/persistence/snapshot.rs`; reescritura de la fila 3 de AD-4 (`use serde_json::Value;` sin cambios).
+- [x] 3.4 Mover `read_side_store.rs` verbatim — incluyendo su módulo `#[cfg(test)]` (EC-4) — a `src/read_side/store.rs` (renombrado del Refinamiento 1 de AD-3); reescritura de la fila 4 de AD-4.
 
 ## Fase 4: GREEN — Re-export en las Rutas Antiguas, S1 — PR 1
 
-- [ ] 4.1 Reemplazar las 4 declaraciones `mod` de `crates/infrastructure/src/persistence/in_memory/mod.rs` por 4 líneas `pub use ego_persistence_memory::…` a nivel de ítem (AD-6); eliminar los 4 archivos de origen ahora vacíos; dejar el doc del módulo (`:1-5`) sin cambios.
+- [x] 4.1 Reemplazar las 4 declaraciones `mod` de `crates/infrastructure/src/persistence/in_memory/mod.rs` por 4 líneas `pub use ego_persistence_memory::…` a nivel de ítem (AD-6); eliminar los 4 archivos de origen ahora vacíos; dejar el doc del módulo (`:1-5`) sin cambios.
 
 ## Fase 5: Verificación — S1 — PR 1
 
-- [ ] 5.1 `cargo build -p ego-persistence-memory` funciona de forma independiente.
-- [ ] 5.2 `cargo build --workspace` funciona; pone en verde los testigos de identidad de 2.1.
-- [ ] 5.3 `cargo run -p xtask -- verify-layers` pasa: el nuevo crate está mapeado, sin edición de la matriz, sin ciclos (R11).
-- [ ] 5.4 `cargo test --workspace` pasa; el conteo de aserciones del módulo de test reubicado de `read_side_store.rs` no cambia (R5).
-- [ ] 5.5 Lectura de diff: `crates/infrastructure/tests/in_memory_event_store_conformance.rs`, `crates/infrastructure/tests/commit_publishes_atomically.rs`, `examples/reference-app/src/lib.rs:432-439` compilan con código fuente idéntico byte a byte (R9).
-- [ ] 5.6 Puerta de diff cero semántico: comparar cada uno de los 4 archivos movidos, ruta antigua vs. nueva — idénticos salvo la ruta de módulo y las líneas de import enumeradas en AD-4 (R5, R2).
+- [x] 5.1 `cargo build -p ego-persistence-memory` funciona de forma independiente.
+- [x] 5.2 `cargo build --workspace` funciona; pone en verde los testigos de identidad de 2.1.
+- [x] 5.3 `cargo run -p xtask -- verify-layers` pasa: el nuevo crate está mapeado, sin edición de la matriz, sin ciclos (R11).
+- [x] 5.4 `cargo test --workspace` pasa; el conteo de aserciones del módulo de test reubicado de `read_side_store.rs` no cambia (R5).
+- [x] 5.5 Lectura de diff: `crates/infrastructure/tests/in_memory_event_store_conformance.rs`, `crates/infrastructure/tests/commit_publishes_atomically.rs`, `examples/reference-app/src/lib.rs:432-439` compilan con código fuente idéntico byte a byte (R9).
+- [x] 5.6 Puerta de diff cero semántico: comparar cada uno de los 4 archivos movidos, ruta antigua vs. nueva — idénticos salvo la ruta de módulo y las líneas de import enumeradas en AD-4 (R5, R2).
 
 ## Fase 6: RED — Test de Identidad de Compatibilidad, S2 — PR 2
 
