@@ -25,10 +25,12 @@ use ego_domain::read_side::config::ReadSideConfig;
 use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::offset::OffsetStore;
+use ego_persistence::postgres::{PostgreSQLDedupStore, PostgreSQLOffsetStore};
 use ego_runtime::read_side::scheduler::{ProjectionSpec, ReadSideStopOutcome, TagSchedulerImpl};
 use ego_runtime::read_side::ReadSideProjectionHandle;
 use kitlogger::KITLogger;
 use kitlogger_log_domain::Severity;
+use sqlx::PgPool;
 
 pub use projection::{TenantUsersView, UserSummary, UsersByTenantHandler, UsersByTenantStore};
 pub use store::{
@@ -112,6 +114,22 @@ impl ReadSideProgressStores {
         Self {
             offset: Arc::new(FakeDurableOffsetStore::default()),
             dedup: Arc::new(FakeDurableDedupStore::default()),
+        }
+    }
+
+    /// Durable, and the only pair a `Profile::Production` composition can
+    /// register and satisfy (PROD-014B IS-5). `pool` must already have had
+    /// `ego_persistence::postgres::migrations::run` applied — migrations
+    /// `013`/`014` create the two tables these stores write to.
+    ///
+    /// Adoption constraint (PROD-014B L-3): safe only where exactly one
+    /// writer per `(projection_id, tag, tenant)` exists. Two replicas of
+    /// this projection are outside the guarantee and nothing here detects
+    /// it — see PROD-014C — Atomic Read-Side Event Claiming.
+    pub fn postgres(pool: PgPool) -> Self {
+        Self {
+            offset: Arc::new(PostgreSQLOffsetStore::new(pool.clone())),
+            dedup: Arc::new(PostgreSQLDedupStore::new(pool)),
         }
     }
 }

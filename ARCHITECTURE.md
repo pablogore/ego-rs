@@ -208,6 +208,16 @@ store, snapshot store, or effect store lacks an explicitly configured durable im
 `Profile::Dev` (the default) preserves the historical in-memory-fallback behavior unchanged, so
 none of the 67 pre-existing `EntityRuntimeBuilder::new()` call sites are affected.
 
+**Read-side progress (PROD-014B)**: the reference application's `Profile::Production` path
+registers `ReadSideProgressStores::postgres(pool)` — the durable `PostgreSQLOffsetStore`/
+`PostgreSQLDedupStore` pair (`crates/persistence/README.md`) — rather than an absent value or a
+non-durable placeholder. Safe operation of that pair depends on an external, unenforced adoption
+constraint: exactly one writer per `(projection_id, tag, tenant)`. No leader election, lock,
+lease, or fencing token exists anywhere in this workspace to enforce that across replicas, and
+two replicas of the same projection are outside the guarantee this pair provides. Closing that
+gap is **PROD-014C — Atomic Read-Side Event Claiming**, a named, distinct follow-up, not
+implemented by this rule or by PROD-014B.
+
 ---
 
 ## Persistent Entity Runtime (CORE-006)

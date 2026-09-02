@@ -39,6 +39,9 @@ use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::offset::{Offset, OffsetStore, OffsetStoreError};
 use ego_integration_tests::isolated_database;
 use ego_persistence::postgres::{PostgreSQLDedupStore, PostgreSQLOffsetStore};
+use persistent_entity::profile::Profile;
+use reference_app::read_side::ReadSideProgressStores;
+use reference_app::{AppConfig, EntityEventStores, ExternalEffectsWiring, IdempotencyWiring};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -320,10 +323,9 @@ async fn dedup_identity_is_tenant_independent() {
 /// This is the offset/dedup half of spec.md's "Both Progress Stores Report
 /// Themselves As Durable" (PROD-014B tasks.md 3.7). The other half — a
 /// `Profile::Production` composition building successfully through
-/// `ReadSideProgressStores::postgres(pool)` — is PR3's reference-app wiring
-/// (tasks.md Phase 6) and is re-proven at tasks.md 8.2 once that constructor
-/// exists; asserting it here would make this file depend on code this PR
-/// does not ship.
+/// `ReadSideProgressStores::postgres(pool)` — is proved below, in
+/// [`production_profile_composition_registers_the_durable_pair`]
+/// (PR3, tasks.md 8.2).
 #[tokio::test]
 async fn both_progress_stores_report_themselves_as_durable() {
     let db = isolated_database().await;
@@ -332,6 +334,52 @@ async fn both_progress_stores_report_themselves_as_durable() {
 
     assert!(offset_store.is_durable(), "the offset store must report durable");
     assert!(dedup_store.is_durable(), "the dedup store must report durable");
+
+    db.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// PR3 (Phase 6/8.2): the reference app's production path uses the durable
+// pair
+// ---------------------------------------------------------------------------
+
+/// A `Profile::Production` composition that registers the durable read-side
+/// pair through the existing registration point (`build_runtime_with`)
+/// builds successfully — because both stores report themselves durable, not
+/// because of a test-only substitute.
+///
+/// Traces: spec.md "Both Progress Stores Report Themselves As Durable", "The
+/// Reference Application's Production Path Uses the Durable Pair"; tasks.md
+/// 3.7 (final GREEN) and 8.2.
+#[tokio::test]
+async fn production_profile_composition_registers_the_durable_pair() {
+    let db = isolated_database().await;
+    let pool = connect(db.url()).await;
+
+    // EC-2: the clone is taken before the pool is moved into
+    // `EntityEventStores::open`, mirroring `main.rs`'s corrected ordering.
+    let read_side_progress = ReadSideProgressStores::postgres(pool.clone());
+    let stores = EntityEventStores::open(pool)
+        .await
+        .expect("the stores open against a migrated database");
+    assert_eq!(stores.profile(), Profile::Production);
+
+    let built = reference_app::build_runtime_with(
+        &AppConfig::default(),
+        stores,
+        IdempotencyWiring::Compatibility,
+        None,
+        ExternalEffectsWiring::None,
+        Some(read_side_progress),
+    );
+
+    assert!(
+        built.is_ok(),
+        "a Profile::Production composition registering the durable read-side \
+         pair must build successfully, with no change to the gate's own \
+         validation logic: {:?}",
+        built.err()
+    );
 
     db.close().await;
 }

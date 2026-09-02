@@ -36,6 +36,7 @@ use ego_effect_store::StoolapEffectStore;
 use ego_transport::AppState;
 use reference_app::effects::WelcomeEmailExecutor;
 use reference_app::ports::http::build_router;
+use reference_app::read_side::ReadSideProgressStores;
 use reference_app::{
     build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, ExternalEffectsWiring,
     IdempotencyWiring,
@@ -75,6 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&config.database.url)
         .await?;
     ego_persistence::postgres::migrations::run(&pool).await?;
+    // PROD-014B EC-2: the clone must be taken here, before `pool` is moved
+    // into `EntityEventStores::open` below — `PgPool` is `Clone` over a
+    // shared `Arc`, so both the read-side progress pair and the event
+    // stores share one connection pool rather than opening a second.
+    let read_side_progress = ReadSideProgressStores::postgres(pool.clone());
     let stores = EntityEventStores::open(pool).await?;
 
     // PROD-002 Phase 8: durable external effects, embedded — no separate
@@ -106,12 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store: effect_store,
             executor: Arc::new(WelcomeEmailExecutor),
         },
-        // PROD-014A F-1: no durable `OffsetStore`/`DedupStore` backend exists
-        // in this workspace yet, so this composition states that plainly
-        // rather than registering the in-memory pair and having
-        // `Profile::Production` refuse to start with no in-tree fix (design.md
-        // AD-8's one interpretive call).
-        None,
+        // PROD-014B IS-6/SC-6: the durable pair, real and durable, so
+        // `Profile::Production` has something to accept instead of refuse.
+        Some(read_side_progress),
     )?;
 
     let query = read_side_handles.query.clone();
