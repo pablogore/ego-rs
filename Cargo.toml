@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/domain",
+    "crates/persistence-api",
     "crates/application",
     "crates/infrastructure",
     "crates/persistence",
