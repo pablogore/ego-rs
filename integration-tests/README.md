@@ -279,6 +279,21 @@ test or row of its own.
 |---|---|---|---|
 | Event store and reservation store, against the shared conformance harnesses | `PostgreSQLEventStore` and `PostgresOperationReservationStore` satisfy the same `EventStore<E>`/`OperationReservationStore` conformance definitions the in-memory adapters satisfy, including that an uncommitted staged append is invisible to a reader on a distinct connection and a dropped unit of work persists nothing (IS-6) | No in-memory double has a real transaction, a real second pooled connection, or real `READ COMMITTED` cross-connection visibility — a staging map cannot misrepresent isolation it never had to implement. The reservation store's fencing/CAS assertions likewise need a real row and a real conditional `UPDATE`, which a scripted store cannot misrepresent in the way this suite is built to catch | `tests/infrastructure/durable_store_conformance_postgres.rs` |
 
+## Read-side durable progress (PROD-014B)
+
+`PostgreSQLOffsetStore` and `PostgreSQLDedupStore` — the durable pair behind
+the `OffsetStore`/`DedupStore` read-side SPI ports, closing PROD-014A's F-1
+gap. Each case obtains its database via `isolated_database()`, and the
+restart-survival case drops the store and its pool entirely before reading
+back through a brand-new pool, so nothing here is satisfiable by in-process
+state. See the file's own module doc for what this suite deliberately does
+not claim about execution exclusion (PROD-014B AD-6) — that gap is named,
+distinct follow-up **PROD-014C — Atomic Read-Side Event Claiming**.
+
+| Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|
+| Offset survives a process restart, tenant isolation, last-write-wins writes, dedup convergence (sequential and concurrent), tenant-independent dedup identity, both stores report durable, unapplied-migration classification | The durable pair behaves the way `spec.md` states against real PostgreSQL: an offset outlives the process that wrote it, a never-written tenant never leaks another tenant's row, a later write silently wins, two `mark_seen` calls on one identity converge to one row whether sequential or concurrent, dedup identity carries no tenant, both `is_durable()` report `true`, and a missing table classifies `Fatal`, never `Transient` | Restart survival and tenant isolation are properties of the stored rows, not of an in-memory struct — a scripted double has nothing to lose across a restart. Dedup convergence under real concurrency needs a real `ON CONFLICT … DO NOTHING` resolved by the database, not a mutex a test controls. The unapplied-migration case needs a real `42P01` from a real catalog lookup — no scripted store has a catalog to be missing from | `tests/infrastructure/read_side_progress_postgres.rs` |
+
 ## Migration transactional behaviour
 
 The offline `backfill_aggregate_type` operator step

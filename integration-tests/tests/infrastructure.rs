@@ -98,6 +98,12 @@ mod infrastructure {
     /// main suite; see the file's own doc comment for what is excluded.
     mod pg14_compatibility;
     mod purge_progress_postgres;
+    /// PROD-014B (PR2): the durable read-side `OffsetStore`/`DedupStore` pair
+    /// against real PostgreSQL — restart survival, tenant isolation,
+    /// last-write-wins offsets, dedup convergence (sequential and
+    /// concurrent), tenant-independent dedup identity, durability
+    /// reporting, and unapplied-migration `Fatal` classification.
+    mod read_side_progress_postgres;
     mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;
     /// Not named `*_postgres` like its neighbours, because it is not a scenario
