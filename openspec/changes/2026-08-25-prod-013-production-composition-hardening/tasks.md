@@ -115,8 +115,8 @@ profile and calls `.build()`; `compose_entity_runtimes` (line 452) and `build_ru
 
 ## Phase 8: Final Verification
 
-- [ ] 8.1 Run `cargo test --workspace`; confirm zero new failures (SC-7); confirm all 67 `EntityRuntimeBuilder::new()` call sites across 25 files compile unmodified.
-- [ ] 8.2 Run `cargo clippy --workspace -- -D warnings`; confirm no function introduced exceeds cyclomatic complexity 10.
+- [x] 8.1 Run `cargo test --workspace`; confirm zero new failures (SC-7); confirm all 67 `EntityRuntimeBuilder::new()` call sites across 25 files compile unmodified.
+- [x] 8.2 Run `cargo clippy --workspace -- -D warnings`; confirm no function introduced exceeds cyclomatic complexity 10.
 - [x] 8.3 Verification only, no implementation — confirm AD-11 (Approach C) remains recorded as evaluated-and-deferred in design.md; nothing to implement here.
 
 ## Phase 9: Final Reconciliation
