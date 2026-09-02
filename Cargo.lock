@@ -801,6 +801,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ego-persistence-api",
  "mockall 0.14.0",
  "rand 0.8.7",
  "serde",
@@ -870,6 +871,17 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "ego-persistence-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "thiserror 1.0.69",
  "tokio",
 ]
 

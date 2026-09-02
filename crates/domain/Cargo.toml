@@ -15,6 +15,10 @@ rand = "0.8"
 # is a domain rule (CORE-019 §12), so it lives with the type it protects rather
 # than in an adapter that could be bypassed.
 sha2 = "0.11.0"
+# CORE-PERSIST-A D-2: the only new crate-graph edge this change makes. Forced
+# by read_side/{scheduler,session,runner}.rs, which stay in ego-domain and
+# consume ports (DedupStore, OffsetStore, ReadSideStore) that relocate here.
+ego-persistence-api = { path = "../persistence-api" }
 
 [dev-dependencies]
 mockall = { workspace = true }
