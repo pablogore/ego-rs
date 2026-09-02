@@ -33,3 +33,4 @@
 "ego-service-sdk-macros" = "tooling"
 "ego-testkit" = "tooling"
 "ego-effect-store" = "infrastructure"
+"ego-persistence-memory" = "foundation"

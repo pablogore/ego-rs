@@ -5,10 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use ego_domain::read_side::event_stream::EventStreamElement;
-use ego_domain::read_side::event_tag::EventTag;
-use ego_domain::read_side::offset::Offset;
-use ego_domain::read_side::store::{ReadSideStore, ReadSideStoreError};
+use ego_persistence_api::read_side::event_stream::EventStreamElement;
+use ego_persistence_api::read_side::event_tag::EventTag;
+use ego_persistence_api::read_side::offset::Offset;
+use ego_persistence_api::read_side::store::{ReadSideStore, ReadSideStoreError};
 
 type TagStream = Vec<EventStreamElement<serde_json::Value>>;
 

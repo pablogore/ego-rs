@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use ego_domain::persistence::resolve_tenant;
-use ego_domain::persistence::{PersistenceError, Snapshot};
+use ego_persistence_api::persistence::resolve_tenant;
+use ego_persistence_api::persistence::{PersistenceError, Snapshot};
 use serde_json::Value;
 
 type SnapshotKey = (String, Option<String>);

@@ -2,6 +2,7 @@
 members = [
     "crates/domain",
     "crates/persistence-api",
+    "crates/persistence-memory",
     "crates/application",
     "crates/infrastructure",
     "crates/persistence",

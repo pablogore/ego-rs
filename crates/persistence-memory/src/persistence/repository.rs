@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use ego_domain::persistence::resolve_tenant;
-use ego_domain::persistence::{PersistenceError, Repository};
+use ego_persistence_api::persistence::resolve_tenant;
+use ego_persistence_api::persistence::{PersistenceError, Repository};
 
 type RepoKey = (String, Option<String>);
 
