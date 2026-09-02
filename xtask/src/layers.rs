@@ -73,7 +73,7 @@ impl std::fmt::Display for Violation {
 /// sink that may depend on anything (`tooling`).
 pub fn allowed_layers(layer: &str) -> Option<&'static [&'static str]> {
     match layer {
-        "domain" => Some(&[]),
+        "domain" => Some(&["domain"]),
         "foundation" => Some(&["domain", "foundation"]),
         "cross-cutting" => Some(&["domain"]),
         "application" => Some(&["domain"]),
@@ -239,6 +239,74 @@ mod tests {
         let layers = layers_from(&[("a", "domain"), ("b", "foundation")]);
 
         assert!(check_completeness(&crates, &layers).is_empty());
+    }
+
+    #[test]
+    fn direction_check_passes_on_domain_to_domain_self_edge() {
+        // CORE-PERSIST-A AD-1/SC-7: a domain-layer crate MAY depend on
+        // another domain-layer crate (the ego-domain -> ego-persistence-api
+        // edge). This is the narrow same-layer self-edge, not a wider hole.
+        let graph = graph_from(&[("ego-domain", &["ego-persistence-api"]), ("ego-persistence-api", &[])]);
+        let layers = layers_from(&[
+            ("ego-domain", "domain"),
+            ("ego-persistence-api", "domain"),
+        ]);
+
+        assert!(check_direction(&graph, &layers).is_empty());
+    }
+
+    #[test]
+    fn direction_check_still_fails_domain_to_foundation() {
+        let graph = graph_from(&[("domain-crate", &["foundation-crate"]), ("foundation-crate", &[])]);
+        let layers = layers_from(&[
+            ("domain-crate", "domain"),
+            ("foundation-crate", "foundation"),
+        ]);
+
+        assert_eq!(
+            check_direction(&graph, &layers),
+            vec![Violation::WrongDirection {
+                from: "domain-crate".into(),
+                from_layer: "domain".into(),
+                to: "foundation-crate".into(),
+                to_layer: "foundation".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direction_check_still_fails_domain_to_infrastructure() {
+        let graph = graph_from(&[("domain-crate", &["infra-crate"]), ("infra-crate", &[])]);
+        let layers = layers_from(&[
+            ("domain-crate", "domain"),
+            ("infra-crate", "infrastructure"),
+        ]);
+
+        assert_eq!(
+            check_direction(&graph, &layers),
+            vec![Violation::WrongDirection {
+                from: "domain-crate".into(),
+                from_layer: "domain".into(),
+                to: "infra-crate".into(),
+                to_layer: "infrastructure".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direction_check_still_fails_domain_to_sdk() {
+        let graph = graph_from(&[("domain-crate", &["sdk-crate"]), ("sdk-crate", &[])]);
+        let layers = layers_from(&[("domain-crate", "domain"), ("sdk-crate", "sdk")]);
+
+        assert_eq!(
+            check_direction(&graph, &layers),
+            vec![Violation::WrongDirection {
+                from: "domain-crate".into(),
+                from_layer: "domain".into(),
+                to: "sdk-crate".into(),
+                to_layer: "sdk".into(),
+            }]
+        );
     }
 
     #[test]
