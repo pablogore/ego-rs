@@ -4,9 +4,9 @@
 //! (`EventStore`, `Repository`, `Snapshot`, the read-side projection SPIs,
 //! and the operation-reservation ports), relocated out of `ego-domain` so a
 //! port has exactly one owning module tree (CORE-PERSIST-A). Populated
-//! slice by slice, per design.md AD-6 — S1 (read-side SPIs) and S2
-//! (operation identity/receipt/reservation, `id_type!`) have landed;
-//! `persistence`/`event` (S3) is still to move.
+//! slice by slice, per design.md AD-6 — S1 (read-side SPIs), S2 (operation
+//! identity/receipt/reservation, `id_type!`), and S3 (`persistence`,
+//! `event`) have all landed.
 //!
 //! This crate has no normal/build dependency on another workspace crate.
 //! `ego-domain` depends on it and, as each slice lands, re-exports the
@@ -25,3 +25,10 @@ pub mod operation;
 /// The `id_type!` identity-type generator and `TenantId`/`TenantIdError`
 /// (S2, design.md AD-3).
 pub mod context;
+
+/// Persistence SPI — `EventStore`, `EventStoreUnitOfWork`, `Repository`,
+/// `Snapshot`, `PersistenceError`, `resolve_tenant` (S3, design.md AD-6).
+pub mod persistence;
+
+/// Domain event trait for event-sourced state (S3, design.md AD-2).
+pub mod event;
