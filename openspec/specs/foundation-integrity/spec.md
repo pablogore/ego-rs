@@ -35,13 +35,28 @@ does not exist in the workspace.
 A crate's dependencies MUST NOT violate the documented layer direction:
 transport/infrastructure MAY depend on domain and application only;
 application MAY depend on domain only; domain MUST NOT depend on any
-other layer.
+other layer, EXCEPT that a domain-layer crate MAY depend on another
+domain-layer crate (the domain self-edge). Dev-only dependencies (declared
+under `[dev-dependencies]`) are excluded from this gate; only normal and
+build dependencies are subject to direction enforcement.
 
 #### Scenario: Wrong-direction dependency fails the gate
 - GIVEN a crate in one layer depends on a crate in a layer the direction
   rules forbid
 - WHEN the gate runs
 - THEN it fails, identifying the offending crate and the violated
+  direction rule
+
+#### Scenario: A domain-to-domain self-edge passes the gate
+- GIVEN a domain-layer crate depends on another domain-layer crate
+- WHEN the gate runs
+- THEN it passes for that edge, and no violation is reported for it
+
+#### Scenario: Domain still cannot depend on foundation or infrastructure
+- GIVEN a domain-layer crate depends on a foundation-layer or
+  infrastructure-layer crate
+- WHEN the gate runs
+- THEN it still fails, identifying the offending crate and the violated
   direction rule
 
 ### FR-003 — Dependency Cycle Freedom

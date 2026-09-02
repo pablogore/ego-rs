@@ -153,7 +153,7 @@ passing is necessary but not sufficient. Per PR, before merge:
 
 ## Phase 14: Post-Merge Traceability — Future `sdd-archive`
 
-- [ ] 14.1 Not performed in this session. Once all three PRs merge, `sdd-archive` merges `openspec/changes/core-persist-a-unified-persistence-api-surface/spec.md`'s `persistence-api-surface` (NEW) capability into `openspec/specs/persistence-api-surface/spec.md`, and merges the `foundation-integrity` (MODIFIED) delta's `FR-002` block into `openspec/specs/foundation-integrity/spec.md` — that merge is `sdd-archive`'s job, not this phase's or `sdd-apply`'s.
+- [x] 14.1 `sdd-archive` merged `openspec/changes/core-persist-a-unified-persistence-api-surface/spec.md`'s `persistence-api-surface` (NEW) capability into `openspec/specs/persistence-api-surface/spec.md`, and merged the `foundation-integrity` (MODIFIED) delta's `FR-002` block into `openspec/specs/foundation-integrity/spec.md` with a dev-dependency clarification (2026-09-02).
 
 ## Traceability Audit
 
