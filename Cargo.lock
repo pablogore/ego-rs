@@ -845,6 +845,7 @@ dependencies = [
  "ego-application",
  "ego-domain",
  "ego-persistence",
+ "ego-persistence-memory",
  "ego-testkit",
  "mockall 0.14.0",
  "opentelemetry",
@@ -884,6 +885,17 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "ego-persistence-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ego-persistence-api",
+ "serde_json",
  "tokio",
 ]
 
