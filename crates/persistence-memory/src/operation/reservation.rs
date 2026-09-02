@@ -31,7 +31,7 @@ struct Record {
     state: RecordState,
 }
 
-/// The `testkit` double for [`OperationReservationStore`].
+/// An in-memory [`OperationReservationStore`] implementation.
 ///
 /// Same-contract principle: this is a real, full implementation of the real
 /// production port, not a parallel model of it — every scenario a test
