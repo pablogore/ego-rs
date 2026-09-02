@@ -4,7 +4,6 @@
 //! `OffsetStore`/`DedupStore` implementations CORE-005 requires that this
 //! workspace does not otherwise provide an in-memory reference for.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +15,7 @@ use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::offset::{Offset, OffsetStore, OffsetStoreError};
 use ego_domain::read_side::store::{ReadSideStore, ReadSideStoreError};
 use ego_infrastructure::persistence::in_memory::{paginate, InMemoryReadSideStore};
+use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};
 use serde_json::Value;
 
 /// Shared, cloneable handle to a single `InMemoryReadSideStore` instance.
@@ -137,103 +137,6 @@ impl ReadSideSink {
             occurred_at,
             vec![super::tenant_tag(tenant_id)],
         ));
-    }
-}
-
-/// Dedup-state key: `(projection_id, tag, event_id)` (CORE-005's exact
-/// dedup scope).
-type DedupKey = (String, String, String);
-/// Offset key: `(projection_id, tag, tenant)` (CORE-005's exact offset
-/// scope).
-type OffsetKey = (String, String, String);
-
-/// In-memory `OffsetStore` — this workspace has no other in-memory
-/// reference implementation of it.
-#[derive(Clone, Default)]
-pub struct InMemoryOffsetStore(Arc<Mutex<HashMap<OffsetKey, Offset>>>);
-
-#[async_trait]
-impl OffsetStore for InMemoryOffsetStore {
-    async fn read_offset(
-        &self,
-        projection_id: &str,
-        tag: &EventTag,
-        tenant: &str,
-    ) -> Result<Option<Offset>, OffsetStoreError> {
-        let key = (
-            projection_id.to_string(),
-            tag.value().to_string(),
-            tenant.to_string(),
-        );
-        Ok(self
-            .0
-            .lock()
-            .expect("InMemoryOffsetStore lock poisoned")
-            .get(&key)
-            .copied())
-    }
-
-    async fn write_offset(
-        &self,
-        projection_id: &str,
-        tag: &EventTag,
-        tenant: &str,
-        offset: &Offset,
-    ) -> Result<(), OffsetStoreError> {
-        let key = (
-            projection_id.to_string(),
-            tag.value().to_string(),
-            tenant.to_string(),
-        );
-        self.0
-            .lock()
-            .expect("InMemoryOffsetStore lock poisoned")
-            .insert(key, *offset);
-        Ok(())
-    }
-}
-
-/// In-memory `DedupStore` — this workspace has no other in-memory
-/// reference implementation of it.
-#[derive(Clone, Default)]
-pub struct InMemoryDedupStore(Arc<Mutex<HashSet<DedupKey>>>);
-
-#[async_trait]
-impl DedupStore for InMemoryDedupStore {
-    async fn seen(
-        &self,
-        projection_id: &str,
-        tag: &EventTag,
-        event_id: &str,
-    ) -> Result<bool, DedupStoreError> {
-        let key = (
-            projection_id.to_string(),
-            tag.value().to_string(),
-            event_id.to_string(),
-        );
-        Ok(self
-            .0
-            .lock()
-            .expect("InMemoryDedupStore lock poisoned")
-            .contains(&key))
-    }
-
-    async fn mark_seen(
-        &self,
-        projection_id: &str,
-        tag: &EventTag,
-        event_id: &str,
-    ) -> Result<(), DedupStoreError> {
-        let key = (
-            projection_id.to_string(),
-            tag.value().to_string(),
-            event_id.to_string(),
-        );
-        self.0
-            .lock()
-            .expect("InMemoryDedupStore lock poisoned")
-            .insert(key);
-        Ok(())
     }
 }
 

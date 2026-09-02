@@ -30,6 +30,7 @@ kit-config = { git = "https://github.com/pablogore/kit-config.git", branch = "ma
 serde_json = "1"
 ego-domain = { path = "../../crates/domain" }
 ego-infrastructure = { path = "../../crates/infrastructure" }
+ego-persistence-memory = { path = "../../crates/persistence-memory" }
 ego-runtime = { path = "../../crates/runtime" }
 # PROD-002 Phase 8: the reference app's durable external-effects backend —
 # an embedded, no-external-server-dependency store (mirrors how the entity
