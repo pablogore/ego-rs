@@ -106,6 +106,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store: effect_store,
             executor: Arc::new(WelcomeEmailExecutor),
         },
+        // PROD-014A F-1: no durable `OffsetStore`/`DedupStore` backend exists
+        // in this workspace yet, so this composition states that plainly
+        // rather than registering the in-memory pair and having
+        // `Profile::Production` refuse to start with no in-tree fix (design.md
+        // AD-8's one interpretive call).
+        None,
     )?;
 
     let query = read_side_handles.query.clone();

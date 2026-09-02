@@ -73,7 +73,9 @@ use security_jwt::{
 };
 
 use crate::application::{RegisterUserImpl, RegisterUserTag};
-use crate::read_side::{ReadSideHandles, ReadSideSink, SharedReadSideStore};
+use crate::read_side::{
+    ReadSideHandles, ReadSideProgressStores, ReadSideSink, SharedReadSideStore,
+};
 
 /// Signing key `build_runtime`'s `Hs256AuthenticationProvider` verifies
 /// against — `pub` so tests (e.g. `http_route.rs`) can
@@ -619,6 +621,7 @@ pub fn build_runtime_observed_in_memory(
         IdempotencyWiring::Compatibility,
         observability,
         ExternalEffectsWiring::None,
+        None,
     )
 }
 
@@ -654,12 +657,23 @@ pub enum ExternalEffectsWiring {
 /// hands the durable stores here — so a Postgres that cannot be reached stops
 /// startup instead of degrading to memory. Callers that genuinely want in-memory
 /// stores say so by passing [`EntityEventStores::in_memory`].
+///
+/// `read_side_progress`: the durable progress pair this composition states
+/// at the composition root (PROD-014A IS-7/AD-8), or `None` for "this host
+/// has not adopted durable read-side progress". `None` uses
+/// [`ReadSideProgressStores::in_memory`] and registers **nothing** with
+/// `AppBuilder`, so `Profile::Production` has nothing to refuse (IS-5) — no
+/// durable `OffsetStore`/`DedupStore` exists anywhere in this workspace yet
+/// (OOS-2/F-1). `Some(pair)` registers that pair AND spawns the projection
+/// on it — the same value, cloned into two destinations, so a durable
+/// registration over a volatile projection is not expressible.
 pub fn build_runtime_with(
     config: &AppConfig,
     stores: EntityEventStores,
     idempotency: IdempotencyWiring,
     observability: Option<Arc<dyn ego_domain::Observability>>,
     effects: ExternalEffectsWiring,
+    read_side_progress: Option<ReadSideProgressStores>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
 
@@ -772,7 +786,14 @@ pub fn build_runtime_with(
     // scheduler-facing handles share the same underlying store.
     let read_side_store = SharedReadSideStore::new();
     let read_side_sink = ReadSideSink::new(read_side_store.clone());
-    let read_side_handles = ReadSideHandles::new(read_side_store).with_logger(logger.clone());
+    // PROD-014A AD-8: the pair registered with `AppBuilder` below (only when
+    // the host stated one) and the pair spawned into the scheduler here are
+    // the SAME `Arc` clones — a durable registration over a volatile
+    // projection is not expressible.
+    let progress_stated = read_side_progress.is_some();
+    let progress = read_side_progress.unwrap_or_else(ReadSideProgressStores::in_memory);
+    let read_side_handles =
+        ReadSideHandles::new(read_side_store, progress.clone()).with_logger(logger.clone());
 
     let register_user = RegisterUserImpl::new(org_runtime, user_runtime.clone(), None)
         .with_read_side_sink(read_side_sink);
@@ -842,6 +863,16 @@ pub fn build_runtime_with(
     // internal `Arc<RwLock<_>>` (read_side/projection.rs), so this clone
     // shares live state with the engine-fed store, not a frozen snapshot.
     builder = builder.projection(Arc::new(read_side_handles.query.clone()));
+    // PROD-014A IS-2/AD-8: registered only when the host stated a pair —
+    // registering the in-memory default would make `Profile::Production`
+    // refuse a host that never asked to be governed here (IS-5).
+    if progress_stated {
+        builder = builder.read_side_progress(
+            crate::read_side::PROJECTION_ID,
+            progress.offset.clone(),
+            progress.dedup.clone(),
+        );
+    }
     // CORE-028 Stage 2C (AD-7 item 2): registers the entity-runtime DI path
     // for `UserEntity` through the composition API, as production proof of
     // `.entity::<E>()`/`App::resolve_entity`. Deliberately does NOT migrate

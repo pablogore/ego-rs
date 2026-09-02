@@ -122,6 +122,7 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
         reference_app::IdempotencyWiring::Compatibility,
         None,
         ExternalEffectsWiring::None,
+        None,
     )
     .expect("the reference app builds")
     .entities

@@ -11,7 +11,7 @@ use std::time::Duration;
 use ego_testkit::{PrincipalBuilder, ServiceTestFixture};
 use reference_app::application::{RegisterInput, RegisterUser, RegisterUserTag};
 use reference_app::read_side::{
-    ReadSideHandles, ReadSideSink, SharedReadSideStore, UsersByTenantStore,
+    ReadSideHandles, ReadSideProgressStores, ReadSideSink, SharedReadSideStore, UsersByTenantStore,
 };
 
 fn input(user_id: &str, email: &str, tenant_id: &str, org_name: &str) -> RegisterInput {
@@ -75,7 +75,13 @@ async fn projection_populates_from_real_registration_events_not_a_hand_built_rea
     // The projection is constructed AFTER the write and reads only from the
     // shared store the write already populated — proving the read model
     // comes from real emitted events, not a value asserted by the test.
-    let handles = ReadSideHandles::new(store);
+    //
+    // PROD-014A AD-3/AD-8: the progress pair arrives here type-erased as
+    // `Arc<dyn OffsetStore + Send + Sync>` / `Arc<dyn DedupStore + Send +
+    // Sync>` (`fake_durable()`, not `in_memory()`), proving the `Arc<T>`
+    // forwarding impls work against the real `TagSchedulerImpl`, not just in
+    // isolation.
+    let handles = ReadSideHandles::new(store, ReadSideProgressStores::fake_durable());
     let query: UsersByTenantStore = handles.query.clone();
     let runtime = handles.spawn();
 
@@ -109,7 +115,7 @@ async fn query_returns_only_what_was_registered_for_that_tenant() {
     )
     .await;
 
-    let handles = ReadSideHandles::new(store);
+    let handles = ReadSideHandles::new(store, ReadSideProgressStores::in_memory());
     let query = handles.query.clone();
     let runtime = handles.spawn();
 
@@ -180,7 +186,7 @@ async fn projection_catches_up_past_the_first_poll_batch() {
             .expect("registration succeeds");
     }
 
-    let handles = ReadSideHandles::new(store);
+    let handles = ReadSideHandles::new(store, ReadSideProgressStores::in_memory());
     let query = handles.query.clone();
     let runtime = handles.spawn();
 

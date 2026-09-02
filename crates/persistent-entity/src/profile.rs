@@ -16,11 +16,15 @@ pub enum Profile {
     /// reachable by omission for those capabilities.
     ///
     /// Today that means the event store, snapshot store, and effect store
-    /// (PROD-013) — the only capabilities with a real, generic
-    /// composition-root registration slot to observe. Read-side/projection
-    /// persistence has no such slot yet and is deliberately not governed
-    /// here; PROD-014 introduces it and extends this same policy to cover
-    /// it. See PROD-013/PROD-014.
+    /// (PROD-013), plus the durable progress pair — `OffsetStore` and
+    /// `DedupStore` together — of every projection registered through
+    /// `AppBuilder::read_side_progress` (PROD-014A). A projection whose pair
+    /// is never registered is not governed here, by design: a command-only or
+    /// non-read-side application is never forced to register storage it does
+    /// not use, and a projection spawned directly through
+    /// `ProjectionSpec`/`TagSchedulerImpl` without passing the composition
+    /// root is ungoverned by construction (PROD-014A OOS-7).
+    /// See PROD-013/PROD-014A.
     Production,
 }
 

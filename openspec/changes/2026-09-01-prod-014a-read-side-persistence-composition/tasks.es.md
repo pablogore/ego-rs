@@ -12,11 +12,11 @@
 | PRs encadenados recomendados | Sí |
 | División sugerida | PR 1 (framework) → PR 2 (host) |
 | Estrategia de entrega | ask-on-risk |
-| Estrategia de cadena | pendiente — preguntar al mantenedor: stacked-to-main o feature-branch-chain |
+| Estrategia de cadena | stacked-to-main — confirmada por la topología real de ramas (`opsx/prod-014a-pr2-host` apilada sobre `opsx/prod-014a-pr1-framework` sobre `develop`) |
 
 Decisión necesaria antes de aplicar: Sí
 PRs encadenados recomendados: Sí
-Estrategia de cadena: pendiente
+Estrategia de cadena: stacked-to-main
 Riesgo de presupuesto de 400 líneas: Alto
 
 ### Unidades de Trabajo Sugeridas
@@ -49,15 +49,15 @@ Riesgo de presupuesto de 400 líneas: Alto
 
 ## Fase 4: Reconexión de Reference-App — PR 2
 
-- [ ] 4.1 RED+GREEN `examples/reference-app/src/read_side/store.rs`: `FakeDurableOffsetStore`/`FakeDurableDedupStore` delegan a `InMemory*`, sobrescriben `is_durable() -> true` (AD-9)
-- [ ] 4.2 `read_side/mod.rs`: agregar `ReadSideProgressStores{offset,dedup}` con `in_memory()`/`fake_durable()`; cambiar `ReadSideHandles::new(store, progress)` (AD-8)
-- [ ] 4.3 `lib.rs`: `build_runtime_with` gana `read_side_progress: Option<ReadSideProgressStores>`; `None` → `in_memory()` sin registro; `Some(pair)` registra vía `AppBuilder::read_side_progress(PROJECTION_ID, ..)` y pasa el mismo clon a `ReadSideHandles::new`
-- [ ] 4.4 `main.rs`: pasar `None` (no existe backend durable — F-1)
-- [ ] 4.5 Mecánico: actualizar los 13 sitios de llamada según la lista de Radio de Impacto del diseño (5× `ReadSideHandles::new`, 8× `build_runtime_with`, en `tests/` e `integration-tests/`)
-- [ ] 4.6 `crates/persistent-entity/src/profile.rs`: reemplazar el comentario de doc de `Profile::Production` literalmente (AD-10, IS-10) — sin cambio de firma
+- [x] 4.1 RED+GREEN `examples/reference-app/src/read_side/store.rs`: `FakeDurableOffsetStore`/`FakeDurableDedupStore` delegan a `InMemory*`, sobrescriben `is_durable() -> true` (AD-9)
+- [x] 4.2 `read_side/mod.rs`: agregar `ReadSideProgressStores{offset,dedup}` con `in_memory()`/`fake_durable()`; cambiar `ReadSideHandles::new(store, progress)` (AD-8)
+- [x] 4.3 `lib.rs`: `build_runtime_with` gana `read_side_progress: Option<ReadSideProgressStores>`; `None` → `in_memory()` sin registro; `Some(pair)` registra vía `AppBuilder::read_side_progress(PROJECTION_ID, ..)` y pasa el mismo clon a `ReadSideHandles::new`
+- [x] 4.4 `main.rs`: pasar `None` (no existe backend durable — F-1)
+- [x] 4.5 Mecánico: actualizar los 13 sitios de llamada según la lista de Radio de Impacto del diseño (5× `ReadSideHandles::new`, 8× `build_runtime_with`, en `tests/` e `integration-tests/`)
+- [x] 4.6 `crates/persistent-entity/src/profile.rs`: reemplazar el comentario de doc de `Profile::Production` literalmente (AD-10, IS-10) — sin cambio de firma
 
 ## Fase 5: Verificación End-to-End — PR 2
 
-- [ ] 5.1 Actualizar `examples/reference-app/tests/users_by_tenant_projection.rs`: el par erasado fluye por `ReadSideProgressStores` hasta el scheduler real (AD-3 funciona de punta a punta)
-- [ ] 5.2 Actualizar `examples/reference-app/tests/production_profile_guard.rs`: `None` sigue compilando en Dev; `Some(fake_durable())` registra y compila en Production; un par volátil registrado es rechazado
-- [ ] 5.3 `cargo test --workspace` sin fallos; `cargo clippy --workspace -- -D warnings` limpio; confirmar que ninguna función de 2.3 supera complejidad 10
+- [x] 5.1 Actualizar `examples/reference-app/tests/users_by_tenant_projection.rs`: el par erasado fluye por `ReadSideProgressStores` hasta el scheduler real (AD-3 funciona de punta a punta)
+- [x] 5.2 Actualizar `examples/reference-app/tests/production_profile_guard.rs`: `None` sigue compilando en Dev; `Some(fake_durable())` registra y compila en Production; un par volátil registrado es rechazado
+- [x] 5.3 `cargo test --workspace` sin fallos; `cargo clippy --workspace -- -D warnings` limpio; confirmar que ninguna función de 2.3 supera complejidad 10

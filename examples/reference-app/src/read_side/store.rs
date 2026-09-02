@@ -237,6 +237,75 @@ impl DedupStore for InMemoryDedupStore {
     }
 }
 
+/// A **fake** durable `OffsetStore`: stores exactly like
+/// [`InMemoryOffsetStore`] and loses everything on restart, and declares
+/// [`OffsetStore::is_durable`] `-> true` anyway (PROD-014A IS-8/AD-9).
+///
+/// It exists to exercise `Profile::Production`'s accept path, which no real
+/// implementation can exercise today — this workspace ships no durable
+/// `OffsetStore` (PROD-014A D-6/OOS-2; the durable backend is F-1). Never
+/// wire this into a deployment: it makes a production composition build and
+/// then lose every offset on the next restart, which is the exact failure
+/// PROD-014A exists to refuse.
+#[derive(Clone, Default)]
+pub struct FakeDurableOffsetStore(InMemoryOffsetStore);
+
+#[async_trait]
+impl OffsetStore for FakeDurableOffsetStore {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    async fn read_offset(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        tenant: &str,
+    ) -> Result<Option<Offset>, OffsetStoreError> {
+        self.0.read_offset(projection_id, tag, tenant).await
+    }
+
+    async fn write_offset(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        tenant: &str,
+        offset: &Offset,
+    ) -> Result<(), OffsetStoreError> {
+        self.0.write_offset(projection_id, tag, tenant, offset).await
+    }
+}
+
+/// A **fake** durable `DedupStore` — see [`FakeDurableOffsetStore`], the
+/// structurally identical counterpart (PROD-014A IS-8/AD-9).
+#[derive(Clone, Default)]
+pub struct FakeDurableDedupStore(InMemoryDedupStore);
+
+#[async_trait]
+impl DedupStore for FakeDurableDedupStore {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    async fn seen(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        event_id: &str,
+    ) -> Result<bool, DedupStoreError> {
+        self.0.seen(projection_id, tag, event_id).await
+    }
+
+    async fn mark_seen(
+        &self,
+        projection_id: &str,
+        tag: &EventTag,
+        event_id: &str,
+    ) -> Result<(), DedupStoreError> {
+        self.0.mark_seen(projection_id, tag, event_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -349,5 +418,40 @@ mod tests {
             crossed.is_empty(),
             "a tag for a different tenant must never surface that tenant's events, got: {crossed:?}"
         );
+    }
+
+    // PROD-014A IS-8/AD-9: the fake durable pair must delegate storage
+    // identically to the in-memory pair (same-contract principle) and
+    // override only `is_durable()`.
+    #[tokio::test]
+    async fn fake_durable_offset_store_reports_durable_and_delegates_storage() {
+        let store = FakeDurableOffsetStore::default();
+        assert!(store.is_durable(), "must declare durable (AD-9)");
+
+        let tag = EventTag::new("users-by-tenant:tenant-a");
+        assert_eq!(store.read_offset("proj", &tag, "tenant-a").await.unwrap(), None);
+
+        store
+            .write_offset("proj", &tag, "tenant-a", &Offset::sequence(3))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.read_offset("proj", &tag, "tenant-a").await.unwrap(),
+            Some(Offset::sequence(3))
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_durable_dedup_store_reports_durable_and_delegates_storage() {
+        let store = FakeDurableDedupStore::default();
+        assert!(store.is_durable(), "must declare durable (AD-9)");
+
+        let tag = EventTag::new("users-by-tenant:tenant-a");
+        assert!(!store.seen("proj", &tag, "event-1").await.unwrap());
+
+        store.mark_seen("proj", &tag, "event-1").await.unwrap();
+
+        assert!(store.seen("proj", &tag, "event-1").await.unwrap());
     }
 }

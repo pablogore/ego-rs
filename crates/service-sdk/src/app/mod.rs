@@ -1904,6 +1904,29 @@ mod tests {
         }
     }
 
+    // PROD-014A remediation (verify CRITICAL #1): the spec's "The same store
+    // instance may be shared across projection_ids" scenario requires one
+    // identical `Arc` pair registered under two different `projection_id`s,
+    // not two distinct stub instances — the duplicate guard is keyed on
+    // `projection_id` alone (`HashSet<String>`), never store identity, so
+    // this is expected to pass with zero production-code changes.
+    #[test]
+    fn read_side_progress_registration_with_a_shared_store_instance_across_two_projection_ids_both_succeed(
+    ) {
+        let (offset, dedup) = stub_pair();
+        let result = compat_app()
+            .read_side_progress("users-by-tenant", offset.clone(), dedup.clone())
+            .read_side_progress("orders-by-tenant", offset, dedup)
+            .build();
+
+        match result {
+            Ok(_) => {}
+            Err(err) => panic!(
+                "sharing one store instance across two projection_ids must not conflict: {err:?}"
+            ),
+        }
+    }
+
     // Regression: the default in-memory path (no custom store registered)
     // must still build, start, and shut down exactly as before these two new
     // delegation methods were added.
