@@ -51,8 +51,10 @@ pub mod command;
 /// Idempotency key for safe external effect retry.
 pub mod idempotency;
 
-/// Domain event trait for event-sourced state.
-pub mod event;
+// CORE-PERSIST-A S3 (AD-4): relocated to `ego-persistence-api`, re-exported
+// here so `ego_domain::event::DomainEvent` keeps resolving to the identical
+// item.
+pub use ego_persistence_api::event;
 
 /// Observability port — SemanticEvent, Level, Observability trait.
 pub mod observability;

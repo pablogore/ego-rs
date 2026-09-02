@@ -14,23 +14,12 @@
 //! | `snapshot` | `Snapshot` — save and load aggregate state snapshots |
 //! | `stored_event` | `StoredEvent<E>` — event wrapper carrying an optional operation key |
 
-/// Persistence error types.
-pub mod error;
-
-/// Event store contract — append and load domain events.
-pub mod event_store;
-
-/// Resolution of a caller-supplied tenant scope into the value a store files under.
-pub mod tenant;
-
-/// Aggregate repository contract — save, load, and delete.
-pub mod repository;
-
-/// Aggregate snapshot contract — save and load state snapshots.
-pub mod snapshot;
-
-/// Event wrapper carrying an optional operation key.
-pub mod stored_event;
+// CORE-PERSIST-A S3 (AD-4): relocated to `ego-persistence-api`, re-exported
+// here at module granularity so every old `ego_domain::persistence::*` path
+// keeps resolving to the identical item.
+pub use ego_persistence_api::persistence::{
+    error, event_store, repository, snapshot, stored_event, tenant,
+};
 
 pub use error::PersistenceError;
 pub use event_store::{EventStore, EventStoreUnitOfWork};
