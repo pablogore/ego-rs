@@ -8,9 +8,17 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = { workspace = true }
+# Redaction primitive for telemetry: `OperationKeyHash` hashes a client-supplied
+# operation key so the raw value is not expressible as a span attribute
+# (`operation/key.rs`). Moved from `ego-domain`'s `[dependencies]` with the
+# type it protects (AD-5) — the only consumer of this dependency relocated.
+sha2 = "0.11.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Dev-only, for context.rs's TenantId deserialize tests moved with `id_type!`
+# (AD-3, D-6).
+serde_json = "1"
 # Dev-only, for tests/reexport_identity.rs's compile-time proof that every
 # relocated item resolves to the same item at its old and new path (IS-6,
 # SC-1). Excluded from the layer/cycle graph like every dev edge
