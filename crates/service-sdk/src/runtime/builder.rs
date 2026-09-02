@@ -1,11 +1,13 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_domain::event::DomainEvent;
+use ego_domain::read_side::dedup::DedupStore;
+use ego_domain::read_side::offset::OffsetStore;
 use ego_domain::{Observability, Tracer, TracerLifecycle};
 use ego_runtime::effects::{
     DeliveryConfig, DuplicateEffectType, EffectDedupStore, EffectStateStore, ExecutorRegistry,
@@ -56,6 +58,16 @@ pub type SecurityProviders = (
 
 /// A recorded `(service_name, S::validate)` pair for `with_injectable`/`try_build` (AD-3).
 type ValidatorEntry = (&'static str, fn(&RuntimeInner) -> Result<(), RuntimeError>);
+
+/// One projection's durable progress pair (PROD-014A AD-5). Private and
+/// constructible only through [`RuntimeBuilder::with_read_side_progress`],
+/// so the two fields cannot be populated independently (AD-1's invariant,
+/// enforced at the storage layer too).
+#[derive(Clone)]
+struct ReadSideProgressPair {
+    offset: Arc<dyn OffsetStore + Send + Sync>,
+    dedup: Arc<dyn DedupStore + Send + Sync>,
+}
 
 /// Builder for constructing a [`Runtime`] with optional security providers.
 ///
@@ -227,6 +239,16 @@ pub struct RuntimeBuilder {
     /// registered (AD-5). Independent of `EntityRuntimeBuilder::profile`,
     /// which gates the event/snapshot stores one layer down.
     profile: persistent_entity::profile::Profile,
+    /// The durable progress pair each registered projection resumes from
+    /// (PROD-014A), keyed by `projection_id` (D-3). Empty by default — a
+    /// composition that registers none has no read-side to govern, exactly
+    /// as zero registered effect executors means no effect store to refuse
+    /// (IS-5).
+    ///
+    /// `BTreeMap`, not `HashMap`: with two volatile projections registered
+    /// the refusal must be the same one on every run, and `HashMap`
+    /// iteration order is not stable across runs.
+    read_side_progress: BTreeMap<String, ReadSideProgressPair>,
 }
 
 impl RuntimeBuilder {
@@ -267,6 +289,7 @@ impl RuntimeBuilder {
             provider_health_pairs: Vec::new(),
             lifecycle_components: Vec::new(),
             profile: persistent_entity::profile::Profile::default(),
+            read_side_progress: BTreeMap::new(),
         }
     }
 
@@ -529,6 +552,42 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a projection's durable progress pair — its `OffsetStore`
+    /// and `DedupStore` together, keyed by `projection_id` (PROD-014A D-3).
+    ///
+    /// The pair is one argument list, not two calls, so a half-registered
+    /// projection is not representable: there is no state in which an
+    /// offset store is registered and a dedup store is not, and therefore
+    /// none that `Profile::Production` could mistake for a complete
+    /// configuration.
+    ///
+    /// Last-write-wins at this layer, deliberately: [`Self::with_effect_store`]
+    /// behaves identically when called twice directly on `RuntimeBuilder`.
+    /// The fail-closed duplicate guard lives at `AppBuilder`
+    /// (`AppBuilder::read_side_progress`) — restating it here would create
+    /// the second, parallel check PROD-014A exists to avoid.
+    ///
+    /// The framework never constructs either store (CORE-026's non-goal,
+    /// intact): it accepts what the host built, classifies it via
+    /// `is_durable()`, and refuses at [`Self::build`]/[`Self::try_build`]
+    /// under `Profile::Production` if either is volatile. Registering
+    /// nothing at all is valid and unchanged (IS-5).
+    pub fn with_read_side_progress(
+        mut self,
+        projection_id: impl Into<String>,
+        offset_store: Arc<dyn OffsetStore + Send + Sync>,
+        dedup_store: Arc<dyn DedupStore + Send + Sync>,
+    ) -> Self {
+        self.read_side_progress.insert(
+            projection_id.into(),
+            ReadSideProgressPair {
+                offset: offset_store,
+                dedup: dedup_store,
+            },
+        );
+        self
+    }
+
     /// Enables retention of settled external effects (PROD-002 G12).
     ///
     /// Optional and absent by default, for the identical reason
@@ -771,10 +830,25 @@ impl RuntimeBuilder {
     }
 
     /// Whether this configuration can honour the production posture it
-    /// declares for the effect store (PROD-013, AD-5). Mirrors
-    /// [`Self::validate_idempotency`]: one definition, checked from both
-    /// `build()` and `try_build()`, so the two paths cannot disagree.
+    /// declares for every capability this layer owns (PROD-013 AD-5,
+    /// PROD-014A AD-6). Mirrors [`Self::validate_idempotency`]: one
+    /// definition, checked from both `build()` and `try_build()`, so the two
+    /// paths cannot disagree.
+    ///
+    /// A sequencer, not a body: the effect-store check returns early when no
+    /// executor is registered, and a read-side check appended after it would
+    /// be unreachable for every composition that registers no effect
+    /// executor — including every read-side-only service (PROD-014A EC-1).
     fn validate_persistence_profile(&self) -> Result<(), RuntimeError> {
+        self.validate_effect_store_profile()?;
+        self.validate_read_side_progress_profile()?;
+        Ok(())
+    }
+
+    /// Unchanged from PROD-013 AD-5 — body, early return, capability and fix
+    /// strings all byte-for-byte identical; only the enclosing function name
+    /// is new (PROD-014A AD-6/EC-1).
+    fn validate_effect_store_profile(&self) -> Result<(), RuntimeError> {
         // Conditional on a registered executor because with none registered
         // no effect store is constructed at all (see `build()`'s
         // `effect_acceptor_impl` gate) — there is no volatile storage to
@@ -792,6 +866,27 @@ impl RuntimeBuilder {
             "effect store",
             "RuntimeBuilder::with_effect_store(store) (or AppBuilder::effect_store(store))",
         )?;
+        Ok(())
+    }
+
+    /// Under `Profile::Production`, every **registered** projection's
+    /// progress pair must be durable (PROD-014A IS-4). Not conditional on
+    /// anything else: registration is itself the composition-visible signal
+    /// that this projection has a progress pair worth governing, exactly as
+    /// executor registration is for the effect store. Zero registered means
+    /// the loop body never runs, which is IS-5 — falling out of the same
+    /// reasoning, not a special case.
+    fn validate_read_side_progress_profile(&self) -> Result<(), RuntimeError> {
+        for pair in self.read_side_progress.values() {
+            persistent_entity::profile::require_durably_configured(
+                self.profile,
+                pair.offset.is_durable() && pair.dedup.is_durable(),
+                "durable read-side progress store (OffsetStore + DedupStore)",
+                "AppBuilder::read_side_progress(projection_id, offset_store, dedup_store) \
+                 (or RuntimeBuilder::with_read_side_progress(..)), passing stores whose \
+                 is_durable() returns true",
+            )?;
+        }
         Ok(())
     }
 
@@ -3754,6 +3849,228 @@ mod tests {
             err.to_string().contains("effect store"),
             "the refusal must still name the capability: {err}"
         );
+    }
+
+    // -- PROD-014A: the read-side durable progress gate on `RuntimeBuilder` -
+
+    /// Minimal `OffsetStore`/`DedupStore` stubs for the read-side production
+    /// gate matrix (PROD-014A design.md AD-9, framework side). The gate
+    /// reads only `is_durable()`, so `read_offset`/`write_offset`/`seen`/
+    /// `mark_seen` are `unreachable!()` — the hand-rolled-stub rung of the
+    /// double ladder, correct for a two-method trait where `mockall` is
+    /// overkill.
+    struct StubOffsetStore(bool);
+
+    #[async_trait::async_trait]
+    impl ego_domain::read_side::offset::OffsetStore for StubOffsetStore {
+        fn is_durable(&self) -> bool {
+            self.0
+        }
+
+        async fn read_offset(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _tenant: &str,
+        ) -> Result<
+            Option<ego_domain::read_side::offset::Offset>,
+            ego_domain::read_side::offset::OffsetStoreError,
+        > {
+            unreachable!("PROD-014A gate reads only is_durable()")
+        }
+
+        async fn write_offset(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _tenant: &str,
+            _offset: &ego_domain::read_side::offset::Offset,
+        ) -> Result<(), ego_domain::read_side::offset::OffsetStoreError> {
+            unreachable!("PROD-014A gate reads only is_durable()")
+        }
+    }
+
+    struct StubDedupStore(bool);
+
+    #[async_trait::async_trait]
+    impl ego_domain::read_side::dedup::DedupStore for StubDedupStore {
+        fn is_durable(&self) -> bool {
+            self.0
+        }
+
+        async fn seen(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _event_id: &str,
+        ) -> Result<bool, ego_domain::read_side::dedup::DedupStoreError> {
+            unreachable!("PROD-014A gate reads only is_durable()")
+        }
+
+        async fn mark_seen(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _event_id: &str,
+        ) -> Result<(), ego_domain::read_side::dedup::DedupStoreError> {
+            unreachable!("PROD-014A gate reads only is_durable()")
+        }
+    }
+
+    fn durable_pair() -> (
+        Arc<dyn ego_domain::read_side::offset::OffsetStore + Send + Sync>,
+        Arc<dyn ego_domain::read_side::dedup::DedupStore + Send + Sync>,
+    ) {
+        (
+            Arc::new(StubOffsetStore(true)),
+            Arc::new(StubDedupStore(true)),
+        )
+    }
+
+    fn volatile_pair() -> (
+        Arc<dyn ego_domain::read_side::offset::OffsetStore + Send + Sync>,
+        Arc<dyn ego_domain::read_side::dedup::DedupStore + Send + Sync>,
+    ) {
+        (
+            Arc::new(StubOffsetStore(false)),
+            Arc::new(StubDedupStore(false)),
+        )
+    }
+
+    /// SC-1: `Profile::Production` with no read-side registered at all
+    /// builds successfully — a command-only or non-read-side application is
+    /// never forced to register a dummy store.
+    #[test]
+    fn validate_read_side_progress_profile_ok_when_none_registered() {
+        let rt = compat().profile(Profile::Production).build();
+        assert_eq!(rt.effect_acceptor().is_none(), true);
+    }
+
+    /// SC-2: `Profile::Production` with a registered pair whose `OffsetStore`
+    /// and `DedupStore` are both durable builds successfully.
+    #[test]
+    fn validate_read_side_progress_profile_ok_when_pair_durable() {
+        let (offset, dedup) = durable_pair();
+        let result = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build();
+        assert!(
+            result.is_ok(),
+            "a fully durable registered pair must not be refused"
+        );
+    }
+
+    /// SC-3/SC-4: a volatile `OffsetStore` in an otherwise-durable pair must
+    /// refuse, naming the capability and the exact fixing call.
+    #[test]
+    fn validate_read_side_progress_profile_rejects_volatile_offset() {
+        let dedup: Arc<dyn ego_domain::read_side::dedup::DedupStore + Send + Sync> =
+            Arc::new(StubDedupStore(true));
+        let offset: Arc<dyn ego_domain::read_side::offset::OffsetStore + Send + Sync> =
+            Arc::new(StubOffsetStore(false));
+        let err = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build()
+            .err()
+            .expect("a volatile OffsetStore must refuse under Production");
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("read-side progress"),
+            "the refusal must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("read_side_progress"),
+            "the refusal must name the exact fixing call: {message}"
+        );
+    }
+
+    /// SC-3/SC-4, the mirror case: a volatile `DedupStore` in an
+    /// otherwise-durable pair must refuse too — the pair is the unit.
+    #[test]
+    fn validate_read_side_progress_profile_rejects_volatile_dedup() {
+        let offset: Arc<dyn ego_domain::read_side::offset::OffsetStore + Send + Sync> =
+            Arc::new(StubOffsetStore(true));
+        let dedup: Arc<dyn ego_domain::read_side::dedup::DedupStore + Send + Sync> =
+            Arc::new(StubDedupStore(false));
+        let err = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build()
+            .err()
+            .expect("a volatile DedupStore must refuse under Production");
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+    }
+
+    /// Both stores volatile — the ordinary case, refused for the same
+    /// reason as either alone.
+    #[test]
+    fn validate_read_side_progress_profile_rejects_both_volatile() {
+        let (offset, dedup) = volatile_pair();
+        let err = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build()
+            .err()
+            .expect("a fully volatile pair must refuse under Production");
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+    }
+
+    /// EC-1 regression: the exact bug a naive append to
+    /// `validate_persistence_profile` would reintroduce. Zero effect
+    /// executors means `validate_effect_store_profile` returns early — a
+    /// read-side check appended AFTER that early return would never run for
+    /// this composition. The split (AD-6) must still reach it.
+    #[test]
+    fn validate_read_side_progress_profile_runs_even_with_zero_effect_executors() {
+        let (offset, dedup) = volatile_pair();
+        let err = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build()
+            .err()
+            .expect(
+                "a volatile read-side pair must refuse even when no effect \
+                 executor is registered at all (EC-1)",
+            );
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+    }
+
+    /// `Profile::Dev` (the default) with volatile stores is unchanged —
+    /// byte-for-byte identical to today (IS-6/SC-5).
+    #[test]
+    fn validate_read_side_progress_profile_ok_under_dev_with_volatile_pair() {
+        let (offset, dedup) = volatile_pair();
+        let result = compat()
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .try_build();
+        assert!(result.is_ok(), "Profile::Dev must accept a volatile pair");
+    }
+
+    /// `build()` and `try_build()` must agree on this validation too,
+    /// mirroring `build_and_try_build_agree_on_persistence_profile_validation`.
+    #[test]
+    #[should_panic(expected = "read-side progress")]
+    fn build_and_try_build_agree_on_read_side_progress_validation() {
+        let (offset, dedup) = volatile_pair();
+        let builder = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup);
+
+        let err = builder
+            .clone()
+            .try_build()
+            .err()
+            .expect("try_build must report the same refusal build() panics on");
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+
+        let _ = builder.build();
     }
 
     // -- CORE-019 PR4 review F-01: build() must never panic outside Tokio ---
