@@ -52,6 +52,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ego_domain::event::DomainEvent;
+use ego_domain::read_side::dedup::DedupStore;
+use ego_domain::read_side::offset::OffsetStore;
 use ego_domain::Observability;
 use ego_runtime::effects::{
     EffectDedupStore, EffectStateStore, ExternalEffectExecutor, RetentionMaintenance,
@@ -125,6 +127,11 @@ pub struct AppBuilder {
     /// Presence guard for `.effect_retention_store()` (CORE-028D1),
     /// independent of `effect_store_registered`.
     effect_retention_store_registered: bool,
+    /// Keys already registered through `.read_side_progress()` (PROD-014A
+    /// AD-7). Keyed, not a `bool`: registration is per-projection (D-3), so
+    /// a second projection is valid and only a second registration of the
+    /// *same* `projection_id` is not.
+    read_side_progress_ids: HashSet<String>,
     service_registrars: Vec<ServiceRegistrar>,
     /// First error encountered by an infallible-signature registration call
     /// (e.g. a duplicate adapter, AD-4) — surfaced at `build()` rather than
@@ -304,6 +311,7 @@ impl AppBuilder {
             adapter_types: HashSet::new(),
             effect_store_registered: false,
             effect_retention_store_registered: false,
+            read_side_progress_ids: HashSet::new(),
             service_registrars: Vec::new(),
             pending_error: None,
         }
@@ -612,6 +620,33 @@ impl AppBuilder {
         }
         self.effect_retention_store_registered = true;
         self.runtime_builder = self.runtime_builder.with_effect_retention_store(store);
+        self
+    }
+
+    /// Registers the durable read-side progress pair for a projection — thin
+    /// delegation to [`RuntimeBuilder::with_read_side_progress`] (PROD-014A
+    /// AD-1/AD-7). Keyed by `projection_id`, not a single slot like
+    /// [`Self::effect_store`]: a second registration for a *different*
+    /// `projection_id` is valid, but a second registration for the *same*
+    /// `projection_id` is rejected — silently replacing a projection's resume
+    /// state is not a composition a reader can verify.
+    pub fn read_side_progress(
+        mut self,
+        projection_id: impl Into<String>,
+        offset_store: Arc<dyn OffsetStore + Send + Sync>,
+        dedup_store: Arc<dyn DedupStore + Send + Sync>,
+    ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        let projection_id = projection_id.into();
+        if !self.read_side_progress_ids.insert(projection_id.clone()) {
+            self.pending_error = Some(CompositionError::DuplicateReadSideProgress { projection_id });
+            return self;
+        }
+        self.runtime_builder =
+            self.runtime_builder
+                .with_read_side_progress(projection_id, offset_store, dedup_store);
         self
     }
 
@@ -1737,6 +1772,127 @@ mod tests {
             .adapter(Arc::new(StubAdapter(2)))
             .effect_store(RecordingEffectStore::new())
             .effect_retention_store(RecordingEffectStore::new() as Arc<dyn RetentionMaintenance>)
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateAdapter { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<StubAdapter>());
+            }
+            Err(other) => panic!("expected the original DuplicateAdapter, got {other:?}"),
+            Ok(_) => panic!("expected the pre-existing pending_error to surface"),
+        }
+    }
+
+    // PROD-014A: minimal `OffsetStore`/`DedupStore` stubs so the dup-guard
+    // tests below don't need a real durable backend — mirrors
+    // `runtime::builder`'s `StubOffsetStore`/`StubDedupStore` (AD-9).
+    struct StubOffsetStore;
+
+    #[async_trait::async_trait]
+    impl OffsetStore for StubOffsetStore {
+        async fn read_offset(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _tenant: &str,
+        ) -> Result<
+            Option<ego_domain::read_side::offset::Offset>,
+            ego_domain::read_side::offset::OffsetStoreError,
+        > {
+            unreachable!("dup-guard tests never reach the store")
+        }
+
+        async fn write_offset(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _tenant: &str,
+            _offset: &ego_domain::read_side::offset::Offset,
+        ) -> Result<(), ego_domain::read_side::offset::OffsetStoreError> {
+            unreachable!("dup-guard tests never reach the store")
+        }
+    }
+
+    struct StubDedupStore;
+
+    #[async_trait::async_trait]
+    impl DedupStore for StubDedupStore {
+        async fn seen(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _event_id: &str,
+        ) -> Result<bool, ego_domain::read_side::dedup::DedupStoreError> {
+            unreachable!("dup-guard tests never reach the store")
+        }
+
+        async fn mark_seen(
+            &self,
+            _projection_id: &str,
+            _tag: &ego_domain::read_side::event_tag::EventTag,
+            _event_id: &str,
+        ) -> Result<(), ego_domain::read_side::dedup::DedupStoreError> {
+            unreachable!("dup-guard tests never reach the store")
+        }
+    }
+
+    fn stub_pair() -> (
+        Arc<dyn OffsetStore + Send + Sync>,
+        Arc<dyn DedupStore + Send + Sync>,
+    ) {
+        (Arc::new(StubOffsetStore), Arc::new(StubDedupStore))
+    }
+
+    // Task 3.3 (RED): registering the same `projection_id` twice fails
+    // closed with `CompositionError::DuplicateReadSideProgress`, and the
+    // rejection happens at registration time (the `pending_error` latch),
+    // not at `build()` — mirroring `duplicate_effect_store_registration_is_rejected`.
+    #[test]
+    fn duplicate_read_side_progress_registration_is_rejected() {
+        let (offset_a, dedup_a) = stub_pair();
+        let (offset_b, dedup_b) = stub_pair();
+        let result = compat_app()
+            .read_side_progress("users-by-tenant", offset_a, dedup_a)
+            .read_side_progress("users-by-tenant", offset_b, dedup_b)
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateReadSideProgress { projection_id }) => {
+                assert_eq!(projection_id, "users-by-tenant");
+            }
+            Err(other) => panic!("expected DuplicateReadSideProgress, got {other:?}"),
+            Ok(_) => panic!("expected duplicate read-side progress registration to fail"),
+        }
+    }
+
+    // Task 3.3 (RED): two *different* `projection_id`s both register — the
+    // guard is per-projection, not a single slot (AD-1/AD-7 contrast with
+    // `.effect_store()`).
+    #[test]
+    fn read_side_progress_registration_for_two_different_projections_both_succeed() {
+        let (offset_a, dedup_a) = stub_pair();
+        let (offset_b, dedup_b) = stub_pair();
+        let result = compat_app()
+            .read_side_progress("users-by-tenant", offset_a, dedup_a)
+            .read_side_progress("orders-by-tenant", offset_b, dedup_b)
+            .build();
+
+        match result {
+            Ok(_) => {}
+            Err(err) => panic!("two distinct projection_ids must both register: {err:?}"),
+        }
+    }
+
+    // Task 3.3 (RED): `.read_side_progress()` short-circuits on a
+    // pre-existing `pending_error` — mirrors
+    // `effect_store_and_retention_store_short_circuit_on_a_pending_error`.
+    #[test]
+    fn read_side_progress_short_circuits_on_a_pending_error() {
+        let (offset, dedup) = stub_pair();
+        let result = compat_app()
+            .adapter(Arc::new(StubAdapter(1)))
+            .adapter(Arc::new(StubAdapter(2)))
+            .read_side_progress("users-by-tenant", offset, dedup)
             .build();
 
         match result {

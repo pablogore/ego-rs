@@ -47,6 +47,20 @@ pub enum CompositionError {
         "effect retention store already registered — register exactly one effect retention store"
     )]
     DuplicateEffectRetentionStore,
+    /// A second durable progress pair was registered for the same
+    /// `projection_id` through `AppBuilder::read_side_progress(...)`
+    /// (PROD-014A). Rejected even when the second pair is durable and the
+    /// first was not: silently replacing a projection's resume state is not
+    /// a composition a reader can verify. Deliberately has no replace escape
+    /// hatch — the message must not invent one.
+    #[error(
+        "read-side progress stores already registered for projection `{projection_id}`; \
+         second registration rejected — register exactly one progress pair per projection"
+    )]
+    DuplicateReadSideProgress {
+        /// The `projection_id` whose second registration was rejected.
+        projection_id: String,
+    },
     /// A service registration was rejected by the underlying registry
     /// (e.g. a duplicate `(Tag, version)` pair).
     #[error("service registration failed: {0}")]
@@ -238,6 +252,40 @@ mod tests {
     #[test]
     fn duplicate_effect_retention_store_message_has_no_replace_api() {
         let text = CompositionError::DuplicateEffectRetentionStore.to_string();
+        assert!(
+            !text.contains("replace"),
+            "must not suggest a non-existent replace API: {text:?}"
+        );
+    }
+
+    // PROD-014A task 3.1 (RED): `CompositionError::DuplicateReadSideProgress`
+    // carries `projection_id`, mirroring `duplicate_adapter_carries_type_name`.
+    #[test]
+    fn duplicate_read_side_progress_carries_projection_id() {
+        let err = CompositionError::DuplicateReadSideProgress {
+            projection_id: "users-by-tenant".to_string(),
+        };
+        match err {
+            CompositionError::DuplicateReadSideProgress { projection_id } => {
+                assert_eq!(projection_id, "users-by-tenant");
+            }
+            other => panic!("expected DuplicateReadSideProgress, got {other:?}"),
+        }
+    }
+
+    // PROD-014A task 3.1 (RED): the message names the projection and, like
+    // `DuplicateEffectStore`, suggests no non-existent replace API.
+    #[test]
+    fn duplicate_read_side_progress_message_names_projection_without_a_replace_api() {
+        let err = CompositionError::DuplicateReadSideProgress {
+            projection_id: "users-by-tenant".to_string(),
+        };
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "read-side progress stores already registered for projection `users-by-tenant`; \
+             second registration rejected — register exactly one progress pair per projection"
+        );
         assert!(
             !text.contains("replace"),
             "must not suggest a non-existent replace API: {text:?}"
