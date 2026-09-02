@@ -175,3 +175,39 @@ handler, event store, poll interval, progress reporter, and error callback.
   running async runtime (e.g. to assert on its own read model in a
   synchronous test) does so through its own pre-existing constructor (e.g.
   `ReadSideHandles::new`), which this capability does not change or replace.
+
+### Requirement: Composition-Root Acceptance Of A Host-Constructed Durable Progress Pair Is In Scope; Framework Construction Remains Out Of Scope
+
+A projection's durable progress pair — its `OffsetStore` and `DedupStore`
+— MAY be composed at the composition root: accepted, classified by
+durability, and refused there under `Profile::Production` when not
+durable. This is orthogonal to, and does not reverse, CORE-026's existing
+non-goal that the framework constructs or defaults these stores
+internally — that non-goal remains fully in force. The composition root
+never internally constructs an `OffsetStore`, `DedupStore`, or
+tag-discovery mechanism on the application's behalf; it only accepts,
+classifies, and validates a pair the application already built.
+
+#### Scenario: The composition root classifies and validates without constructing
+
+- GIVEN an application that has already constructed its own
+  `OffsetStore`/`DedupStore` pair
+- WHEN it registers that pair at the composition root
+- THEN the composition root classifies and validates the pair's
+  durability without itself constructing either store
+
+#### Scenario: An application that registers nothing is unaffected
+
+- GIVEN an application that never registers a durable progress pair at
+  the composition root
+- WHEN it composes its read-side wiring exactly as before this change
+- THEN nothing about that wiring is required or performed by this
+  capability, unchanged from before
+
+#### Scenario: The refusal never reaches the scheduler engine
+
+- GIVEN a registered pair refused under `Profile::Production`
+- WHEN that refusal occurs
+- THEN it occurs at the composition root, never inside
+  `ProjectionSpec::new()`, `TagSchedulerImpl::spawn()`, or the first
+  poll batch
