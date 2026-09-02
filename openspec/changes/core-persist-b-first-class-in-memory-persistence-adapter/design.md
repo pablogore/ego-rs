@@ -134,6 +134,37 @@ None of the four `ego-infrastructure` implementations names `chrono` outside
 constant across the slices: S1 needs `chrono` as a dev-dependency only, and S2 promotes it to a
 normal one. Stated so the slice boundary is derivable rather than guessed. **AD-2, AD-9.**
 
+### EC-8 — `records` is private, and one colocated test reads it directly: D-8/AD-8's "byte-identical" and "fields don't change" collide once the struct crosses crates
+
+Discovered at apply time (S2), not at design time — recorded here rather than silently patched.
+`InMemoryOperationReservationStore.records` (`reservation.rs:79`) was never `pub`; it only
+compiled from `testkit/src/reservation.rs`'s `#[cfg(test)] mod tests` because struct and test
+shared a crate. `a_lock_wait_that_spans_expiry_rejects_the_lapsed_holder` (originally
+`:378-460`ish) locks `store.records` directly to hold the mutex across an awaited task — a
+white-box test of the store's own lock-ordering, not of the `OperationReservationStore` port. D-8
+and AD-8 both promised this module stays byte-identical in `ego-testkit`; AD-8 separately promised
+the struct's fields don't change. Once the struct moves crate, both cannot hold simultaneously
+without either widening `records`'s visibility (changing AD-8's "fields don't change", and to
+`pub`, not `pub(crate)`, since visibility restrictions don't reach across a crate boundary) or
+relocating the test.
+
+**Resolution (asked of the user, a genuine architectural fork — not resolved unilaterally, same
+posture as OQ-2): move only this one test.** It now lives colocated with the struct, in
+`crates/persistence-memory/src/operation/reservation.rs`'s own `#[cfg(test)] mod tests`, where
+`records` is legally private-but-visible (same module tree). `records` itself is untouched —
+AD-8's "fields don't change" holds exactly as written. `TestClock` and
+`the_in_memory_reservation_store_conforms` (the actual `OperationReservationStore` conformance
+test, which never touches `records`) stay in `ego-testkit` per the original D-8/AD-5 — only the
+one white-box test moves. The new crate needs its own minimal clock double (`FixedClock`,
+~15 lines) since `ego-persistence-memory` (`foundation`) cannot depend on `ego-testkit`
+(`tooling`, a sink) to reuse `TestClock` — the layer direction runs the other way. This adds
+`tokio`'s `rt-multi-thread` dev-feature (the test's `flavor = "multi_thread"` requirement) and a
+second, `#[cfg(test)]`-gated `use ego_domain::Clock;` line, amending AD-2 criterion 4 to
+"exactly one **non-test** line" (see AD-2 above). **AD-8's D-8 amended accordingly: "both
+`#[cfg(test)]` modules stay in `ego-testkit`, byte-identical" becomes "the conformance module
+stays in `ego-testkit`; the lock-ordering test relocates with the struct it inspects, body
+unchanged."**
+
 ---
 
 ## Dependency Graph
@@ -275,9 +306,12 @@ tokio = { version = "1", features = ["macros", "rt"] }
    carries all of those today (`infrastructure/Cargo.toml:8-20`) while its `in_memory` submodule
    imports none of them; that gap is the concrete thing this crate closes.
 4. **The `ego-domain` edge is checkable, not asserted.** `rg '^use ego_domain::|ego_domain::'
-   crates/persistence-memory/src` must return exactly one line —
+   crates/persistence-memory/src` must return exactly one **non-test** line —
    `operation/reservation.rs`'s `use ego_domain::Clock;`. AD-5's EC-2 rewrite is what makes that
-   count one rather than two, and Testing pins it as a diff property.
+   count one rather than two, and Testing pins it as a diff property. **Amended by EC-8**: a
+   second, `#[cfg(test)]`-gated `use ego_domain::Clock;` exists inside the colocated white-box
+   test module for its local `FixedClock` double — a production-surface property, not a
+   test-surface one, so it does not weaken this criterion.
 5. **No third edge exists.** The prompt asks this be confirmed rather than assumed: the other
    six implementations' import lists (`event_store.rs:1-8`, `repository.rs:1-4`,
    `snapshot.rs:1-5`, `read_side_store.rs:6-11`, `store.rs:7-19`) name only `std`, `async_trait`,

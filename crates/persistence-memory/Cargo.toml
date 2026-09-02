@@ -5,14 +5,19 @@ edition = "2021"
 
 [dependencies]
 ego-persistence-api = { path = "../persistence-api" }
+# `Clock` only (design.md EC-1, AD-2) — the reservation store's one
+# surviving `ego_domain::` line.
+ego-domain = { path = "../domain" }
 async-trait = { workspace = true }
 serde_json = "1"
+# S2: promoted from dev to normal — the reservation store names
+# `DateTime<Utc>` in its body, not just its test module (design.md EC-7,
+# AD-2).
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 # read_side/store.rs's relocated `#[cfg(test)]` module: `#[tokio::test]`
-# (design.md EC-4).
-tokio = { version = "1", features = ["macros", "rt"] }
-# Dev-only in S1: only the relocated `read_side/store.rs` test module names
-# `chrono::Utc`. Promoted to a normal dependency in S2 when the reservation
-# store arrives (design.md EC-7, AD-2).
-chrono = { version = "0.4", features = ["serde"] }
+# (design.md EC-4). `rt-multi-thread` additionally backs
+# `#[tokio::test(flavor = "multi_thread")]` in the reservation store's
+# colocated lock-ordering test (S2 design.md AD-8 amendment).
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

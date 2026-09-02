@@ -84,29 +84,29 @@ Riesgo de presupuesto de 400 líneas: Alto
 
 ## Fase 6: RED — Test de Identidad de Compatibilidad, S2 — PR 2
 
-- [ ] 6.1 Crear `crates/testkit/tests/reservation_reexport_identity.rs` con un testigo de identidad para `InMemoryOperationReservationStore` en `ego_persistence_memory::operation::reservation::InMemoryOperationReservationStore`. Falla al compilar: la ruta aún no existe.
+- [x] 6.1 Crear `crates/testkit/tests/reservation_reexport_identity.rs` con un testigo de identidad para `InMemoryOperationReservationStore` en `ego_persistence_memory::operation::reservation::InMemoryOperationReservationStore`. Falla al compilar: la ruta aún no existe.
 
 ## Fase 7: GREEN — Dividir `reservation.rs` y Reubicar el Store de Reservas — S2 — PR 2
 
-- [ ] 7.1 Agregar `ego-domain` (path) a `crates/persistence-memory/Cargo.toml` y promover `chrono` de dev a dependencia normal — el único slice que amplía el borde de dependencias (AD-2, D-3).
-- [ ] 7.2 Agregar `pub mod operation;` a `src/lib.rs`; crear `src/operation/mod.rs`.
-- [ ] 7.3 Mover `RecordState`, `Record`, `InMemoryOperationReservationStore` y su `impl OperationReservationStore` verbatim desde `crates/testkit/src/reservation.rs` a `src/operation/reservation.rs`. Reescribir el import de once nombres de `operation::` a `ego_persistence_api::operation::reservation::{…}` (EC-1, fila 7 de AD-4); reescribir la ruta inline `fingerprint: ego_domain::operation::OperationFingerprint` a `ego_persistence_api::operation::key::OperationFingerprint` (EC-2, AD-5). `use ego_domain::Clock;` queda sin cambios — la única línea `ego_domain::` que sobrevive en el crate.
-- [ ] 7.4 Agregar la dependencia de path `ego-persistence-memory` a `crates/testkit/Cargo.toml`.
+- [x] 7.1 Agregar `ego-domain` (path) a `crates/persistence-memory/Cargo.toml` y promover `chrono` de dev a dependencia normal — el único slice que amplía el borde de dependencias (AD-2, D-3).
+- [x] 7.2 Agregar `pub mod operation;` a `src/lib.rs`; crear `src/operation/mod.rs`.
+- [x] 7.3 Mover `RecordState`, `Record`, `InMemoryOperationReservationStore` y su `impl OperationReservationStore` verbatim desde `crates/testkit/src/reservation.rs` a `src/operation/reservation.rs`. Reescribir el import de once nombres de `operation::` a `ego_persistence_api::operation::reservation::{…}` (EC-1, fila 7 de AD-4); reescribir la ruta inline `fingerprint: ego_domain::operation::OperationFingerprint` a `ego_persistence_api::operation::key::OperationFingerprint` (EC-2, AD-5). `use ego_domain::Clock;` queda sin cambios — la única línea `ego_domain::` que sobrevive en el crate.
+- [x] 7.4 Agregar la dependencia de path `ego-persistence-memory` a `crates/testkit/Cargo.toml`.
 
 ## Fase 8: GREEN — Re-export Dentro de `reservation.rs`; `TestClock` y los Tests se Quedan — S2 — PR 2
 
-- [ ] 8.1 Podar los imports de `crates/testkit/src/reservation.rs` a solo lo que necesita `TestClock` (`std::sync::Mutex`, `chrono::{DateTime, Duration, Utc}`, `ego_domain::Clock`); agregar `pub use ego_persistence_memory::operation::reservation::InMemoryOperationReservationStore;` dentro del módulo, inmediatamente después (EC-3, AD-5). Dejar `TestClock`, su `impl Clock`, y ambos módulos `#[cfg(test)]` (`:370-512`, `:514-…`) idénticos byte a byte, incluyendo sus líneas `use super::{…}`.
-- [ ] 8.2 Confirmar que `crates/testkit/src/lib.rs:50` no necesita ninguna edición (EC-3).
+- [x] 8.1 — **ENMENDADO, EC-8**: Podar los imports de `crates/testkit/src/reservation.rs` a solo lo que necesitan `TestClock` y el test de conformidad que se queda (`std::sync::Arc`, `chrono::{TimeZone, Utc}`); agregar `pub use ego_persistence_memory::operation::reservation::InMemoryOperationReservationStore;` dentro del módulo, inmediatamente después (EC-3, AD-5). Dejar `TestClock`, su `impl Clock`, y `the_in_memory_reservation_store_conforms` idénticos byte a byte. `a_lock_wait_that_spans_expiry_rejects_the_lapsed_holder` NO se queda — bloquea directamente el campo `records`, ahora privado fuera del crate, así que se reubica (cuerpo idéntico byte a byte) a un nuevo `#[cfg(test)] mod tests` colocalizado en `crates/persistence-memory/src/operation/reservation.rs`, impulsado por un nuevo doble local `FixedClock` (design.md EC-8; decisión del usuario, misma postura que OQ-2 — "lo más arquitectónicamente claro").
+- [x] 8.2 Confirmar que `crates/testkit/src/lib.rs:50` no necesita ninguna edición (EC-3).
 
 ## Fase 9: Verificación — S2 — PR 2
 
-- [ ] 9.1 `cargo build -p ego-persistence-memory` funciona de forma independiente con los nuevos bordes `ego-domain`/`chrono`.
-- [ ] 9.2 `cargo build --workspace` funciona; pone en verde el testigo de identidad de 6.1.
-- [ ] 9.3 `rg '^use ego_domain::|ego_domain::' crates/persistence-memory/src` devuelve exactamente una línea (criterio 4 de AD-2).
-- [ ] 9.4 `cargo run -p xtask -- verify-layers` pasa con el borde `ego-domain` (`foundation → domain`, ya permitido, sin edición de la matriz).
-- [ ] 9.5 `cargo test --workspace` pasa; ambas suites `#[cfg(test)]` de reserva colocalizadas pasan sin modificar, ejercitando el store re-exportado a través de `super::` (D-8, R16).
-- [ ] 9.6 Lectura de diff: `crates/transport/tests/operation_key_extractor.rs`, `crates/service-sdk/tests/retention_worker_lifecycle.rs`, `crates/service-sdk/tests/cross_tenant_reservation_isolation.rs` compilan con código idéntico byte a byte (R9). Registrar en la descripción del PR: este slice hace que `InMemoryOperationReservationStore` sea alcanzable desde producción, según D-7/AD-8, ya AUTORIZADO — sin tarea adicional de aprobación.
-- [ ] 9.7 Puerta de diff cero semántico para el cuerpo movido del store de reservas (R5, R2).
+- [x] 9.1 `cargo build -p ego-persistence-memory` funciona de forma independiente con los nuevos bordes `ego-domain`/`chrono`.
+- [x] 9.2 `cargo build --workspace` funciona; pone en verde el testigo de identidad de 6.1.
+- [x] 9.3 — **ENMENDADO, EC-8**: `rg '^use ego_domain::|ego_domain::' crates/persistence-memory/src` devuelve exactamente una línea **no-test** (criterio 4 de AD-2); existe una segunda línea, protegida por `#[cfg(test)]`, para el `FixedClock` del test colocalizado.
+- [x] 9.4 `cargo run -p xtask -- verify-layers` pasa con el borde `ego-domain` (`foundation → domain`, ya permitido, sin edición de la matriz).
+- [x] 9.5 — **ENMENDADO, EC-8**: `cargo test --workspace` pasa; `the_in_memory_reservation_store_conforms` (que se queda en `ego-testkit`) y `a_lock_wait_that_spans_expiry_rejects_the_lapsed_holder` (reubicado en `ego-persistence-memory`) pasan ambos con el cuerpo sin modificar (D-8, R16). Confirmado: corrida completa de `cargo test --workspace`, cero líneas `FAILED`, ambos tests `... ok`.
+- [x] 9.6 Lectura de diff: `git diff develop -- crates/transport/tests/operation_key_extractor.rs crates/service-sdk/tests/retention_worker_lifecycle.rs crates/service-sdk/tests/cross_tenant_reservation_isolation.rs` devuelve vacío — los tres compilan con código idéntico byte a byte (R9). Registrar en la descripción del PR: este slice hace que `InMemoryOperationReservationStore` sea alcanzable desde producción, según D-7/AD-8, ya AUTORIZADO — sin tarea adicional de aprobación.
+- [x] 9.7 Puerta de diff cero semántico para el cuerpo movido del store de reservas (R5, R2). Confirmado: el `diff` de `RecordState`/`Record`/`InMemoryOperationReservationStore`/`impl OperationReservationStore` entre el cuerpo pre-mudanza (`develop:crates/testkit/src/reservation.rs`) y el post-mudanza (`crates/persistence-memory/src/operation/reservation.rs`) muestra exactamente una línea cambiada — el tipo del campo `fingerprint` (`ego_domain::operation::OperationFingerprint` → `ego_persistence_api::operation::key::OperationFingerprint`), ya documentada como la reescritura deliberada de EC-2/AD-5. Cero otro cambio semántico.
 
 ## Fase 10: RED — Reapuntar los Imports de Reference-App Antes de que Existan las Nuevas Rutas — S3 — PR 3
 
