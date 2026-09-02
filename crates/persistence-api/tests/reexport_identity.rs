@@ -232,3 +232,64 @@ fn _identity_tenant_id_error(
 ) -> ego_persistence_api::context::TenantIdError {
     x
 }
+
+// ---- S3 — persistence & event (design.md AD-6) ----
+
+fn _identity_persistence_error(
+    x: ego_domain::persistence::PersistenceError,
+) -> ego_persistence_api::persistence::PersistenceError {
+    x
+}
+
+/// `EventStore<E>` is object-safe (thanks to `#[async_trait]`'s desugaring)
+/// and generic over `E: DomainEvent` — same coercion shape as
+/// `ReadSideStore<E>` above, bounded on the relocated `DomainEvent`.
+fn _identity_event_store<E: ego_domain::event::DomainEvent>(
+    x: Box<dyn ego_domain::persistence::EventStore<E>>,
+) -> Box<dyn ego_persistence_api::persistence::EventStore<E>> {
+    x
+}
+
+fn _identity_event_store_unit_of_work<E: ego_domain::event::DomainEvent>(
+    x: Box<dyn ego_domain::persistence::EventStoreUnitOfWork<E>>,
+) -> Box<dyn ego_persistence_api::persistence::EventStoreUnitOfWork<E>> {
+    x
+}
+
+fn _identity_repository<A>(
+    x: Box<dyn ego_domain::persistence::Repository<A>>,
+) -> Box<dyn ego_persistence_api::persistence::Repository<A>> {
+    x
+}
+
+fn _identity_snapshot(
+    x: Box<dyn ego_domain::persistence::Snapshot>,
+) -> Box<dyn ego_persistence_api::persistence::Snapshot> {
+    x
+}
+
+fn _identity_stored_event<E>(
+    x: ego_domain::persistence::StoredEvent<E>,
+) -> ego_persistence_api::persistence::StoredEvent<E> {
+    x
+}
+
+fn _identity_domain_event(
+    x: Box<dyn ego_domain::event::DomainEvent>,
+) -> Box<dyn ego_persistence_api::event::DomainEvent> {
+    x
+}
+
+/// `resolve_tenant` is a bare function, not a type — an identity coercion
+/// proves nothing about it (same reason `MAX_LEN` above uses a const
+/// equality instead). A function pointer equality check is the analogous
+/// proof for a function item: it only holds if both paths name the exact
+/// same compiled function, not two functions that merely share a signature.
+#[test]
+fn resolve_tenant_old_path_is_the_new_path_function() {
+    let old: fn(Option<&str>) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
+        ego_domain::persistence::resolve_tenant;
+    let new: fn(Option<&str>) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
+        ego_persistence_api::persistence::resolve_tenant;
+    assert_eq!(old as usize, new as usize);
+}
