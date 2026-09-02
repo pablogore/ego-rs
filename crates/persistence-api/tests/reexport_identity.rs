@@ -97,3 +97,138 @@ fn _identity_event_stream_element<E>(
 ) -> ego_persistence_api::read_side::event_stream::EventStreamElement<E> {
     x
 }
+
+// ---- S2 — operation (design.md AD-6) ----
+
+fn _identity_operation_key(
+    x: ego_domain::operation::key::OperationKey,
+) -> ego_persistence_api::operation::key::OperationKey {
+    x
+}
+
+fn _identity_operation_key_error(
+    x: ego_domain::operation::key::OperationKeyError,
+) -> ego_persistence_api::operation::key::OperationKeyError {
+    x
+}
+
+fn _identity_operation_fingerprint(
+    x: ego_domain::operation::key::OperationFingerprint,
+) -> ego_persistence_api::operation::key::OperationFingerprint {
+    x
+}
+
+fn _identity_operation_key_hash(
+    x: ego_domain::operation::key::OperationKeyHash,
+) -> ego_persistence_api::operation::key::OperationKeyHash {
+    x
+}
+
+/// `MAX_LEN` is a bare constant, not a type — an identity function proves
+/// nothing about the constant itself, so this is a const-equality assertion
+/// between both paths instead (spec: "A bare constant relocates too").
+const _: () = assert!(
+    ego_domain::operation::key::MAX_LEN == ego_persistence_api::operation::key::MAX_LEN
+);
+
+fn _identity_operation_receipt(
+    x: ego_domain::operation::receipt::OperationReceipt,
+) -> ego_persistence_api::operation::receipt::OperationReceipt {
+    x
+}
+
+fn _identity_aggregate_outcome(
+    x: ego_domain::operation::receipt::AggregateOutcome,
+) -> ego_persistence_api::operation::receipt::AggregateOutcome {
+    x
+}
+
+fn _identity_aggregate_outcome_error(
+    x: ego_domain::operation::receipt::AggregateOutcomeError,
+) -> ego_persistence_api::operation::receipt::AggregateOutcomeError {
+    x
+}
+
+/// `OperationReservationStore` is object-safe (no generic methods, thanks to
+/// `#[async_trait]`'s desugaring) — same coercion shape as `OffsetStore`.
+fn _identity_operation_reservation_store(
+    x: Box<dyn ego_domain::operation::reservation::OperationReservationStore>,
+) -> Box<dyn ego_persistence_api::operation::reservation::OperationReservationStore> {
+    x
+}
+
+fn _identity_reservation_error(
+    x: ego_domain::operation::reservation::ReservationError,
+) -> ego_persistence_api::operation::reservation::ReservationError {
+    x
+}
+
+fn _identity_reserve_request(
+    x: ego_domain::operation::reservation::ReserveRequest,
+) -> ego_persistence_api::operation::reservation::ReserveRequest {
+    x
+}
+
+fn _identity_reservation_outcome(
+    x: ego_domain::operation::reservation::ReservationOutcome,
+) -> ego_persistence_api::operation::reservation::ReservationOutcome {
+    x
+}
+
+fn _identity_lease(
+    x: ego_domain::operation::reservation::Lease,
+) -> ego_persistence_api::operation::reservation::Lease {
+    x
+}
+
+fn _identity_owner_fence(
+    x: ego_domain::operation::reservation::OwnerFence,
+) -> ego_persistence_api::operation::reservation::OwnerFence {
+    x
+}
+
+fn _identity_fencing_token(
+    x: ego_domain::operation::reservation::FencingToken,
+) -> ego_persistence_api::operation::reservation::FencingToken {
+    x
+}
+
+fn _identity_oldest_completed(
+    x: ego_domain::operation::reservation::OldestCompleted,
+) -> ego_persistence_api::operation::reservation::OldestCompleted {
+    x
+}
+
+fn _identity_operation_id(
+    x: ego_domain::operation::reservation::OperationId,
+) -> ego_persistence_api::operation::reservation::OperationId {
+    x
+}
+
+fn _identity_owner_id(
+    x: ego_domain::operation::reservation::OwnerId,
+) -> ego_persistence_api::operation::reservation::OwnerId {
+    x
+}
+
+fn _identity_stored_service_response(
+    x: ego_domain::operation::reservation::StoredServiceResponse,
+) -> ego_persistence_api::operation::reservation::StoredServiceResponse {
+    x
+}
+
+/// `TenantId`/`TenantIdError` are macro-generated (`id_type!`, AD-3) rather
+/// than hand-declared, but the identity coercion proves the same thing: the
+/// old path resolves to the exact type the relocated macro invocation
+/// produced, not a second definition.
+fn _identity_tenant_id(
+    x: ego_domain::context::TenantId,
+) -> ego_persistence_api::context::TenantId {
+    x
+}
+
+fn _identity_tenant_id_error(
+    x: ego_domain::context::TenantIdError,
+) -> ego_persistence_api::context::TenantIdError {
+    x
+}
