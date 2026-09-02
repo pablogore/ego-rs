@@ -13,10 +13,10 @@
 -- via `ON CONFLICT (...) DO NOTHING` — storage-level convergence to one row, not
 -- execution exclusion (PROD-014B AD-6).
 --
--- `created_at` is operational only; no query reads it today. It is what a future
--- retention pass (PROD-014C's follow-up, F-2) would scan — this migration ships
--- no index for it, since indexing for a scan nobody performs designs that pass
--- in advance.
+-- `created_at` is operational only; no query reads it today. It is what a
+-- future retention follow-up (F-2) would scan — this migration ships no index
+-- for it, since indexing for a scan nobody performs designs that pass in
+-- advance.
 
 CREATE TABLE IF NOT EXISTS projection_dedup (
     projection_id VARCHAR(255) NOT NULL,
