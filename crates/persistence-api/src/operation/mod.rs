@@ -9,3 +9,11 @@
 pub mod key;
 pub mod receipt;
 pub mod reservation;
+
+// S3 (`persistence/event_store.rs`, `persistence/stored_event.rs`) relocated
+// verbatim and refers to these items via the bare `crate::operation::*`
+// path, the same way it did in `ego-domain` through that crate's item-level
+// `pub use` in `operation/mod.rs`. Mirrored here so the moved files resolve
+// unchanged.
+pub use key::OperationKey;
+pub use receipt::OperationReceipt;
