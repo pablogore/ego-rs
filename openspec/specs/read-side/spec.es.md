@@ -196,38 +196,65 @@ bajo escritores concurrentes.
 - ENTONCES el handler PUEDE ejecutarse para ambos escritores; esta capability no impide ese
   resultado, y ninguna documentación puede describirlo como impedido
 
-#### Requisito: La Prevención de Ejecución Doble del Handler Descansa en una Restricción de Adopción de Escritor Único, Explícita y No Forzada
+#### Requisito: La Prevención de Ejecución Doble del Handler Es Forzada Por Claiming Atómico Entre Réplicas
 
-La prevención de ejecución doble del handler para el mismo evento DEBE enunciarse como
-dependiente de una restricción de adopción externa y no forzada —
-**escritor-único-por-`(projection_id, tag, tenant)`** — nunca como una garantía que esta
-capability misma haga cumplir. No existe elección de líder, lock, lease ni mecanismo de
-fencing en esta capability que haga cumplir esa restricción entre múltiples réplicas de la
-misma proyección. Esta es la restricción de adopción vinculante del cambio: adoptar este par
-durable en producción está condicionado a que se cumpla.
+La prevención de la ejecución doble del handler para el mismo evento, entre
+réplicas concurrentes de la misma proyección, DEBE ser forzada por el
+mecanismo de claim atómico de la capacidad `read-side-event-claiming` —
+nunca dejada como una restricción de adopción externa y no forzada. Como
+máximo un worker DEBE sostener un claim de procesamiento válido para un
+`(projection_id, tag, tenant)` dado a la vez; un worker sin un claim válido
+NO DEBE invocar el handler para ese stream. Esta forzada limita solo el
+conteo de ejecuciones del handler — no limita lo que hace el propio efecto
+externo del handler (ver "Durable Dedup Bookkeeping Does Not Imply
+Exactly-Once Handler Execution", sin cambios, y los No-Objetivos de
+`read-side-event-claiming`).
+(Previamente: afirmaba que esto dependía de una restricción de adopción de
+escritor único externa y no forzada por `(projection_id, tag, tenant)`, sin
+ningún mecanismo de elección de líder, lock, lease o fencing que la
+aplicara.)
 
-##### Escenario: Un despliegue de dos réplicas queda fuera de la garantía, y sin detectar
+##### Escenario: Un despliegue de dos réplicas está dentro de la garantía, y forzado
 
-- DADAS dos réplicas del mismo proceso de proyección corriendo concurrentemente contra el mismo
-  `(projection_id, tag, tenant)`
-- CUANDO esta configuración se evalúa contra las garantías de esta capability
-- ENTONCES queda fuera de la garantía que ofrece esta capability, y nada en esta capability
-  detecta ni rechaza esa configuración
+- DADAS dos réplicas del mismo proceso de proyección corriendo
+  concurrentemente contra el mismo `(projection_id, tag, tenant)`
+- CUANDO ambas intentan procesar al mismo tiempo
+- ENTONCES como máximo una sostiene un claim válido e invoca el handler; la
+  otra es rechazada y nunca invoca el handler en ese ciclo — esta
+  configuración está dentro de la garantía de esta capability, no fuera de
+  ella
 
-#### Requisito: La Brecha de Concurrencia Tiene un Seguimiento Nombrado y Distinto
+##### Escenario: La forzada nunca afirma manejo exactamente-una-vez
 
-La brecha entre la contabilidad durable de dedup y la prevención de la ejecución doble del
-handler DEBE registrarse como un seguimiento distinto y nombrado — **PROD-014C — Reclamación
-Atómica de Eventos del Read-Side** — en lugar de plegarse dentro del alcance de esta
-capability o dejarse en silencio sin dueño.
+- DADO un worker que sostiene un claim válido para un batch completo
+- CUANDO crashea después de que el handler tuvo éxito pero antes de que el
+  batch quede completamente registrado, y luego se reanuda
+- ENTONCES el handler PUEDE ejecutarse de nuevo para esos eventos; la
+  forzada de exclusión entre réplicas no convierte la ejecución
+  al-menos-una-vez del handler en exactamente-una-vez, y ninguna
+  documentación puede describirlo así
 
-##### Escenario: El seguimiento está nombrado, no implícito
+#### Requisito: La Brecha de Concurrencia Nombrada En PROD-014B Es Saldada Por Claiming Atómico
 
-- DADO un lector de la documentación de esta capability buscando cómo se prevendrá
-  eventualmente la ejecución doble del handler
-- CUANDO busca el seguimiento que lo posee
-- ENTONCES lo encuentra nombrado como PROD-014C — Reclamación Atómica de Eventos del
-  Read-Side, distinto de esta capability y no parte de ella
+La brecha que PROD-014B nombró entre la contabilidad durable de dedup y la
+prevención de la ejecución doble del handler entre réplicas DEBE tratarse
+como saldada: `read-side-event-claiming` aplica la exclusión antes de que
+el handler se ejecute. La documentación que describa esta brecha como
+abierta, sin dueño, o pendiente de un seguimiento DEBE tratarse como
+obsoleta y corregirse.
+(Previamente: afirmaba que la brecha DEBÍA registrarse como un seguimiento
+distinto y nombrado — PROD-014C — Reclamación Atómica de Eventos del
+Read-Side — en lugar de plegarse dentro del alcance de esta capability o
+dejarse sin dueño en silencio.)
+
+##### Escenario: Un lector encuentra el mecanismo saldado, no un seguimiento pendiente
+
+- DADO un lector de la documentación de esta capability buscando cómo se
+  previene la ejecución doble del handler entre réplicas
+- CUANDO busca el mecanismo responsable
+- ENTONCES encuentra el claiming atómico, forzado por
+  `read-side-event-claiming` — no un seguimiento nombrado pero no
+  entregado
 
 ### No-Objetivos
 

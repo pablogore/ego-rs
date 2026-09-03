@@ -203,36 +203,58 @@ running more than once for the same event under concurrent writers.
 - THEN the handler MAY run for both writers; this capability does not prevent that outcome,
   and no documentation may describe it as prevented
 
-#### Requirement: Prevention of Double Handler Execution Rests on an Explicit, Unenforced Single-Writer Adoption Constraint
+#### Requirement: Prevention of Double Handler Execution Is Enforced By Atomic Claiming Across Replicas
 
-Prevention of double handler execution for the same event MUST be stated as depending on an
-external, unenforced adoption constraint — **single-writer-per-`(projection_id, tag,
-tenant)`** — never as a guarantee this capability itself enforces. No leader election, lock,
-lease, or fencing mechanism exists in this capability to enforce that constraint across
-multiple replicas of the same projection. This is the change's binding adoption constraint:
-adopting this durable pair in production is conditioned on it holding.
+Prevention of double handler execution for the same event, across concurrent
+replicas of the same projection, MUST be enforced by the
+`read-side-event-claiming` capability's atomic claim mechanism — never left
+as an external, unenforced adoption constraint. At most one worker MUST hold
+a valid processing claim for a given `(projection_id, tag, tenant)` at a
+time; a worker without a valid claim MUST NOT invoke the handler for that
+stream. This enforcement bounds handler-execution count only — it does not
+bound what a handler's own external effect does (see "Durable Dedup
+Bookkeeping Does Not Imply Exactly-Once Handler Execution," unchanged, and
+`read-side-event-claiming`'s Non-Goals).
+(Previously: stated this depended on an external, unenforced
+single-writer-per-`(projection_id, tag, tenant)` adoption constraint, with no
+leader election, lock, lease, or fencing mechanism enforcing it.)
 
-##### Scenario: A two-replica deployment is outside the guarantee, and undetected
+##### Scenario: A two-replica deployment is inside the guarantee, and enforced
 
-- GIVEN two replicas of the same projection process running concurrently against the same
-  `(projection_id, tag, tenant)`
-- WHEN this configuration is evaluated against this capability's guarantees
-- THEN it is outside the guarantee this capability provides, and nothing in this capability
-  detects or refuses that configuration
+- GIVEN two replicas of the same projection process running concurrently
+  against the same `(projection_id, tag, tenant)`
+- WHEN both attempt to process at the same time
+- THEN at most one holds a valid claim and invokes the handler; the other is
+  refused and never invokes the handler for that tick — this configuration
+  is inside this capability's guarantee, not outside it
 
-#### Requirement: The Concurrency Gap Has a Named, Distinct Follow-Up
+##### Scenario: Enforcement never claims exactly-once handling
 
-The gap between durable dedup bookkeeping and prevention of double handler execution MUST be
-recorded as a distinct, named follow-up — **PROD-014C — Atomic Read-Side Event Claiming** —
-rather than folded into this capability's scope or silently left unowned.
+- GIVEN a worker holding a valid claim for a whole batch
+- WHEN it crashes after the handler succeeds but before the batch is fully
+  recorded, then resumes
+- THEN the handler MAY run again for those events; enforcement of exclusion
+  across replicas does not turn at-least-once handler execution into
+  exactly-once, and no documentation may describe it as such
 
-##### Scenario: The follow-up is named, not implied
+#### Requirement: The Concurrency Gap Named In PROD-014B Is Discharged By Atomic Claiming
 
-- GIVEN a reader of this capability's documentation looking for how double handler execution
-  will eventually be prevented
-- WHEN they look for the owning follow-up
-- THEN they find it named as PROD-014C — Atomic Read-Side Event Claiming, distinct from and
-  not part of this capability
+The gap PROD-014B named between durable dedup bookkeeping and prevention of
+double handler execution across replicas MUST be treated as discharged:
+`read-side-event-claiming` enforces exclusion before the handler runs.
+Documentation describing this gap as open, unowned, or still pending a
+follow-up MUST be treated as stale and corrected.
+(Previously: stated the gap MUST be recorded as a distinct, named follow-up
+— PROD-014C — Atomic Read-Side Event Claiming — rather than folded into
+this capability's scope or silently left unowned.)
+
+##### Scenario: A reader finds the mechanism discharged, not a pending follow-up
+
+- GIVEN a reader of this capability's documentation looking for how double
+  handler execution across replicas is prevented
+- WHEN they look for the owning mechanism
+- THEN they find atomic claiming, enforced by `read-side-event-claiming` —
+  not a named-but-undelivered follow-up
 
 ### Non-Goals
 
