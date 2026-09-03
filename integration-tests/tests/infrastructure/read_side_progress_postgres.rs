@@ -321,11 +321,11 @@ async fn dedup_identity_is_tenant_independent() {
 /// Both stores report `is_durable() == true`.
 ///
 /// This is the offset/dedup half of spec.md's "Both Progress Stores Report
-/// Themselves As Durable" (PROD-014B tasks.md 3.7). The other half — a
-/// `Profile::Production` composition building successfully through
-/// `ReadSideProgressStores::postgres(pool)` — is proved below, in
-/// [`production_profile_composition_registers_the_durable_pair`]
-/// (PR3, tasks.md 8.2).
+/// Themselves As Durable" (PROD-014B tasks.md 3.7). What a
+/// `Profile::Production` composition through `ReadSideProgressStores::
+/// postgres(pool)` now requires beyond this pair — a durable
+/// `ReadSideClaimStore` alongside it (PROD-014C AD-9) — is proved below, in
+/// [`production_profile_composition_without_a_claim_store_is_refused`].
 #[tokio::test]
 async fn both_progress_stores_report_themselves_as_durable() {
     let db = isolated_database().await;
@@ -344,15 +344,39 @@ async fn both_progress_stores_report_themselves_as_durable() {
 // ---------------------------------------------------------------------------
 
 /// A `Profile::Production` composition that registers the durable read-side
-/// pair through the existing registration point (`build_runtime_with`)
-/// builds successfully — because both stores report themselves durable, not
-/// because of a test-only substitute.
+/// pair through the existing registration point (`build_runtime_with`) but
+/// leaves `read_side_claims` unset — which `reference_app::read_side::
+/// ReadSideProgressStores::postgres`'s own rustdoc names as this reference
+/// app's deliberate choice (PROD-014C tasks.md 8.1) — is now refused, not
+/// accepted.
 ///
-/// Traces: spec.md "Both Progress Stores Report Themselves As Durable", "The
-/// Reference Application's Production Path Uses the Durable Pair"; tasks.md
-/// 3.7 (final GREEN) and 8.2.
+/// Before PROD-014C this build succeeded: registering the durable pair was
+/// the entire single-writer guarantee, unenforced across replicas (PROD-014B
+/// AD-6/L-3). `AppBuilder`/`RuntimeBuilder`'s shared
+/// `validate_read_side_claim_profile` (AD-9) now refuses any
+/// `Profile::Production` composition that registers read-side progress
+/// without a durable `ReadSideClaimStore` alongside it — this reference
+/// app's own composition included, exactly as ARCHITECTURE.md's read-side
+/// event claiming section states. Proving the refusal here, against a real
+/// migrated database, is what keeps this suite honest about what the
+/// reference app's Production path does and does not enforce.
+///
+/// Refusal surfaces as a panic, not a returned `Err`: `build_runtime_with`
+/// registers `.entity::<UserEntity>(..)` (a `service_registrars` entry), so
+/// `AppBuilder::build()` runs its AD-3 scratch-runtime pass first
+/// (`crates/service-sdk/src/app/mod.rs`, `builder.clone().build()`) — the
+/// panicking `RuntimeBuilder::build()`, not `try_build()` — to resolve
+/// `Injectable` adapters before the real, `Result`-returning
+/// `builder.try_build()` further down ever runs. That scratch-pass shape
+/// predates PROD-014C and is unrelated to it: any `Profile::Production`
+/// validation failure reachable through this composition panics here, not
+/// only the new claim gate.
+///
+/// Traces: spec.md "Both Progress Stores Report Themselves As Durable";
+/// PROD-014C tasks.md 8.1/9.1 (this suite's own regression check).
 #[tokio::test]
-async fn production_profile_composition_registers_the_durable_pair() {
+#[should_panic(expected = "durable read-side claim store")]
+async fn production_profile_composition_without_a_claim_store_is_refused() {
     let db = isolated_database().await;
     let pool = connect(db.url()).await;
 
@@ -364,7 +388,7 @@ async fn production_profile_composition_registers_the_durable_pair() {
         .expect("the stores open against a migrated database");
     assert_eq!(stores.profile(), Profile::Production);
 
-    let built = reference_app::build_runtime_with(
+    let _ = reference_app::build_runtime_with(
         &AppConfig::default(),
         stores,
         IdempotencyWiring::Compatibility,
@@ -372,16 +396,6 @@ async fn production_profile_composition_registers_the_durable_pair() {
         ExternalEffectsWiring::None,
         Some(read_side_progress),
     );
-
-    assert!(
-        built.is_ok(),
-        "a Profile::Production composition registering the durable read-side \
-         pair must build successfully, with no change to the gate's own \
-         validation logic: {:?}",
-        built.err()
-    );
-
-    db.close().await;
 }
 
 // ---------------------------------------------------------------------------

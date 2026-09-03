@@ -112,16 +112,16 @@ estado final leído con `sqlx::query_as` crudo, nunca a través del puerto bajo 
 
 ## Fase 8: Reference-App y Documentación — PR 4
 
-- [ ] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retirar el comentario "PROD-014C es la brecha no aplicada"; conectar (o documentar explícitamente la ausencia de) un registro de claim store, reflejando el mecanismo ahora aplicado.
-- [ ] 8.2 `ARCHITECTURE.md:211-219`: reemplazar el lenguaje de escritor único no aplicado con la descripción de reclamo aplicado, nombrando `read-side-event-claiming`.
-- [ ] 8.3 Confirmar que `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (ya redactados) son los deltas exactos que `sdd-archive` fusiona — sin edición adicional en esta tarea.
-- [ ] 8.4 Gate de grep (SC-6, R-1): confirmar que ningún archivo tocado por este cambio afirma la garantía propia de esta capacidad como "exactamente una vez" — una coincidencia dentro de la redacción de no-objetivo de OOS-2/D-8 es esperada; una coincidencia que afirme un logro de exactamente-una-vez no lo es y debe corregirse antes de fusionar.
+- [x] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retirar el comentario "PROD-014C es la brecha no aplicada"; conectar (o documentar explícitamente la ausencia de) un registro de claim store, reflejando el mecanismo ahora aplicado.
+- [x] 8.2 `ARCHITECTURE.md:211-219`: reemplazar el lenguaje de escritor único no aplicado con la descripción de reclamo aplicado, nombrando `read-side-event-claiming`.
+- [x] 8.3 Confirmar que `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (ya redactados) son los deltas exactos que `sdd-archive` fusiona — sin edición adicional en esta tarea.
+- [x] 8.4 Gate de grep (SC-6, R-1): confirmar que ningún archivo tocado por este cambio afirma la garantía propia de esta capacidad como "exactamente una vez" — una coincidencia dentro de la redacción de no-objetivo de OOS-2/D-8 es esperada; una coincidencia que afirme un logro de exactamente-una-vez no lo es y debe corregirse antes de fusionar.
 
 ## Fase 9: Verificación Final — PR 4
 
-- [ ] 9.1 `cargo test --workspace` cero fallos nuevos (SC-5); `cargo clippy --workspace -- -D warnings` limpio; confirmar que ninguna función tocada excede complejidad cognitiva 10.
-- [ ] 9.2 Re-ejecutar `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirmar que 4.1–4.6 están todas en VERDE, y que las verificaciones de mutación de 4.7 están documentadas pero nunca se dejan rotas en el diff entregado.
-- [ ] 9.3 Confirmación por lectura de diff (sin cambio de código): cada sentencia SQL en `read_side_claim.rs` y `016_create_projection_claims.sql` se vincula vía `$N`, cero interpolación de cadenas (Matriz de Amenazas — Reglas 1/2 cerradas por construcción).
+- [x] 9.1 `cargo test --workspace` cero fallos nuevos (SC-5); `cargo clippy --workspace -- -D warnings` limpio; confirmar que ninguna función tocada excede complejidad cognitiva 10.
+- [x] 9.2 Re-ejecutar `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirmar que 4.1–4.6 están todas en VERDE, y que las verificaciones de mutación de 4.7 están documentadas pero nunca se dejan rotas en el diff entregado.
+- [x] 9.3 Confirmación por lectura de diff (sin cambio de código): cada sentencia SQL en `read_side_claim.rs` y `016_create_projection_claims.sql` se vincula vía `$N`, cero interpolación de cadenas (Matriz de Amenazas — Reglas 1/2 cerradas por construcción).
 
 ## Auditoría de Trazabilidad
 

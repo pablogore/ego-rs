@@ -3997,21 +3997,24 @@ mod tests {
     #[test]
     fn validate_read_side_progress_profile_ok_when_none_registered() {
         let rt = compat().profile(Profile::Production).build();
-        assert_eq!(rt.effect_acceptor().is_none(), true);
+        assert!(rt.effect_acceptor().is_none());
     }
 
     /// SC-2: `Profile::Production` with a registered pair whose `OffsetStore`
-    /// and `DedupStore` are both durable builds successfully.
+    /// and `DedupStore` are both durable, AND a durable `ReadSideClaimStore`
+    /// registered alongside it (PROD-014C AD-9 — progress alone is no longer
+    /// sufficient once a claim store is required), builds successfully.
     #[test]
     fn validate_read_side_progress_profile_ok_when_pair_durable() {
         let (offset, dedup) = durable_pair();
         let result = compat()
             .profile(Profile::Production)
             .with_read_side_progress("users-by-tenant", offset, dedup)
+            .with_read_side_claim_store(Arc::new(StubClaimStore(true)))
             .try_build();
         assert!(
             result.is_ok(),
-            "a fully durable registered pair must not be refused"
+            "a fully durable registered pair plus a durable claim store must not be refused"
         );
     }
 

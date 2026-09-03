@@ -2873,6 +2873,7 @@ dependencies = [
  "ego-effect-store",
  "ego-infrastructure",
  "ego-persistence",
+ "ego-persistence-api",
  "ego-persistence-memory",
  "ego-runtime",
  "ego-scheduler",

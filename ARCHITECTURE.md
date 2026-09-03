@@ -211,12 +211,20 @@ none of the 67 pre-existing `EntityRuntimeBuilder::new()` call sites are affecte
 **Read-side progress (PROD-014B)**: the reference application's `Profile::Production` path
 registers `ReadSideProgressStores::postgres(pool)` — the durable `PostgreSQLOffsetStore`/
 `PostgreSQLDedupStore` pair (`crates/persistence/README.md`) — rather than an absent value or a
-non-durable placeholder. Safe operation of that pair depends on an external, unenforced adoption
-constraint: exactly one writer per `(projection_id, tag, tenant)`. No leader election, lock,
-lease, or fencing token exists anywhere in this workspace to enforce that across replicas, and
-two replicas of the same projection are outside the guarantee this pair provides. Closing that
-gap is **PROD-014C — Atomic Read-Side Event Claiming**, a named, distinct follow-up, not
-implemented by this rule or by PROD-014B.
+non-durable placeholder.
+
+**Read-side event claiming (PROD-014C)**: exactly one writer per `(projection_id, tag, tenant)`
+is no longer an external, unenforced adoption constraint — it is enforced by
+`ReadSideClaimStore` (`crates/persistence-api/src/read_side/claim.rs`), a fencing-token-based
+claim/renew/release port with a real `PostgreSQLReadSideClaimStore` adapter
+(`crates/persistence/src/postgres/read_side_claim.rs`). `ReadSideSession` claims its stream
+before `fetch`, re-checks the claim between the handler and the offset/dedup commit, and releases
+unconditionally on every exit path; a stale, replaced owner is fenced out before it can write. A
+composition that registers durable read-side progress states whether this mechanism backs it:
+`AppBuilder::read_side_claims(store)` registers the durable claim store, and
+`Profile::Production` refuses to start a composition with durable progress but no durable claim
+store behind it (`crates/service-sdk/src/runtime/builder.rs`). This closes the concurrency gap
+PROD-014B named as outside its own guarantee — see `openspec/specs/read-side-event-claiming/`.
 
 ---
 

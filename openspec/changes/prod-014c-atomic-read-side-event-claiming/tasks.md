@@ -110,16 +110,16 @@ through the port under test.
 
 ## Phase 8: Reference-App & Docs — PR 4
 
-- [ ] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retire the "PROD-014C is the unenforced gap" comment; wire (or explicitly document the absence of) a claim store registration, reflecting the now-enforced mechanism.
-- [ ] 8.2 `ARCHITECTURE.md:211-219`: replace the single-writer-unenforced language with the enforced-claiming description, naming `read-side-event-claiming`.
-- [ ] 8.3 Confirm `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (already drafted) are the exact deltas `sdd-archive` merges — no further edit needed at this task.
-- [ ] 8.4 Grep-gate (SC-6, R-1): confirm no file touched by this change asserts this capability's own guarantee as "exactly-once" — a hit inside OOS-2/D-8's own non-goal wording is expected; a hit claiming achieved exactly-once is not and must be fixed before merge.
+- [x] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retire the "PROD-014C is the unenforced gap" comment; wire (or explicitly document the absence of) a claim store registration, reflecting the now-enforced mechanism.
+- [x] 8.2 `ARCHITECTURE.md:211-219`: replace the single-writer-unenforced language with the enforced-claiming description, naming `read-side-event-claiming`.
+- [x] 8.3 Confirm `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (already drafted) are the exact deltas `sdd-archive` merges — no further edit needed at this task.
+- [x] 8.4 Grep-gate (SC-6, R-1): confirm no file touched by this change asserts this capability's own guarantee as "exactly-once" — a hit inside OOS-2/D-8's own non-goal wording is expected; a hit claiming achieved exactly-once is not and must be fixed before merge.
 
 ## Phase 9: Final Verification — PR 4
 
-- [ ] 9.1 `cargo test --workspace` zero new failures (SC-5); `cargo clippy --workspace -- -D warnings` clean; confirm no touched function exceeds cognitive-complexity 10.
-- [ ] 9.2 Re-run `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirm 4.1–4.6 all GREEN, and 4.7's ablation checks are documented but never left broken in the delivered diff.
-- [ ] 9.3 Diff-read confirmation (no code change): every SQL statement across `read_side_claim.rs` and `016_create_projection_claims.sql` binds via `$N`, zero string interpolation (Threat Matrix — Rules 1/2 closed by construction).
+- [x] 9.1 `cargo test --workspace` zero new failures (SC-5); `cargo clippy --workspace -- -D warnings` clean; confirm no touched function exceeds cognitive-complexity 10.
+- [x] 9.2 Re-run `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirm 4.1–4.6 all GREEN, and 4.7's ablation checks are documented but never left broken in the delivered diff.
+- [x] 9.3 Diff-read confirmation (no code change): every SQL statement across `read_side_claim.rs` and `016_create_projection_claims.sql` binds via `$N`, zero string interpolation (Threat Matrix — Rules 1/2 closed by construction).
 
 ## Traceability Audit
 
