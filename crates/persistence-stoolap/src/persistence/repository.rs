@@ -269,6 +269,37 @@ mod tests {
     }
 
     #[test]
+    fn is_write_conflict_recognizes_a_unique_constraint_violation() {
+        let e = stoolap::Error::UniqueConstraint {
+            index: "idx".into(),
+            column: "aggregate_id".into(),
+            value: "agg-1".into(),
+            row_id: -1,
+        };
+        assert!(is_write_conflict(&e));
+    }
+
+    #[test]
+    fn is_write_conflict_recognizes_a_transaction_aborted_error() {
+        assert!(is_write_conflict(&stoolap::Error::TransactionAborted));
+    }
+
+    #[test]
+    fn is_write_conflict_recognizes_lock_failures() {
+        assert!(is_write_conflict(&stoolap::Error::LockAcquisitionFailed(
+            "held by another writer".into()
+        )));
+        assert!(is_write_conflict(&stoolap::Error::DatabaseLocked));
+    }
+
+    #[test]
+    fn is_write_conflict_fails_loud_for_an_unrecognized_error() {
+        assert!(!is_write_conflict(&stoolap::Error::TableNotFound(
+            "aggregates".into()
+        )));
+    }
+
+    #[test]
     fn an_opened_repository_requested_full_sync() {
         let dir = TempDir::new().unwrap();
         let repo = new_repo(dir.path());
