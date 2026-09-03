@@ -76,11 +76,12 @@ Migration transactional behaviour .... 1
 Version-floor compatibility .......... 1
 SQL-expression invariants ............ 1
 Receipt identity isolation ........... 1
+Repository tenant-null identity ...... 1
 Schema/catalog assertions ............ 1
 PROD-002 backend conformance ......... 1
 PROD-002 backend-specific invariants . 1
 PROD-002 provider composition ........ 1
-Total infrastructure tests ........... 21
+Total infrastructure tests ........... 22
 ```
 
 **This block was wrong, and the correction is the point of keeping this note.** It
@@ -356,6 +357,19 @@ the identity is refused rather than overwriting what is stored.
 | Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
 |---|---|---|---|
 | Each identity field isolates independently | Two receipts agreeing on three of the four identity fields and differing on the fourth never collide and each keeps its own outcome; within one fixed scope a genuine retry replays and a fingerprint mismatch conflicts without disturbing the stored row | `conflict_from_postgres.rs` loads only the reservation table's `(tenant_id, operation_key)` pair — the reservations table has no `aggregate_type`/`aggregate_id` column at all. Only a real insert against the real receipt indexes can show that varying `aggregate_type` or `aggregate_id` alone does not collide; the catalog shape alone cannot rule out a narrower `ON CONFLICT` target or a dropped predicate | `tests/infrastructure/receipt_identity_isolation_postgres.rs` |
+
+## Repository tenant-null identity
+
+KD-2: `PostgreSQLRepository` (`crates/persistence/src/postgres/repository.rs`)
+had no coverage anywhere in this suite before this row, so the systemwide
+(`tenant_id IS NULL`) scope's round trip through `save`/`load`/`delete` was
+never exercised against real SQL. `event_store.rs` and `snapshot.rs` already
+carry this exact guarantee for their own tables (migrations 008/012); this
+row is `aggregates` catching up, not a new pattern.
+
+| Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
+|---|---|---|---|
+| Systemwide-scope save/load/delete round trip, plus tenant isolation both ways | A systemwide-scoped aggregate saves, loads, re-saves (proving the lock-select finds the existing row rather than treating every save as new) and deletes correctly; a concrete tenant and the systemwide scope never collide on a shared `aggregate_id`, in either direction | `NULL = NULL` is never `TRUE` in real SQL — no in-memory double keyed on `Option<TenantId>` can misrepresent this, since `Option::eq` treats `None == None` as `true` by construction. Whether `INSERT ... ON CONFLICT` actually names a matching unique index is likewise only observable against a real catalog | `tests/infrastructure/repository_tenant_scoping_postgres.rs` |
 
 ## Schema and catalog assertions
 

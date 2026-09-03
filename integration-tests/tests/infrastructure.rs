@@ -106,6 +106,10 @@ mod infrastructure {
     mod read_side_progress_postgres;
     mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;
+    /// KD-2: `PostgreSQLRepository`'s tenant-scoped predicates against the
+    /// `aggregates` table, including the systemwide (`tenant_id IS NULL`)
+    /// scope no prior test here exercised.
+    mod repository_tenant_scoping_postgres;
     /// Not named `*_postgres` like its neighbours, because it is not a scenario
     /// traversing the framework at all: it reads PostgreSQL's own catalog and
     /// asserts the shape of the indexes the other modules depend on.

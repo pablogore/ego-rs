@@ -45,6 +45,11 @@ const MIGRATION_013_CREATE_PROJECTION_OFFSETS: &str =
 const MIGRATION_014_CREATE_PROJECTION_DEDUP: &str =
     include_str!("migrations/014_create_projection_dedup.sql");
 
+/// Migration SQL for the pair of partial unique indexes that fix the
+/// aggregates table's tenant-null uniqueness (KD-2).
+const MIGRATION_015_FIX_AGGREGATES_TENANT_NULL_UNIQUENESS: &str =
+    include_str!("migrations/015_fix_aggregates_tenant_null_uniqueness.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -101,6 +106,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "014_create_projection_dedup",
             MIGRATION_014_CREATE_PROJECTION_DEDUP,
+        ),
+        (
+            "015_fix_aggregates_tenant_null_uniqueness",
+            MIGRATION_015_FIX_AGGREGATES_TENANT_NULL_UNIQUENESS,
         ),
     ]
 }
