@@ -61,6 +61,18 @@ pub enum CompositionError {
         /// The `projection_id` whose second registration was rejected.
         projection_id: String,
     },
+    /// A second durable claim store was registered through
+    /// `AppBuilder::read_side_claims(...)` (PROD-014C). One global slot —
+    /// unlike `DuplicateReadSideProgress`, there is no `projection_id` to
+    /// key by: `projection_id` is already part of the claim identity
+    /// itself, so one store serves every projection (AD-9 criteria c).
+    /// Deliberately has no replace escape hatch — the message must not
+    /// invent one.
+    #[error(
+        "read-side claim store already registered via `AppBuilder::read_side_claims(...)`; \
+         second registration rejected — register exactly one claim store"
+    )]
+    DuplicateReadSideClaimStore,
     /// A service registration was rejected by the underlying registry
     /// (e.g. a duplicate `(Tag, version)` pair).
     #[error("service registration failed: {0}")]
@@ -285,6 +297,25 @@ mod tests {
             text,
             "read-side progress stores already registered for projection `users-by-tenant`; \
              second registration rejected — register exactly one progress pair per projection"
+        );
+        assert!(
+            !text.contains("replace"),
+            "must not suggest a non-existent replace API: {text:?}"
+        );
+    }
+
+    // PROD-014C task 7.3 (RED): `CompositionError::DuplicateReadSideClaimStore`
+    // names the offending call and suggests no replace API, mirroring
+    // `DuplicateReadSideProgress` (PROD-014A 3.1) — but fieldless: one global
+    // slot, not a per-projection map (AD-9 criteria c), so there is no
+    // `projection_id` to distinguish registrations by.
+    #[test]
+    fn duplicate_read_side_claim_store_message_names_call_without_a_replace_api() {
+        let err = CompositionError::DuplicateReadSideClaimStore;
+        let text = err.to_string();
+        assert!(
+            text.contains("read_side_claims"),
+            "the message must name the offending call: {text:?}"
         );
         assert!(
             !text.contains("replace"),

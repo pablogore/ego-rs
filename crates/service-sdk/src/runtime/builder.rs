@@ -37,6 +37,7 @@ use crate::runtime::runtime_builder::{
     DependencyTable, RegisteredDependencies, RuntimeError, RuntimeInner,
 };
 use ego_domain::operation::OperationReservationStore;
+use ego_persistence_api::read_side::claim::ReadSideClaimStore;
 
 use crate::runtime::idempotency::IdempotencyEnforcementMode;
 use crate::runtime::tenant::{TenantEnforcementMode, TenantResolver};
@@ -249,6 +250,11 @@ pub struct RuntimeBuilder {
     /// the refusal must be the same one on every run, and `HashMap`
     /// iteration order is not stable across runs.
     read_side_progress: BTreeMap<String, ReadSideProgressPair>,
+    /// The single registered durable claim store, if any (PROD-014C AD-9).
+    /// One global slot, not a per-projection map: `projection_id` is part of
+    /// the claim identity itself, so one store serves every projection —
+    /// unlike `read_side_progress`, which is inherently per-projection.
+    read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>,
 }
 
 impl RuntimeBuilder {
@@ -290,6 +296,7 @@ impl RuntimeBuilder {
             lifecycle_components: Vec::new(),
             profile: persistent_entity::profile::Profile::default(),
             read_side_progress: BTreeMap::new(),
+            read_side_claims: None,
         }
     }
 
@@ -588,6 +595,24 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers the single durable claim store read-side claiming uses
+    /// (PROD-014C AD-9). One global slot: `projection_id` is already part of
+    /// the claim identity, so one store serves every projection.
+    ///
+    /// Last-write-wins at this layer, deliberately: [`Self::with_effect_store`]
+    /// and [`Self::with_read_side_progress`] behave identically when called
+    /// twice directly on `RuntimeBuilder`. The fail-closed duplicate guard
+    /// lives at `AppBuilder` (`AppBuilder::read_side_claims`) — restating it
+    /// here would create the second, parallel check PROD-014A exists to
+    /// avoid.
+    pub fn with_read_side_claim_store(
+        mut self,
+        store: Arc<dyn ReadSideClaimStore + Send + Sync>,
+    ) -> Self {
+        self.read_side_claims = Some(store);
+        self
+    }
+
     /// Enables retention of settled external effects (PROD-002 G12).
     ///
     /// Optional and absent by default, for the identical reason
@@ -842,6 +867,7 @@ impl RuntimeBuilder {
     fn validate_persistence_profile(&self) -> Result<(), RuntimeError> {
         self.validate_effect_store_profile()?;
         self.validate_read_side_progress_profile()?;
+        self.validate_read_side_claim_profile()?;
         Ok(())
     }
 
@@ -887,6 +913,34 @@ impl RuntimeBuilder {
                  is_durable() returns true",
             )?;
         }
+        Ok(())
+    }
+
+    /// Under `Profile::Production`, a composition that registers read-side
+    /// progress must also register a durable claim store (PROD-014C IS-6,
+    /// AD-9).
+    ///
+    /// The early return is INSIDE this function, never before the call: an
+    /// early return placed in [`Self::validate_persistence_profile`] would
+    /// skip this check for every composition that registers no read-side
+    /// progress AND every one that does — PROD-014A EC-1's exact defect.
+    fn validate_read_side_claim_profile(&self) -> Result<(), RuntimeError> {
+        // Registration of a progress pair is the composition-visible signal
+        // that this application processes a read side at all. A command-only
+        // service is never forced to register a claim store it would never
+        // use (PROD-014A IS-5, and `validate_effect_store_profile`'s own
+        // shape).
+        if self.read_side_progress.is_empty() {
+            return Ok(());
+        }
+        persistent_entity::profile::require_durably_configured(
+            self.profile,
+            self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()),
+            "durable read-side claim store (ReadSideClaimStore)",
+            "AppBuilder::read_side_claims(store) (or \
+             RuntimeBuilder::with_read_side_claim_store(..)), passing a store whose \
+             is_durable() returns true",
+        )?;
         Ok(())
     }
 
@@ -3943,21 +3997,24 @@ mod tests {
     #[test]
     fn validate_read_side_progress_profile_ok_when_none_registered() {
         let rt = compat().profile(Profile::Production).build();
-        assert_eq!(rt.effect_acceptor().is_none(), true);
+        assert!(rt.effect_acceptor().is_none());
     }
 
     /// SC-2: `Profile::Production` with a registered pair whose `OffsetStore`
-    /// and `DedupStore` are both durable builds successfully.
+    /// and `DedupStore` are both durable, AND a durable `ReadSideClaimStore`
+    /// registered alongside it (PROD-014C AD-9 — progress alone is no longer
+    /// sufficient once a claim store is required), builds successfully.
     #[test]
     fn validate_read_side_progress_profile_ok_when_pair_durable() {
         let (offset, dedup) = durable_pair();
         let result = compat()
             .profile(Profile::Production)
             .with_read_side_progress("users-by-tenant", offset, dedup)
+            .with_read_side_claim_store(Arc::new(StubClaimStore(true)))
             .try_build();
         assert!(
             result.is_ok(),
-            "a fully durable registered pair must not be refused"
+            "a fully durable registered pair plus a durable claim store must not be refused"
         );
     }
 
@@ -4059,6 +4116,131 @@ mod tests {
     #[should_panic(expected = "read-side progress")]
     fn build_and_try_build_agree_on_read_side_progress_validation() {
         let (offset, dedup) = volatile_pair();
+        let builder = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup);
+
+        let err = builder
+            .clone()
+            .try_build()
+            .err()
+            .expect("try_build must report the same refusal build() panics on");
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+
+        let _ = builder.build();
+    }
+
+    // -- PROD-014C: the read-side durable claim gate on `RuntimeBuilder` ----
+
+    /// Minimal `ReadSideClaimStore` stub for the claim production gate
+    /// matrix (PROD-014C design.md AD-9), mirroring `StubOffsetStore`/
+    /// `StubDedupStore` above: the gate reads only `is_durable()`, so
+    /// `try_claim`/`renew`/`release` are `unreachable!()`.
+    struct StubClaimStore(bool);
+
+    #[async_trait::async_trait]
+    impl ego_persistence_api::read_side::claim::ReadSideClaimStore for StubClaimStore {
+        fn is_durable(&self) -> bool {
+            self.0
+        }
+
+        async fn try_claim(
+            &self,
+            _claim_id: &ego_persistence_api::read_side::claim::ClaimId,
+            _owner_id: &ego_domain::operation::OwnerId,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<
+            Option<ego_persistence_api::read_side::claim::ClaimFence>,
+            ego_persistence_api::read_side::claim::ClaimError,
+        > {
+            unreachable!("PROD-014C gate reads only is_durable()")
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_persistence_api::read_side::claim::ClaimFence,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_persistence_api::read_side::claim::ClaimError> {
+            unreachable!("PROD-014C gate reads only is_durable()")
+        }
+
+        async fn release(
+            &self,
+            _fence: &ego_persistence_api::read_side::claim::ClaimFence,
+        ) -> Result<(), ego_persistence_api::read_side::claim::ClaimError> {
+            unreachable!("PROD-014C gate reads only is_durable()")
+        }
+    }
+
+    /// task 7.1 / AD-9 / SC-4: the full matrix — {Dev, Production} x {no
+    /// progress registered / no claim store, progress registered / no claim
+    /// store, progress registered / volatile claim store, progress
+    /// registered / durable claim store}. Only `Profile::Production` with a
+    /// progress pair registered and no durably-configured claim store
+    /// refuses; every other cell — including `Production` with **zero**
+    /// progress registered and no claim store, the PROD-014A EC-1-shaped
+    /// early-return case — builds successfully.
+    #[test]
+    fn validate_read_side_claim_profile_matrix() {
+        for (profile, register_progress, claim_store, should_err) in [
+            (Profile::Dev, false, None, false),
+            (Profile::Dev, true, None, false),
+            (Profile::Dev, true, Some(false), false),
+            (Profile::Dev, true, Some(true), false),
+            (Profile::Production, false, None, false),
+            (Profile::Production, true, None, true),
+            (Profile::Production, true, Some(false), true),
+            (Profile::Production, true, Some(true), false),
+        ] {
+            let mut builder = compat().profile(profile);
+            if register_progress {
+                let (offset, dedup) = durable_pair();
+                builder = builder.with_read_side_progress("users-by-tenant", offset, dedup);
+            }
+            if let Some(durable) = claim_store {
+                builder = builder.with_read_side_claim_store(Arc::new(StubClaimStore(durable)));
+            }
+            let result = builder.try_build();
+            assert_eq!(
+                result.is_err(),
+                should_err,
+                "profile={profile:?} register_progress={register_progress} \
+                 claim_store={claim_store:?} expected_err={should_err}"
+            );
+        }
+    }
+
+    /// The refusal must name both the missing capability and the exact
+    /// fixing call, mirroring `validate_read_side_progress_profile_rejects_volatile_offset`.
+    #[test]
+    fn validate_read_side_claim_profile_rejects_volatile_claim_store() {
+        let (offset, dedup) = durable_pair();
+        let err = compat()
+            .profile(Profile::Production)
+            .with_read_side_progress("users-by-tenant", offset, dedup)
+            .with_read_side_claim_store(Arc::new(StubClaimStore(false)))
+            .try_build()
+            .err()
+            .expect("a volatile claim store must refuse under Production once progress is registered");
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("durable read-side claim store"),
+            "the refusal must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("read_side_claims") || message.contains("with_read_side_claim_store"),
+            "the refusal must name the exact fixing call: {message}"
+        );
+    }
+
+    /// `build()` and `try_build()` must agree on this validation too,
+    /// mirroring `build_and_try_build_agree_on_read_side_progress_validation` (SC-4).
+    #[test]
+    #[should_panic(expected = "durable read-side claim store")]
+    fn build_and_try_build_agree_on_read_side_claim_validation() {
+        let (offset, dedup) = durable_pair();
         let builder = compat()
             .profile(Profile::Production)
             .with_read_side_progress("users-by-tenant", offset, dedup);

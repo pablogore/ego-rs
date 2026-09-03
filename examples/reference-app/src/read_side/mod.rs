@@ -120,10 +120,16 @@ impl ReadSideProgressStores {
     /// `ego_persistence::postgres::migrations::run` applied — migrations
     /// `013`/`014` create the two tables these stores write to.
     ///
-    /// Adoption constraint (PROD-014B L-3): safe only where exactly one
-    /// writer per `(projection_id, tag, tenant)` exists. Two replicas of
-    /// this projection are outside the guarantee and nothing here detects
-    /// it — see PROD-014C — Atomic Read-Side Event Claiming.
+    /// The single-writer constraint PROD-014B's L-3 named (safe only where
+    /// exactly one writer per `(projection_id, tag, tenant)` exists) is no
+    /// longer unenforced: PROD-014C shipped `ReadSideClaimStore` and its
+    /// `Profile::Production` fail-closed gate (`AppBuilder::read_side_claims`)
+    /// so a durable-progress host can refuse to start without a durable claim
+    /// store backing it. This method only constructs the durable offset/dedup
+    /// pair and does not itself register a claim store. A host using this
+    /// pair under `Profile::Production` must additionally call
+    /// `AppBuilder::read_side_claims(PostgreSQLReadSideClaimStore::new(pool, clock))`;
+    /// otherwise composition fails closed.
     pub fn postgres(pool: PgPool) -> Self {
         Self {
             offset: Arc::new(PostgreSQLOffsetStore::new(pool.clone())),

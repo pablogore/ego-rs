@@ -132,6 +132,11 @@ pub struct AppBuilder {
     /// a second projection is valid and only a second registration of the
     /// *same* `projection_id` is not.
     read_side_progress_ids: HashSet<String>,
+    /// Presence guard for `.read_side_claims()` (PROD-014C AD-9): single-slot,
+    /// a `bool` — unlike `read_side_progress_ids`, one global claim store
+    /// serves every projection, so a second registration is rejected
+    /// regardless of `projection_id`.
+    read_side_claims_registered: bool,
     service_registrars: Vec<ServiceRegistrar>,
     /// First error encountered by an infallible-signature registration call
     /// (e.g. a duplicate adapter, AD-4) — surfaced at `build()` rather than
@@ -312,6 +317,7 @@ impl AppBuilder {
             effect_store_registered: false,
             effect_retention_store_registered: false,
             read_side_progress_ids: HashSet::new(),
+            read_side_claims_registered: false,
             service_registrars: Vec::new(),
             pending_error: None,
         }
@@ -647,6 +653,29 @@ impl AppBuilder {
         self.runtime_builder =
             self.runtime_builder
                 .with_read_side_progress(projection_id, offset_store, dedup_store);
+        self
+    }
+
+    /// Registers the single durable claim store read-side claiming uses —
+    /// thin delegation to [`RuntimeBuilder::with_read_side_claim_store`]
+    /// (PROD-014C AD-9). Single-slot like [`Self::effect_store`], not
+    /// per-projection like [`Self::read_side_progress`]: `projection_id` is
+    /// already part of the claim identity itself, so one store serves every
+    /// projection. Deliberately has no replace escape hatch — a second call
+    /// is rejected outright.
+    pub fn read_side_claims(
+        mut self,
+        store: Arc<dyn ego_persistence_api::read_side::claim::ReadSideClaimStore + Send + Sync>,
+    ) -> Self {
+        if self.pending_error.is_some() {
+            return self;
+        }
+        if self.read_side_claims_registered {
+            self.pending_error = Some(CompositionError::DuplicateReadSideClaimStore);
+            return self;
+        }
+        self.read_side_claims_registered = true;
+        self.runtime_builder = self.runtime_builder.with_read_side_claim_store(store);
         self
     }
 
@@ -1843,6 +1872,41 @@ mod tests {
         (Arc::new(StubOffsetStore), Arc::new(StubDedupStore))
     }
 
+    /// Minimal `ReadSideClaimStore` stub for the `.read_side_claims()`
+    /// dup-guard tests (PROD-014C task 7.4) — never reached, mirroring
+    /// `StubOffsetStore`/`StubDedupStore` above.
+    struct StubClaimStore;
+
+    #[async_trait::async_trait]
+    impl ego_persistence_api::read_side::claim::ReadSideClaimStore for StubClaimStore {
+        async fn try_claim(
+            &self,
+            _claim_id: &ego_persistence_api::read_side::claim::ClaimId,
+            _owner_id: &ego_domain::operation::OwnerId,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<
+            Option<ego_persistence_api::read_side::claim::ClaimFence>,
+            ego_persistence_api::read_side::claim::ClaimError,
+        > {
+            unreachable!("dup-guard tests never reach the store")
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_persistence_api::read_side::claim::ClaimFence,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_persistence_api::read_side::claim::ClaimError> {
+            unreachable!("dup-guard tests never reach the store")
+        }
+
+        async fn release(
+            &self,
+            _fence: &ego_persistence_api::read_side::claim::ClaimFence,
+        ) -> Result<(), ego_persistence_api::read_side::claim::ClaimError> {
+            unreachable!("dup-guard tests never reach the store")
+        }
+    }
+
     // Task 3.3 (RED): registering the same `projection_id` twice fails
     // closed with `CompositionError::DuplicateReadSideProgress`, and the
     // rejection happens at registration time (the `pending_error` latch),
@@ -1924,6 +1988,45 @@ mod tests {
             Err(err) => panic!(
                 "sharing one store instance across two projection_ids must not conflict: {err:?}"
             ),
+        }
+    }
+
+    // PROD-014C task 7.4 (RED): registering a second claim store fails
+    // closed with `CompositionError::DuplicateReadSideClaimStore`, at
+    // registration time (the `pending_error` latch), mirroring
+    // `duplicate_effect_store_registration_is_rejected` — single global
+    // slot, not per-projection like `.read_side_progress()`.
+    #[test]
+    fn duplicate_read_side_claims_registration_is_rejected() {
+        let result = compat_app()
+            .read_side_claims(Arc::new(StubClaimStore))
+            .read_side_claims(Arc::new(StubClaimStore))
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateReadSideClaimStore) => {}
+            Err(other) => panic!("expected DuplicateReadSideClaimStore, got {other:?}"),
+            Ok(_) => panic!("expected duplicate read-side claim store registration to fail"),
+        }
+    }
+
+    // PROD-014C task 7.4 (RED): `.read_side_claims()` short-circuits on a
+    // pre-existing `pending_error`, mirroring
+    // `read_side_progress_short_circuits_on_a_pending_error`.
+    #[test]
+    fn read_side_claims_short_circuits_on_a_pending_error() {
+        let result = compat_app()
+            .adapter(Arc::new(StubAdapter(1)))
+            .adapter(Arc::new(StubAdapter(2)))
+            .read_side_claims(Arc::new(StubClaimStore))
+            .build();
+
+        match result {
+            Err(CompositionError::DuplicateAdapter { type_name }) => {
+                assert_eq!(type_name, std::any::type_name::<StubAdapter>());
+            }
+            Err(other) => panic!("expected the original DuplicateAdapter, got {other:?}"),
+            Ok(_) => panic!("expected the pre-existing pending_error to surface"),
         }
     }
 

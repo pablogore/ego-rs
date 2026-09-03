@@ -103,23 +103,23 @@ through the port under test.
 
 ## Phase 7: Production Gate — PR 4
 
-- [ ] 7.1 RED `crates/service-sdk/src/runtime/builder.rs`: matrix {Dev, Production} × {no progress / no claim store, progress registered / no claim store, progress registered / volatile claim store, progress registered / durable claim store}; Production + zero progress registered + no claim store ⇒ `Ok` (the early-return-inside-the-function shape, PROD-014A EC-1); `build()`/`try_build()` agree (SC-4).
-- [ ] 7.2 GREEN: add `read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>` field; `validate_read_side_claim_profile` returns `Ok(())` early when `self.read_side_progress.is_empty()`, else calls `require_durably_configured(self.profile, self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()), "durable read-side claim store (ReadSideClaimStore)", "AppBuilder::read_side_claims(store) (or RuntimeBuilder::with_read_side_claim_store(..))")` verbatim; called from `validate_persistence_profile` after the existing two validators (AD-9).
-- [ ] 7.3 RED `crates/service-sdk/src/app/error.rs`: `CompositionError::DuplicateReadSideClaimStore` message names the offending call, suggests no replace API (mirrors `DuplicateReadSideProgress`, PROD-014A 3.1).
-- [ ] 7.4 GREEN: add the variant; `crates/service-sdk/src/app/mod.rs` — `AppBuilder::read_side_claims(store)` with a fail-closed duplicate guard; `RuntimeBuilder` stays last-write-wins (mirrors `effect_store`'s split, AD-9 criteria d).
+- [x] 7.1 RED `crates/service-sdk/src/runtime/builder.rs`: matrix {Dev, Production} × {no progress / no claim store, progress registered / no claim store, progress registered / volatile claim store, progress registered / durable claim store}; Production + zero progress registered + no claim store ⇒ `Ok` (the early-return-inside-the-function shape, PROD-014A EC-1); `build()`/`try_build()` agree (SC-4).
+- [x] 7.2 GREEN: add `read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>` field; `validate_read_side_claim_profile` returns `Ok(())` early when `self.read_side_progress.is_empty()`, else calls `require_durably_configured(self.profile, self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()), "durable read-side claim store (ReadSideClaimStore)", "AppBuilder::read_side_claims(store) (or RuntimeBuilder::with_read_side_claim_store(..))")` verbatim; called from `validate_persistence_profile` after the existing two validators (AD-9).
+- [x] 7.3 RED `crates/service-sdk/src/app/error.rs`: `CompositionError::DuplicateReadSideClaimStore` message names the offending call, suggests no replace API (mirrors `DuplicateReadSideProgress`, PROD-014A 3.1).
+- [x] 7.4 GREEN: add the variant; `crates/service-sdk/src/app/mod.rs` — `AppBuilder::read_side_claims(store)` with a fail-closed duplicate guard; `RuntimeBuilder` stays last-write-wins (mirrors `effect_store`'s split, AD-9 criteria d).
 
 ## Phase 8: Reference-App & Docs — PR 4
 
-- [ ] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retire the "PROD-014C is the unenforced gap" comment; wire (or explicitly document the absence of) a claim store registration, reflecting the now-enforced mechanism.
-- [ ] 8.2 `ARCHITECTURE.md:211-219`: replace the single-writer-unenforced language with the enforced-claiming description, naming `read-side-event-claiming`.
-- [ ] 8.3 Confirm `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (already drafted) are the exact deltas `sdd-archive` merges — no further edit needed at this task.
-- [ ] 8.4 Grep-gate (SC-6, R-1): confirm no file touched by this change asserts this capability's own guarantee as "exactly-once" — a hit inside OOS-2/D-8's own non-goal wording is expected; a hit claiming achieved exactly-once is not and must be fixed before merge.
+- [x] 8.1 `examples/reference-app/src/read_side/mod.rs:118-126`: retire the "PROD-014C is the unenforced gap" comment; wire (or explicitly document the absence of) a claim store registration, reflecting the now-enforced mechanism.
+- [x] 8.2 `ARCHITECTURE.md:211-219`: replace the single-writer-unenforced language with the enforced-claiming description, naming `read-side-event-claiming`.
+- [x] 8.3 Confirm `openspec/changes/prod-014c-atomic-read-side-event-claiming/specs/{read-side-event-claiming,read-side}/spec.md` (already drafted) are the exact deltas `sdd-archive` merges — no further edit needed at this task.
+- [x] 8.4 Grep-gate (SC-6, R-1): confirm no file touched by this change asserts this capability's own guarantee as "exactly-once" — a hit inside OOS-2/D-8's own non-goal wording is expected; a hit claiming achieved exactly-once is not and must be fixed before merge.
 
 ## Phase 9: Final Verification — PR 4
 
-- [ ] 9.1 `cargo test --workspace` zero new failures (SC-5); `cargo clippy --workspace -- -D warnings` clean; confirm no touched function exceeds cognitive-complexity 10.
-- [ ] 9.2 Re-run `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirm 4.1–4.6 all GREEN, and 4.7's ablation checks are documented but never left broken in the delivered diff.
-- [ ] 9.3 Diff-read confirmation (no code change): every SQL statement across `read_side_claim.rs` and `016_create_projection_claims.sql` binds via `$N`, zero string interpolation (Threat Matrix — Rules 1/2 closed by construction).
+- [x] 9.1 `cargo test --workspace` zero new failures (SC-5); `cargo clippy --workspace -- -D warnings` clean; confirm no touched function exceeds cognitive-complexity 10.
+- [x] 9.2 Re-run `cargo test -p ego-integration-tests --test read_side_claiming_postgres`; confirm 4.1–4.6 all GREEN, and 4.7's ablation checks are documented but never left broken in the delivered diff.
+- [x] 9.3 Diff-read confirmation (no code change): every SQL statement across `read_side_claim.rs` and `016_create_projection_claims.sql` binds via `$N`, zero string interpolation (Threat Matrix — Rules 1/2 closed by construction).
 
 ## Traceability Audit
 
