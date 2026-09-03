@@ -974,6 +974,7 @@ dependencies = [
  "console-exporter",
  "ego-domain",
  "ego-effect-store",
+ "ego-persistence-api",
  "ego-runtime",
  "ego-security-sdk",
  "ego-service-sdk-macros",

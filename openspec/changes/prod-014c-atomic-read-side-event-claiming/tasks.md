@@ -103,10 +103,10 @@ through the port under test.
 
 ## Phase 7: Production Gate — PR 4
 
-- [ ] 7.1 RED `crates/service-sdk/src/runtime/builder.rs`: matrix {Dev, Production} × {no progress / no claim store, progress registered / no claim store, progress registered / volatile claim store, progress registered / durable claim store}; Production + zero progress registered + no claim store ⇒ `Ok` (the early-return-inside-the-function shape, PROD-014A EC-1); `build()`/`try_build()` agree (SC-4).
-- [ ] 7.2 GREEN: add `read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>` field; `validate_read_side_claim_profile` returns `Ok(())` early when `self.read_side_progress.is_empty()`, else calls `require_durably_configured(self.profile, self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()), "durable read-side claim store (ReadSideClaimStore)", "AppBuilder::read_side_claims(store) (or RuntimeBuilder::with_read_side_claim_store(..))")` verbatim; called from `validate_persistence_profile` after the existing two validators (AD-9).
-- [ ] 7.3 RED `crates/service-sdk/src/app/error.rs`: `CompositionError::DuplicateReadSideClaimStore` message names the offending call, suggests no replace API (mirrors `DuplicateReadSideProgress`, PROD-014A 3.1).
-- [ ] 7.4 GREEN: add the variant; `crates/service-sdk/src/app/mod.rs` — `AppBuilder::read_side_claims(store)` with a fail-closed duplicate guard; `RuntimeBuilder` stays last-write-wins (mirrors `effect_store`'s split, AD-9 criteria d).
+- [x] 7.1 RED `crates/service-sdk/src/runtime/builder.rs`: matrix {Dev, Production} × {no progress / no claim store, progress registered / no claim store, progress registered / volatile claim store, progress registered / durable claim store}; Production + zero progress registered + no claim store ⇒ `Ok` (the early-return-inside-the-function shape, PROD-014A EC-1); `build()`/`try_build()` agree (SC-4).
+- [x] 7.2 GREEN: add `read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>` field; `validate_read_side_claim_profile` returns `Ok(())` early when `self.read_side_progress.is_empty()`, else calls `require_durably_configured(self.profile, self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()), "durable read-side claim store (ReadSideClaimStore)", "AppBuilder::read_side_claims(store) (or RuntimeBuilder::with_read_side_claim_store(..))")` verbatim; called from `validate_persistence_profile` after the existing two validators (AD-9).
+- [x] 7.3 RED `crates/service-sdk/src/app/error.rs`: `CompositionError::DuplicateReadSideClaimStore` message names the offending call, suggests no replace API (mirrors `DuplicateReadSideProgress`, PROD-014A 3.1).
+- [x] 7.4 GREEN: add the variant; `crates/service-sdk/src/app/mod.rs` — `AppBuilder::read_side_claims(store)` with a fail-closed duplicate guard; `RuntimeBuilder` stays last-write-wins (mirrors `effect_store`'s split, AD-9 criteria d).
 
 ## Phase 8: Reference-App & Docs — PR 4
 
