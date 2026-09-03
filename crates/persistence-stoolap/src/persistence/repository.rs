@@ -321,6 +321,34 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_aggregate_with_a_nonzero_expected_version_is_a_conflict() {
+        let dir = TempDir::new().unwrap();
+        let mut repo = new_repo(dir.path());
+
+        let err = repo
+            .save(
+                "agg-never-saved",
+                TestAggregate { value: "a".into() },
+                None,
+                5,
+            )
+            .unwrap_err();
+
+        match err {
+            PersistenceError::Conflict {
+                aggregate_id,
+                expected,
+                actual,
+            } => {
+                assert_eq!(aggregate_id, "agg-never-saved");
+                assert_eq!(expected, 5);
+                assert_eq!(actual, 0);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_stale_expected_version_is_a_conflict() {
         let dir = TempDir::new().unwrap();
         let mut repo = new_repo(dir.path());
