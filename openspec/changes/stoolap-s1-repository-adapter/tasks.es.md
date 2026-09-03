@@ -74,47 +74,47 @@ improvisación.
 
 ## Fase 5: Fundación — Esqueleto del Crate y Puerta de Capas — S2 — PR 2
 
-- [ ] 5.1 Crear `crates/persistence-stoolap/Cargo.toml` (paquete `ego-persistence-stoolap`): dependencias normales `ego-persistence-api` (path), `stoolap = "0.4"`, `serde = "1"`, `serde_json = "1"` — exactamente el conjunto D-3/AD-1, sin dev-dependencies todavía (design AD-11 difiere `ego-testkit`/`tempfile` a S3).
-- [ ] 5.2 Crear `src/lib.rs`: doc de crate, `pub mod persistence;`, `pub use persistence::repository::StoolapRepository;` (AD-2). Sin `#![deny(missing_docs)]`.
-- [ ] 5.3 Crear `src/persistence/mod.rs`: `pub mod repository;`.
-- [ ] 5.4 Añadir la entrada de `layers.toml` `"ego-persistence-stoolap" = "infrastructure"`. No abrir `xtask/src/layers.rs` (D-2, AD-1).
-- [ ] 5.5 Añadir `"crates/persistence-stoolap",` a los miembros del workspace en el `Cargo.toml` raíz.
+- [x] 5.1 Crear `crates/persistence-stoolap/Cargo.toml` (paquete `ego-persistence-stoolap`): dependencias normales `ego-persistence-api` (path), `stoolap = "0.4"`, `serde = "1"`, `serde_json = "1"` — exactamente el conjunto D-3/AD-1, sin dev-dependencies todavía (design AD-11 difiere `ego-testkit`/`tempfile` a S3).
+- [x] 5.2 Crear `src/lib.rs`: doc de crate, `pub mod persistence;`, `pub use persistence::repository::StoolapRepository;` (AD-2). Sin `#![deny(missing_docs)]`.
+- [x] 5.3 Crear `src/persistence/mod.rs`: `pub mod repository;`.
+- [x] 5.4 Añadir la entrada de `layers.toml` `"ego-persistence-stoolap" = "infrastructure"`. No abrir `xtask/src/layers.rs` (D-2, AD-1).
+- [x] 5.5 Añadir `"crates/persistence-stoolap",` a los miembros del workspace en el `Cargo.toml` raíz.
 
 ## Fase 6: RED — Pruebas Unitarias de DSN y del Centinela de Tenant — S2 — PR 2
 
-- [ ] 6.1 Escribir la prueba unitaria fallida `dsn_carries_full_sync`: `dsn_for(Path::new("/tmp/x")) == "file:///tmp/x?sync=full"`. Falla — `dsn_for` aún no existe (AD-4; matriz de amenazas "Durabilidad").
-- [ ] 6.2 Escribir la prueba unitaria fallida `encode_tenant_maps_only_the_absent_scope_to_the_sentinel`: `encode_tenant(None) == ""`, `encode_tenant(Some("t")) == "t"`. Falla — `encode_tenant`/`SYSTEMWIDE_SCOPE` aún no existen (AD-3; matriz de amenazas "Aislamiento de tenant"/"Fuga del centinela").
+- [x] 6.1 Escribir la prueba unitaria fallida `dsn_carries_full_sync`: `dsn_for(Path::new("/tmp/x")) == "file:///tmp/x?sync=full"`. Falla — `dsn_for` aún no existe (AD-4; matriz de amenazas "Durabilidad").
+- [x] 6.2 Escribir la prueba unitaria fallida `encode_tenant_maps_only_the_absent_scope_to_the_sentinel`: `encode_tenant(None) == ""`, `encode_tenant(Some("t")) == "t"`. Falla — `encode_tenant`/`SYSTEMWIDE_SCOPE` aún no existen (AD-3; matriz de amenazas "Aislamiento de tenant"/"Fuga del centinela").
 
 ## Fase 7: GREEN — Esquema, DSN, Centinela de Tenant — S2 — PR 2
 
-- [ ] 7.1 Añadir la constante DDL `CREATE_AGGREGATES_TABLE` (sección Schema): `tenant_id`, `aggregate_id`, `version`, `payload`, `UNIQUE (tenant_id, aggregate_id)`, sin `PRIMARY KEY` en ningún lugar (EC-3).
-- [ ] 7.2 Implementar `SYSTEMWIDE_SCOPE` y `encode_tenant()` — pone en verde 6.2 (AD-3).
-- [ ] 7.3 Implementar `dsn_for()` — pone en verde 6.1 (AD-4).
-- [ ] 7.4 Implementar `struct StoolapRepository<A, F>`, su impl de `Debug` (imprime `db.dsn()`, no el handle), y `pub fn new(path: &Path, deserialize: F) -> Result<Self, PersistenceError>` que abre vía `dsn_for` y ejecuta el DDL (AD-4; la divergencia del constructor falible de OQ-3, registrada y no oculta).
+- [x] 7.1 Añadir la constante DDL `CREATE_AGGREGATES_TABLE` (sección Schema): `tenant_id`, `aggregate_id`, `version`, `payload`, `UNIQUE (tenant_id, aggregate_id)`, sin `PRIMARY KEY` en ningún lugar (EC-3).
+- [x] 7.2 Implementar `SYSTEMWIDE_SCOPE` y `encode_tenant()` — pone en verde 6.2 (AD-3).
+- [x] 7.3 Implementar `dsn_for()` — pone en verde 6.1 (AD-4).
+- [x] 7.4 Implementar `struct StoolapRepository<A, F>`, su impl de `Debug` (imprime `db.dsn()`, no el handle), y `pub fn new(path: &Path, deserialize: F) -> Result<Self, PersistenceError>` que abre vía `dsn_for` y ejecuta el DDL (AD-4; la divergencia del constructor falible de OQ-3, registrada y no oculta).
 
 ## Fase 8: RED — Pruebas Unitarias de Durabilidad y CAS — S2 — PR 2
 
-- [ ] 8.1 Escribir la prueba unitaria fallida `an_opened_repository_requested_full_sync`: un accesor delgado `dsn()` sobre `Database::dsn()` igual a `dsn_for(path)`. Falla — el accesor aún no existe (EC-6, spec R5 primera mitad).
-- [ ] 8.2 Escribir la prueba unitaria fallida `a_committed_save_survives_close_and_reopen` (ruta bajo `std::env::temp_dir()` con sufijo único por prueba — sin dependencia `tempfile` hasta S3). Falla — `save`/`load` no implementados (spec R9).
-- [ ] 8.3 Escribir la prueba unitaria fallida `two_systemwide_saves_leave_exactly_one_row`: guardar el mismo `aggregate_id` dos veces bajo `None`, verificar una sola fila y `version == 2`. Falla — `save` no implementado (spec R3; el fallo que una columna nulable habría permitido).
-- [ ] 8.4 Escribir la prueba unitaria fallida `a_stale_expected_version_is_a_conflict`. Falla — `save` no implementado (spec R5).
-- [ ] 8.5 Escribir la prueba unitaria fallida `race_between_two_transactions_is_a_conflict`: dos transacciones reales compitiendo sobre una fila, verificando `Conflict` y no `Internal`. Falla — `save`/`is_write_conflict` no implementados (spec R10, R12; el brazo frágil de AD-7).
+- [x] 8.1 Escribir la prueba unitaria fallida `an_opened_repository_requested_full_sync`: un accesor delgado `dsn()` sobre `Database::dsn()` igual a `dsn_for(path)`. Falla — el accesor aún no existe (EC-6, spec R5 primera mitad).
+- [x] 8.2 Escribir la prueba unitaria fallida `a_committed_save_survives_close_and_reopen` (ruta bajo `std::env::temp_dir()` con sufijo único por prueba — sin dependencia `tempfile` hasta S3). Falla — `save`/`load` no implementados (spec R9).
+- [x] 8.3 Escribir la prueba unitaria fallida `two_systemwide_saves_leave_exactly_one_row`: guardar el mismo `aggregate_id` dos veces bajo `None`, verificar una sola fila y `version == 2`. Falla — `save` no implementado (spec R3; el fallo que una columna nulable habría permitido).
+- [x] 8.4 Escribir la prueba unitaria fallida `a_stale_expected_version_is_a_conflict`. Falla — `save` no implementado (spec R5).
+- [x] 8.5 Escribir la prueba unitaria fallida `race_between_two_transactions_is_a_conflict`: dos transacciones reales compitiendo sobre una fila, verificando `Conflict` y no `Internal`. Falla — `save`/`is_write_conflict` no implementados (spec R10, R12; el brazo frágil de AD-7).
 
 ## Fase 9: GREEN — `save`/`load`/`delete` y Mapeo de Errores — S2 — PR 2
 
-- [ ] 9.1 Añadir el accesor `dsn()` — pone en verde 8.1 (EC-6).
-- [ ] 9.2 Añadir las constantes de sentencia `SELECT_VERSION`/`INSERT_AGGREGATE`/`UPDATE_AGGREGATE` (parametrizadas con `$n`, binding por tupla — matriz de amenazas "Construcción de SQL") e implementar el algoritmo de 7 pasos de `save()` (AD-5): resolver+codificar tenant, transacción real, lectura CAS, fila ausente+esperado distinto de cero ⇒ `Conflict` (EC-1), escritura protegida por versión, relectura si `affected == 0`, commit.
-- [ ] 9.3 Implementar `is_write_conflict()` (AD-7): `UniqueConstraint`, `TransactionAborted`, `LockAcquisitionFailed`/`DatabaseLocked` ⇒ `Conflict`; el brazo fijado por texto de mensaje `Internal` para la colisión MVCC de reclamo de escritura (EC-7); default de falla ruidosa (`Internal`) para todo lo demás.
-- [ ] 9.4 Implementar `LOAD_PAYLOAD`/`DELETE_AGGREGATE` y `load()`/`delete()` (AD-6): predicados `=` simples, `NotFound` en fila ausente / cero filas afectadas (spec R7, R8).
-- [ ] 9.5 Confirmar que 8.1–8.5 pasan todas en verde.
+- [x] 9.1 Añadir el accesor `dsn()` — pone en verde 8.1 (EC-6).
+- [x] 9.2 Añadir las constantes de sentencia `SELECT_VERSION`/`INSERT_AGGREGATE`/`UPDATE_AGGREGATE` (parametrizadas con `$n`, binding por tupla — matriz de amenazas "Construcción de SQL") e implementar el algoritmo de 7 pasos de `save()` (AD-5): resolver+codificar tenant, transacción real, lectura CAS, fila ausente+esperado distinto de cero ⇒ `Conflict` (EC-1), escritura protegida por versión, relectura si `affected == 0`, commit.
+- [x] 9.3 Implementar `is_write_conflict()` (AD-7): `UniqueConstraint`, `TransactionAborted`, `LockAcquisitionFailed`/`DatabaseLocked` ⇒ `Conflict`; el brazo fijado por texto de mensaje `Internal` para la colisión MVCC de reclamo de escritura (EC-7); default de falla ruidosa (`Internal`) para todo lo demás.
+- [x] 9.4 Implementar `LOAD_PAYLOAD`/`DELETE_AGGREGATE` y `load()`/`delete()` (AD-6): predicados `=` simples, `NotFound` en fila ausente / cero filas afectadas (spec R7, R8).
+- [x] 9.5 Confirmar que 8.1–8.5 pasan todas en verde.
 
 ## Fase 10: Verificación — S2 — PR 2
 
-- [ ] 10.1 `cargo build -p ego-persistence-stoolap` compila de forma independiente.
-- [ ] 10.2 `cargo test -p ego-persistence-stoolap` pasa — las 7 pruebas unitarias colocadas en verde.
-- [ ] 10.3 `cargo run -p xtask -- verify-layers` pasa: el crate nuevo está mapeado, la arista `infrastructure → domain`, sin edición de matriz (R8, proposal).
-- [ ] 10.4 Puerta de grep: `rg '""' crates/persistence-stoolap/src` devuelve exactamente una línea no-test (AD-3 criterio 1, matriz de amenazas "Fuga del centinela"); ningún token `sqlx`/`PgPool`/`ego-persistence`/`postgres`/de migración en ningún lugar bajo el crate (R7, D-11); ningún token `async`/`tokio`/`block_in_place`/`spawn_blocking` en el crate (D-4).
-- [ ] 10.5 Confirmar exactamente un `impl Repository<...> for StoolapRepository` y ningún trait propio declarado en el crate (R10, proposal).
+- [x] 10.1 `cargo build -p ego-persistence-stoolap` compila de forma independiente.
+- [x] 10.2 `cargo test -p ego-persistence-stoolap` pasa — las 7 pruebas unitarias colocadas en verde.
+- [x] 10.3 `cargo run -p xtask -- verify-layers` pasa: el crate nuevo está mapeado, la arista `infrastructure → domain`, sin edición de matriz (R8, proposal).
+- [x] 10.4 Puerta de grep: `rg '""' crates/persistence-stoolap/src` devuelve exactamente una línea no-test (AD-3 criterio 1, matriz de amenazas "Fuga del centinela"); ningún token `sqlx`/`PgPool`/`ego-persistence`/`postgres`/de migración en ningún lugar bajo el crate (R7, D-11); ningún token `async`/`tokio`/`block_in_place`/`spawn_blocking` en el crate (D-4).
+- [x] 10.5 Confirmar exactamente un `impl Repository<...> for StoolapRepository` y ningún trait propio declarado en el crate (R10, proposal).
 
 ## Fase 11: RED — Stoolap se Convierte en el Tercer Sujeto del Harness — S3 — PR 3
 

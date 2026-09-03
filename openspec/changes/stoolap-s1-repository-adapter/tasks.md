@@ -73,47 +73,47 @@ systemwide-duplicate proof to S2b. Recorded as a decision, not an improvisation.
 
 ## Phase 5: Foundation — Crate Skeleton & Layer Gate — S2 — PR 2
 
-- [ ] 5.1 Create `crates/persistence-stoolap/Cargo.toml` (package `ego-persistence-stoolap`): normal deps `ego-persistence-api` (path), `stoolap = "0.4"`, `serde = "1"`, `serde_json = "1"` — exactly the D-3/AD-1 set, no dev-dependencies yet (design AD-11 defers `ego-testkit`/`tempfile` to S3).
-- [ ] 5.2 Create `src/lib.rs`: crate doc, `pub mod persistence;`, `pub use persistence::repository::StoolapRepository;` (AD-2). No `#![deny(missing_docs)]`.
-- [ ] 5.3 Create `src/persistence/mod.rs`: `pub mod repository;`.
-- [ ] 5.4 Add `layers.toml` entry `"ego-persistence-stoolap" = "infrastructure"`. Do not open `xtask/src/layers.rs` (D-2, AD-1).
-- [ ] 5.5 Add `"crates/persistence-stoolap",` to the root `Cargo.toml` workspace members.
+- [x] 5.1 Create `crates/persistence-stoolap/Cargo.toml` (package `ego-persistence-stoolap`): normal deps `ego-persistence-api` (path), `stoolap = "0.4"`, `serde = "1"`, `serde_json = "1"` — exactly the D-3/AD-1 set, no dev-dependencies yet (design AD-11 defers `ego-testkit`/`tempfile` to S3).
+- [x] 5.2 Create `src/lib.rs`: crate doc, `pub mod persistence;`, `pub use persistence::repository::StoolapRepository;` (AD-2). No `#![deny(missing_docs)]`.
+- [x] 5.3 Create `src/persistence/mod.rs`: `pub mod repository;`.
+- [x] 5.4 Add `layers.toml` entry `"ego-persistence-stoolap" = "infrastructure"`. Do not open `xtask/src/layers.rs` (D-2, AD-1).
+- [x] 5.5 Add `"crates/persistence-stoolap",` to the root `Cargo.toml` workspace members.
 
 ## Phase 6: RED — DSN & Tenant-Sentinel Unit Tests — S2 — PR 2
 
-- [ ] 6.1 Write failing unit test `dsn_carries_full_sync`: `dsn_for(Path::new("/tmp/x")) == "file:///tmp/x?sync=full"`. Fails — `dsn_for` does not exist yet (AD-4; threat matrix "Durability").
-- [ ] 6.2 Write failing unit test `encode_tenant_maps_only_the_absent_scope_to_the_sentinel`: `encode_tenant(None) == ""`, `encode_tenant(Some("t")) == "t"`. Fails — `encode_tenant`/`SYSTEMWIDE_SCOPE` do not exist yet (AD-3; threat matrix "Tenant isolation"/"Sentinel leakage").
+- [x] 6.1 Write failing unit test `dsn_carries_full_sync`: `dsn_for(Path::new("/tmp/x")) == "file:///tmp/x?sync=full"`. Fails — `dsn_for` does not exist yet (AD-4; threat matrix "Durability").
+- [x] 6.2 Write failing unit test `encode_tenant_maps_only_the_absent_scope_to_the_sentinel`: `encode_tenant(None) == ""`, `encode_tenant(Some("t")) == "t"`. Fails — `encode_tenant`/`SYSTEMWIDE_SCOPE` do not exist yet (AD-3; threat matrix "Tenant isolation"/"Sentinel leakage").
 
 ## Phase 7: GREEN — Schema, DSN, Tenant Sentinel — S2 — PR 2
 
-- [ ] 7.1 Add the `CREATE_AGGREGATES_TABLE` DDL constant (Schema section): `tenant_id`, `aggregate_id`, `version`, `payload`, `UNIQUE (tenant_id, aggregate_id)`, no `PRIMARY KEY` anywhere (EC-3).
-- [ ] 7.2 Implement `SYSTEMWIDE_SCOPE` and `encode_tenant()` — turns 6.2 green (AD-3).
-- [ ] 7.3 Implement `dsn_for()` — turns 6.1 green (AD-4).
-- [ ] 7.4 Implement `struct StoolapRepository<A, F>`, its `Debug` impl (prints `db.dsn()`, not the handle), and `pub fn new(path: &Path, deserialize: F) -> Result<Self, PersistenceError>` opening via `dsn_for` and executing the DDL (AD-4; OQ-3's fallible-constructor divergence, recorded not hidden).
+- [x] 7.1 Add the `CREATE_AGGREGATES_TABLE` DDL constant (Schema section): `tenant_id`, `aggregate_id`, `version`, `payload`, `UNIQUE (tenant_id, aggregate_id)`, no `PRIMARY KEY` anywhere (EC-3).
+- [x] 7.2 Implement `SYSTEMWIDE_SCOPE` and `encode_tenant()` — turns 6.2 green (AD-3).
+- [x] 7.3 Implement `dsn_for()` — turns 6.1 green (AD-4).
+- [x] 7.4 Implement `struct StoolapRepository<A, F>`, its `Debug` impl (prints `db.dsn()`, not the handle), and `pub fn new(path: &Path, deserialize: F) -> Result<Self, PersistenceError>` opening via `dsn_for` and executing the DDL (AD-4; OQ-3's fallible-constructor divergence, recorded not hidden).
 
 ## Phase 8: RED — Durability & CAS Unit Tests — S2 — PR 2
 
-- [ ] 8.1 Write failing unit test `an_opened_repository_requested_full_sync`: a thin `dsn()` accessor over `Database::dsn()` equals `dsn_for(path)`. Fails — no accessor yet (EC-6, spec R5 first half).
-- [ ] 8.2 Write failing unit test `a_committed_save_survives_close_and_reopen` (path under `std::env::temp_dir()` with a per-test unique suffix — no `tempfile` dep until S3). Fails — `save`/`load` not implemented (spec R9).
-- [ ] 8.3 Write failing unit test `two_systemwide_saves_leave_exactly_one_row`: save the same `aggregate_id` twice under `None`, assert one row and `version == 2`. Fails — `save` not implemented (spec R3; the failure a nullable column would have permitted).
-- [ ] 8.4 Write failing unit test `a_stale_expected_version_is_a_conflict`. Fails — `save` not implemented (spec R5).
-- [ ] 8.5 Write failing unit test `race_between_two_transactions_is_a_conflict`: two real transactions racing on one row, asserting `Conflict` not `Internal`. Fails — `save`/`is_write_conflict` not implemented (spec R10, R12; AD-7's brittle arm).
+- [x] 8.1 Write failing unit test `an_opened_repository_requested_full_sync`: a thin `dsn()` accessor over `Database::dsn()` equals `dsn_for(path)`. Fails — no accessor yet (EC-6, spec R5 first half).
+- [x] 8.2 Write failing unit test `a_committed_save_survives_close_and_reopen` (path under `std::env::temp_dir()` with a per-test unique suffix — no `tempfile` dep until S3). Fails — `save`/`load` not implemented (spec R9).
+- [x] 8.3 Write failing unit test `two_systemwide_saves_leave_exactly_one_row`: save the same `aggregate_id` twice under `None`, assert one row and `version == 2`. Fails — `save` not implemented (spec R3; the failure a nullable column would have permitted).
+- [x] 8.4 Write failing unit test `a_stale_expected_version_is_a_conflict`. Fails — `save` not implemented (spec R5).
+- [x] 8.5 Write failing unit test `race_between_two_transactions_is_a_conflict`: two real transactions racing on one row, asserting `Conflict` not `Internal`. Fails — `save`/`is_write_conflict` not implemented (spec R10, R12; AD-7's brittle arm).
 
 ## Phase 9: GREEN — `save`/`load`/`delete` and Error Mapping — S2 — PR 2
 
-- [ ] 9.1 Add the `dsn()` accessor — turns 8.1 green (EC-6).
-- [ ] 9.2 Add `SELECT_VERSION`/`INSERT_AGGREGATE`/`UPDATE_AGGREGATE` statement constants (`$n`-parameterized, tuple binding — threat matrix "SQL construction") and implement `save()`'s 7-step algorithm (AD-5): resolve+encode tenant, real transaction, CAS read, absent-row+nonzero-expected ⇒ `Conflict` (EC-1), version-guarded write, re-read on `affected == 0`, commit.
-- [ ] 9.3 Implement `is_write_conflict()` (AD-7): `UniqueConstraint`, `TransactionAborted`, `LockAcquisitionFailed`/`DatabaseLocked` ⇒ `Conflict`; the pinned `Internal` message-text arm for the MVCC write-claim (EC-7); fail-loud default (`Internal`) for everything else.
-- [ ] 9.4 Implement `LOAD_PAYLOAD`/`DELETE_AGGREGATE` and `load()`/`delete()` (AD-6): plain `=` predicates, `NotFound` on absent row / zero rows affected (spec R7, R8).
-- [ ] 9.5 Confirm 8.1–8.5 all pass green.
+- [x] 9.1 Add the `dsn()` accessor — turns 8.1 green (EC-6).
+- [x] 9.2 Add `SELECT_VERSION`/`INSERT_AGGREGATE`/`UPDATE_AGGREGATE` statement constants (`$n`-parameterized, tuple binding — threat matrix "SQL construction") and implement `save()`'s 7-step algorithm (AD-5): resolve+encode tenant, real transaction, CAS read, absent-row+nonzero-expected ⇒ `Conflict` (EC-1), version-guarded write, re-read on `affected == 0`, commit.
+- [x] 9.3 Implement `is_write_conflict()` (AD-7): `UniqueConstraint`, `TransactionAborted`, `LockAcquisitionFailed`/`DatabaseLocked` ⇒ `Conflict`; the pinned `Internal` message-text arm for the MVCC write-claim (EC-7); fail-loud default (`Internal`) for everything else.
+- [x] 9.4 Implement `LOAD_PAYLOAD`/`DELETE_AGGREGATE` and `load()`/`delete()` (AD-6): plain `=` predicates, `NotFound` on absent row / zero rows affected (spec R7, R8).
+- [x] 9.5 Confirm 8.1–8.5 all pass green.
 
 ## Phase 10: Verification — S2 — PR 2
 
-- [ ] 10.1 `cargo build -p ego-persistence-stoolap` succeeds standalone.
-- [ ] 10.2 `cargo test -p ego-persistence-stoolap` passes — all 7 colocated unit tests green.
-- [ ] 10.3 `cargo run -p xtask -- verify-layers` passes: new crate mapped, `infrastructure → domain` edge, no matrix edit (R8, proposal).
-- [ ] 10.4 Grep gate: `rg '""' crates/persistence-stoolap/src` returns exactly one non-test line (AD-3 criterion 1, threat matrix "Sentinel leakage"); no `sqlx`/`PgPool`/`ego-persistence`/`postgres`/migration token anywhere under the crate (R7, D-11); no `async`/`tokio`/`block_in_place`/`spawn_blocking` token in the crate (D-4).
-- [ ] 10.5 Confirm exactly one `impl Repository<...> for StoolapRepository` and no trait of its own declared in the crate (R10, proposal).
+- [x] 10.1 `cargo build -p ego-persistence-stoolap` succeeds standalone.
+- [x] 10.2 `cargo test -p ego-persistence-stoolap` passes — all 7 colocated unit tests green.
+- [x] 10.3 `cargo run -p xtask -- verify-layers` passes: new crate mapped, `infrastructure → domain` edge, no matrix edit (R8, proposal).
+- [x] 10.4 Grep gate: `rg '""' crates/persistence-stoolap/src` returns exactly one non-test line (AD-3 criterion 1, threat matrix "Sentinel leakage"); no `sqlx`/`PgPool`/`ego-persistence`/`postgres`/migration token anywhere under the crate (R7, D-11); no `async`/`tokio`/`block_in_place`/`spawn_blocking` token in the crate (D-4).
+- [x] 10.5 Confirm exactly one `impl Repository<...> for StoolapRepository` and no trait of its own declared in the crate (R10, proposal).
 
 ## Phase 11: RED — Stoolap Becomes the Harness's Third Subject — S3 — PR 3
 

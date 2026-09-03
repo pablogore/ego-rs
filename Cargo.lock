@@ -901,6 +901,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ego-persistence-stoolap"
+version = "0.1.0"
+dependencies = [
+ "ego-persistence-api",
+ "serde",
+ "serde_json",
+ "stoolap",
+]
+
+[[package]]
 name = "ego-runtime"
 version = "0.1.0"
 dependencies = [

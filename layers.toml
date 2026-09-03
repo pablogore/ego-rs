@@ -34,3 +34,4 @@
 "ego-testkit" = "tooling"
 "ego-effect-store" = "infrastructure"
 "ego-persistence-memory" = "foundation"
+"ego-persistence-stoolap" = "infrastructure"
