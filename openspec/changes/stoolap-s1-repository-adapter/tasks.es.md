@@ -129,6 +129,41 @@ improvisación.
 - [x] 12.4 Lectura de diff: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` ausentes de la lista de archivos de todo el cambio (R6, R7, proposal NG-4/NG-6/KD-2).
 - [x] 12.5 Registrar F-5 y F-6 en la descripción del PR como seguimientos nombrados (R14, proposal); confirmar que KD-1..KD-4 siguen enunciados con precisión y sin tocar.
 
+## Fase 13: Remediación de Verify — Seguimiento del FAIL de sdd-verify
+
+Corrige los 4 hallazgos del reporte FAIL de `sdd-verify` (tema Engram
+`sdd/stoolap-s1-repository-adapter/verify-report`) sobre las Fases 1-12 ya
+fusionadas. TDD estricto (RED luego GREEN) aplicado a cada prueba nueva.
+
+- [x] 13.1 CRÍTICO — Añadir una prueba unitaria para el primer escenario de spec R6
+      (un agregado nuevo guardado con una versión esperada distinta de cero es un
+      conflicto), cubriendo el brazo `None => Conflict { actual: 0 }` de
+      `repository.rs`. RED verificado corrompiendo `actual` en ese brazo, luego
+      restaurado (commit d58cba0).
+- [x] 13.2 ADVERTENCIA — Añadir pruebas unitarias para los 3 brazos de clasificación
+      sin cubrir de `is_write_conflict()` (`UniqueConstraint`, `TransactionAborted`,
+      `LockAcquisitionFailed`/`DatabaseLocked`). RED verificado invirtiendo el
+      booleano de cada brazo, luego restaurado (commit da6f71d).
+- [x] 13.3 ADVERTENCIA — Añadir pruebas unitarias para la ruta de reintento de
+      lectura del paso 6 de `save()` y la ruta de clasificación de error en el
+      commit. Se añadió un seam de hook thread-local solo `#[cfg(test)]` que
+      intercala determinísticamente el commit completo de un par entre la
+      lectura y la escritura de la víctima (design AD-5 criterio 4), y se
+      habilitó la dev-dependency `test-failpoints` propia de stoolap para armar
+      un fallo de escritura de WAL en el momento del commit. Se protegió cada
+      prueba que toca la base de datos con el propio lock de failpoints de
+      stoolap para eliminar la inestabilidad entre pruebas causada por los
+      flags de failpoint de ámbito de proceso. RED verificado para ambas
+      pruebas nuevas deshabilitando temporalmente la rama de reintento de
+      lectura y cortocircuitando el brazo de error de commit, luego restaurado
+      (commit ddac27b).
+- [x] 13.4 ADVERTENCIA — Marcar las casillas de la checklist de DoD en `proposal.md`
+      y `proposal.es.md` (R1-R14) que ya eran verdaderas pero seguían sin marcar.
+- [x] 13.5 Volver a ejecutar `cargo test -p ego-persistence-stoolap`,
+      `cargo test --workspace` y
+      `cargo clippy -p ego-persistence-stoolap --all-targets -- -D warnings`
+      para confirmar que todo el cambio sigue en verde tras la remediación.
+
 ## Diferido / Fuera de Alcance (deuda nombrada, no tareas)
 
 - **KD-1** — `Snapshot`/`OffsetStore`/`DedupStore` siguen sin un harness de conformidad compartido. Ninguna tarea añade uno (proposal NG-1, F-1).

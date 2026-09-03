@@ -181,38 +181,38 @@ adapter, then the third harness run.
 
 Each is independently checkable and doubles as this change's success criteria.
 
-- [ ] **R1 — The adapter exists and satisfies the contract.** `StoolapRepository<A, F>` implements
+- [x] **R1 — The adapter exists and satisfies the contract.** `StoolapRepository<A, F>` implements
       `ego_persistence_api::persistence::Repository<A>` and passes the IS-5 harness in full.
-- [ ] **R2 — Cross-backend agreement is proven, not asserted.** The identical harness runs green
+- [x] **R2 — Cross-backend agreement is proven, not asserted.** The identical harness runs green
       against `InMemoryRepository`, `PostgreSQLRepository`, and `StoolapRepository` — one harness,
       three subjects, no per-backend variant or skipped scenario.
-- [ ] **R3 — Systemwide uniqueness actually holds.** Two saves of the same `aggregate_id` under the
+- [x] **R3 — Systemwide uniqueness actually holds.** Two saves of the same `aggregate_id` under the
       systemwide scope produce one row and correct version arithmetic — the failure mode a nullable
       tenant column would have permitted (D-5) is proven absent, not argued absent.
-- [ ] **R4 — The sentinel never escapes the adapter.** No caller-visible value, error message, or
+- [x] **R4 — The sentinel never escapes the adapter.** No caller-visible value, error message, or
       returned type exposes the encoding; `Repository`'s `Option<&str>` contract behaves identically
       across all three implementations, including `MissingTenant` on `Some("")`.
-- [ ] **R5 — Durability is pinned by a test.** A committed save survives a close/reopen cycle, and
+- [x] **R5 — Durability is pinned by a test.** A committed save survives a close/reopen cycle, and
       the adapter's configured sync mode is asserted rather than assumed (D-6).
-- [ ] **R6 — No contract change.** `crates/persistence-api/**` is unmodified; no port's method set,
+- [x] **R6 — No contract change.** `crates/persistence-api/**` is unmodified; no port's method set,
       bounds, supertraits, default bodies, or error variants change.
-- [ ] **R7 — Backend independence.** `crates/persistence-stoolap/` names no `sqlx`, `PgPool`,
+- [x] **R7 — Backend independence.** `crates/persistence-stoolap/` names no `sqlx`, `PgPool`,
       `ego-persistence`, PostgreSQL migration, or PostgreSQL symbol anywhere in its manifest or
       sources; `crates/persistence/**` appears nowhere in the diff.
-- [ ] **R8 — Dependency and layer integrity.** The crate's `Cargo.toml` names exactly the D-3 set;
+- [x] **R8 — Dependency and layer integrity.** The crate's `Cargo.toml` names exactly the D-3 set;
       `cargo run -p xtask -- verify-layers` passes with no new violation and no matrix edit.
-- [ ] **R9 — Root workspace stays Docker-free.** `cargo test --workspace` passes with no container
+- [x] **R9 — Root workspace stays Docker-free.** `cargo test --workspace` passes with no container
       runtime available, and no Testcontainers dependency appears in the root workspace.
-- [ ] **R10 — Scope containment.** No Stoolap implementation of any port other than `Repository`
+- [x] **R10 — Scope containment.** No Stoolap implementation of any port other than `Repository`
       exists, and no `StorageEngine`/dialect/ORM/generic-engine abstraction is introduced.
-- [ ] **R11 — Existing behavior is unchanged.** `InMemoryRepository` and `PostgreSQLRepository` are
+- [x] **R11 — Existing behavior is unchanged.** `InMemoryRepository` and `PostgreSQLRepository` are
       byte-identical in behavior; any divergence the harness exposes is recorded as debt (NG-9), not
       fixed here.
-- [ ] **R12 — Conflict fidelity.** A stale `expected_version` and a concurrent-writer race both
+- [x] **R12 — Conflict fidelity.** A stale `expected_version` and a concurrent-writer race both
       surface as `PersistenceError::Conflict`, and no error variant is added.
-- [ ] **R13 — Harness ownership.** The harness is declared once, in `ego-testkit`, and is consumed
+- [x] **R13 — Harness ownership.** The harness is declared once, in `ego-testkit`, and is consumed
       by every backend rather than copied.
-- [ ] **R14 — Deferred work is named, not silently handled.** F-1 through F-4 are recorded with
+- [x] **R14 — Deferred work is named, not silently handled.** F-1 through F-4 are recorded with
       owners and prerequisites, and nothing in those boundaries is touched.
 
 ## Known Debt (carried, not fixed)
