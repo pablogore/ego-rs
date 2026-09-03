@@ -78,8 +78,16 @@ where
             })?;
 
             // Lock the row for update to prevent concurrent version bypasses.
+            //
+            // `tenant_id IS NOT DISTINCT FROM $2`, never `= $2`: a systemwide
+            // scope binds SQL NULL here, and `tenant_id = NULL` is never true
+            // even against a row whose own `tenant_id` is also NULL. `IS NOT
+            // DISTINCT FROM` treats two NULLs as equal while still comparing
+            // non-NULL values with ordinary equality — the same pattern
+            // already used throughout `event_store.rs` and `snapshot.rs` for
+            // the identical reason.
             let current_version: Option<i64> = sqlx::query_scalar(
-                r#"SELECT version FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2 FOR UPDATE"#,
+                r#"SELECT version FROM aggregates WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE"#,
             )
             .bind(&aggregate_id)
             .bind(&tenant)
@@ -103,19 +111,43 @@ where
                 }
             };
 
-            sqlx::query(
-                r#"INSERT INTO aggregates (aggregate_id, tenant_id, version, payload, updated_at)
-                   VALUES ($1, $2, $3, $4, NOW())
-                   ON CONFLICT (aggregate_id, tenant_id) DO UPDATE
-                   SET version = $3, payload = $4, updated_at = NOW()"#,
-            )
-            .bind(&aggregate_id)
-            .bind(&tenant)
-            .bind(new_version)
-            .bind(&payload)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Internal(format!("failed to save aggregate: {}", e)))?;
+            // `ON CONFLICT` infers the partial index matching this row's own
+            // tenant scope (migration 015: one partial unique index per side
+            // of the `tenant_id IS NULL` split) — branching the statement is
+            // what makes conflict inference exact for each side; a single
+            // `ON CONFLICT (aggregate_id, tenant_id)` cannot target a
+            // partial index at all.
+            let insert_result = match &tenant {
+                Some(_) => {
+                    sqlx::query(
+                        r#"INSERT INTO aggregates (aggregate_id, tenant_id, version, payload, updated_at)
+                           VALUES ($1, $2, $3, $4, NOW())
+                           ON CONFLICT (tenant_id, aggregate_id) WHERE tenant_id IS NOT NULL DO UPDATE
+                           SET version = $3, payload = $4, updated_at = NOW()"#,
+                    )
+                    .bind(&aggregate_id)
+                    .bind(&tenant)
+                    .bind(new_version)
+                    .bind(&payload)
+                    .execute(&mut *tx)
+                    .await
+                }
+                None => {
+                    sqlx::query(
+                        r#"INSERT INTO aggregates (aggregate_id, tenant_id, version, payload, updated_at)
+                           VALUES ($1, NULL, $2, $3, NOW())
+                           ON CONFLICT (aggregate_id) WHERE tenant_id IS NULL DO UPDATE
+                           SET version = $2, payload = $3, updated_at = NOW()"#,
+                    )
+                    .bind(&aggregate_id)
+                    .bind(new_version)
+                    .bind(&payload)
+                    .execute(&mut *tx)
+                    .await
+                }
+            };
+            insert_result
+                .map_err(|e| PersistenceError::Internal(format!("failed to save aggregate: {}", e)))?;
 
             tx.commit().await.map_err(|e| {
                 PersistenceError::Internal(format!("failed to commit transaction: {}", e))
@@ -132,7 +164,7 @@ where
             .block_on(async {
                 sqlx::query_as(
                     r#"SELECT aggregate_id, tenant_id, version, payload, updated_at
-                   FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#,
+                   FROM aggregates WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
                 )
                 .bind(aggregate_id)
                 .bind(&tenant)
@@ -158,7 +190,9 @@ where
 
         let deleted = self
             .block_on(async {
-                sqlx::query(r#"DELETE FROM aggregates WHERE aggregate_id = $1 AND tenant_id = $2"#)
+                sqlx::query(
+                    r#"DELETE FROM aggregates WHERE aggregate_id = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
+                )
                     .bind(aggregate_id)
                     .bind(&tenant)
                     .execute(&self.pool)
