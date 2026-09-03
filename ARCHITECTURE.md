@@ -218,9 +218,12 @@ is no longer an external, unenforced adoption constraint — it is enforced by
 `ReadSideClaimStore` (`crates/persistence-api/src/read_side/claim.rs`), a fencing-token-based
 claim/renew/release port with a real `PostgreSQLReadSideClaimStore` adapter
 (`crates/persistence/src/postgres/read_side_claim.rs`). `ReadSideSession` claims its stream
-before `fetch`, re-checks the claim between the handler and the offset/dedup commit, and releases
-unconditionally on every exit path; a stale, replaced owner is fenced out before it can write. A
-composition that registers durable read-side progress states whether this mechanism backs it:
+before `fetch`, renews the claim just before the offset/dedup commit, and releases unconditionally
+on every exit path; a stale, replaced owner that fails that pre-commit renew is fenced out before
+its offset/dedup write. The renew-to-commit interval is not itself a cross-store transaction, so a
+residual lease-expiry race in that narrow window is a known, documented limit of this guarantee,
+not a claim of exactly-once handler execution. A composition that registers durable read-side
+progress states whether this mechanism backs it:
 `AppBuilder::read_side_claims(store)` registers the durable claim store, and
 `Profile::Production` refuses to start a composition with durable progress but no durable claim
 store behind it (`crates/service-sdk/src/runtime/builder.rs`). This closes the concurrency gap

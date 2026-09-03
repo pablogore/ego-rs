@@ -125,12 +125,11 @@ impl ReadSideProgressStores {
     /// longer unenforced: PROD-014C shipped `ReadSideClaimStore` and its
     /// `Profile::Production` fail-closed gate (`AppBuilder::read_side_claims`)
     /// so a durable-progress host can refuse to start without a durable claim
-    /// store backing it. This reference app deliberately does not register
-    /// one here — it composes only the two durable progress stores this type
-    /// returns and leaves `read_side_claims` unset, so its own
-    /// `Profile::Production` composition is not itself claim-guarded; a host
-    /// that adopts durable progress AND wants the guarantee enforced must
-    /// also call `AppBuilder::read_side_claims(PostgreSQLReadSideClaimStore::new(pool, clock))`.
+    /// store backing it. This method only constructs the durable offset/dedup
+    /// pair and does not itself register a claim store. A host using this
+    /// pair under `Profile::Production` must additionally call
+    /// `AppBuilder::read_side_claims(PostgreSQLReadSideClaimStore::new(pool, clock))`;
+    /// otherwise composition fails closed.
     pub fn postgres(pool: PgPool) -> Self {
         Self {
             offset: Arc::new(PostgreSQLOffsetStore::new(pool.clone())),
