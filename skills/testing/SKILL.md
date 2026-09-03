@@ -4,7 +4,7 @@ description: "Trigger: test, unit test, integration test, mock, testcontainer, d
 license: Apache-2.0
 metadata:
   author: "pablogore"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Activation Contract
@@ -19,9 +19,10 @@ Load this skill when:
 
 ### Rule 1 — Unit tests: no external resources (ABSOLUTE)
 
-Every `#[test]` and `#[tokio::test]` inside a `crates/` module MUST be isolated.
+Every `#[test]` and `#[tokio::test]` inside a `crates/` module MUST be isolated. The boundary is the property, not the technology name: anything that leaves the test process — a separate server, daemon, container, or network socket — is external and forbidden; an engine that runs entirely inside the test process is not.
+
 **Forbidden in unit tests:**
-- Real database connections to a server/daemon process (Postgres, Redis, networked or shared-file SQLite)
+- Connections to external database or cache server processes (Postgres, Redis, networked or shared-file SQLite)
 - Real message brokers (Kafka, RabbitMQ, NATS)
 - Real HTTP/gRPC calls to external APIs
 - `std::fs` writes outside of `tempfile`-managed dirs
@@ -29,10 +30,12 @@ Every `#[test]` and `#[tokio::test]` inside a `crates/` module MUST be isolated.
 
 If a test needs any of the above → it is an integration test → move it to `crates/integration-tests/`.
 
-**Documented architectural exception**: an embedded, in-process, no-server database engine (e.g. Stoolap, SQLite in `:memory:` mode) is allowed inside a unit test when a written, approved architecture decision requires it (e.g. keeping a Testcontainers/Docker dependency out of the root workspace — see `crates/effect-store/src/stoolap/mod.rs`'s `fresh_store()` and `openspec/changes/stoolap-s1-repository-adapter/design.md` AD-9 criterion 1). Under that exception:
-- The engine must run entirely in-process with no daemon and no network socket.
-- Each test opens its own instance against a `tempfile`-managed path (or `:memory:`); no state is shared between tests.
-- The exception must be traceable to the approving decision (issue/ADR/design doc) referenced from the crate's own module docs — an undocumented use is still a violation.
+**Documented architectural exception**: an embedded, in-process storage engine that requires no external server, daemon, container, or network socket (e.g. Stoolap, or SQLite in `:memory:` mode) is allowed inside a unit test when a written, approved architecture decision explicitly requires it (e.g. keeping a Testcontainers/Docker dependency out of the root workspace — see `crates/effect-store/src/stoolap/mod.rs`'s `fresh_store()` and `openspec/changes/stoolap-s1-repository-adapter/design.md` AD-9 criterion 1). Under this exception:
+- The engine MUST execute entirely in the test process.
+- The test MUST NOT require a daemon, container, or network socket.
+- Each test MUST use its own isolated instance; no mutable state is shared between tests.
+- A file-backed instance MUST use a `tempfile`-managed path.
+- The exception MUST be traceable to an approved issue/ADR/design decision referenced from the crate's own module docs — an undocumented use is still a violation.
 
 ### Rule 2 — Unit tests use mocks for all external dependencies
 
@@ -66,8 +69,8 @@ Do not mark a test `#[ignore]` because it needs external resources. Move it to t
 | Test needs | Where it goes |
 |------------|--------------|
 | Only in-memory state, mocks, stubs | `#[cfg(test)]` inside the crate module |
-| Embedded, in-process, no-server engine (Stoolap, SQLite `:memory:`), with a traceable architecture decision | `#[cfg(test)]` inside the crate module (documented exception) |
-| Real DB / broker / HTTP served by a separate process | `crates/integration-tests/` with testcontainers |
+| Embedded, in-process storage engine (Stoolap, SQLite `:memory:`) with no daemon/container/socket, plus a traceable architecture decision | `#[cfg(test)]` inside the crate module (documented exception) |
+| Anything external to the test process — a separate server, daemon, container, or network socket | `crates/integration-tests/` with testcontainers |
 | Compile-time assertion (`static_assertions`, trait bounds) | `#[cfg(test)]` inside the crate module |
 | Contract / property test (no I/O) | `#[cfg(test)]` inside the crate module |
 | End-to-end scenario with multiple services | `crates/integration-tests/` |
