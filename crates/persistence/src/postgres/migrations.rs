@@ -50,6 +50,10 @@ const MIGRATION_014_CREATE_PROJECTION_DEDUP: &str =
 const MIGRATION_015_FIX_AGGREGATES_TENANT_NULL_UNIQUENESS: &str =
     include_str!("migrations/015_fix_aggregates_tenant_null_uniqueness.sql");
 
+/// Migration SQL for the durable read-side processing-claim table (PROD-014C).
+const MIGRATION_016_CREATE_PROJECTION_CLAIMS: &str =
+    include_str!("migrations/016_create_projection_claims.sql");
+
 /// Run all migrations against the database.
 ///
 /// Creates the events, aggregates, and snapshots tables if they don't exist.
@@ -110,6 +114,10 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         (
             "015_fix_aggregates_tenant_null_uniqueness",
             MIGRATION_015_FIX_AGGREGATES_TENANT_NULL_UNIQUENESS,
+        ),
+        (
+            "016_create_projection_claims",
+            MIGRATION_016_CREATE_PROJECTION_CLAIMS,
         ),
     ]
 }

@@ -4,6 +4,7 @@
 //! event_tag,state,event_stream}` (D-6); `ego-domain` re-exports each
 //! module at its original name and path.
 
+pub mod claim;
 pub mod dedup;
 pub mod event_stream;
 pub mod event_tag;
@@ -11,3 +12,5 @@ pub mod offset;
 pub mod projection_state;
 pub mod state;
 pub mod store;
+
+pub use claim::{ClaimError, ClaimFence, ClaimId, ReadSideClaimStore};

@@ -121,7 +121,7 @@ fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
 /// negatives and **accepts zero**, which is exactly the value this function's own
 /// promise excludes — a `FencingToken(0)` is a token nobody minted, and the earlier
 /// version of this code built one while its documentation said it would not.
-fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
+pub(crate) fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
     if raw <= 0 {
         return Err(ReservationError::Backend(format!(
             "stored fencing_token {raw} is not positive; the sequence starts at 1 and the \
