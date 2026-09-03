@@ -61,6 +61,29 @@ fn internal_err(e: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Internal(e.to_string())
 }
 
+// Test-only seam (zero cost in non-test builds): lets a test run a peer
+// transaction's full commit deterministically between `save()`'s read
+// (steps 3-4) and write (step 5), to exercise the step-6 re-read fallback
+// (design AD-5 criterion 4) without a flaky real-thread race.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_before_write_hook(hook: impl FnMut() + 'static) {
+    BEFORE_WRITE_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn fire_before_write_hook() {
+    let hook = BEFORE_WRITE_HOOK.with(|h| h.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook();
+    }
+}
+
 /// Stoolap-backed implementation of `Repository<A>`.
 ///
 /// `F` deserializes a stored payload (`serde_json::Value`) back into `A`.
@@ -139,6 +162,9 @@ where
                 });
             }
         };
+
+        #[cfg(test)]
+        fire_before_write_hook();
 
         let write_result = match current {
             None => tx.execute(INSERT_AGGREGATE, (scope, aggregate_id, payload.as_str())),
@@ -257,6 +283,14 @@ mod tests {
         StoolapRepository::new(path, deserialize_test_aggregate as fn(_) -> _).unwrap()
     }
 
+    /// Every test that touches the database serializes on stoolap's own
+    /// failpoint lock. Two of these tests arm process-wide I/O failpoints
+    /// (`WAL_WRITE_FAIL`); without this guard, a concurrently-running test
+    /// in this file could spuriously observe the injected failure.
+    fn db_test_guard() -> stoolap::test_failpoints::FailpointGuard {
+        stoolap::test_failpoints::FailpointGuard::new()
+    }
+
     #[test]
     fn dsn_carries_full_sync() {
         assert_eq!(dsn_for(Path::new("/tmp/x")), "file:///tmp/x?sync=full");
@@ -301,6 +335,7 @@ mod tests {
 
     #[test]
     fn an_opened_repository_requested_full_sync() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let repo = new_repo(dir.path());
         assert_eq!(repo.dsn(), dsn_for(dir.path()));
@@ -308,6 +343,7 @@ mod tests {
 
     #[test]
     fn a_committed_save_survives_close_and_reopen() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let path = dir.path();
         {
@@ -332,6 +368,7 @@ mod tests {
 
     #[test]
     fn two_systemwide_saves_leave_exactly_one_row() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let mut repo = new_repo(dir.path());
         repo.save("agg-2", TestAggregate { value: "a".into() }, None, 0)
@@ -353,6 +390,7 @@ mod tests {
 
     #[test]
     fn a_fresh_aggregate_with_a_nonzero_expected_version_is_a_conflict() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let mut repo = new_repo(dir.path());
 
@@ -381,6 +419,7 @@ mod tests {
 
     #[test]
     fn a_stale_expected_version_is_a_conflict() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let mut repo = new_repo(dir.path());
         repo.save("agg-3", TestAggregate { value: "a".into() }, None, 0)
@@ -407,7 +446,71 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_commit_between_read_and_write_triggers_the_re_read_fallback() {
+        let _fp = db_test_guard();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let mut repo = new_repo(&path);
+        repo.save("agg-5", TestAggregate { value: "a".into() }, None, 0)
+            .unwrap();
+
+        // Deterministically interleave a peer's FULL commit between this
+        // save()'s own read (step 3/4, which will see version 1 and match
+        // expected_version) and its own write (step 5) — the exact race
+        // design AD-5 criterion 4 describes, without real-thread timing.
+        set_before_write_hook(move || {
+            let mut peer = new_repo(&path);
+            let bumped = peer
+                .save("agg-5", TestAggregate { value: "peer".into() }, None, 1)
+                .unwrap();
+            assert_eq!(bumped, 2);
+        });
+
+        let err = repo
+            .save("agg-5", TestAggregate { value: "b".into() }, None, 1)
+            .unwrap_err();
+
+        match err {
+            PersistenceError::Conflict {
+                aggregate_id,
+                expected,
+                actual,
+            } => {
+                assert_eq!(aggregate_id, "agg-5");
+                assert_eq!(expected, 1);
+                assert_eq!(actual, 2);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_commit_time_failure_is_classified_as_internal() {
+        let _fp = db_test_guard();
+        let dir = TempDir::new().unwrap();
+        let mut repo = new_repo(dir.path());
+
+        stoolap::test_failpoints::WAL_WRITE_FAIL
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let err = repo
+            .save("agg-6", TestAggregate { value: "a".into() }, None, 0)
+            .unwrap_err();
+
+        match err {
+            PersistenceError::Internal(message) => {
+                assert!(
+                    message.contains("failpoint"),
+                    "expected the WAL failpoint message, got: {message}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn race_between_two_transactions_is_a_conflict() {
+        let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
         let path = dir.path();
         let mut repo1 = new_repo(path);
