@@ -118,16 +118,16 @@ improvisación.
 
 ## Fase 11: RED — Stoolap se Convierte en el Tercer Sujeto del Harness — S3 — PR 3
 
-- [ ] 11.1 Añadir `[dev-dependencies]` a `crates/persistence-stoolap/Cargo.toml`: `ego-testkit = { path = "../testkit" }`, `tempfile = "3"` (AD-9, AD-11 S3).
-- [ ] 11.2 Crear `crates/persistence-stoolap/tests/repository_conformance.rs`: construir `StoolapRepository<ConformanceAggregate, _>` en una ruta `tempfile::TempDir` nueva, llamar a `ego_testkit::assert_repository_conformance`. Falla al compilar hasta que aterrice 11.1 (AD-11, RED de S3).
+- [x] 11.1 Añadir `[dev-dependencies]` a `crates/persistence-stoolap/Cargo.toml`: `ego-testkit = { path = "../testkit" }`, `tempfile = "3"` (AD-9, AD-11 S3).
+- [x] 11.2 Crear `crates/persistence-stoolap/tests/repository_conformance.rs`: construir `StoolapRepository<ConformanceAggregate, _>` en una ruta `tempfile::TempDir` nueva, llamar a `ego_testkit::assert_repository_conformance`. Falla al compilar hasta que aterrice 11.1 (AD-11, RED de S3).
 
 ## Fase 12: GREEN + Verificación de Todo el Cambio — S3 — PR 3
 
-- [ ] 12.1 `cargo test -p ego-persistence-stoolap` pasa — los 11 escenarios del harness en verde contra `StoolapRepository` (spec R1, R2 sujeto 3).
-- [ ] 12.2 `cargo test --workspace` pasa sin runtime de contenedor disponible; confirmar que no aparece dependencia de Testcontainers/Docker en ningún lugar del workspace raíz (spec R2 combinado con proposal R9, NG-8).
-- [ ] 12.3 Confirmar que `repository_tenant_scoping_postgres.rs` sigue pasando sin modificar (R11, proposal).
-- [ ] 12.4 Lectura de diff: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` ausentes de la lista de archivos de todo el cambio (R6, R7, proposal NG-4/NG-6/KD-2).
-- [ ] 12.5 Registrar F-5 y F-6 en la descripción del PR como seguimientos nombrados (R14, proposal); confirmar que KD-1..KD-4 siguen enunciados con precisión y sin tocar.
+- [x] 12.1 `cargo test -p ego-persistence-stoolap` pasa — los 11 escenarios del harness en verde contra `StoolapRepository` (spec R1, R2 sujeto 3).
+- [x] 12.2 `cargo test --workspace` pasa sin runtime de contenedor disponible; confirmar que no aparece dependencia de Testcontainers/Docker en ningún lugar del workspace raíz (spec R2 combinado con proposal R9, NG-8).
+- [x] 12.3 Confirmar que `repository_tenant_scoping_postgres.rs` sigue pasando sin modificar (R11, proposal).
+- [x] 12.4 Lectura de diff: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` ausentes de la lista de archivos de todo el cambio (R6, R7, proposal NG-4/NG-6/KD-2).
+- [x] 12.5 Registrar F-5 y F-6 en la descripción del PR como seguimientos nombrados (R14, proposal); confirmar que KD-1..KD-4 siguen enunciados con precisión y sin tocar.
 
 ## Diferido / Fuera de Alcance (deuda nombrada, no tareas)
 

@@ -4,7 +4,7 @@ description: "Trigger: test, unit test, integration test, mock, testcontainer, d
 license: Apache-2.0
 metadata:
   author: "pablogore"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Activation Contract
@@ -21,13 +21,18 @@ Load this skill when:
 
 Every `#[test]` and `#[tokio::test]` inside a `crates/` module MUST be isolated.
 **Forbidden in unit tests:**
-- Real database connections (Postgres, Redis, SQLite)
+- Real database connections to a server/daemon process (Postgres, Redis, networked or shared-file SQLite)
 - Real message brokers (Kafka, RabbitMQ, NATS)
 - Real HTTP/gRPC calls to external APIs
 - `std::fs` writes outside of `tempfile`-managed dirs
 - Any `tokio::net` or `std::net` that binds or connects to a real socket
 
 If a test needs any of the above → it is an integration test → move it to `crates/integration-tests/`.
+
+**Documented architectural exception**: an embedded, in-process, no-server database engine (e.g. Stoolap, SQLite in `:memory:` mode) is allowed inside a unit test when a written, approved architecture decision requires it (e.g. keeping a Testcontainers/Docker dependency out of the root workspace — see `crates/effect-store/src/stoolap/mod.rs`'s `fresh_store()` and `openspec/changes/stoolap-s1-repository-adapter/design.md` AD-9 criterion 1). Under that exception:
+- The engine must run entirely in-process with no daemon and no network socket.
+- Each test opens its own instance against a `tempfile`-managed path (or `:memory:`); no state is shared between tests.
+- The exception must be traceable to the approving decision (issue/ADR/design doc) referenced from the crate's own module docs — an undocumented use is still a violation.
 
 ### Rule 2 — Unit tests use mocks for all external dependencies
 
@@ -50,7 +55,7 @@ The default integration crate:
 
 ### Non-exceptions
 
-Speed or convenience is never grounds for the exception above — only an approved architecture decision citing a concrete constraint (e.g. no-Docker root build) qualifies.
+Speed or convenience is never grounds for either exception above — only an approved architecture decision citing a concrete constraint (e.g. no-Docker root build) qualifies.
 
 ### Rule 4 — No `#[ignore]` as a workaround
 
@@ -61,7 +66,8 @@ Do not mark a test `#[ignore]` because it needs external resources. Move it to t
 | Test needs | Where it goes |
 |------------|--------------|
 | Only in-memory state, mocks, stubs | `#[cfg(test)]` inside the crate module |
-| Real DB / broker / HTTP | `crates/integration-tests/` with testcontainers |
+| Embedded, in-process, no-server engine (Stoolap, SQLite `:memory:`), with a traceable architecture decision | `#[cfg(test)]` inside the crate module (documented exception) |
+| Real DB / broker / HTTP served by a separate process | `crates/integration-tests/` with testcontainers |
 | Compile-time assertion (`static_assertions`, trait bounds) | `#[cfg(test)]` inside the crate module |
 | Contract / property test (no I/O) | `#[cfg(test)]` inside the crate module |
 | End-to-end scenario with multiple services | `crates/integration-tests/` |

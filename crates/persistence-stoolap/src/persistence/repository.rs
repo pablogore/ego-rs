@@ -93,6 +93,7 @@ where
         })
     }
 
+    #[cfg(test)]
     fn dsn(&self) -> &str {
         self.db.dsn()
     }
@@ -227,13 +228,18 @@ where
     }
 }
 
+/// Colocated unit tests open a real embedded Stoolap database per test, each
+/// against its own `tempfile` path. Documented architectural exception under
+/// `skills/testing/SKILL.md` Rule 1, per `design.md` AD-3 criterion 4, AD-4,
+/// AD-7, and the same embedded/file-backed reasoning as AD-9 criterion 1
+/// (see `crates/effect-store/src/stoolap/mod.rs`'s `fresh_store()`).
 #[cfg(test)]
 mod tests {
     use super::*;
     use ego_persistence_api::persistence::Repository;
     use serde::{Deserialize, Serialize};
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::path::Path;
+    use tempfile::TempDir;
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct TestAggregate {
@@ -244,23 +250,10 @@ mod tests {
         serde_json::from_value(v).map_err(|e| PersistenceError::Internal(e.to_string()))
     }
 
-    fn temp_db_path(label: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "ego-persistence-stoolap-{label}-{}-{unique}",
-            std::process::id()
-        ));
-        path
-    }
+    type TestRepo =
+        StoolapRepository<TestAggregate, fn(serde_json::Value) -> Result<TestAggregate, PersistenceError>>;
 
-    fn new_repo(
-        path: &Path,
-    ) -> StoolapRepository<
-        TestAggregate,
-        fn(serde_json::Value) -> Result<TestAggregate, PersistenceError>,
-    > {
+    fn new_repo(path: &Path) -> TestRepo {
         StoolapRepository::new(path, deserialize_test_aggregate as fn(_) -> _).unwrap()
     }
 
@@ -277,16 +270,17 @@ mod tests {
 
     #[test]
     fn an_opened_repository_requested_full_sync() {
-        let path = temp_db_path("dsn-accessor");
-        let repo = new_repo(&path);
-        assert_eq!(repo.dsn(), dsn_for(&path));
+        let dir = TempDir::new().unwrap();
+        let repo = new_repo(dir.path());
+        assert_eq!(repo.dsn(), dsn_for(dir.path()));
     }
 
     #[test]
     fn a_committed_save_survives_close_and_reopen() {
-        let path = temp_db_path("reopen");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
         {
-            let mut repo = new_repo(&path);
+            let mut repo = new_repo(path);
             let version = repo
                 .save(
                     "agg-1",
@@ -300,15 +294,15 @@ mod tests {
             assert_eq!(version, 1);
         }
 
-        let repo = new_repo(&path);
+        let repo = new_repo(path);
         let loaded = repo.load("agg-1", None).unwrap();
         assert_eq!(loaded.value, "hello");
     }
 
     #[test]
     fn two_systemwide_saves_leave_exactly_one_row() {
-        let path = temp_db_path("systemwide-dup");
-        let mut repo = new_repo(&path);
+        let dir = TempDir::new().unwrap();
+        let mut repo = new_repo(dir.path());
         repo.save("agg-2", TestAggregate { value: "a".into() }, None, 0)
             .unwrap();
         let second = repo
@@ -328,8 +322,8 @@ mod tests {
 
     #[test]
     fn a_stale_expected_version_is_a_conflict() {
-        let path = temp_db_path("stale-version");
-        let mut repo = new_repo(&path);
+        let dir = TempDir::new().unwrap();
+        let mut repo = new_repo(dir.path());
         repo.save("agg-3", TestAggregate { value: "a".into() }, None, 0)
             .unwrap();
         repo.save("agg-3", TestAggregate { value: "b".into() }, None, 1)
@@ -355,8 +349,9 @@ mod tests {
 
     #[test]
     fn race_between_two_transactions_is_a_conflict() {
-        let path = temp_db_path("race");
-        let mut repo1 = new_repo(&path);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path();
+        let mut repo1 = new_repo(path);
         repo1
             .save("agg-4", TestAggregate { value: "a".into() }, None, 0)
             .unwrap();
@@ -374,7 +369,7 @@ mod tests {
         // A second repository handle on the same DSN (same underlying engine,
         // per Stoolap's DSN registry) races against the still-uncommitted
         // claim above through the real public `save()` path.
-        let mut repo2 = new_repo(&path);
+        let mut repo2 = new_repo(path);
         let err = repo2
             .save("agg-4", TestAggregate { value: "b".into() }, None, 1)
             .unwrap_err();

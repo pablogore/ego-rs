@@ -117,16 +117,16 @@ systemwide-duplicate proof to S2b. Recorded as a decision, not an improvisation.
 
 ## Phase 11: RED — Stoolap Becomes the Harness's Third Subject — S3 — PR 3
 
-- [ ] 11.1 Add `[dev-dependencies]` to `crates/persistence-stoolap/Cargo.toml`: `ego-testkit = { path = "../testkit" }`, `tempfile = "3"` (AD-9, AD-11 S3).
-- [ ] 11.2 Create `crates/persistence-stoolap/tests/repository_conformance.rs`: build `StoolapRepository<ConformanceAggregate, _>` at a fresh `tempfile::TempDir` path, call `ego_testkit::assert_repository_conformance`. Fails to compile until 11.1 lands (AD-11 S3 RED).
+- [x] 11.1 Add `[dev-dependencies]` to `crates/persistence-stoolap/Cargo.toml`: `ego-testkit = { path = "../testkit" }`, `tempfile = "3"` (AD-9, AD-11 S3).
+- [x] 11.2 Create `crates/persistence-stoolap/tests/repository_conformance.rs`: build `StoolapRepository<ConformanceAggregate, _>` at a fresh `tempfile::TempDir` path, call `ego_testkit::assert_repository_conformance`. Fails to compile until 11.1 lands (AD-11 S3 RED).
 
 ## Phase 12: GREEN + Whole-Change Verification — S3 — PR 3
 
-- [ ] 12.1 `cargo test -p ego-persistence-stoolap` passes — all 11 harness scenarios green against `StoolapRepository` (spec R1, R2 subject 3).
-- [ ] 12.2 `cargo test --workspace` passes with no container runtime available; confirm no Testcontainers/Docker dependency anywhere in the root workspace (spec R2 combined with proposal R9, NG-8).
-- [ ] 12.3 Confirm `repository_tenant_scoping_postgres.rs` still passes unmodified (R11, proposal).
-- [ ] 12.4 Diff-read: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` absent from the whole-change file list (R6, R7, proposal NG-4/NG-6/KD-2).
-- [ ] 12.5 Record F-5 and F-6 in the PR description as named follow-ups (R14, proposal); confirm KD-1..KD-4 remain accurately stated and untouched.
+- [x] 12.1 `cargo test -p ego-persistence-stoolap` passes — all 11 harness scenarios green against `StoolapRepository` (spec R1, R2 subject 3).
+- [x] 12.2 `cargo test --workspace` passes with no container runtime available; confirm no Testcontainers/Docker dependency anywhere in the root workspace (spec R2 combined with proposal R9, NG-8).
+- [x] 12.3 Confirm `repository_tenant_scoping_postgres.rs` still passes unmodified (R11, proposal).
+- [x] 12.4 Diff-read: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` absent from the whole-change file list (R6, R7, proposal NG-4/NG-6/KD-2).
+- [x] 12.5 Record F-5 and F-6 in the PR description as named follow-ups (R14, proposal); confirm KD-1..KD-4 remain accurately stated and untouched.
 
 ## Deferred / Out of Scope (named debt, not tasks)
 
