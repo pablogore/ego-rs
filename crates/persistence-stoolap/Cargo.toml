@@ -15,3 +15,8 @@ serde_json = "1"
 ego-testkit = { path = "../testkit" }
 # Every test needs a database directory of its own.
 tempfile = "3"
+# Enables stoolap's own built-in I/O failpoints (WAL write/sync) so the
+# commit-time error-classification path in `save()` can be exercised without
+# a real disk failure. Feature-unified only into test builds; `cargo build`
+# never enables it (verify-remediation, spec R6/AD-5 criterion 4 follow-up).
+stoolap = { version = "0.4", features = ["test-failpoints"] }

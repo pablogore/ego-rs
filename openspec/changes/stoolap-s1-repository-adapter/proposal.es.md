@@ -190,46 +190,46 @@ nuevo. Después el adaptador, y después la tercera ejecución del harness.
 
 Cada uno es verificable de forma independiente y funciona además como criterio de éxito del cambio.
 
-- [ ] **R1 — El adaptador existe y satisface el contrato.** `StoolapRepository<A, F>` implementa
+- [x] **R1 — El adaptador existe y satisface el contrato.** `StoolapRepository<A, F>` implementa
       `ego_persistence_api::persistence::Repository<A>` y pasa íntegro el harness de IS-5.
-- [ ] **R2 — La concordancia entre backends se prueba, no se afirma.** El harness idéntico corre en
+- [x] **R2 — La concordancia entre backends se prueba, no se afirma.** El harness idéntico corre en
       verde contra `InMemoryRepository`, `PostgreSQLRepository` y `StoolapRepository`: un harness,
       tres sujetos, sin variantes por backend ni escenarios omitidos.
-- [ ] **R3 — La unicidad systemwide se sostiene de verdad.** Dos saves del mismo `aggregate_id` bajo
+- [x] **R3 — La unicidad systemwide se sostiene de verdad.** Dos saves del mismo `aggregate_id` bajo
       el ámbito systemwide producen una fila y aritmética de versión correcta: el modo de fallo que
       una columna de tenant anulable habría permitido (D-5) se prueba ausente, no se argumenta
       ausente.
-- [ ] **R4 — El centinela nunca escapa del adaptador.** Ningún valor visible al llamador, mensaje de
+- [x] **R4 — El centinela nunca escapa del adaptador.** Ningún valor visible al llamador, mensaje de
       error ni tipo retornado expone la codificación; el contrato `Option<&str>` de `Repository` se
       comporta de forma idéntica en las tres implementaciones, incluido `MissingTenant` ante
       `Some("")`.
-- [ ] **R5 — La durabilidad queda fijada por un test.** Un save confirmado sobrevive a un ciclo de
+- [x] **R5 — La durabilidad queda fijada por un test.** Un save confirmado sobrevive a un ciclo de
       cierre y reapertura, y el modo de sincronización configurado del adaptador se afirma en lugar
       de asumirse (D-6).
-- [ ] **R6 — Sin cambio de contrato.** `crates/persistence-api/**` queda sin modificar; ningún
+- [x] **R6 — Sin cambio de contrato.** `crates/persistence-api/**` queda sin modificar; ningún
       conjunto de métodos, límite, supertrait, cuerpo por defecto ni variante de error de ningún
       puerto cambia.
-- [ ] **R7 — Independencia de backend.** `crates/persistence-stoolap/` no nombra `sqlx`, `PgPool`,
+- [x] **R7 — Independencia de backend.** `crates/persistence-stoolap/` no nombra `sqlx`, `PgPool`,
       `ego-persistence`, ninguna migración de PostgreSQL ni ningún símbolo de PostgreSQL en su
       manifiesto ni en sus fuentes; `crates/persistence/**` no aparece en el diff.
-- [ ] **R8 — Integridad de dependencias y capas.** El `Cargo.toml` del crate nombra exactamente el
+- [x] **R8 — Integridad de dependencias y capas.** El `Cargo.toml` del crate nombra exactamente el
       conjunto de D-3; `cargo run -p xtask -- verify-layers` pasa sin violaciones nuevas y sin
       editar la matriz.
-- [ ] **R9 — El workspace raíz sigue libre de Docker.** `cargo test --workspace` pasa sin ningún
+- [x] **R9 — El workspace raíz sigue libre de Docker.** `cargo test --workspace` pasa sin ningún
       runtime de contenedores disponible, y ninguna dependencia de Testcontainers aparece en el
       workspace raíz.
-- [ ] **R10 — Contención del alcance.** No existe implementación Stoolap de ningún puerto distinto
+- [x] **R10 — Contención del alcance.** No existe implementación Stoolap de ningún puerto distinto
       de `Repository`, y no se introduce ninguna abstracción `StorageEngine`/dialecto/ORM/motor
       genérico.
-- [ ] **R11 — El comportamiento existente no cambia.** `InMemoryRepository` y
+- [x] **R11 — El comportamiento existente no cambia.** `InMemoryRepository` y
       `PostgreSQLRepository` son idénticos en comportamiento; cualquier divergencia que exponga el
       harness se registra como deuda (NG-9), no se corrige aquí.
-- [ ] **R12 — Fidelidad de conflictos.** Tanto un `expected_version` obsoleto como una carrera real
+- [x] **R12 — Fidelidad de conflictos.** Tanto un `expected_version` obsoleto como una carrera real
       con un escritor concurrente se manifiestan como `PersistenceError::Conflict`, y no se añade
       ninguna variante de error.
-- [ ] **R13 — Propiedad del harness.** El harness se declara una sola vez, en `ego-testkit`, y cada
+- [x] **R13 — Propiedad del harness.** El harness se declara una sola vez, en `ego-testkit`, y cada
       backend lo consume en lugar de copiarlo.
-- [ ] **R14 — El trabajo diferido se nombra, no se resuelve en silencio.** F-1 a F-4 quedan
+- [x] **R14 — El trabajo diferido se nombra, no se resuelve en silencio.** F-1 a F-4 quedan
       registrados con responsables y prerrequisitos, y nada de esas fronteras se toca.
 
 ## Deuda conocida (registrada, no corregida)

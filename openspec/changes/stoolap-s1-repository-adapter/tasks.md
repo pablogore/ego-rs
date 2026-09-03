@@ -128,6 +128,36 @@ systemwide-duplicate proof to S2b. Recorded as a decision, not an improvisation.
 - [x] 12.4 Diff-read: `crates/persistence-api/**`, `crates/persistence/**`, `crates/runtime/**`, `crates/effect-store/**` absent from the whole-change file list (R6, R7, proposal NG-4/NG-6/KD-2).
 - [x] 12.5 Record F-5 and F-6 in the PR description as named follow-ups (R14, proposal); confirm KD-1..KD-4 remain accurately stated and untouched.
 
+## Phase 13: Verify Remediation — sdd-verify FAIL Follow-up
+
+Fixes the 4 findings from the `sdd-verify` FAIL report (Engram topic
+`sdd/stoolap-s1-repository-adapter/verify-report`) on top of the already-merged
+Phases 1-12. Strict TDD (RED then GREEN) applied to every new test.
+
+- [x] 13.1 CRITICAL — Add a unit test for spec R6's first scenario (a fresh aggregate
+      saved with a nonzero expected version is a conflict), covering
+      `repository.rs`'s `None => Conflict { actual: 0 }` arm. RED verified by
+      corrupting `actual` in that arm, then restored (commit d58cba0).
+- [x] 13.2 WARNING — Add unit tests for the 3 untested `is_write_conflict()`
+      classification arms (`UniqueConstraint`, `TransactionAborted`,
+      `LockAcquisitionFailed`/`DatabaseLocked`). RED verified by inverting each
+      arm's boolean, then restored (commit da6f71d).
+- [x] 13.3 WARNING — Add unit tests for `save()`'s step-6 re-read fallback and the
+      commit-time error-classification path. Added a `#[cfg(test)]`-only
+      thread-local hook seam that deterministically interleaves a peer's full
+      commit between the victim's read and write (design AD-5 criterion 4), and
+      enabled stoolap's built-in `test-failpoints` dev-dependency to arm a WAL
+      write failure at commit time. Guarded every database-touching test with
+      stoolap's own failpoint lock to eliminate cross-test flakiness from the
+      process-wide failpoint flags. RED verified for both new tests by
+      temporarily disabling the re-read fallback branch and by short-circuiting
+      the commit-error arm, then restored (commit ddac27b).
+- [x] 13.4 WARNING — Check the DoD checklist boxes in `proposal.md` and
+      `proposal.es.md` (R1-R14) that were already true but left unchecked.
+- [x] 13.5 Re-run `cargo test -p ego-persistence-stoolap`, `cargo test --workspace`,
+      and `cargo clippy -p ego-persistence-stoolap --all-targets -- -D warnings`
+      to confirm the whole change stays green after remediation.
+
 ## Deferred / Out of Scope (named debt, not tasks)
 
 - **KD-1** — `Snapshot`/`OffsetStore`/`DedupStore` remain without a shared conformance harness. No task adds one (proposal NG-1, F-1).
