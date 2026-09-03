@@ -50,26 +50,26 @@ systemwide-duplicate proof to S2b. Recorded as a decision, not an improvisation.
 
 ## Phase 1: RED — Harness Call Sites Before the Harness Exists — S1 — PR 1
 
-- [ ] 1.1 Create `crates/testkit/tests/repository_conformance_memory.rs`: build `InMemoryRepository<ConformanceAggregate, _>`, call `ego_testkit::assert_repository_conformance`. Fails to compile — neither symbol exists yet (AD-11).
-- [ ] 1.2 Create `integration-tests/tests/infrastructure/repository_conformance_postgres.rs`: build `PostgreSQLRepository<ConformanceAggregate, _>` against `isolated_database()`, call the same harness function; register one `mod repository_conformance_postgres;` line in `integration-tests/tests/infrastructure.rs`. Fails to compile — same reason.
+- [x] 1.1 Create `crates/testkit/tests/repository_conformance_memory.rs`: build `InMemoryRepository<ConformanceAggregate, _>`, call `ego_testkit::assert_repository_conformance`. Fails to compile — neither symbol exists yet (AD-11).
+- [x] 1.2 Create `integration-tests/tests/infrastructure/repository_conformance_postgres.rs`: build `PostgreSQLRepository<ConformanceAggregate, _>` against `isolated_database()`, call the same harness function; register one `mod repository_conformance_postgres;` line in `integration-tests/tests/infrastructure.rs`. Fails to compile — same reason.
 
 ## Phase 2: GREEN — The Shared Harness and the Memory Run — S1 — PR 1
 
-- [ ] 2.1 Create `crates/testkit/src/repository_conformance.rs`: `ConformanceAggregate`, `conformance_aggregate(value: &str)`, and `assert_repository_conformance<R: Repository<ConformanceAggregate> + ?Sized>(repository: &mut R)` implementing the 11 scenarios (design AD-8 table) — spec R1, R2, R3, R4, R5, R7, R8. Doc comment names the 4 deliberate exclusions: fresh+nonzero `expected_version` (EC-1, spec R6), durability, concurrency, payload shape.
-- [ ] 2.2 Export from `crates/testkit/src/lib.rs`: `pub mod repository_conformance;` plus `pub use` for the three public items, alongside the three existing conformance harnesses.
-- [ ] 2.3 Confirm 1.1 now compiles and passes — all 11 scenarios green against `InMemoryRepository` (spec R2 subject 1).
+- [x] 2.1 Create `crates/testkit/src/repository_conformance.rs`: `ConformanceAggregate`, `conformance_aggregate(value: &str)`, and `assert_repository_conformance<R: Repository<ConformanceAggregate> + ?Sized>(repository: &mut R)` implementing the 11 scenarios (design AD-8 table) — spec R1, R2, R3, R4, R5, R7, R8. Doc comment names the 4 deliberate exclusions: fresh+nonzero `expected_version` (EC-1, spec R6), durability, concurrency, payload shape.
+- [x] 2.2 Export from `crates/testkit/src/lib.rs`: `pub mod repository_conformance;` plus `pub use` for the three public items, alongside the three existing conformance harnesses.
+- [x] 2.3 Confirm 1.1 now compiles and passes — all 11 scenarios green against `InMemoryRepository` (spec R2 subject 1).
 
 ## Phase 3: RED+GREEN — The PostgreSQL Run — S1 — PR 1
 
-- [ ] 3.1 Confirm 1.2 now compiles and passes against real PostgreSQL — all 11 scenarios green (spec R2 subject 2).
-- [ ] 3.2 Confirm `repository_tenant_scoping_postgres.rs` still passes unmodified — its 3 tests are now a subset of the shared harness (design AD-9 criterion 4).
+- [x] 3.1 Confirm 1.2 now compiles and passes against real PostgreSQL — all 11 scenarios green (spec R2 subject 2).
+- [x] 3.2 Confirm `repository_tenant_scoping_postgres.rs` still passes unmodified — its 3 tests are now a subset of the shared harness (design AD-9 criterion 4).
 
 ## Phase 4: Verification — S1 — PR 1
 
-- [ ] 4.1 `cargo test -p ego-testkit` passes with the Memory conformance run green.
-- [ ] 4.2 `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite` passes with the PostgreSQL conformance run green.
-- [ ] 4.3 Confirm zero new dependency edges: `crates/persistence-memory/**` untouched (EC-2); `crates/testkit/Cargo.toml` and `integration-tests/Cargo.toml` unchanged (AD-9 criteria 1–2).
-- [ ] 4.4 Confirm the harness's doc comment states all 4 exclusions in full (AD-8 criterion 5) and that the fresh+nonzero scenario appears nowhere in the scenario list (spec R6, second scenario).
+- [x] 4.1 `cargo test -p ego-testkit` passes with the Memory conformance run green.
+- [x] 4.2 `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite` passes with the PostgreSQL conformance run green.
+- [x] 4.3 Confirm zero new dependency edges: `crates/persistence-memory/**` untouched (EC-2); `crates/testkit/Cargo.toml` and `integration-tests/Cargo.toml` unchanged (AD-9 criteria 1–2).
+- [x] 4.4 Confirm the harness's doc comment states all 4 exclusions in full (AD-8 criterion 5) and that the fresh+nonzero scenario appears nowhere in the scenario list (spec R6, second scenario).
 
 ## Phase 5: Foundation — Crate Skeleton & Layer Gate — S2 — PR 2
 

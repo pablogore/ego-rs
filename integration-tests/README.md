@@ -371,6 +371,20 @@ row is `aggregates` catching up, not a new pattern.
 |---|---|---|---|
 | Systemwide-scope save/load/delete round trip, plus tenant isolation both ways | A systemwide-scoped aggregate saves, loads, re-saves (proving the lock-select finds the existing row rather than treating every save as new) and deletes correctly; a concrete tenant and the systemwide scope never collide on a shared `aggregate_id`, in either direction | `NULL = NULL` is never `TRUE` in real SQL — no in-memory double keyed on `Option<TenantId>` can misrepresent this, since `Option::eq` treats `None == None` as `true` by construction. Whether `INSERT ... ON CONFLICT` actually names a matching unique index is likewise only observable against a real catalog | `tests/infrastructure/repository_tenant_scoping_postgres.rs` |
 
+## Repository conformance (shared harness)
+
+STOOLAP-S1 (design AD-8/AD-9): `assert_repository_conformance` (`crates/testkit/src/repository_conformance.rs`)
+is one shared contract judging every `Repository` implementation — `InMemoryRepository`,
+`PostgreSQLRepository`, and later `StoolapRepository` — against the identical eleven
+scenarios, so the three cannot silently drift the way the pre-harness suite let
+`InMemoryRepository` and `PostgreSQLRepository` diverge undetected. This row is the
+harness's PostgreSQL subject; the in-memory subject runs in-process as
+`crates/testkit/tests/repository_conformance_memory.rs` and needs no ledger row here.
+
+| Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
+|---|---|---|---|
+| `PostgreSQLRepository` satisfies the same eleven scenarios as `InMemoryRepository` | Version sequencing, truthful stale-version conflicts, not-found on absent load/delete, permanent delete, `MissingTenant` on an empty tenant identifier, and systemwide/tenant isolation all hold against a real `aggregates` table, not just the in-memory double | The harness is written once against the `Repository` trait; only running it against a real pool proves `PostgreSQLRepository`'s SQL actually satisfies the same contract the in-memory adapter satisfies in-process | `tests/infrastructure/repository_conformance_postgres.rs` |
+
 ## Schema and catalog assertions
 
 Not a scenario, and deliberately not named `*_postgres` like its neighbours: it

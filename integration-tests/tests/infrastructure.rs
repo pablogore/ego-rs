@@ -106,6 +106,11 @@ mod infrastructure {
     mod read_side_progress_postgres;
     mod receipt_identity_isolation_postgres;
     mod replay_from_postgres;
+    /// STOOLAP-S1 (design AD-9, D-10): the shared `Repository` conformance
+    /// harness's PostgreSQL run — one of the harness's three subjects,
+    /// judged against the identical scenarios `InMemoryRepository` and
+    /// `StoolapRepository` satisfy.
+    mod repository_conformance_postgres;
     /// KD-2: `PostgreSQLRepository`'s tenant-scoped predicates against the
     /// `aggregates` table, including the systemwide (`tenant_id IS NULL`)
     /// scope no prior test here exercised.
