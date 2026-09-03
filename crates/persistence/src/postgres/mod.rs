@@ -7,6 +7,9 @@ pub mod migrations;
 pub mod read_side_dedup;
 /// The durable [`ego_domain::read_side::OffsetStore`].
 pub mod read_side_offset;
+/// The durable [`ego_persistence_api::read_side::claim::ReadSideClaimStore`]
+/// (PROD-014C).
+pub mod read_side_claim;
 pub mod repository;
 
 /// The durable operation-reservation store.
@@ -14,6 +17,7 @@ pub mod reservation;
 pub mod snapshot;
 
 pub use event_store::PostgreSQLEventStore;
+pub use read_side_claim::PostgreSQLReadSideClaimStore;
 pub use read_side_dedup::PostgreSQLDedupStore;
 pub use read_side_offset::PostgreSQLOffsetStore;
 pub use repository::PostgreSQLRepository;

@@ -52,6 +52,11 @@ ego-domain = { path = "../crates/domain" }
 # Stoolap/in-memory tiers stay crate-local (Tier 1/Tier 2-Stoolap, unmoved).
 ego-effect-store = { path = "../crates/effect-store", features = ["postgres"] }
 ego-persistence = { path = "../crates/persistence" }
+# `ClaimId`/`ClaimFence`/`ClaimError`/`ReadSideClaimStore` (PROD-014C) are not
+# yet re-exported through `ego-domain::read_side` — that re-export is Phase 5
+# (PR3, task 5.7). Depended on directly here, same reasoning as
+# `crates/persistence/Cargo.toml`.
+ego-persistence-api = { path = "../crates/persistence-api" }
 ego-runtime = { path = "../crates/runtime" }
 ego-security-sdk = { path = "../crates/security-sdk" }
 ego-service-sdk = { path = "../crates/service-sdk" }

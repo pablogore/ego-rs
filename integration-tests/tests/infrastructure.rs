@@ -98,6 +98,14 @@ mod infrastructure {
     /// main suite; see the file's own doc comment for what is excluded.
     mod pg14_compatibility;
     mod purge_progress_postgres;
+    /// PROD-014C (PR2): `PostgreSQLReadSideClaimStore` against real
+    /// PostgreSQL — the execution-exclusion gap `read_side_progress_postgres`
+    /// (PROD-014B) names but does not close: concurrent-second-claimant
+    /// exclusion, expiry-driven takeover, stale-owner fencing (with a
+    /// token-isolation probe), renewal extending a live lease, no ordering
+    /// interference with a stream's events, and immediate reclaim on
+    /// release.
+    mod read_side_claiming_postgres;
     /// PROD-014B (PR2): the durable read-side `OffsetStore`/`DedupStore` pair
     /// against real PostgreSQL — restart survival, tenant isolation,
     /// last-write-wins offsets, dedup convergence (sequential and

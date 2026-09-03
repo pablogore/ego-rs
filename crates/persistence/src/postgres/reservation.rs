@@ -104,7 +104,7 @@ fn storage(err: sqlx::Error) -> ReservationError {
 ///
 /// The exhaustion the port names is therefore the *storage* limit, not `u64`'s. That
 /// is the honest reading: a token that cannot be stored cannot fence anything.
-fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
+pub(crate) fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
     i64::try_from(token.value()).map_err(|_| ReservationError::FencingExhausted)
 }
 
