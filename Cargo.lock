@@ -905,9 +905,11 @@ name = "ego-persistence-stoolap"
 version = "0.1.0"
 dependencies = [
  "ego-persistence-api",
+ "ego-testkit",
  "serde",
  "serde_json",
  "stoolap",
+ "tempfile",
 ]
 
 [[package]]
