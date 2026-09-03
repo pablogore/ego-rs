@@ -24,6 +24,7 @@ mod jwt;
 mod logger;
 mod observability_conformance;
 mod providers;
+mod repository_conformance;
 mod reservation;
 mod reservation_conformance;
 mod security;
@@ -47,6 +48,9 @@ pub use observability_conformance::{
     PROBE_GAUGE_METRIC, PROBE_HISTOGRAM_METRIC,
 };
 pub use providers::{RecordingDataProvider, StaticDataProvider};
+pub use repository_conformance::{
+    assert_repository_conformance, conformance_aggregate, ConformanceAggregate,
+};
 pub use reservation::{InMemoryOperationReservationStore, TestClock};
 pub use reservation_conformance::{
     assert_lease_mutation_conformance, assert_purge_conformance,
