@@ -19,6 +19,6 @@ pub mod tagger;
 // renamed `projection_state` at its new home; the alias below keeps this
 // crate's path unchanged.
 pub use ego_persistence_api::read_side::{
-    dedup, event_stream, event_tag, offset, projection_state as projection_state_store, state,
-    store,
+    claim, dedup, event_stream, event_tag, offset, projection_state as projection_state_store,
+    state, store,
 };

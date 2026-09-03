@@ -87,19 +87,19 @@ through the port under test.
 
 ## Phase 5: Session Wiring — PR 3
 
-- [ ] 5.1 RED `crates/domain/src/read_side/session.rs` `#[cfg(test)]`, scripted doubles, no pool: a refused `try_claim` (`Ok(None)`) ⇒ `fetch` never called, handler never invoked, `execute()` returns `Ok(None)` (IS-4, AD-4).
-- [ ] 5.2 RED: `renew` returning `StaleOwner` ⇒ no `mark_seen`, no `write_offset`, error propagates as `ProjectionError::transient` naming the withheld writes (AD-6).
-- [ ] 5.3 RED: `release` is called on the success path, both empty-early-return paths (`events.is_empty()`, `unique_events.is_empty()`), and the handler-error path.
-- [ ] 5.4 GREEN: add `ReadSideClaiming { store, owner, clock, lease }` and `with_claiming(...)` as an optional knob — every existing `ReadSideSession::new` call site compiles unchanged; split `execute()` into the `try_claim` gate + extracted `run_batch` body, with `release` called unconditionally on every exit path (AD-6).
-- [ ] 5.5 GREEN: insert the `renew` call between `handler.handle()` and the commit loop inside `run_batch`; map `StaleOwner` to `ProjectionError::transient` with AD-6's exact wording, other errors to `ProjectionError::transient(format!("claim renew failed: {other}"))`.
-- [ ] 5.6 Rustdoc on `ReadSideClaiming::owner`: state `OwnerId` per-process-instance uniqueness is the host's obligation, the port cannot verify it, and name the consequence of violating it (documented Open Question — not a code gap to close).
-- [ ] 5.7 `crates/domain/src/read_side/mod.rs`: re-export `claim` types at the module's existing path shape, mirroring `offset`/`dedup`.
+- [x] 5.1 RED `crates/domain/src/read_side/session.rs` `#[cfg(test)]`, scripted doubles, no pool: a refused `try_claim` (`Ok(None)`) ⇒ `fetch` never called, handler never invoked, `execute()` returns `Ok(None)` (IS-4, AD-4).
+- [x] 5.2 RED: `renew` returning `StaleOwner` ⇒ no `mark_seen`, no `write_offset`, error propagates as `ProjectionError::transient` naming the withheld writes (AD-6).
+- [x] 5.3 RED: `release` is called on the success path, both empty-early-return paths (`events.is_empty()`, `unique_events.is_empty()`), and the handler-error path.
+- [x] 5.4 GREEN: add `ReadSideClaiming { store, owner, clock, lease }` and `with_claiming(...)` as an optional knob — every existing `ReadSideSession::new` call site compiles unchanged; split `execute()` into the `try_claim` gate + extracted `run_batch` body, with `release` called unconditionally on every exit path (AD-6).
+- [x] 5.5 GREEN: insert the `renew` call between `handler.handle()` and the commit loop inside `run_batch`; map `StaleOwner` to `ProjectionError::transient` with AD-6's exact wording, other errors to `ProjectionError::transient(format!("claim renew failed: {other}"))`.
+- [x] 5.6 Rustdoc on `ReadSideClaiming::owner`: state `OwnerId` per-process-instance uniqueness is the host's obligation, the port cannot verify it, and name the consequence of violating it (documented Open Question — not a code gap to close).
+- [x] 5.7 `crates/domain/src/read_side/mod.rs`: re-export `claim` types at the module's existing path shape, mirroring `offset`/`dedup`.
 
 ## Phase 6: Scheduler Wiring — PR 3
 
-- [ ] 6.1 RED `crates/runtime/src/read_side/scheduler.rs`: `ProjectionSpec::claims(claiming)` sets the knob, absent by default (mirrors `reporter`/`interval`/`on_error`); `TagSchedulerImpl::start_projection` attaches it to each session it constructs (AD-7).
-- [ ] 6.2 GREEN: add `pub fn claims(mut self, claiming: ReadSideClaiming) -> Self` to `ProjectionSpec`; move `spec.claiming` onto `TagSchedulerImpl` inside `spawn`; `start_projection` reads `self.claiming` and calls `.with_claiming(...)` when present. `TagScheduler::start_projection`'s public signature stays unchanged — no external implementor breaks.
-- [ ] 6.3 Confirm `start_projection` remains today's sequential for-loop — no cross-tag concurrency added (D-12, OOS-5); no cross-tick claim state, no in-memory fence cache.
+- [x] 6.1 RED `crates/runtime/src/read_side/scheduler.rs`: `ProjectionSpec::claims(claiming)` sets the knob, absent by default (mirrors `reporter`/`interval`/`on_error`); `TagSchedulerImpl::start_projection` attaches it to each session it constructs (AD-7).
+- [x] 6.2 GREEN: add `pub fn claims(mut self, claiming: ReadSideClaiming) -> Self` to `ProjectionSpec`; move `spec.claiming` onto `TagSchedulerImpl` inside `spawn`; `start_projection` reads `self.claiming` and calls `.with_claiming(...)` when present. `TagScheduler::start_projection`'s public signature stays unchanged — no external implementor breaks.
+- [x] 6.3 Confirm `start_projection` remains today's sequential for-loop — no cross-tag concurrency added (D-12, OOS-5); no cross-tick claim state, no in-memory fence cache.
 
 ## Phase 7: Production Gate — PR 4
 
