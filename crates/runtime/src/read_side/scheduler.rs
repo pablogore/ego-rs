@@ -15,6 +15,7 @@ use ego_domain::read_side::handler::Handler;
 use ego_domain::read_side::offset::OffsetStore;
 use ego_domain::read_side::progress::{NoopProgressReporter, ProgressReporter};
 use ego_domain::read_side::scheduler::TagScheduler;
+use ego_domain::read_side::session::ReadSideClaiming;
 use ego_domain::read_side::store::ReadSideStore;
 
 /// Scheduler for managing tag-based projection processing.
@@ -30,6 +31,10 @@ where
     batch_executor: BatchExecutor<E>,
     /// Tracks active projections and their tag processing state
     active_projections: HashMap<String, ProjectionState>,
+    /// Claims each `(tag, tenant)` stream before processing it (PROD-014C
+    /// AD-7). Absent by default; set via [`ProjectionSpec::claims`] and
+    /// moved onto this scheduler by [`TagSchedulerImpl::spawn`].
+    claiming: Option<ReadSideClaiming>,
 }
 
 /// State tracking for active projections
@@ -54,6 +59,7 @@ where
             backpressure,
             batch_executor,
             active_projections: HashMap::new(),
+            claiming: None,
         }
     }
 }
@@ -87,7 +93,7 @@ where
             // Check if we can process this tag (respect concurrency limits)
             if self.backpressure.can_process().await {
                 // Create a session for this tag, threading its own tenant
-                let session = ego_domain::read_side::session::ReadSideSession::new(
+                let mut session = ego_domain::read_side::session::ReadSideSession::new(
                     projection_id.clone(),
                     tag.clone(),
                     tenant,
@@ -98,6 +104,9 @@ where
                     offset_store.clone(),
                     reporter.clone(),
                 );
+                if let Some(claiming) = &self.claiming {
+                    session = session.with_claiming(claiming.clone());
+                }
 
                 // Execute the session
                 self.batch_executor.execute_session(session).await?;
@@ -182,6 +191,10 @@ pub struct ProjectionSpec<F, H, S, D, O, R = NoopProgressReporter> {
     reporter: R,
     interval: Duration,
     on_error: Box<dyn Fn(Box<dyn std::error::Error>) + Send + Sync>,
+    /// Claims each `(tag, tenant)` stream before processing it. Absent by
+    /// default, exactly as `reporter`/`interval`/`on_error` are (PROD-014C
+    /// AD-7).
+    claiming: Option<ReadSideClaiming>,
 }
 
 impl<F, H, S, D, O> ProjectionSpec<F, H, S, D, O, NoopProgressReporter> {
@@ -206,6 +219,7 @@ impl<F, H, S, D, O> ProjectionSpec<F, H, S, D, O, NoopProgressReporter> {
             reporter: NoopProgressReporter,
             interval: Duration::from_secs(1),
             on_error: Box::new(|_| {}),
+            claiming: None,
         }
     }
 }
@@ -230,6 +244,7 @@ impl<F, H, S, D, O, R> ProjectionSpec<F, H, S, D, O, R> {
             reporter,
             interval: self.interval,
             on_error: self.on_error,
+            claiming: self.claiming,
         }
     }
 
@@ -240,6 +255,14 @@ impl<F, H, S, D, O, R> ProjectionSpec<F, H, S, D, O, R> {
         on_error: impl Fn(Box<dyn std::error::Error>) + Send + Sync + 'static,
     ) -> Self {
         self.on_error = Box::new(on_error);
+        self
+    }
+
+    /// Claims each `(tag, tenant)` stream before processing it. Absent by
+    /// default, exactly as `reporter`/`interval`/`on_error` are (PROD-014C
+    /// AD-7).
+    pub fn claims(mut self, claiming: ReadSideClaiming) -> Self {
+        self.claiming = Some(claiming);
         self
     }
 }
@@ -295,10 +318,12 @@ where
             reporter,
             interval,
             on_error,
+            claiming,
         } = spec;
 
         let (stop_tx, mut stop_signal) = watch::channel(false);
         let mut scheduler = self;
+        scheduler.claiming = claiming;
         let task = tokio::spawn(async move {
             loop {
                 if *stop_signal.borrow() {
@@ -878,6 +903,122 @@ mod tests {
                 "users-by-tenant:tenant-b".to_string()
             )),
             "tenant-b's tag must reach fetch paired with tenant-b, got: {seen:?}"
+        );
+    }
+
+    // ---- PROD-014C Phase 6: the `claims` knob ----
+
+    /// A `ReadSideClaimStore` that always refuses and signals every
+    /// `try_claim` call, so a test can prove the knob reached the session
+    /// without relying on a sleep loop.
+    struct RefusingClaimStore {
+        try_claim_tx: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl ego_domain::read_side::claim::ReadSideClaimStore for RefusingClaimStore {
+        async fn try_claim(
+            &self,
+            _claim_id: &ego_domain::read_side::claim::ClaimId,
+            _owner_id: &ego_domain::operation::OwnerId,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<
+            Option<ego_domain::read_side::claim::ClaimFence>,
+            ego_domain::read_side::claim::ClaimError,
+        > {
+            let _ = self.try_claim_tx.send(());
+            Ok(None)
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_domain::read_side::claim::ClaimFence,
+            _lease_until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_domain::read_side::claim::ClaimError> {
+            Ok(())
+        }
+
+        async fn release(
+            &self,
+            _fence: &ego_domain::read_side::claim::ClaimFence,
+        ) -> Result<(), ego_domain::read_side::claim::ClaimError> {
+            Ok(())
+        }
+    }
+
+    struct FixedClock;
+
+    impl ego_domain::time::Clock for FixedClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::Utc::now()
+        }
+    }
+
+    fn refusing_claiming(try_claim_tx: mpsc::UnboundedSender<()>) -> ReadSideClaiming {
+        ReadSideClaiming {
+            store: Arc::new(RefusingClaimStore { try_claim_tx }),
+            owner: ego_domain::operation::OwnerId::new("owner-1"),
+            clock: Arc::new(FixedClock),
+            lease: chrono::Duration::seconds(30),
+        }
+    }
+
+    /// `ProjectionSpec::claims` is absent by default: a spec built with no
+    /// call to `.claims(...)` carries no claiming knob, mirroring
+    /// `reporter`/`interval`/`on_error`'s own defaults (task 6.1).
+    #[test]
+    fn projection_spec_claims_is_absent_by_default() {
+        let spec = ProjectionSpec::new(
+            "proj",
+            || Vec::<(EventTag, String)>::new(),
+            NoopHandler,
+            FakeStore,
+            FakeDedup,
+            FakeOffset,
+        );
+
+        assert!(
+            spec.claiming.is_none(),
+            "claims must default to absent, exactly as reporter/interval/on_error do"
+        );
+    }
+
+    /// `TagSchedulerImpl::start_projection` attaches the configured claiming
+    /// to every session it constructs: a claim store that refuses every
+    /// `(tag, tenant)` pair must prevent `fetch` from ever being called for
+    /// any of them (task 6.1, AD-7).
+    #[tokio::test]
+    async fn start_projection_attaches_claiming_to_every_session_it_constructs() {
+        let (try_claim_tx, mut try_claim_rx) = mpsc::unbounded_channel::<()>();
+        let store = RecordingStore::default();
+        let mut scheduler = TagSchedulerImpl::<serde_json::Value>::new(ReadSideConfig::default());
+        scheduler.claiming = Some(refusing_claiming(try_claim_tx));
+
+        scheduler
+            .start_projection(
+                "proj".to_string(),
+                vec![
+                    (EventTag::new("tenant-a"), "tenant-a".to_string()),
+                    (EventTag::new("tenant-b"), "tenant-b".to_string()),
+                ],
+                NoopHandler,
+                store.clone(),
+                FakeDedup,
+                FakeOffset,
+                NoopProgressReporter,
+            )
+            .await
+            .expect("start_projection succeeds even when every claim is refused");
+
+        // Every tag's claim attempt must have been observed — proves the
+        // knob was attached to each session, not just the first.
+        expect_signal(&mut try_claim_rx, "tenant-a's claim attempt").await;
+        expect_signal(&mut try_claim_rx, "tenant-b's claim attempt").await;
+
+        assert!(
+            store.seen.lock().unwrap().is_empty(),
+            "a refused claim must prevent fetch for every tag, got: {:?}",
+            store.seen.lock().unwrap()
         );
     }
 }

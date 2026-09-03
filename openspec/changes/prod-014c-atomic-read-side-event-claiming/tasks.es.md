@@ -89,19 +89,19 @@ estado final leído con `sqlx::query_as` crudo, nunca a través del puerto bajo 
 
 ## Fase 5: Wiring de Sesión — PR 3
 
-- [ ] 5.1 ROJO `crates/domain/src/read_side/session.rs` `#[cfg(test)]`, dobles con guion, sin pool: un `try_claim` rechazado (`Ok(None)`) ⇒ `fetch` nunca se llama, el handler nunca se invoca, `execute()` devuelve `Ok(None)` (IS-4, AD-4).
-- [ ] 5.2 ROJO: `renew` devolviendo `StaleOwner` ⇒ ni `mark_seen` ni `write_offset`, el error se propaga como `ProjectionError::transient` nombrando las escrituras retenidas (AD-6).
-- [ ] 5.3 ROJO: `release` se llama en el camino de éxito, en ambos caminos de retorno temprano vacío (`events.is_empty()`, `unique_events.is_empty()`), y en el camino de error del handler.
-- [ ] 5.4 VERDE: agregar `ReadSideClaiming { store, owner, clock, lease }` y `with_claiming(...)` como un knob opcional — cada sitio de llamada existente a `ReadSideSession::new` compila sin cambios; dividir `execute()` en la puerta `try_claim` + el cuerpo extraído `run_batch`, con `release` llamado incondicionalmente en cada camino de salida (AD-6).
-- [ ] 5.5 VERDE: insertar la llamada `renew` entre `handler.handle()` y el bucle de commit dentro de `run_batch`; mapear `StaleOwner` a `ProjectionError::transient` con la redacción exacta de AD-6, otros errores a `ProjectionError::transient(format!("claim renew failed: {other}"))`.
-- [ ] 5.6 Rustdoc en `ReadSideClaiming::owner`: declarar que la unicidad de `OwnerId` por instancia de proceso es obligación del host, que el puerto no puede verificarla, y nombrar la consecuencia de violarla (Pregunta Abierta documentada — no una brecha de código por cerrar).
-- [ ] 5.7 `crates/domain/src/read_side/mod.rs`: re-exportar los tipos de `claim` en la forma de ruta existente del módulo, replicando `offset`/`dedup`.
+- [x] 5.1 ROJO `crates/domain/src/read_side/session.rs` `#[cfg(test)]`, dobles con guion, sin pool: un `try_claim` rechazado (`Ok(None)`) ⇒ `fetch` nunca se llama, el handler nunca se invoca, `execute()` devuelve `Ok(None)` (IS-4, AD-4).
+- [x] 5.2 ROJO: `renew` devolviendo `StaleOwner` ⇒ ni `mark_seen` ni `write_offset`, el error se propaga como `ProjectionError::transient` nombrando las escrituras retenidas (AD-6).
+- [x] 5.3 ROJO: `release` se llama en el camino de éxito, en ambos caminos de retorno temprano vacío (`events.is_empty()`, `unique_events.is_empty()`), y en el camino de error del handler.
+- [x] 5.4 VERDE: agregar `ReadSideClaiming { store, owner, clock, lease }` y `with_claiming(...)` como un knob opcional — cada sitio de llamada existente a `ReadSideSession::new` compila sin cambios; dividir `execute()` en la puerta `try_claim` + el cuerpo extraído `run_batch`, con `release` llamado incondicionalmente en cada camino de salida (AD-6).
+- [x] 5.5 VERDE: insertar la llamada `renew` entre `handler.handle()` y el bucle de commit dentro de `run_batch`; mapear `StaleOwner` a `ProjectionError::transient` con la redacción exacta de AD-6, otros errores a `ProjectionError::transient(format!("claim renew failed: {other}"))`.
+- [x] 5.6 Rustdoc en `ReadSideClaiming::owner`: declarar que la unicidad de `OwnerId` por instancia de proceso es obligación del host, que el puerto no puede verificarla, y nombrar la consecuencia de violarla (Pregunta Abierta documentada — no una brecha de código por cerrar).
+- [x] 5.7 `crates/domain/src/read_side/mod.rs`: re-exportar los tipos de `claim` en la forma de ruta existente del módulo, replicando `offset`/`dedup`.
 
 ## Fase 6: Wiring del Scheduler — PR 3
 
-- [ ] 6.1 ROJO `crates/runtime/src/read_side/scheduler.rs`: `ProjectionSpec::claims(claiming)` fija el knob, ausente por defecto (replica `reporter`/`interval`/`on_error`); `TagSchedulerImpl::start_projection` lo adjunta a cada sesión que construye (AD-7).
-- [ ] 6.2 VERDE: agregar `pub fn claims(mut self, claiming: ReadSideClaiming) -> Self` a `ProjectionSpec`; mover `spec.claiming` a `TagSchedulerImpl` dentro de `spawn`; `start_projection` lee `self.claiming` y llama a `.with_claiming(...)` cuando está presente. La firma pública de `TagScheduler::start_projection` permanece sin cambios — ningún implementador externo se rompe.
-- [ ] 6.3 Confirmar que `start_projection` permanece como el bucle for secuencial de hoy — sin concurrencia entre tags agregada (D-12, OOS-5); sin estado de reclamo entre ticks, sin caché de fence en memoria.
+- [x] 6.1 ROJO `crates/runtime/src/read_side/scheduler.rs`: `ProjectionSpec::claims(claiming)` fija el knob, ausente por defecto (replica `reporter`/`interval`/`on_error`); `TagSchedulerImpl::start_projection` lo adjunta a cada sesión que construye (AD-7).
+- [x] 6.2 VERDE: agregar `pub fn claims(mut self, claiming: ReadSideClaiming) -> Self` a `ProjectionSpec`; mover `spec.claiming` a `TagSchedulerImpl` dentro de `spawn`; `start_projection` lee `self.claiming` y llama a `.with_claiming(...)` cuando está presente. La firma pública de `TagScheduler::start_projection` permanece sin cambios — ningún implementador externo se rompe.
+- [x] 6.3 Confirmar que `start_projection` permanece como el bucle for secuencial de hoy — sin concurrencia entre tags agregada (D-12, OOS-5); sin estado de reclamo entre ticks, sin caché de fence en memoria.
 
 ## Fase 7: Gate de Producción — PR 4
 
