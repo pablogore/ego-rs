@@ -6,6 +6,12 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 ego-domain = { path = "../domain" }
+# `ClaimId`/`ClaimFence`/`ClaimError`/`ReadSideClaimStore` (PROD-014C) are not
+# yet re-exported through `ego-domain::read_side` — that re-export is Phase 5
+# (PR3, task 5.7). Depended on directly here so this crate's adapter can land
+# first, same as every other `ego-persistence-api::read_side::*` item before
+# CORE-PERSIST-A S1 added the domain-level re-export.
+ego-persistence-api = { path = "../persistence-api" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "migrate"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }

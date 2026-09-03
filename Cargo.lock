@@ -866,6 +866,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ego-domain",
+ "ego-persistence-api",
  "log",
  "serde",
  "serde_json",

@@ -62,10 +62,10 @@ Required Semantics are unaffected — the deviation is delivery-slicing only.
 
 ## Phase 3: PostgreSQL Adapter — PR 2
 
-- [ ] 3.1 GREEN `crates/persistence/src/postgres/read_side_claim.rs`: `PostgreSQLReadSideClaimStore { pool: PgPool, clock: Arc<dyn Clock> }`, manual `Debug` (pool only), `is_durable() -> true`; `try_claim` as the single `INSERT … ON CONFLICT (projection_id, tag, tenant) DO UPDATE … WHERE projection_claims.lease_until <= $now RETURNING fencing_token` statement — no check-then-act window (AD-5).
-- [ ] 3.2 GREEN: shared `mutate_owned`-shaped private helper for `renew`/`release`, verifying `(projection_id, tag, tenant, owner_id, fencing_token, lease_until > now)` in one `WHERE` per statement; `release` sets `lease_until = now`, never `DELETE`, keeping the fencing token strictly monotone across the release boundary (AD-5 criteria).
-- [ ] 3.3 GREEN: `claim_error` mapping reuses PROD-014B's `pub(crate) is_fatal` verbatim for the `Transient`/`Fatal` split, with SQLSTATE `22003` (`numeric_value_out_of_range`) checked first → `ClaimError::FencingExhausted`.
-- [ ] 3.4 GREEN: `crates/persistence/src/postgres/mod.rs` — `pub use read_side_claim::PostgreSQLReadSideClaimStore;`.
+- [x] 3.1 GREEN `crates/persistence/src/postgres/read_side_claim.rs`: `PostgreSQLReadSideClaimStore { pool: PgPool, clock: Arc<dyn Clock> }`, manual `Debug` (pool only), `is_durable() -> true`; `try_claim` as the single `INSERT … ON CONFLICT (projection_id, tag, tenant) DO UPDATE … WHERE projection_claims.lease_until <= $now RETURNING fencing_token` statement — no check-then-act window (AD-5).
+- [x] 3.2 GREEN: shared `mutate_owned`-shaped private helper for `renew`/`release`, verifying `(projection_id, tag, tenant, owner_id, fencing_token, lease_until > now)` in one `WHERE` per statement; `release` sets `lease_until = now`, never `DELETE`, keeping the fencing token strictly monotone across the release boundary (AD-5 criteria).
+- [x] 3.3 GREEN: `claim_error` mapping reuses PROD-014B's `pub(crate) is_fatal` verbatim for the `Transient`/`Fatal` split, with SQLSTATE `22003` (`numeric_value_out_of_range`) checked first → `ClaimError::FencingExhausted`.
+- [x] 3.4 GREEN: `crates/persistence/src/postgres/mod.rs` — `pub use read_side_claim::PostgreSQLReadSideClaimStore;`.
 
 ## Phase 4: Real-Postgres Contention Suite — RED before Phase 3 GREEN (`integration-tests/tests/infrastructure/read_side_claiming_postgres.rs`) — PR 2
 
@@ -76,14 +76,14 @@ contender, `SettableClock` moved by hand, `tokio::sync::Barrier`, `AtomicUsize` 
 bounded `WAIT_LIMIT` assertions, final state read back with raw `sqlx::query_as` never
 through the port under test.
 
-- [ ] 4.1 RED — SC-1 exclusion: two workers, two pools, two `OwnerId`s, released together onto one `(projection_id, tag, tenant)`; exactly one gets `Some(fence)`, the refused worker's fetch/handler counters are both 0. Control case: the same two workers on two different tenants both obtain a fence and both run. Traces: "Acquisition Excludes A Concurrent Second Claimant".
-- [ ] 4.2 RED — SC-2 takeover: A claims and never releases (session dropped mid-batch); clock advanced past `lease_until`; B's `try_claim` returns `Some`, `fencing_token` strictly greater, row's `owner_id` is B's. Traces: "An Expired Lease Enables Takeover Without Operator Action".
-- [ ] 4.3 RED — SC-3 stale-owner rejection: after B's takeover, A's `renew`/`release` both `Err(StaleOwner)`, row still holds B's owner and token unchanged; plus a token-isolation probe — B's `owner_id` paired with A's stale `fencing_token` is also refused, so the refusal is never attributable to `owner_id` alone. Traces: "Takeover Fences Out The Stale Owner".
-- [ ] 4.4 RED — renewal prevents takeover: A renews before expiry; B's concurrent `try_claim` attempt during the renewed lease is refused. Traces: "A Valid Claim May Be Renewed To Extend Processing".
-- [ ] 4.5 RED — SC-5 ordering: one worker holds the claim across a batch of at least three events; the handler's received slice is asserted strictly ascending by `event_version`. Traces: "Claiming Preserves Existing Per-Stream Ordering".
-- [ ] 4.6 RED — immediate reclaim on release: a worker releases normally; a second `try_claim` immediately after succeeds without waiting for lease expiry. Traces: "Normal Release Makes the Stream Immediately Reclaimable".
-- [ ] 4.7 Mutation checks, recorded in the suite's module doc rather than assumed: deleting `AND projection_claims.lease_until <= $6` from `try_claim`'s `WHERE` must make 4.1 fail with both workers claiming; deleting `AND fencing_token = $6` from the shared fence `WHERE` must make 4.3's token probe fail. Confirmed by hand once, documented, not left in the delivered diff as a broken state.
-- [ ] 4.8 GREEN: confirm 4.1–4.6 pass once Phase 3's adapter lands.
+- [x] 4.1 RED — SC-1 exclusion: two workers, two pools, two `OwnerId`s, released together onto one `(projection_id, tag, tenant)`; exactly one gets `Some(fence)`, the refused worker's fetch/handler counters are both 0. Control case: the same two workers on two different tenants both obtain a fence and both run. Traces: "Acquisition Excludes A Concurrent Second Claimant".
+- [x] 4.2 RED — SC-2 takeover: A claims and never releases (session dropped mid-batch); clock advanced past `lease_until`; B's `try_claim` returns `Some`, `fencing_token` strictly greater, row's `owner_id` is B's. Traces: "An Expired Lease Enables Takeover Without Operator Action".
+- [x] 4.3 RED — SC-3 stale-owner rejection: after B's takeover, A's `renew`/`release` both `Err(StaleOwner)`, row still holds B's owner and token unchanged; plus a token-isolation probe — B's `owner_id` paired with A's stale `fencing_token` is also refused, so the refusal is never attributable to `owner_id` alone. Traces: "Takeover Fences Out The Stale Owner".
+- [x] 4.4 RED — renewal prevents takeover: A renews before expiry; B's concurrent `try_claim` attempt during the renewed lease is refused. Traces: "A Valid Claim May Be Renewed To Extend Processing".
+- [x] 4.5 RED — SC-5 ordering: one worker holds the claim across a batch of at least three events; the handler's received slice is asserted strictly ascending by `event_version`. Traces: "Claiming Preserves Existing Per-Stream Ordering".
+- [x] 4.6 RED — immediate reclaim on release: a worker releases normally; a second `try_claim` immediately after succeeds without waiting for lease expiry. Traces: "Normal Release Makes the Stream Immediately Reclaimable".
+- [x] 4.7 Mutation checks, recorded in the suite's module doc rather than assumed: deleting `AND projection_claims.lease_until <= $6` from `try_claim`'s `WHERE` must make 4.1 fail with both workers claiming; deleting `AND fencing_token = $6` from the shared fence `WHERE` must make 4.3's token probe fail. Confirmed by hand once, documented, not left in the delivered diff as a broken state.
+- [x] 4.8 GREEN: confirm 4.1–4.6 pass once Phase 3's adapter lands.
 
 ## Phase 5: Session Wiring — PR 3
 

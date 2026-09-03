@@ -295,6 +295,21 @@ distinct follow-up **PROD-014C — Atomic Read-Side Event Claiming**.
 |---|---|---|---|
 | Offset survives a process restart, tenant isolation, last-write-wins writes, dedup convergence (sequential and concurrent), tenant-independent dedup identity, both stores report durable, unapplied-migration classification | The durable pair behaves the way `spec.md` states against real PostgreSQL: an offset outlives the process that wrote it, a never-written tenant never leaks another tenant's row, a later write silently wins, two `mark_seen` calls on one identity converge to one row whether sequential or concurrent, dedup identity carries no tenant, both `is_durable()` report `true`, and a missing table classifies `Fatal`, never `Transient` | Restart survival and tenant isolation are properties of the stored rows, not of an in-memory struct — a scripted double has nothing to lose across a restart. Dedup convergence under real concurrency needs a real `ON CONFLICT … DO NOTHING` resolved by the database, not a mutex a test controls. The unapplied-migration case needs a real `42P01` from a real catalog lookup — no scripted store has a catalog to be missing from | `tests/infrastructure/read_side_progress_postgres.rs` |
 
+## Read-side atomic claiming (PROD-014C)
+
+`PostgreSQLReadSideClaimStore` — the durable adapter behind the
+`ReadSideClaimStore` port, closing the execution-exclusion gap named but
+deliberately left open by `read_side_progress_postgres.rs` above
+(PROD-014B AD-6). Each case obtains its database via `isolated_database()`,
+uses a separate `PgPool` per contending worker, and moves a `TestClock` by
+hand rather than sleeping through a real lease. See the file's own module doc
+for what this suite deliberately does not claim yet — session/scheduler
+wiring around a real claim is a distinct, not-yet-started follow-up (PR3).
+
+| Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|
+| Concurrent-second-claimant exclusion (plus a cross-tenant control case), expiry-driven takeover, stale-owner fencing on `renew`/`release` (plus a token-isolation probe), renewal extending a live lease past its original expiry, no ordering interference with a stream's events, immediate reclaim on release | `try_claim` behaves the way `spec.md` states against real PostgreSQL: exactly one of two workers racing one identity is granted, a lapsed lease is taken over with a strictly greater fencing token, the replaced owner's `renew`/`release` are refused by the full identity, a renewed lease resists a takeover attempt inside its extended window, holding a claim never reorders what a reader of `events` sees, and a released claim is reclaimable immediately, with no wait for expiry | Exclusion is `INSERT … ON CONFLICT … DO UPDATE … WHERE lease_until <= $now` resolved by the database, not a mutex a test double holds — a scripted store cannot misrepresent a race it never had to resolve in SQL. Takeover and fencing are properties of the same statement and the row it leaves behind, readable only by querying `projection_claims` directly, never through the port under test | `tests/infrastructure/read_side_claiming_postgres.rs` |
+
 ## Migration transactional behaviour
 
 The offline `backfill_aggregate_type` operator step
