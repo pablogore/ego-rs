@@ -6,7 +6,7 @@
 //! the two business-outcome paths (success, partial-failure) need this
 //! file's coverage of `RegisterUserImpl`'s own explicit `obs.trace()` calls.
 
-mod support;
+use crate::support;
 
 use std::sync::{Arc, Mutex};
 

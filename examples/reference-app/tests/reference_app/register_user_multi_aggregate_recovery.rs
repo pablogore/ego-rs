@@ -15,8 +15,6 @@
 //! aggregate confirmed. A test that only checked the call returned `Ok` would
 //! pass just as happily if both steps re-ran.
 
-mod support;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

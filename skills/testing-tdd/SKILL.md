@@ -379,4 +379,4 @@ Before opening a PR:
 - `ego-rs-testing-strategy` — levels, pyramid, coverage gates
 - `ego-rs-testing` — hard placement rules
 - `crates/testkit/src/lib.rs` — same-contract principle and full export list
-- `examples/reference-app/tests/pipeline.rs` — a reference end-to-end test
+- `examples/reference-app/tests/reference_app/pipeline.rs` — a reference end-to-end test

@@ -2,13 +2,12 @@
 //! `RegisterUserImpl` construction boilerplate and JWT minting were each
 //! hand-rolled, byte-for-byte identical, across several test files.
 //!
-//! `tests/support/mod.rs` (not `tests/support.rs`) is the standard Rust
-//! convention for a module shared across multiple integration-test
-//! binaries without becoming its own separate test binary — each file that
-//! needs it declares `mod support;`.
+//! A submodule of the single `tests/reference_app.rs` integration-test
+//! binary (issue #305): every other file under `tests/reference_app/` reaches
+//! it via `use crate::support;`.
 //!
-//! Each consuming test binary only uses a subset of these helpers, so
-//! `dead_code` is expected per-binary (not a real problem) — hence the
+//! Each consuming module only uses a subset of these helpers, so
+//! `dead_code` is expected per-module (not a real problem) — hence the
 //! blanket allow below, the standard idiom for shared test-support modules.
 #![allow(dead_code)]
 

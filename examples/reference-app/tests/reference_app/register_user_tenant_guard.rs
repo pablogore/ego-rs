@@ -18,7 +18,7 @@
 //! only public seam that produces a resolved canonical tenant — there is no
 //! public setter for it.
 
-mod support;
+use crate::support;
 
 use ego_security_sdk::SecurityError;
 use ego_service_sdk::context::ServiceContext;

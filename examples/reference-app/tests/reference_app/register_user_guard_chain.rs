@@ -3,7 +3,7 @@
 //! Satisfies reference-service spec "Unauthorized principal denied",
 //! "Cross-tenant request denied", "Successful registration".
 
-mod support;
+use crate::support;
 
 use std::sync::Arc;
 

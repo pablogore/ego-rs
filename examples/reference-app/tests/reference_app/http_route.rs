@@ -4,7 +4,7 @@
 //! Satisfies http-transport spec "Request reaches the guarded operation",
 //! "Outcomes map to appropriate responses".
 
-mod support;
+use crate::support;
 
 use std::time::Duration;
 

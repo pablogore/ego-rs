@@ -10,7 +10,7 @@
 //! what the **service actually received** — the one place a dropped transfer is
 //! visible.
 
-mod support;
+use crate::support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
