@@ -103,6 +103,21 @@ async fn connect(url: &str, max: u32) -> PgPool {
         .expect("the container accepts connections")
 }
 
+/// Normalizes a timestamp to the precision PostgreSQL actually stores.
+///
+/// `TIMESTAMPTZ` is microseconds since its epoch, and sqlx's encoder gets
+/// there via `chrono::Duration::num_microseconds`, which truncates toward
+/// zero rather than rounding (`sqlx-postgres`'s
+/// `Encode<Postgres> for NaiveDateTime`). A value read back from the column
+/// has therefore already lost any sub-microsecond component that `Utc::now()`
+/// produced when the in-memory expected value was built — comparing the two
+/// directly fails on precision alone, not on the guarantee under test. This
+/// mirrors that same truncation on the expected side before comparing.
+fn truncated_to_postgres_precision(at: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    chrono::DateTime::<Utc>::from_timestamp_micros(at.timestamp_micros())
+        .expect("a value already representable as DateTime<Utc> round-trips through micros")
+}
+
 /// Blocks until a backend is waiting on a lock while running a statement against
 /// the reservations table, or fails at the deadline.
 ///
@@ -258,7 +273,8 @@ async fn a_takeover_waiting_on_the_row_lock_rechecks_the_lease_it_finds_not_the_
          legitimate takeover still sees the version it expects"
     );
     assert_eq!(
-        lease_until, renewed_until,
+        lease_until,
+        truncated_to_postgres_precision(renewed_until),
         "and the renewed lease stands, unshortened by the attempt"
     );
 
