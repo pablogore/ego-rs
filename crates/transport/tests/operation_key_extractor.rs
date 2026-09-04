@@ -327,6 +327,70 @@ fn expected_rejection(reason: &str) -> (MetricKind, String, f64, Vec<(String, St
     )
 }
 
+// ---------------------------------------------------------------------------
+// Issue #306 — a panicking metric sink must not take the request down with it
+// ---------------------------------------------------------------------------
+
+/// `record_metric` always panics; `trace`/`log` are unused no-ops. Stands in
+/// for a broken metrics backend wired into a real deployment's runtime.
+#[derive(Default)]
+struct PanickingObservability;
+
+impl ego_domain::Observability for PanickingObservability {
+    fn trace(&self, _e: ego_domain::SemanticEvent) {}
+    fn record_metric(&self, _observation: ego_domain::MetricObservation<'_>) {
+        panic!("PanickingObservability::record_metric always panics (test double)");
+    }
+    fn log(&self, _l: ego_domain::Level, _m: &str) {}
+}
+
+/// Same wiring as `instrumented_state_under`, with a sink that panics on every
+/// metric emission instead of recording it.
+fn state_with_panicking_observability(mode: IdempotencyEnforcementMode) -> AppState {
+    let mut builder = RuntimeBuilder::new()
+        .with_idempotency_enforcement_mode(mode)
+        .with_observability(Arc::new(PanickingObservability) as Arc<dyn ego_domain::Observability>);
+    if matches!(mode, IdempotencyEnforcementMode::MandatoryKey) {
+        builder = builder
+            .with_operation_reservation_store(Arc::new(
+                ego_testkit::InMemoryOperationReservationStore::new(Arc::new(
+                    ego_domain::time::SystemClock,
+                )),
+            ))
+            .with_reservation_owner_id(ego_domain::operation::OwnerId::new("under-test"))
+            .with_reservation_lease_duration(std::time::Duration::from_secs(30));
+    }
+    AppState::new(builder.build().resolver(), Arc::new(UnusedAuthn))
+}
+
+/// The exact scenario issue #306 names: "for the transport-edge counters it is
+/// a request." A missing key under `MandatoryKey` reaches the same
+/// `obs.counter("idempotency.key.rejected", ...)` call `a_missing_key_counts_
+/// the_missing_rejection` above exercises against a recording sink — here the
+/// sink panics on that call instead, and the request must still resolve to the
+/// same `400 BadRequest` a healthy sink would produce. `result.is_err()` alone
+/// would not distinguish a real rejection from a panic that unwound through
+/// the extractor and was reported as some other failure — the `matches!` below
+/// pins it to the exact variant a healthy sink produces.
+#[tokio::test]
+async fn a_panicking_metric_sink_does_not_fail_the_request_it_is_only_counting() {
+    let state = state_with_panicking_observability(IdempotencyEnforcementMode::MandatoryKey);
+    let (mut parts, _) = Request::builder()
+        .uri("/register")
+        .body(())
+        .expect("a valid request")
+        .into_parts();
+
+    let result = OperationKeyExtractor::from_request_parts(&mut parts, &state).await;
+
+    assert!(
+        matches!(result, Err(TransportError::BadRequest)),
+        "a missing key must still be refused with the same 400 a healthy \
+         metrics sink would produce, not silently turned into something else \
+         by the panic"
+    );
+}
+
 /// A missing key under `MandatoryKey` counts one rejection, once.
 #[tokio::test]
 async fn a_missing_key_counts_the_missing_rejection() {

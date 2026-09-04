@@ -177,17 +177,19 @@ mod recording_observability_contract {
     }
 }
 
-/// Test double proving `record_security_denial` isolates a misbehaving sink
-/// (RESIL-001, CORE-012A 4R review): `trace()` always panics.
+/// Test double proving a misbehaving sink is isolated (RESIL-001, CORE-012A 4R
+/// review; issue #306): both `trace()` and `record_metric()` always panic.
 ///
-/// # What this does NOT cover
+/// # Two different isolation mechanisms, both covered
 ///
-/// Only `trace` is isolated, and only this double's `trace` panics. The metric
-/// methods return quietly here on purpose: their call sites are not wrapped in
-/// `catch_unwind`, so a double that panicked from them would not be exercising a
-/// guarantee — it would be demonstrating the absence of one, in code this fixture
-/// does not own. Do not read the existence of this double as evidence that a
-/// panicking metric sink is survivable.
+/// `trace()` panics escape unless the *caller* wraps the call in
+/// `catch_unwind` — which every SDK call site does (`record_security_denial`,
+/// `record_app_starting`, `record_app_started`, `record_completion_lost` in
+/// `runtime_builder.rs`). `record_metric()` panics are instead caught by the
+/// `Observability` trait's own `counter`/`histogram`/`gauge` default methods
+/// (`ego_domain::observability`), so every metric call site inherits the
+/// guarantee without repeating it. This double panics from both methods so
+/// either kind of call site can be exercised against it.
 #[derive(Default)]
 pub(crate) struct PanickingObservability;
 
@@ -195,7 +197,9 @@ impl Observability for PanickingObservability {
     fn trace(&self, _event: SemanticEvent) {
         panic!("PanickingObservability::trace always panics (test double)");
     }
-    fn record_metric(&self, _observation: MetricObservation<'_>) {}
+    fn record_metric(&self, _observation: MetricObservation<'_>) {
+        panic!("PanickingObservability::record_metric always panics (test double)");
+    }
     fn log(&self, _level: Level, _message: &str) {}
 }
 
