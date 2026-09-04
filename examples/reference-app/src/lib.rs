@@ -710,6 +710,22 @@ pub fn build_runtime_with(
     // material `Profile::Production` will accept depends on it.
     let profile = stores.profile();
 
+    // PROD-P0.3: `EntityRuntime::entity_ref` persists every request under one
+    // fixed tenant per runtime process (`RuntimeConfig.tenant_id`, or
+    // `"default"` under single-tenant mode) — it never receives the
+    // per-request resolved tenant. Under `single_tenant_mode = false` that
+    // fixed partition is only relabeled, not isolated: every authenticated
+    // tenant sharing this process would still write into the same durable
+    // scope. Production therefore only supports one tenant scope per
+    // deployed runtime; a composition that declares otherwise is refused
+    // here rather than silently sharing storage across tenants.
+    if profile == Profile::Production && !config.runtime.single_tenant_mode {
+        return Err(Box::new(ConfigError::Invalid {
+            field: "runtime.single_tenant_mode".to_string(),
+            reason: "shared multi-tenant runtime mode is not supported under Production profile; use single-tenant-per-deployment".to_string(),
+        }));
+    }
+
     // PROD-P0.2: the committed `DEV_SIGNING_KEY` must never authenticate a
     // `Profile::Production` host — an attacker with repository access could
     // otherwise forge valid JWTs against real production traffic.

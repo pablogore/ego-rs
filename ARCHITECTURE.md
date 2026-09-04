@@ -229,6 +229,21 @@ progress states whether this mechanism backs it:
 store behind it (`crates/service-sdk/src/runtime/builder.rs`). This closes the concurrency gap
 PROD-014B named as outside its own guarantee — see `openspec/specs/read-side-event-claiming/`.
 
+**Production tenancy scope (PROD-P0.3)**: request-level tenant resolution/authentication is
+distinct from durable persistence scoping. `TenantResolver::resolve` (`crates/service-sdk/src/
+runtime/tenant.rs`) establishes which tenant a request is authenticated and authorized as — but
+`EntityRuntime::entity_ref` (`crates/persistent-entity/src/runtime.rs`) never receives that
+per-request tenant. It persists every entity under one tenant fixed at `EntityRuntime`
+construction time (`RuntimeConfig.tenant_id`, or the literal `"default"` under
+`single_tenant_mode = true`), for every request the runtime process serves. Production therefore
+supports **one tenant scope per running deployment/runtime**: shared multi-tenant-per-runtime
+durable persistence is not part of the v1 supported production model, and `build_runtime_with`
+refuses `Profile::Production` composed with `single_tenant_mode = false` rather than start a
+deployment whose authorization tenant and persistence tenant can diverge. This is a v1 support
+boundary, not a permanent design limit — a future change that threads a resolved tenant through
+`EntityRuntime::entity_ref` and every durable store it touches could lift it; until then, a
+deployment that needs to separate tenants' durable data runs one `EntityRuntime` per tenant.
+
 ---
 
 ## Persistent Entity Runtime (CORE-006)

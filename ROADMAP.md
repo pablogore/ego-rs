@@ -58,6 +58,10 @@ The following capabilities are implemented and considered complete or archived.
 * [x] CORE-021 — API Key Authentication
 * [x] CORE-024 — Validate Tenant Once
 
+These enforce request-level tenant resolution and authorization. They are distinct from durable
+persistence scoping — see "Production tenancy scope (PROD-P0.3)" in `ARCHITECTURE.md` for the
+first production tag's supported deployment model.
+
 ### Configuration and Runtime Infrastructure
 
 * [x] CORE-016 — Application Configuration Model

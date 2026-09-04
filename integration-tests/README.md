@@ -386,6 +386,23 @@ this cannot be an in-process test.
 | The committed dev key is refused | `Profile::Production` with `DEV_SIGNING_KEY` explicitly configured is refused, and the refusal never echoes the key's own bytes back | Same reachability constraint as above; also the exact vulnerability this gate closes, so it must be proven against a real production-shaped composition, not asserted about the gate's source | `tests/infrastructure/production_jwt_key_postgres.rs` |
 | An external key is accepted | An external, non-dev, >= 32-byte key configured the same way builds successfully | Proves the gate discriminates rather than refusing unconditionally — the other two rows could otherwise pass by rejecting every key | `tests/infrastructure/production_jwt_key_postgres.rs` |
 
+## Production tenancy gate (PROD-P0.3)
+
+`build_runtime_with`'s `Profile::Production` fail-closed tenancy gate:
+`EntityRuntime::entity_ref` persists every request under one fixed tenant
+per runtime process (see `RuntimeConfig.tenant_id`), never a per-request
+tenant, so `single_tenant_mode = false` would only relabel — not isolate —
+one shared durable scope across every authenticated tenant. Production
+therefore refuses that setting; only single-tenant-per-deployment is
+supported for this tag. `Profile::Production` is only reachable through
+`EntityEventStores::open` over a real Postgres pool, so this cannot be an
+in-process test.
+
+| Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
+|---|---|---|---|
+| Shared multi-tenant mode is refused | `Profile::Production` with `single_tenant_mode: false` returns `Err`, never a panic, never a started runtime | Only a real `Profile::Production` composition (real Postgres-backed `EntityEventStores`) exercises this gate at all | `tests/infrastructure/production_tenancy_postgres.rs` |
+| Single-tenant mode is accepted | `Profile::Production` with the supported `single_tenant_mode: true` default still builds successfully | Proves the gate discriminates rather than refusing unconditionally — the row above could otherwise pass by rejecting every configuration | `tests/infrastructure/production_tenancy_postgres.rs` |
+
 ## SQL-expression invariants
 
 | Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |

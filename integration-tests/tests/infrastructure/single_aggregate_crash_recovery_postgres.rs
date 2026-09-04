@@ -354,6 +354,19 @@ async fn event_count(pool: &PgPool, aggregate_type: &str) -> i64 {
         .expect("the count comes back")
 }
 
+/// PROD-P0.3: the persistence tenant scope of the one event this scenario
+/// wrote, read back by direct SQL rather than inferred from the comment
+/// above — a regression guard against a future change silently altering the
+/// single-tenant-mode contract (`EntityRuntime::entity_ref` stamping
+/// `"default"`) without anyone noticing.
+async fn event_tenant(pool: &PgPool, aggregate_type: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT tenant_id FROM events WHERE aggregate_type = $1 LIMIT 1")
+        .bind(aggregate_type)
+        .fetch_one(pool)
+        .await
+        .expect("the one row this scenario wrote comes back")
+}
+
 async fn receipt_count(pool: &PgPool, aggregate_type: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM operation_receipts \
@@ -459,6 +472,15 @@ async fn child_completes_ensure_org_then_aborts() {
         receipt_count(&observer, "tenant_organization").await,
         1,
         "and so is its confirmed receipt"
+    );
+    assert_eq!(
+        event_tenant(&observer, "tenant_organization")
+            .await
+            .as_deref(),
+        Some("default"),
+        "single_tenant_mode persists under the literal tenant \"default\", \
+         not the JWT-authenticated tenant (\"tenant-e2\") — PROD-P0.3's \
+         supported production tenancy contract"
     );
     observer.close().await;
 

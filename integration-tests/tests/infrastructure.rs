@@ -102,6 +102,12 @@ mod infrastructure {
     /// pool (the only way this profile is reachable — see
     /// `durable_entity_progress_postgres`'s own note on this).
     mod production_jwt_key_postgres;
+    /// PROD-P0.3: `build_runtime_with`'s fail-closed tenancy gate under
+    /// `Profile::Production` — `single_tenant_mode = false` is refused
+    /// (persistence tenant is fixed per runtime process, never per request;
+    /// see the gate's own comment in `reference_app::build_runtime_with`),
+    /// over a real, migrated PostgreSQL pool.
+    mod production_tenancy_postgres;
     mod purge_progress_postgres;
     /// PROD-014C (PR2): `PostgreSQLReadSideClaimStore` against real
     /// PostgreSQL — the execution-exclusion gap `read_side_progress_postgres`
