@@ -86,7 +86,9 @@ External effects (currently: the post-registration "welcome email") are persiste
 cargo test -p reference-app
 ```
 
-Covers the guard chain (authz/tenant-scoping denial, happy path), the documented non-atomic dual-write (org-first, no saga — a `User`-write failure after the org write succeeds leaves a benign, reusable orphan org, not a rollback), observability event recording, the read-side projection (including tenant isolation), and a real end-to-end HTTP round trip against a live `axum::serve()` socket.
+Covers the guard chain (authz/tenant-scoping denial, happy path), the documented non-atomic dual-write (org-first, no saga — a `User`-write failure after the org write succeeds leaves a benign, reusable orphan org, not a rollback), observability event recording, and the read-side projection (including tenant isolation). These route the `Router` in-process via `tower::ServiceExt::oneshot` — no socket.
+
+The real end-to-end HTTP round trip against a live `axum::serve()` socket — real TCP, a real HTTP client, real JWT verification, this same router/composition, real PostgreSQL — lives in the separate `integration-tests` workspace, not here: `integration-tests/tests/infrastructure/wire_register_postgres.rs`, run via `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite` (CORE-018).
 
 ## Non-goals
 

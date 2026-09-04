@@ -299,6 +299,14 @@ This was the named success criterion of the CORE-018 proposal ("A real HTTP requ
 against a running axum server completes registration end-to-end"), so its removal
 un-verifies a shipped acceptance claim until the integration workspace exists.
 
+**Resolved (CORE-018, `develop@037628a`):** the integration workspace now exists.
+`integration-tests/tests/infrastructure/wire_register_postgres.rs` re-proves this
+claim over the real wire — real TCP, real HTTP client, real JWT auth, real
+PostgreSQL — through the reference app's real composition root, run via
+`cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`. The
+paragraph above is left as written: an accurate record of the gap as it stood
+at the time this backlog entry was written.
+
 `tests/support/mod.rs` was **kept** — `make_token` is used by four retained tests
 (`http_route`, `ingress_trace_context`, `ingress_trace_wiring`, and the support
 module itself).
