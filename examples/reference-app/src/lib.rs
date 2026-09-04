@@ -50,6 +50,7 @@ pub mod read_side;
 use ego_domain::persistence::{EventStore, Snapshot};
 use ego_domain::{Clock, ConfigError, SystemClock, Validate};
 use ego_persistence::DatabaseConfig;
+use ego_persistence_api::read_side::claim::ReadSideClaimStore;
 use ego_runtime::effects::{
     DeliveryConfig, EffectDedupStore, EffectStateStore, ExecutorRegistry, ExternalEffectExecutor,
     RuntimeEffectAcceptor,
@@ -622,6 +623,7 @@ pub fn build_runtime_observed_in_memory(
         observability,
         ExternalEffectsWiring::None,
         None,
+        None,
     )
 }
 
@@ -667,6 +669,14 @@ pub enum ExternalEffectsWiring {
 /// (OOS-2/F-1). `Some(pair)` registers that pair AND spawns the projection
 /// on it — the same value, cloned into two destinations, so a durable
 /// registration over a volatile projection is not expressible.
+///
+/// `read_side_claims`: the durable claim store PROD-014C's `Profile::
+/// Production` gate requires once `read_side_progress` is `Some` (AD-9) —
+/// see [`ReadSideProgressStores::postgres`]'s own doc comment, which names
+/// this exact obligation. `None` registers nothing, same shape as
+/// `read_side_progress: None`; a host that states durable progress under
+/// `Profile::Production` without also stating a durable claim store here
+/// gets the fail-closed refusal by construction, not by omission.
 pub fn build_runtime_with(
     config: &AppConfig,
     stores: EntityEventStores,
@@ -674,6 +684,7 @@ pub fn build_runtime_with(
     observability: Option<Arc<dyn ego_domain::Observability>>,
     effects: ExternalEffectsWiring,
     read_side_progress: Option<ReadSideProgressStores>,
+    read_side_claims: Option<Arc<dyn ReadSideClaimStore + Send + Sync>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
 
@@ -872,6 +883,13 @@ pub fn build_runtime_with(
             progress.offset.clone(),
             progress.dedup.clone(),
         );
+    }
+    // PROD-014C AD-9: registered only when the host stated one, mirroring
+    // `read_side_progress` immediately above — an unregistered claim store
+    // is "this host has not adopted durable claiming", not a default to
+    // silently supply.
+    if let Some(claims) = read_side_claims {
+        builder = builder.read_side_claims(claims);
     }
     // CORE-028 Stage 2C (AD-7 item 2): registers the entity-runtime DI path
     // for `UserEntity` through the composition API, as production proof of

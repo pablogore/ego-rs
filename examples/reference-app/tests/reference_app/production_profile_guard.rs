@@ -71,6 +71,7 @@ fn dev_profile_still_builds_at_the_composition_root() {
         None,
         ExternalEffectsWiring::None,
         None,
+        None,
     )
     .expect("Profile::Dev over in-memory stores must still build (SC-5), with no read-side progress registered");
 }

@@ -69,6 +69,7 @@ async fn spawn_real_server(url: &str) -> (std::net::SocketAddr, JoinHandle<()>) 
         None,
         ExternalEffectsWiring::None,
         None,
+        None,
     )
     .expect("the reference app builds");
 

@@ -32,7 +32,9 @@
 //! that failure and "shutdown complete" is never printed, instead of
 //! silently reporting success for a shutdown that didn't actually drain.
 
+use ego_domain::{Clock, SystemClock};
 use ego_effect_store::StoolapEffectStore;
+use ego_persistence::postgres::PostgreSQLReadSideClaimStore;
 use ego_transport::AppState;
 use reference_app::effects::WelcomeEmailExecutor;
 use reference_app::ports::http::build_router;
@@ -81,6 +83,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // shared `Arc`, so both the read-side progress pair and the event
     // stores share one connection pool rather than opening a second.
     let read_side_progress = ReadSideProgressStores::postgres(pool.clone());
+    // PROD-014C AD-9: the obligation `ReadSideProgressStores::postgres`'s own
+    // doc comment names — a durable progress pair under `Profile::Production`
+    // requires a durable claim store alongside it, or composition fails
+    // closed. Same pool clone as the progress pair above, taken before `pool`
+    // moves into `EntityEventStores::open` (PROD-014B EC-2's ordering) — one
+    // shared connection pool, not a second one opened for this store alone.
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let read_side_claims = PostgreSQLReadSideClaimStore::new(pool.clone(), clock);
     let stores = EntityEventStores::open(pool).await?;
 
     // PROD-002 Phase 8: durable external effects, embedded — no separate
@@ -115,6 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // PROD-014B IS-6/SC-6: the durable pair, real and durable, so
         // `Profile::Production` has something to accept instead of refuse.
         Some(read_side_progress),
+        // PROD-014C AD-9: the durable claim store the pair above now requires.
+        Some(Arc::new(read_side_claims)),
     )?;
 
     let query = read_side_handles.query.clone();

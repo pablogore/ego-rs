@@ -43,6 +43,10 @@ security-jwt = { path = "../../crates/security-jwt" }
 ego-security-sdk = { path = "../../crates/security-sdk" }
 ego-scheduler = { path = "../../crates/ego-scheduler" }
 ego-persistence = { path = "../../crates/persistence" }
+# `read_side_claims` (PROD-P0.1): `build_runtime_with`'s signature names
+# `ReadSideClaimStore` directly, so this is a real composition-root
+# dependency now, not only a test one.
+ego-persistence-api = { path = "../../crates/persistence-api" }
 # Matches `EntityRuntimeBuilder::with_snapshot_store`'s `Arc<Mutex<dyn Snapshot
 # + Send>>` field type exactly (persistent-entity/Cargo.toml) — a different
 # `Mutex` would not satisfy that signature.
@@ -67,10 +71,6 @@ utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 ego-testkit = { path = "../../crates/testkit" }
-# `tests/production_profile_guard.rs`: implements a stub `ReadSideClaimStore`
-# (PROD-014C) to exercise `AppBuilder::read_side_claims`'s Production accept
-# path — the trait lives in `persistence-api`, not re-exported elsewhere.
-ego-persistence-api = { path = "../../crates/persistence-api" }
 # PROD-002 Phase 8: `tests/stoolap_restart_persistence.rs` opens a second,
 # independent handle on the same on-disk DSN to read the raw `effect_state`
 # row back — proving delivery landed in the REGISTERED Stoolap store, not

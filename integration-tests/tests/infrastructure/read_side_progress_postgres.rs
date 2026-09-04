@@ -34,11 +34,14 @@
 //! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
+use std::sync::Arc;
+
 use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::offset::{Offset, OffsetStore, OffsetStoreError};
+use ego_domain::{Clock, SystemClock};
 use ego_integration_tests::isolated_database;
-use ego_persistence::postgres::{PostgreSQLDedupStore, PostgreSQLOffsetStore};
+use ego_persistence::postgres::{PostgreSQLDedupStore, PostgreSQLOffsetStore, PostgreSQLReadSideClaimStore};
 use persistent_entity::profile::Profile;
 use reference_app::read_side::ReadSideProgressStores;
 use reference_app::{AppConfig, EntityEventStores, ExternalEffectsWiring, IdempotencyWiring};
@@ -361,21 +364,17 @@ async fn both_progress_stores_report_themselves_as_durable() {
 /// migrated database, is what keeps this suite honest about what the
 /// reference app's Production path does and does not enforce.
 ///
-/// Refusal surfaces as a panic, not a returned `Err`: `build_runtime_with`
-/// registers `.entity::<UserEntity>(..)` (a `service_registrars` entry), so
-/// `AppBuilder::build()` runs its AD-3 scratch-runtime pass first
-/// (`crates/service-sdk/src/app/mod.rs`, `builder.clone().build()`) — the
-/// panicking `RuntimeBuilder::build()`, not `try_build()` — to resolve
-/// `Injectable` adapters before the real, `Result`-returning
-/// `builder.try_build()` further down ever runs. That scratch-pass shape
-/// predates PROD-014C and is unrelated to it: any `Profile::Production`
-/// validation failure reachable through this composition panics here, not
-/// only the new claim gate.
+/// Refusal surfaces as a returned `Err`, never a panic: `AppBuilder::build()`'s
+/// AD-3 scratch-runtime pass (`crates/service-sdk/src/app/mod.rs`) now calls
+/// the fallible `try_build()` instead of the panicking `build()`, so a
+/// `Profile::Production` validation failure reachable through that scratch
+/// pass — this claim-store gate included — is mapped to
+/// `CompositionError::Validation` and returned, exactly as this function's
+/// `Result` signature promises.
 ///
 /// Traces: spec.md "Both Progress Stores Report Themselves As Durable";
 /// PROD-014C tasks.md 8.1/9.1 (this suite's own regression check).
 #[tokio::test]
-#[should_panic(expected = "durable read-side claim store")]
 async fn production_profile_composition_without_a_claim_store_is_refused() {
     let db = isolated_database().await;
     let pool = connect(db.url()).await;
@@ -388,14 +387,61 @@ async fn production_profile_composition_without_a_claim_store_is_refused() {
         .expect("the stores open against a migrated database");
     assert_eq!(stores.profile(), Profile::Production);
 
-    let _ = reference_app::build_runtime_with(
+    let result = reference_app::build_runtime_with(
         &AppConfig::default(),
         stores,
         IdempotencyWiring::Compatibility,
         None,
         ExternalEffectsWiring::None,
         Some(read_side_progress),
+        None,
     );
+
+    let Err(err) = result else {
+        panic!("a registered read-side progress pair without a durable claim store must be refused under Profile::Production");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("durable read-side claim store"),
+        "the refusal must name the missing durable read-side claim store, got: {message}"
+    );
+}
+
+/// The positive counterpart to the refusal above: a `Profile::Production`
+/// composition that registers the durable read-side pair AND a real
+/// `PostgreSQLReadSideClaimStore` — exactly as `ReadSideProgressStores::
+/// postgres`'s own rustdoc instructs hosts to do — builds successfully
+/// through `build_runtime_with`, the same composition root `main.rs` calls.
+///
+/// Traces: PROD-P0.1 Required Test 1.
+#[tokio::test]
+async fn production_profile_composition_with_a_durable_claim_store_builds() {
+    let db = isolated_database().await;
+    let pool = connect(db.url()).await;
+
+    let read_side_progress = ReadSideProgressStores::postgres(pool.clone());
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let read_side_claims = PostgreSQLReadSideClaimStore::new(pool.clone(), clock);
+    let stores = EntityEventStores::open(pool)
+        .await
+        .expect("the stores open against a migrated database");
+    assert_eq!(stores.profile(), Profile::Production);
+
+    reference_app::build_runtime_with(
+        &AppConfig::default(),
+        stores,
+        IdempotencyWiring::Compatibility,
+        None,
+        ExternalEffectsWiring::None,
+        Some(read_side_progress),
+        Some(Arc::new(read_side_claims)),
+    )
+    .expect(
+        "a durable read-side progress pair plus a durable claim store must be \
+         accepted under Profile::Production through the real composition root",
+    );
+
+    db.close().await;
 }
 
 // ---------------------------------------------------------------------------

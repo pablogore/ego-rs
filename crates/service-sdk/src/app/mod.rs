@@ -883,7 +883,16 @@ impl AppBuilder {
             // resolves adapters/configs already registered above, letting
             // each `Injectable::build` run for real — then it is discarded,
             // never started or shut down.
-            let scratch = builder.clone().build();
+            //
+            // `try_build()`, not `build()`: this method's own signature
+            // promises `Result`, so a Production-validation failure reachable
+            // through this scratch pass (e.g. PROD-014C's missing durable
+            // claim store) must return `Err` here too, not panic ahead of the
+            // real `try_build()` call below.
+            let scratch = builder
+                .clone()
+                .try_build()
+                .map_err(CompositionError::Validation)?;
             for registrar in self.service_registrars {
                 builder = registrar(scratch.inner(), builder)?;
             }

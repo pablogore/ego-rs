@@ -91,6 +91,7 @@ async fn an_effect_accepted_before_a_restart_is_delivered_only_by_the_process_th
                 executor: Arc::new(WelcomeEmailExecutor),
             },
             None,
+            None,
         )
         .expect("process A builds through the real reference-app composition path");
 
@@ -139,6 +140,7 @@ async fn an_effect_accepted_before_a_restart_is_delivered_only_by_the_process_th
             store: store_b,
             executor: Arc::new(WelcomeEmailExecutor),
         },
+        None,
         None,
     )
     .expect("process B builds through the same real composition path");
