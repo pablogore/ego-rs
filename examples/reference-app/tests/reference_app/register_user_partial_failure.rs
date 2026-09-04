@@ -5,7 +5,7 @@
 //! (not just "org still exists") — a subsequent `Ensure` on the same org_id
 //! must return zero new events.
 
-mod support;
+use crate::support;
 
 use std::sync::Arc;
 

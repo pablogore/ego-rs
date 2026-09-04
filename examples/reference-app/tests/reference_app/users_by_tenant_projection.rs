@@ -4,7 +4,7 @@
 //! `OffsetStore`/`DedupStore`), not a hand-constructed read model, and that
 //! the query path returns exactly what `RegisterUser` actually wrote.
 
-mod support;
+use crate::support;
 
 use std::time::Duration;
 

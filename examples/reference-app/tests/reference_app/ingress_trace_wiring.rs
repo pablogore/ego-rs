@@ -11,7 +11,7 @@
 //! `Tracer` receives and asserts trace_id/span_id/parent_span_id — it goes
 //! red the moment that wiring is removed.
 
-mod support;
+use crate::support;
 
 use std::sync::{Arc, Mutex};
 

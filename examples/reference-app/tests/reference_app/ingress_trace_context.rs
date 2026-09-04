@@ -10,7 +10,7 @@
 //! fresh root trace instead of failing the request (service-sdk spec:
 //! "Trace-Context Originates At HTTP Ingress").
 
-mod support;
+use crate::support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

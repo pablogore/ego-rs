@@ -36,7 +36,7 @@
 //! example depends on infrastructure internals, to move an assertion that is
 //! already made. The two tests meet at a real seam; that is not a gap in the chain.
 
-mod support;
+use crate::support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

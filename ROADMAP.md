@@ -910,7 +910,7 @@ Delivered:
       snapshot store the production path silently used before
 * [x] A structural regression guard, not a one-time example: the profile field on
       `EntityEventStores` is private, so only `open()`/`in_memory()` can set it, backed by
-      `examples/reference-app/tests/production_profile_guard.rs` and an assertion in the
+      `examples/reference-app/tests/reference_app/production_profile_guard.rs` and an assertion in the
       Postgres integration suite
 * [x] The persistence completeness rule documented as forward-looking architecture guidance
       (`ARCHITECTURE.md`) — backend support is all-or-nothing across the durable capabilities a

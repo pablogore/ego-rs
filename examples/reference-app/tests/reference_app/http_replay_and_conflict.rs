@@ -36,7 +36,7 @@
 //! a table with one entry proven elsewhere and five assumed is how a mapping
 //! drifts.
 
-mod support;
+use crate::support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
