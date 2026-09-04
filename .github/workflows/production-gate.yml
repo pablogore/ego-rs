@@ -1,0 +1,48 @@
+name: Production Gate
+
+# Minimal mandatory CI gate (PROD-P1.2): fails a PR/push on regressions in
+# the production-critical guarantees already closed as P0.1, P0.2, P0.3,
+# P1.1, CORE-018, and PROD-014C. Does not build/publish anything — see
+# CONTRIBUTING.md for what each step covers and how to reproduce locally.
+on:
+  pull_request:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: production-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-readiness:
+    name: production-readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler; this resolves/installs it via
+      # rustup (preinstalled on GitHub-hosted runners) and prints the version.
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: xtask verify-layers
+        run: cargo run -p xtask -- verify-layers
+
+      - name: xtask verify-isolation
+        run: cargo run -p xtask -- verify-isolation
+
+      - name: xtask verify-hygiene
+        run: cargo run -p xtask -- verify-hygiene
+
+      # integration-tests is a deliberately separate Cargo workspace.
+      # run-suite provisions its own Postgres (16 + 14) via testcontainers,
+      # migrates them, runs the real suite, and always reclaims the
+      # containers before exiting — no secrets, no external services.
+      - name: Production-critical integration suite (run-suite)
+        run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
