@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ego_domain::operation::{OperationFingerprint, OperationIdentity, OperationKey};
-use ego_integration_tests::{isolated_database, IsolatedDatabase};
+use ego_integration_tests::{isolated_database, IsolatedDatabase, TEST_PRODUCTION_JWT_KEY};
 use persistent_entity::command_context::CommandContext;
 use persistent_entity::entity_ref::EntityRef;
 use persistent_entity::persistent_entity::CommandResult;
@@ -116,7 +116,10 @@ async fn build(url: &str) -> reference_app::ObservedEntityRuntimes {
     // organization runtime by hand — so resolution would reach one aggregate and
     // not the other, and this claim is about both.
     reference_app::build_runtime_with(
-        &AppConfig::default(),
+        &AppConfig {
+            jwt_verification_key: Some(TEST_PRODUCTION_JWT_KEY.to_vec()),
+            ..AppConfig::default()
+        },
         stores,
         // E0's claim is about the event stores; the reservation posture is E1's.
         reference_app::IdempotencyWiring::Compatibility,

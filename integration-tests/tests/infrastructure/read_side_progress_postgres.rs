@@ -40,7 +40,7 @@ use ego_domain::read_side::dedup::DedupStore;
 use ego_domain::read_side::event_tag::EventTag;
 use ego_domain::read_side::offset::{Offset, OffsetStore, OffsetStoreError};
 use ego_domain::{Clock, SystemClock};
-use ego_integration_tests::isolated_database;
+use ego_integration_tests::{isolated_database, TEST_PRODUCTION_JWT_KEY};
 use ego_persistence::postgres::{PostgreSQLDedupStore, PostgreSQLOffsetStore, PostgreSQLReadSideClaimStore};
 use persistent_entity::profile::Profile;
 use reference_app::read_side::ReadSideProgressStores;
@@ -388,7 +388,10 @@ async fn production_profile_composition_without_a_claim_store_is_refused() {
     assert_eq!(stores.profile(), Profile::Production);
 
     let result = reference_app::build_runtime_with(
-        &AppConfig::default(),
+        &AppConfig {
+            jwt_verification_key: Some(TEST_PRODUCTION_JWT_KEY.to_vec()),
+            ..AppConfig::default()
+        },
         stores,
         IdempotencyWiring::Compatibility,
         None,
@@ -428,7 +431,10 @@ async fn production_profile_composition_with_a_durable_claim_store_builds() {
     assert_eq!(stores.profile(), Profile::Production);
 
     reference_app::build_runtime_with(
-        &AppConfig::default(),
+        &AppConfig {
+            jwt_verification_key: Some(TEST_PRODUCTION_JWT_KEY.to_vec()),
+            ..AppConfig::default()
+        },
         stores,
         IdempotencyWiring::Compatibility,
         None,

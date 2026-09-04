@@ -27,11 +27,11 @@
 //! Run: `cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite`.
 //! Never `cargo test --workspace` at the root — this workspace is not a member.
 
-use ego_integration_tests::{isolated_database, IsolatedDatabase};
+use ego_integration_tests::{isolated_database, IsolatedDatabase, TEST_PRODUCTION_JWT_KEY};
 use ego_testkit::TestJwtBuilder;
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
-use reference_app::{AppConfig, EntityEventStores, ExternalEffectsWiring, DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
+use reference_app::{AppConfig, EntityEventStores, ExternalEffectsWiring, REFERENCE_APP_AUDIENCE};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -63,7 +63,13 @@ async fn spawn_real_server(url: &str) -> (std::net::SocketAddr, JoinHandle<()>) 
         .await
         .expect("the stores open against a migrated database");
     let built = reference_app::build_runtime_with(
-        &AppConfig::default(),
+        &AppConfig {
+            // PROD-P0.2: this is the CORE-018 real-wire acceptance path —
+            // proving it works through the new external key source, not
+            // just the old committed dev constant, is the point.
+            jwt_verification_key: Some(TEST_PRODUCTION_JWT_KEY.to_vec()),
+            ..AppConfig::default()
+        },
         stores,
         reference_app::IdempotencyWiring::Compatibility,
         None,
@@ -91,7 +97,7 @@ async fn spawn_real_server(url: &str) -> (std::net::SocketAddr, JoinHandle<()>) 
 }
 
 fn token(sub: &str, tenant_id: &str) -> String {
-    TestJwtBuilder::new(DEV_SIGNING_KEY.to_vec())
+    TestJwtBuilder::new(TEST_PRODUCTION_JWT_KEY.to_vec())
         .subject(sub)
         .tenant_id(tenant_id)
         .claim("aud", Value::from(REFERENCE_APP_AUDIENCE))

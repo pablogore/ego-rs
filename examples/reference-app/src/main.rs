@@ -32,7 +32,7 @@
 //! that failure and "shutdown complete" is never printed, instead of
 //! silently reporting success for a shutdown that didn't actually drain.
 
-use ego_domain::{Clock, SystemClock};
+use ego_domain::{Clock, SystemClock, Validate};
 use ego_effect_store::StoolapEffectStore;
 use ego_persistence::postgres::PostgreSQLReadSideClaimStore;
 use ego_transport::AppState;
@@ -54,6 +54,19 @@ use tokio::net::TcpListener;
 /// environment itself would carry a second, invisible input.
 const EFFECT_STORE_PATH_VAR: &str = "EGO_REFERENCE_APP_EFFECT_STORE_PATH";
 
+/// Overrides [`AppConfig::default`]'s PostgreSQL URL (PROD-P0.2). Unset keeps
+/// the ergonomic `postgres://localhost:5432/ego` dev default. Read exactly
+/// once, at the composition root — same idiom as `EFFECT_STORE_PATH_VAR`.
+const DATABASE_URL_VAR: &str = "EGO_REFERENCE_APP_DATABASE_URL";
+
+/// The HMAC verification key [`Hs256AuthenticationProvider`] uses to
+/// authenticate incoming JWTs (PROD-P0.2). Unset means `Profile::Production`
+/// (this binary always opens `EntityEventStores::open`, never `in_memory()`)
+/// refuses to start rather than silently accept the repository's committed
+/// `reference_app::DEV_SIGNING_KEY` — see `build_runtime_with`'s fail-closed
+/// gate. Read exactly once, at the composition root, and never logged.
+const JWT_VERIFICATION_KEY_VAR: &str = "EGO_REFERENCE_APP_JWT_VERIFICATION_KEY";
+
 /// This crate has no prior app-data-directory convention (checked
 /// `config.toml`, `.gitignore`) — this is the first one, and it is a
 /// directory, not a file (Stoolap's own on-disk layout). Never committed
@@ -61,9 +74,40 @@ const EFFECT_STORE_PATH_VAR: &str = "EGO_REFERENCE_APP_EFFECT_STORE_PATH";
 /// accepted-but-undelivered effect state.
 const DEFAULT_EFFECT_STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/data/effects");
 
+/// Applies the two environment overrides on top of an already-defaulted
+/// `AppConfig`. A pure function of its arguments — it never calls
+/// `std::env::var` itself — so `apply_env_overrides_tests` below can prove
+/// the override behavior without mutating real process environment in a
+/// parallel test binary (this repo has no existing safe pattern for that,
+/// PROD-P0.2).
+fn apply_env_overrides(
+    config: &mut AppConfig,
+    database_url: Option<String>,
+    jwt_verification_key: Option<String>,
+) {
+    if let Some(url) = database_url {
+        config.database.url = url;
+    }
+    if let Some(key) = jwt_verification_key {
+        config.jwt_verification_key = Some(key.into_bytes());
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AppConfig::default();
+    let mut config = AppConfig::default();
+    apply_env_overrides(
+        &mut config,
+        std::env::var(DATABASE_URL_VAR).ok(),
+        std::env::var(JWT_VERIFICATION_KEY_VAR).ok(),
+    );
+    // Fail closed on a malformed override (empty URL, etc.) before ever
+    // touching the network — `DatabaseConfig::validate`'s existing check,
+    // reused rather than duplicated. `build_runtime_with` validates again
+    // for callers that construct `AppConfig` directly, but connecting to
+    // Postgres first would surface a confusing sqlx error instead of this
+    // domain-level one.
+    config.validate()?;
 
     // The host owns the pool, the migrations, and the decision to start at all.
     //
@@ -168,4 +212,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// PROD-P0.2 Required Test 4: the runtime-supplied PostgreSQL URL (and JWT
+/// verification key) win over `AppConfig::default`'s source default —
+/// exercised as a pure function so nothing here mutates real process
+/// environment in a shared test binary.
+#[cfg(test)]
+mod apply_env_overrides_tests {
+    use super::*;
+
+    #[test]
+    fn database_url_override_wins_over_the_source_default() {
+        let mut config = AppConfig::default();
+        let default_url = config.database.url.clone();
+
+        apply_env_overrides(
+            &mut config,
+            Some("postgres://operator-supplied-host:5432/real".to_string()),
+            None,
+        );
+
+        assert_eq!(config.database.url, "postgres://operator-supplied-host:5432/real");
+        assert_ne!(config.database.url, default_url);
+    }
+
+    #[test]
+    fn missing_database_url_override_keeps_the_ergonomic_dev_default() {
+        let mut config = AppConfig::default();
+        let default_url = config.database.url.clone();
+
+        apply_env_overrides(&mut config, None, None);
+
+        assert_eq!(config.database.url, default_url);
+    }
+
+    #[test]
+    fn jwt_verification_key_override_is_applied() {
+        let mut config = AppConfig::default();
+        assert!(config.jwt_verification_key.is_none());
+
+        apply_env_overrides(&mut config, None, Some("an-external-key".to_string()));
+
+        assert_eq!(
+            config.jwt_verification_key,
+            Some(b"an-external-key".to_vec())
+        );
+    }
 }

@@ -76,7 +76,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use ego_domain::operation::OwnerId;
-use ego_integration_tests::isolated_database;
+use ego_integration_tests::{isolated_database, TEST_PRODUCTION_JWT_KEY};
 use ego_testkit::{TestClock, TestJwtBuilder};
 use ego_transport::AppState;
 use reference_app::ports::http::build_router;
@@ -84,7 +84,7 @@ use reference_app::{
     build_runtime_with, AppConfig, BuiltRuntime, EntityEventStores, ExternalEffectsWiring,
     IdempotencyWiring, CRASH_FAILPOINT_VAR,
 };
-use reference_app::{DEV_SIGNING_KEY, REFERENCE_APP_AUDIENCE};
+use reference_app::REFERENCE_APP_AUDIENCE;
 use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -103,7 +103,7 @@ const CHILD_DB_URL: &str = "EGO_IT_CHILD_DB_URL";
 /// files are modules of one target a shared helper is finally possible, which is a
 /// tidy-up for its own slice rather than a change to smuggle in here.
 fn make_token(sub: &str, tenant_id: &str) -> String {
-    TestJwtBuilder::new(DEV_SIGNING_KEY.to_vec())
+    TestJwtBuilder::new(TEST_PRODUCTION_JWT_KEY.to_vec())
         .subject(sub)
         .tenant_id(tenant_id)
         .claim("aud", Value::from(REFERENCE_APP_AUDIENCE))
@@ -245,7 +245,10 @@ async fn productive_app(
     );
 
     build_runtime_with(
-        &AppConfig::default(),
+        &AppConfig {
+            jwt_verification_key: Some(TEST_PRODUCTION_JWT_KEY.to_vec()),
+            ..AppConfig::default()
+        },
         stores,
         IdempotencyWiring::Enforced {
             store: reservations,

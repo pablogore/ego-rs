@@ -371,6 +371,21 @@ This file targets exactly T0–T3, nothing else.
 | T2 — systemwide duplicate refused with `23505` | `ux_events_identity_systemwide`'s partial unique index refuses a duplicate `(aggregate_type, aggregate_id, version)` under `tenant_id IS NULL` on PG14, the same way it does on PG16 | `NULLS NOT DISTINCT` is unavailable on the declared 14 floor; only a real duplicate insert against the real partial index proves the two-index pattern is what actually holds there | `tests/infrastructure/pg14_compatibility.rs` |
 | T3 — backfill/revert round trip | `backfill_aggregate_type` and `revert_aggregate_type_column` round-trip cleanly against a real PG14-migrated table, mirroring C4's proof on PG16 | Requires the real forward and reverse migration paths against a real, migrated PostgreSQL 14 database | `tests/infrastructure/pg14_compatibility.rs` |
 
+## Production JWT verification-key gate (PROD-P0.2)
+
+`build_runtime_with`'s `Profile::Production` fail-closed gate: the
+repository's own committed `reference_app::DEV_SIGNING_KEY` must never
+authenticate a production host, and a missing key must refuse to start
+rather than silently accept nothing at all. `Profile::Production` is only
+reachable through `EntityEventStores::open` over a real Postgres pool, so
+this cannot be an in-process test.
+
+| Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |
+|---|---|---|---|
+| No configured key is refused | `Profile::Production` with `AppConfig::jwt_verification_key: None` returns `Err`, never a panic | Only a real `Profile::Production` composition (real Postgres-backed `EntityEventStores`) exercises this gate at all | `tests/infrastructure/production_jwt_key_postgres.rs` |
+| The committed dev key is refused | `Profile::Production` with `DEV_SIGNING_KEY` explicitly configured is refused, and the refusal never echoes the key's own bytes back | Same reachability constraint as above; also the exact vulnerability this gate closes, so it must be proven against a real production-shaped composition, not asserted about the gate's source | `tests/infrastructure/production_jwt_key_postgres.rs` |
+| An external key is accepted | An external, non-dev, >= 32-byte key configured the same way builds successfully | Proves the gate discriminates rather than refusing unconditionally — the other two rows could otherwise pass by rejecting every key | `tests/infrastructure/production_jwt_key_postgres.rs` |
+
 ## SQL-expression invariants
 
 | Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |

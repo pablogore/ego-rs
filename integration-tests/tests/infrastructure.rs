@@ -97,6 +97,11 @@ mod infrastructure {
     /// separate PG14 container. Deliberately not a second full run of the
     /// main suite; see the file's own doc comment for what is excluded.
     mod pg14_compatibility;
+    /// PROD-P0.2: `build_runtime_with`'s fail-closed JWT verification-key
+    /// gate under `Profile::Production`, over a real, migrated PostgreSQL
+    /// pool (the only way this profile is reachable — see
+    /// `durable_entity_progress_postgres`'s own note on this).
+    mod production_jwt_key_postgres;
     mod purge_progress_postgres;
     /// PROD-014C (PR2): `PostgreSQLReadSideClaimStore` against real
     /// PostgreSQL — the execution-exclusion gap `read_side_progress_postgres`

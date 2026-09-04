@@ -170,6 +170,19 @@ pub struct AppConfig {
     pub scheduler: EventBusConfig,
     pub database: DatabaseConfig,
     pub transport: GrpcServerConfig,
+    /// External HMAC verification key for [`Hs256AuthenticationProvider`]
+    /// (PROD-P0.2). Key material, not JWT policy — deliberately not folded
+    /// into `jwt: JwtProviderConfig`, which by design holds none (see
+    /// `security_jwt::KeyResolver`).
+    ///
+    /// `None` under `Profile::Dev` falls back to [`DEV_SIGNING_KEY`];
+    /// `None`, or a value equal to [`DEV_SIGNING_KEY`], under
+    /// `Profile::Production` is refused by [`build_runtime_with`] — the
+    /// repository's committed development key must never authenticate a
+    /// production host. `main.rs` populates this from the host's own
+    /// environment; it is never read here or anywhere else in this crate's
+    /// library code.
+    pub jwt_verification_key: Option<Vec<u8>>,
 }
 
 impl Default for AppConfig {
@@ -186,6 +199,7 @@ impl Default for AppConfig {
             scheduler: EventBusConfig::default(),
             database: DatabaseConfig::default(),
             transport: GrpcServerConfig::default(),
+            jwt_verification_key: None,
         }
     }
 }
@@ -688,9 +702,52 @@ pub fn build_runtime_with(
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     config.validate()?;
 
+    // Captured before `stores.org`/`stores.user`/the snapshot fields below
+    // are moved into the `observed_entity_runtime` calls: `stores.profile()`
+    // borrows the whole struct, which a partial move would make impossible
+    // to call afterward (PROD-013 AD-8/AD-9). Also needed here, ahead of
+    // resolving the JWT verification key below (PROD-P0.2): which key
+    // material `Profile::Production` will accept depends on it.
+    let profile = stores.profile();
+
+    // PROD-P0.2: the committed `DEV_SIGNING_KEY` must never authenticate a
+    // `Profile::Production` host — an attacker with repository access could
+    // otherwise forge valid JWTs against real production traffic.
+    // `Profile::Dev` keeps today's ergonomics (an explicit key, or the dev
+    // key as a fallback); `Profile::Production` requires an explicit,
+    // non-dev, NIST SP 800-107-sized (>= 32 byte) key or refuses to start.
+    let jwt_verification_key: Vec<u8> = match profile {
+        Profile::Production => match &config.jwt_verification_key {
+            None => {
+                return Err(Box::new(ConfigError::Invalid {
+                    field: "jwt_verification_key".to_string(),
+                    reason: "production JWT verification key is not configured".to_string(),
+                }))
+            }
+            Some(key) if key.as_slice() == DEV_SIGNING_KEY => {
+                return Err(Box::new(ConfigError::Invalid {
+                    field: "jwt_verification_key".to_string(),
+                    reason: "development JWT key is not allowed under Production profile"
+                        .to_string(),
+                }))
+            }
+            Some(key) if key.len() < 32 => {
+                return Err(Box::new(ConfigError::Invalid {
+                    field: "jwt_verification_key".to_string(),
+                    reason: "production JWT verification key must be at least 32 bytes"
+                        .to_string(),
+                }))
+            }
+            Some(key) => key.clone(),
+        },
+        Profile::Dev => config
+            .jwt_verification_key
+            .clone()
+            .unwrap_or_else(|| DEV_SIGNING_KEY.to_vec()),
+    };
     let resolver: Arc<dyn KeyResolver> = Arc::new(LocalKeyResolver::new(
         JwtAlgorithm::Hs256,
-        VerificationKey::Hmac(DEV_SIGNING_KEY.to_vec()),
+        VerificationKey::Hmac(jwt_verification_key),
     ));
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let authn: Arc<dyn AuthenticationProvider> = Arc::new(Hs256AuthenticationProvider::try_new(
@@ -757,11 +814,6 @@ pub fn build_runtime_with(
         }
     };
 
-    // Captured before `stores.org`/`stores.user`/the snapshot fields below
-    // are moved into the `observed_entity_runtime` calls: `stores.profile()`
-    // borrows the whole struct, which a partial move would make impossible
-    // to call afterward (PROD-013 AD-8/AD-9).
-    let profile = stores.profile();
     // AD-4: two independent EntityRuntimes, one per aggregate — built
     // directly here (not via [`compose_entity_runtimes`]) because only
     // `User` ever receives an effect acceptor; `TenantOrganization` never

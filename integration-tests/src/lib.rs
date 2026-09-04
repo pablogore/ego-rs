@@ -87,6 +87,15 @@ const TEMPLATE: &str = "ego_template";
 const HOST_VAR: &str = "EGO_IT_PG_HOST";
 const PORT_VAR: &str = "EGO_IT_PG_PORT";
 
+/// Shared external (non-dev) HMAC key for tests that build a
+/// `Profile::Production` composition (PROD-P0.2): `build_runtime_with`
+/// refuses `reference_app::DEV_SIGNING_KEY` under that profile, so every
+/// Postgres integration test that reaches `Profile::Production` needs a
+/// distinct key of its own, both to configure `AppConfig::jwt_verification_key`
+/// and to sign tokens through `TestJwtBuilder`. >= 32 bytes (NIST SP 800-107).
+pub const TEST_PRODUCTION_JWT_KEY: &[u8] =
+    b"integration-tests-production-signing-key-not-dev-key";
+
 /// How many isolated databases may be live at once.
 ///
 /// Bounds connections without serialising: the container's default
