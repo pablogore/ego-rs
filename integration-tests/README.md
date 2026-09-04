@@ -81,7 +81,8 @@ Schema/catalog assertions ............ 1
 PROD-002 backend conformance ......... 1
 PROD-002 backend-specific invariants . 1
 PROD-002 provider composition ........ 1
-Total infrastructure tests ........... 22
+Real transport boundary acceptance ... 2
+Total infrastructure tests ........... 24
 ```
 
 **This block was wrong, and the correction is the point of keeping this note.** It
@@ -294,6 +295,23 @@ distinct follow-up **PROD-014C — Atomic Read-Side Event Claiming**.
 | Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
 |---|---|---|---|
 | Offset survives a process restart, tenant isolation, last-write-wins writes, dedup convergence (sequential and concurrent), tenant-independent dedup identity, both stores report durable, unapplied-migration classification | The durable pair behaves the way `spec.md` states against real PostgreSQL: an offset outlives the process that wrote it, a never-written tenant never leaks another tenant's row, a later write silently wins, two `mark_seen` calls on one identity converge to one row whether sequential or concurrent, dedup identity carries no tenant, both `is_durable()` report `true`, and a missing table classifies `Fatal`, never `Transient` | Restart survival and tenant isolation are properties of the stored rows, not of an in-memory struct — a scripted double has nothing to lose across a restart. Dedup convergence under real concurrency needs a real `ON CONFLICT … DO NOTHING` resolved by the database, not a mutex a test controls. The unapplied-migration case needs a real `42P01` from a real catalog lookup — no scripted store has a catalog to be missing from | `tests/infrastructure/read_side_progress_postgres.rs` |
+
+## Real transport boundary acceptance
+
+Every HTTP-route test elsewhere (`examples/reference-app/tests/reference_app/http_route.rs`)
+drives `reference_app::ports::http::build_router` in-process via
+`tower::ServiceExt::oneshot` — no socket, no real HTTP client, no durable
+store. This is the only place a real TCP listener, a real HTTP client and a
+real, migrated PostgreSQL are combined: the reference app's real composition
+root, serving its real router, reached over a real wire, all the way to a
+durable event row. A new infrastructure risk distinct from every category
+above, so it is its own budget line, not a draw against the closed
+end-to-end scenario budget.
+
+| Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|
+| A real HTTP client, over a real TCP socket, through the real JWT auth path, persists a durable PostgreSQL event | The reference app's real router (the same one `main.rs` serves) traverses the transport-neutral service boundary to a real `PostgreSQLEventStore` write — proving the wiring `AppState`/`ego_transport::serve`/`build_router` describe on paper actually carries a request end to end | `Router::oneshot()` never opens a socket, never runs axum's real connection/framing loop, and never runs a real HTTP client — all three are the thing under test. No prior test pairs a real socket with a durable store | `tests/infrastructure/wire_register_postgres.rs` |
+| Replaying an identical registration over the real wire does not duplicate the durable event | `UserEntity`'s in-process, rehydration-based duplicate guard (`domain/user.rs`) — not key/receipt idempotency — still holds when the second call arrives as a genuine second HTTP request against a genuinely durable stream | The guard depends on rehydrating state from a real event stream across two independent requests; an in-memory store or a `oneshot()`-driven call cannot show a durable stream being replayed against over the wire | `tests/infrastructure/wire_register_postgres.rs` |
 
 ## Read-side atomic claiming (PROD-014C)
 

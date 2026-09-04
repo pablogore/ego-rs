@@ -134,4 +134,10 @@ mod infrastructure {
     #[cfg(unix)]
     mod single_aggregate_crash_recovery_postgres;
     mod takeover_fencing_postgres;
+    /// Real transport boundary acceptance: a real TCP socket, a real HTTP
+    /// client, and `reference_app::ports::http::build_router` — the exact
+    /// router production serves — carrying `POST /register` through the
+    /// real JWT auth path to a durable PostgreSQL write. See the file's own
+    /// doc comment for what it does and does not prove.
+    mod wire_register_postgres;
 }

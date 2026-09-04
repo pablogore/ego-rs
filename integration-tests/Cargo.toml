@@ -64,6 +64,10 @@ ego-service-sdk-macros = { path = "../crates/service-sdk-macros" }
 ego-testkit = { path = "../crates/testkit" }
 ego-transport = { path = "../crates/transport" }
 persistent-entity = { path = "../crates/persistent-entity" }
+# Real HTTP client for the wire-level transport-boundary acceptance test
+# (`wire_register_postgres.rs`) — it must connect over a real TCP socket,
+# never invoke the router in-process. Same pin as `crates/security-jwt`.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 # `crash-test-failpoint` is what lets the crash-recovery scenario interrupt the
 # real workflow. It is off by default in the reference app on purpose — see that
 # crate's `[features]` — and this is the only place that turns it on. This
