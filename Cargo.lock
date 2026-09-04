@@ -2889,6 +2889,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "persistent-entity",
+ "reqwest 0.12.28",
  "security-jwt",
  "serde",
  "serde_json",

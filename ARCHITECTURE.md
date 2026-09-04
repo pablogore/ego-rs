@@ -492,6 +492,21 @@ signals the health of an application that has *already* started, with degraded m
 for optional dependencies. The two never overlap: PROD-013 runs before Startup; PROD-005
 describes what happens after it.
 
+**Operational HTTP surface (PROD-P1.1)**: the reference app exposes this model over its existing
+HTTP adapter — `GET /health` reads `Runtime::liveness()` (process-internal, always `Healthy`,
+never fails on a transient dependency outage) and `GET /ready` reads `Runtime::readiness()`
+(dependency-aware; `Healthy`/`Degraded` → `200`, `Unhealthy` → `503`), both through
+`RuntimeResolver`'s delegation to the same `HealthAggregator` instance the running composition
+built — never a second, ad-hoc aggregator. No auth is required on either route: a caller must be
+able to check liveness/readiness before authenticated traffic is ever routed. `/startup` is not
+exposed by this slice. Response bodies are deliberately minimal (`{"status": "..."}`) — component
+names, error text, and dependency detail are never serialized into the response. As of this
+change, `examples/reference-app`'s own composition root registers zero `HealthContributor`s, so
+`/ready` is currently vacuously `200` in that example; Postgres connectivity does not yet
+participate in its readiness signal — a real deployment that needs dependency-aware readiness
+must register its own contributors via `LifecycleManaged::health_contributors()`, the mechanism
+this section already describes.
+
 ---
 
 ## Repository Layout

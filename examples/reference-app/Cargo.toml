@@ -71,6 +71,10 @@ utoipa-swagger-ui = { version = "=8.1.0", features = ["axum"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 ego-testkit = { path = "../../crates/testkit" }
+# PROD-P1.1: real-wire acceptance for /health and /ready — a real
+# reqwest::Client against a real TcpListener/ego_transport::serve, the same
+# CORE-018 pattern wire_register_postgres.rs uses for /register.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 # PROD-002 Phase 8: `tests/stoolap_restart_persistence.rs` opens a second,
 # independent handle on the same on-disk DSN to read the raw `effect_state`
 # row back — proving delivery landed in the REGISTERED Stoolap store, not

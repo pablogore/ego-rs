@@ -10,20 +10,33 @@
 pub mod handlers;
 pub mod router;
 
-pub use handlers::{register_handler, users_by_tenant_handler};
+pub use handlers::{health_handler, ready_handler, register_handler, users_by_tenant_handler};
 pub use router::build_router;
 
 use crate::application::{RegisterInput, RegisterOutput};
 use crate::read_side::{TenantUsersView, UserSummary};
+use handlers::HealthResponse;
 
 /// OpenAPI document for the reference app: the `/register` write path, the
-/// `UsersByTenant` read-side query path, and the bearer-JWT security scheme
-/// every guarded operation requires (see `crate::DEV_SIGNING_KEY`'s doc for
-/// the dev-only signing key this scheme verifies against).
+/// `UsersByTenant` read-side query path, the `/health`/`/ready` operational
+/// probes, and the bearer-JWT security scheme every guarded operation
+/// requires (see `crate::DEV_SIGNING_KEY`'s doc for the dev-only signing key
+/// this scheme verifies against).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(handlers::register_handler, handlers::users_by_tenant_handler),
-    components(schemas(RegisterInput, RegisterOutput, TenantUsersView, UserSummary)),
+    paths(
+        handlers::register_handler,
+        handlers::users_by_tenant_handler,
+        handlers::health_handler,
+        handlers::ready_handler,
+    ),
+    components(schemas(
+        RegisterInput,
+        RegisterOutput,
+        TenantUsersView,
+        UserSummary,
+        HealthResponse
+    )),
     modifiers(&SecurityAddon),
 )]
 pub struct ApiDoc;

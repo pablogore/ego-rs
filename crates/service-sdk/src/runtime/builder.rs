@@ -1884,6 +1884,21 @@ impl RuntimeResolver {
     pub fn observability(&self) -> Option<Arc<dyn Observability>> {
         self.runtime.observability()
     }
+
+    /// Process-internal liveness check — identical to [`Runtime::liveness`].
+    pub fn liveness(&self) -> ego_domain::health::HealthReport {
+        self.runtime.liveness()
+    }
+
+    /// Dependency-aware readiness check — identical to [`Runtime::readiness`].
+    pub async fn readiness(&self) -> ego_domain::health::HealthReport {
+        self.runtime.readiness().await
+    }
+
+    /// Dependency-aware startup check — identical to [`Runtime::startup`].
+    pub async fn startup(&self) -> ego_domain::health::HealthReport {
+        self.runtime.startup().await
+    }
 }
 
 #[cfg(test)]

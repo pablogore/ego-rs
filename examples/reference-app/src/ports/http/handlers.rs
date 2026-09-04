@@ -6,12 +6,14 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use ego_domain::health::HealthStatus;
 use ego_service_sdk::context::ServiceContext;
 use ego_service_sdk::runtime::ReservationRejection;
 use ego_transport::{
     AppState, AuthenticatedContext, OperationKeyExtractor, TraceContextExtractor, TransportError,
 };
 use kitlogger_log_domain::Severity;
+use serde::Serialize;
 
 use crate::application::{
     RegisterInput, RegisterOutput, RegisterUser, RegisterUserError, RegisterUserTag,
@@ -200,6 +202,59 @@ pub async fn users_by_tenant_handler(
             Ok(Json(store.view(&tenant_id)))
         }
         _ => Err(TransportError::Forbidden),
+    }
+}
+
+/// Minimal, stable probe response body (P1.1 security constraint: never
+/// carry per-contributor detail — component names, dependency error text —
+/// out through an operational endpoint reachable without authentication).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct HealthResponse {
+    pub status: &'static str,
+}
+
+/// `GET /health` — liveness. Reads through the same `RuntimeResolver` every
+/// other handler resolves operations through, the real production
+/// `Runtime`'s handle — not a second, HTTP-owned health concept. Always 200:
+/// `Runtime::liveness()` consults no contributor by design (PROD-005 PR2),
+/// so a struggling dependency cannot fail it — that separation from `/ready`
+/// is the point of having both.
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Process is alive", body = HealthResponse),
+    ),
+)]
+pub async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
+    let _ = state.runtime.liveness();
+    Json(HealthResponse { status: "healthy" })
+}
+
+/// `GET /ready` — readiness. Reads `Runtime::readiness()` through the same
+/// resolver, folding whatever `HealthContributor`s the real composition
+/// registered (P1.1: no bare `HealthAggregator::new()` built here). A
+/// `Degraded` report (an `Optional` dependency is down) still serves — 200.
+/// `Unhealthy` (a `Required` dependency failed) does not — 503, so an
+/// orchestrator stops routing traffic here.
+#[utoipa::path(
+    get,
+    path = "/ready",
+    responses(
+        (status = 200, description = "Instance can serve traffic", body = HealthResponse),
+        (status = 503, description = "A required dependency is unhealthy", body = HealthResponse),
+    ),
+)]
+pub async fn ready_handler(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let report = state.runtime.readiness().await;
+    match report.status {
+        HealthStatus::Healthy | HealthStatus::Degraded => {
+            (StatusCode::OK, Json(HealthResponse { status: "ready" }))
+        }
+        HealthStatus::Unhealthy => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse { status: "not_ready" }),
+        ),
     }
 }
 

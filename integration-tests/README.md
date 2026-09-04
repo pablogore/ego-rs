@@ -403,6 +403,27 @@ in-process test.
 | Shared multi-tenant mode is refused | `Profile::Production` with `single_tenant_mode: false` returns `Err`, never a panic, never a started runtime | Only a real `Profile::Production` composition (real Postgres-backed `EntityEventStores`) exercises this gate at all | `tests/infrastructure/production_tenancy_postgres.rs` |
 | Single-tenant mode is accepted | `Profile::Production` with the supported `single_tenant_mode: true` default still builds successfully | Proves the gate discriminates rather than refusing unconditionally — the row above could otherwise pass by rejecting every configuration | `tests/infrastructure/production_tenancy_postgres.rs` |
 
+## Health/readiness real-wire acceptance (PROD-P1.1)
+
+`GET /health`/`GET /ready`, served by `reference_app::ports::http::build_router`
+— the same router `main.rs` runs — over a real Production-style composition
+built against a real, migrated PostgreSQL (`build_runtime_with`, the exact
+composition root `main.rs` calls). Proves the health surface reads through
+the real `RuntimeResolver`/`HealthAggregator` a real Production composition
+built, not a bare `HealthAggregator::new()` constructed just to answer the
+probe.
+
+**Known limitation, reported rather than simulated:** this composition
+registers zero `HealthContributor`s today (no data provider, no reservation
+store), so PostgreSQL connectivity does not yet participate in this
+readiness signal — see `examples/reference-app/tests/reference_app/health_ready_wire.rs`
+for the deterministic not-ready→503 case, proven instead with the health
+model's own `StaticHealthContributor` test double on a bare `RuntimeBuilder`.
+
+| Test | Guarantee it demonstrates | Why in-process cannot show it | Status |
+|---|---|---|---|
+| `/health` and `/ready` both return 200 for a real, healthy Production-style composition | The real running application's health state — not a synthetic always-green stand-in — reaches the HTTP adapter through `AppState.runtime` and reports healthy/ready over a real socket | Only a real `Profile`-shaped composition (real Postgres-backed `EntityEventStores`), served over a real `TcpListener`/`ego_transport::serve`, proves the same instance the router holds is the one production would run — `Router::oneshot()` never opens a socket | `tests/infrastructure/wire_health_readiness_postgres.rs` |
+
 ## SQL-expression invariants
 
 | Invariant | Guarantee it demonstrates | Why it cannot be end-to-end | Status |

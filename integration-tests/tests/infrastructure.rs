@@ -145,6 +145,13 @@ mod infrastructure {
     #[cfg(unix)]
     mod single_aggregate_crash_recovery_postgres;
     mod takeover_fencing_postgres;
+    /// PROD-P1.1 Required Test 2: real transport boundary acceptance for
+    /// `GET /health`/`GET /ready` over a real, migrated PostgreSQL-backed
+    /// Production-style composition. See the file's own doc comment for
+    /// what it does and does not prove (readiness does not yet depend on
+    /// Postgres connectivity — zero `HealthContributor`s are registered in
+    /// this composition today).
+    mod wire_health_readiness_postgres;
     /// Real transport boundary acceptance: a real TCP socket, a real HTTP
     /// client, and `reference_app::ports::http::build_router` — the exact
     /// router production serves — carrying `POST /register` through the

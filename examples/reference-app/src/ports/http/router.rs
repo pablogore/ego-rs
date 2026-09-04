@@ -11,7 +11,7 @@ use ego_transport::AppState;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use super::handlers::{register_handler, users_by_tenant_handler};
+use super::handlers::{health_handler, ready_handler, register_handler, users_by_tenant_handler};
 use super::ApiDoc;
 use crate::read_side::UsersByTenantStore;
 
@@ -55,6 +55,11 @@ impl FromRef<ReadSideState> for UsersByTenantStore {
 pub fn build_router(state: AppState, users_by_tenant: UsersByTenantStore) -> Router {
     let write_routes = Router::new()
         .route("/register", post(register_handler))
+        // Operational probes (P1.1): no auth required — a caller must be
+        // able to check liveness/readiness before authenticated traffic is
+        // ever routed here.
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
         .with_state(state.clone());
 
     let read_side_routes = Router::new()

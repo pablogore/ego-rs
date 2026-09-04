@@ -38,6 +38,8 @@ mod http_idempotency_span;
 mod http_operation_key_carriage;
 #[path = "reference_app/http_replay_and_conflict.rs"]
 mod http_replay_and_conflict;
+#[path = "reference_app/health_ready_wire.rs"]
+mod health_ready_wire;
 #[path = "reference_app/http_route.rs"]
 mod http_route;
 #[path = "reference_app/idempotency_wiring.rs"]
