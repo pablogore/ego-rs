@@ -279,6 +279,29 @@ pub struct MetricObservation<'a> {
 /// implementor that blocks here is a contract violation by that
 /// implementor, not a gap the caller is responsible for working around.
 ///
+/// # Panic isolation
+///
+/// A caller-supplied implementor is untrusted, the same way an
+/// `AuthorizationProvider` is (`security-sdk/authorization/mod.rs`). `counter`,
+/// `histogram`, and `gauge` are the only methods an emitter calls, and every one
+/// of them funnels into `record_metric` — so a panic inside an implementor's
+/// `record_metric` is caught right there, in these three default methods, and
+/// never reaches the emitter. That isolation lives at this one point rather than
+/// at each of the SDK's call sites precisely because these three methods are the
+/// single place every emission already passes through.
+///
+/// `trace` and `log` have no such indirection: they are what an implementor
+/// itself provides directly, with nothing of the port's own in between. Isolating
+/// a panic in `trace` is therefore the calling code's responsibility, and every
+/// current SDK call site already does it (`service-sdk/runtime/runtime_builder.rs`).
+/// `log` has no call site yet; the same discipline applies the day one is added.
+///
+/// This does not make a broken sink self-healing. Nothing here disables, retries,
+/// or rate-limits an implementor that panics on every call — each emission is
+/// isolated independently, so a persistently panicking sink silently drops every
+/// one of its own emissions for as long as it keeps panicking. That matches
+/// `trace`'s existing behaviour; it is not a stronger guarantee.
+///
 /// # Deterministic
 ///
 /// The trait itself is stateless. Determinism is ensured by the data
@@ -356,38 +379,62 @@ pub trait Observability: Send + Sync {
     /// that cannot represent a kind must say so at its own boundary rather than
     /// silently exporting the observation as another kind, which produces a
     /// number that aggregates wrongly instead of one that is absent.
+    ///
+    /// # Not panic-isolated
+    ///
+    /// This is the low-level primitive the trait's "Panic isolation" contract
+    /// (above) catches an implementor's panic *around* — it is not itself
+    /// isolated. Framework code MUST call [`Observability::counter`],
+    /// [`Observability::histogram`], or [`Observability::gauge`] rather than
+    /// this method directly, or a panicking implementor takes the caller down
+    /// with it, reopening issue #306 through a different door.
     fn record_metric(&self, observation: MetricObservation<'_>);
 
     /// Record an increment of a monotonically increasing count.
     ///
     /// `value` is this observation's increment — usually `1.0` for "it happened
     /// once", or a batch size for "it happened this many times".
+    ///
+    /// A panic inside the implementor's `record_metric` is isolated — see the
+    /// trait's "Panic isolation" contract above.
     fn counter(&self, name: &'static str, value: f64, attributes: &[MetricAttribute<'_>]) {
-        self.record_metric(MetricObservation {
-            kind: MetricKind::Counter,
-            name,
-            value,
-            attributes,
+        emit_isolated(|| {
+            self.record_metric(MetricObservation {
+                kind: MetricKind::Counter,
+                name,
+                value,
+                attributes,
+            })
         });
     }
 
     /// Record one sample of a distribution.
+    ///
+    /// A panic inside the implementor's `record_metric` is isolated — see the
+    /// trait's "Panic isolation" contract above.
     fn histogram(&self, name: &'static str, value: f64, attributes: &[MetricAttribute<'_>]) {
-        self.record_metric(MetricObservation {
-            kind: MetricKind::Histogram,
-            name,
-            value,
-            attributes,
+        emit_isolated(|| {
+            self.record_metric(MetricObservation {
+                kind: MetricKind::Histogram,
+                name,
+                value,
+                attributes,
+            })
         });
     }
 
     /// Record a level read at this moment.
+    ///
+    /// A panic inside the implementor's `record_metric` is isolated — see the
+    /// trait's "Panic isolation" contract above.
     fn gauge(&self, name: &'static str, value: f64, attributes: &[MetricAttribute<'_>]) {
-        self.record_metric(MetricObservation {
-            kind: MetricKind::Gauge,
-            name,
-            value,
-            attributes,
+        emit_isolated(|| {
+            self.record_metric(MetricObservation {
+                kind: MetricKind::Gauge,
+                name,
+                value,
+                attributes,
+            })
         });
     }
 
@@ -395,6 +442,29 @@ pub trait Observability: Send + Sync {
     ///
     /// Log entries carry a severity level and a human-readable message.
     fn log(&self, level: Level, message: &str);
+}
+
+/// Runs `f` — a call into the implementor's `record_metric` — with any panic
+/// caught, so it never reaches the caller of [`Observability::counter`],
+/// [`Observability::histogram`], or [`Observability::gauge`] — the three
+/// default methods that share this one guard rather than each inlining it.
+///
+/// Takes a closure rather than `&dyn Observability` plus a `MetricObservation`
+/// because the coercion from `&Self` to `&dyn Observability` inside a default
+/// method requires `Self: Sized`, which would remove `counter`/`histogram`/
+/// `gauge` from the vtable and break every caller holding a plain
+/// `dyn Observability`. A closure borrowing `self` needs no such coercion —
+/// `self.record_metric(..)` dispatches the same way whether `Self` is
+/// concrete or already `dyn Observability`.
+///
+/// `AssertUnwindSafe` is sound here because nothing capable of being left
+/// inconsistent crosses the boundary: the closure only reads `self` through an
+/// immutable trait method call and closes over a `MetricObservation` built
+/// fresh on the caller's stack — an enum, a `&'static str`, an `f64`, and a
+/// borrowed slice — none owned, none backing a lock. There is no state on
+/// this side of the call for an unwind to abandon mid-mutation.
+fn emit_isolated(f: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
 }
 
 #[cfg(test)]
@@ -589,6 +659,103 @@ mod metric_attribute_tests {
             vec![("aggregate_type", "Order".to_string())],
             "the implementor copied the value rather than retaining the borrow"
         );
+    }
+}
+
+/// Issue #306 — panic isolation for `counter`/`histogram`/`gauge`.
+#[cfg(test)]
+mod panic_isolation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `record_metric` always panics; `trace`/`log` are unused no-ops. Proves
+    /// the isolation lives in `counter`/`histogram`/`gauge` themselves, not in
+    /// some property of a well-behaved implementor.
+    #[derive(Default)]
+    struct PanicOnRecordMetric;
+
+    impl Observability for PanicOnRecordMetric {
+        fn trace(&self, _event: SemanticEvent) {}
+        fn record_metric(&self, _observation: MetricObservation<'_>) {
+            panic!("PanicOnRecordMetric::record_metric always panics (test double)");
+        }
+        fn log(&self, _level: Level, _message: &str) {}
+    }
+
+    /// T1 — a panic inside `record_metric` does not escape `counter`.
+    ///
+    /// If isolation were missing, this call itself would panic and fail the
+    /// test — there is nothing else to assert for "did not escape".
+    #[test]
+    fn a_panicking_record_metric_does_not_escape_counter() {
+        let obs = PanicOnRecordMetric;
+        obs.counter("some.metric", 1.0, &[]);
+    }
+
+    /// T1/T5 variant — the same holds for `histogram` and `gauge`, not just
+    /// `counter`. All three funnel through the same `record_metric`, so all
+    /// three must be covered, not just the first one written.
+    #[test]
+    fn a_panicking_record_metric_does_not_escape_histogram_or_gauge() {
+        let obs = PanicOnRecordMetric;
+        obs.histogram("some.metric", 1.0, &[]);
+        obs.gauge("some.metric", 1.0, &[]);
+    }
+
+    /// T2 — real progress continues after the isolated panic, not just "no
+    /// crash". Each call below only runs if the previous one actually returned
+    /// control to the caller.
+    #[test]
+    fn business_progress_continues_after_each_isolated_panic() {
+        let obs = PanicOnRecordMetric;
+        let reached = AtomicUsize::new(0);
+
+        obs.counter("a", 1.0, &[]);
+        reached.fetch_add(1, Ordering::SeqCst);
+
+        obs.histogram("b", 1.0, &[]);
+        reached.fetch_add(1, Ordering::SeqCst);
+
+        obs.gauge("c", 1.0, &[]);
+        reached.fetch_add(1, Ordering::SeqCst);
+
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            3,
+            "every emission after a panicking one must still run — a caller \
+             that stopped at the first panic would prove isolation, not progress"
+        );
+    }
+
+    /// T4 — the sink is not disabled after panicking once. There is no breaker
+    /// to trip and none to reset: each call is independently isolated, so a
+    /// sink that panics on call N panics again, and is isolated again, on call
+    /// N+1. This pins that as the chosen policy, not an accident of the first
+    /// test passing.
+    #[test]
+    fn a_repeatedly_panicking_sink_is_isolated_on_every_call_not_just_the_first() {
+        let obs = PanicOnRecordMetric;
+        for _ in 0..3 {
+            obs.counter("repeated", 1.0, &[]);
+        }
+    }
+
+    /// T3 — the guard is scoped to `counter`/`histogram`/`gauge`, not a
+    /// blanket catch-all. Calling `record_metric` directly — bypassing the
+    /// three default methods — must still panic, or this test would be
+    /// isolating far more than the contract promises and hiding a defect in
+    /// the implementor's own required method from its own caller (the
+    /// implementor's author, writing an adapter).
+    #[test]
+    #[should_panic(expected = "PanicOnRecordMetric::record_metric always panics")]
+    fn calling_record_metric_directly_is_not_isolated() {
+        let obs = PanicOnRecordMetric;
+        obs.record_metric(MetricObservation {
+            kind: MetricKind::Counter,
+            name: "direct",
+            value: 1.0,
+            attributes: &[],
+        });
     }
 }
 
