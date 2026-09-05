@@ -18,9 +18,18 @@ already have. `EventStore<E>` (`event_store.rs:47`) is `#[async_trait]`, so only
 |---|---|---|
 | Sibling crate `ego-persistence-stoolap-event-sourcing` | Keeps S1 tokio-free, but `dsn_for`/`encode_tenant`/`is_write_conflict`/`internal_err` are private fns in `repository.rs` — they would be copied or newly exported | Rejected: duplicates exactly what AD-2 wants shared |
 | Same crate, unconditional `tokio` + `async-trait` deps | Smallest diff, but every `Repository<A>` consumer gains an async runtime, contradicting the proposal's "no existing crate gains a non-dev dependency" rollback claim | Rejected |
-| **Same crate, `event_sourcing` module behind `event-sourcing = ["dep:tokio", "dep:async-trait"]`** | Two Cargo lines; helpers shared in-crate; sync-only consumers unchanged | **Chosen** — mirrors `ego-effect-store`'s own optional-dep pattern (`effect-store/Cargo.toml:46-50`), which is one crate with feature-gated backends, not a sync/async split |
+| **Same crate, `event_sourcing` module behind `event-sourcing = ["dep:tokio", "dep:async-trait", "dep:chrono"]`** | Two Cargo lines; helpers shared in-crate; sync-only consumers unchanged | **Chosen** — mirrors `ego-effect-store`'s own optional-dep pattern (`effect-store/Cargo.toml:46-50`), which is one crate with feature-gated backends, not a sync/async split |
 
 `Snapshot` lands **outside** the feature: it adds zero dependencies.
+
+The gate's guarantee is about `ego-persistence-stoolap`'s own `Cargo.toml`, not the resolved
+dependency tree: `chrono` and `async-trait` are declared unconditionally by `ego-persistence-api`
+(this crate's own dependency) already, so they are present in the tree with or without
+`event-sourcing` — `cargo tree -p ego-persistence-stoolap --no-default-features` shows both. The
+feature gate's effective benefit today is `tokio`: that dependency genuinely disappears when the
+feature is off, verified the same way. Gating `chrono`/`async-trait` here too still avoids this
+crate introducing its own unnecessary direct dependency on them, which is the property AD-1
+actually controls — but it does not, by itself, keep them out of a sync-only build's tree.
 
 ### AD-2: Reuse boundary
 
