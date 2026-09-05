@@ -7,8 +7,11 @@
 //!
 //! The `snapshots` table mirrors S1's `aggregates` table shape verbatim
 //! (design.md AD-2): `tenant_id`/`aggregate_id`/`version`/`payload` with a
-//! `UNIQUE (tenant_id, aggregate_id)` constraint — one row per aggregate, the
-//! latest snapshot always overwrites the previous one.
+//! `UNIQUE (tenant_id, aggregate_id)` constraint — one row per aggregate,
+//! holding the highest-version snapshot ever saved for it. `save_snapshot`
+//! is monotonic: a save at or below the stored version is a no-op, matching
+//! `Snapshot::load_snapshot`'s "highest version" contract
+//! (`persistence-api/src/persistence/snapshot.rs`).
 
 use std::fmt;
 use std::path::Path;
@@ -35,7 +38,7 @@ const SELECT_SNAPSHOT: &str =
 const INSERT_SNAPSHOT: &str =
     "INSERT INTO snapshots (tenant_id, aggregate_id, version, payload) VALUES ($1, $2, $3, $4)";
 const UPDATE_SNAPSHOT: &str = "UPDATE snapshots SET version = $1, payload = $2 \
-     WHERE tenant_id = $3 AND aggregate_id = $4";
+     WHERE tenant_id = $3 AND aggregate_id = $4 AND version < $5";
 
 /// Stoolap-backed implementation of `Snapshot`.
 ///
@@ -115,16 +118,24 @@ impl Snapshot for StoolapSnapshotStore {
             .map_err(internal_err)?;
 
         match existing {
-            None => tx.execute(
-                INSERT_SNAPSHOT,
-                (scope, aggregate_id, version, payload_str.as_str()),
-            ),
-            Some(_) => tx.execute(
-                UPDATE_SNAPSHOT,
-                (version, payload_str.as_str(), scope, aggregate_id),
-            ),
+            None => {
+                tx.execute(
+                    INSERT_SNAPSHOT,
+                    (scope, aggregate_id, version, payload_str.as_str()),
+                )
+                .map_err(internal_err)?;
+            }
+            Some(_) => {
+                // `version < $5` makes this atomic: a stale or equal-version
+                // write matches zero rows rather than racing a separate
+                // read-then-write against a concurrent saver.
+                tx.execute(
+                    UPDATE_SNAPSHOT,
+                    (version, payload_str.as_str(), scope, aggregate_id, version),
+                )
+                .map_err(internal_err)?;
+            }
         }
-        .map_err(internal_err)?;
 
         // AD-3 criterion 4: exactly one commit, no deferred/batched path — a
         // failed WAL sync here must surface as an `Err`, never silent success.
@@ -269,6 +280,40 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_lower_version_save_is_silently_ignored() {
+        let _fp = db_test_guard();
+        let dir = TempDir::new().unwrap();
+        let mut store = new_store(dir.path());
+        store
+            .save_snapshot("agg-stale", None, 2, serde_json::json!({"value": "b"}))
+            .unwrap();
+        store
+            .save_snapshot("agg-stale", None, 1, serde_json::json!({"value": "a"}))
+            .unwrap();
+
+        let (version, payload) = store.load_snapshot("agg-stale", None).unwrap().unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(payload, serde_json::json!({"value": "b"}));
+    }
+
+    #[test]
+    fn a_same_version_save_with_a_different_payload_does_not_replace_the_existing_snapshot() {
+        let _fp = db_test_guard();
+        let dir = TempDir::new().unwrap();
+        let mut store = new_store(dir.path());
+        store
+            .save_snapshot("agg-tie", None, 5, serde_json::json!({"value": "first"}))
+            .unwrap();
+        store
+            .save_snapshot("agg-tie", None, 5, serde_json::json!({"value": "second"}))
+            .unwrap();
+
+        let (version, payload) = store.load_snapshot("agg-tie", None).unwrap().unwrap();
+        assert_eq!(version, 5);
+        assert_eq!(payload, serde_json::json!({"value": "first"}));
+    }
+
+    #[test]
     fn a_tenants_snapshot_is_isolated_from_another_tenant_sharing_the_same_aggregate_id() {
         let _fp = db_test_guard();
         let dir = TempDir::new().unwrap();
@@ -346,9 +391,13 @@ mod tests {
             other => panic!("expected Internal, got {other:?}"),
         }
 
-        // The failed write must not be visible — no silent partial success.
+        // The failed write must not be visible even after a drop and reopen —
+        // not just to the handle that saw the error, which could pass by
+        // reading back its own uncommitted in-memory state.
         stoolap::test_failpoints::WAL_WRITE_FAIL
             .store(false, std::sync::atomic::Ordering::Release);
-        assert_eq!(store.load_snapshot("agg-3", None).unwrap(), None);
+        drop(store);
+        let reopened = new_store(dir.path());
+        assert_eq!(reopened.load_snapshot("agg-3", None).unwrap(), None);
     }
 }
