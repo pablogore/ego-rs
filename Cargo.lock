@@ -905,12 +905,16 @@ dependencies = [
 name = "ego-persistence-stoolap"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "ego-persistence-api",
  "ego-testkit",
+ "persistent-entity",
  "serde",
  "serde_json",
  "stoolap",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
