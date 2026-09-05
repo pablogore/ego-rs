@@ -62,10 +62,10 @@ impl StoolapSnapshotStore {
     /// Opens (creating the `snapshots` table if absent) a Stoolap-backed
     /// snapshot store at `path`.
     ///
-    /// Fails closed (design.md AD-3 criterion 2) if the live engine handed
-    /// back for this DSN — Stoolap's `Database::open` shares a process-wide
-    /// registry entry per open handle — is not actually configured for
-    /// `sync=full`. A durability claim this store makes later
+    /// Fails closed (design.md AD-3 criterion 2): if `Database::open` cannot
+    /// open `path` under the durable configuration this store requires, it
+    /// returns an error here. If it returns a handle instead, that handle is
+    /// checked for `sync=full`. A durability claim this store makes later
     /// (`is_durable()`) must never outlive-lie about how it was opened.
     pub fn open(path: &Path) -> Result<Self, PersistenceError> {
         let dsn = dsn_for(path);

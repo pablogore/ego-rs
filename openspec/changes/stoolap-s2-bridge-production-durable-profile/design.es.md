@@ -19,9 +19,19 @@ no tenga ya. `EventStore<E>` (`event_store.rs:47`) es `#[async_trait]`, así que
 |---|---|---|
 | Crate hermano `ego-persistence-stoolap-event-sourcing` | Mantiene S1 libre de tokio, pero `dsn_for`/`encode_tenant`/`is_write_conflict`/`internal_err` son funciones privadas de `repository.rs` — habría que copiarlas o exportarlas | Rechazada: duplica justo lo que AD-2 quiere compartir |
 | Mismo crate, dependencias `tokio` + `async-trait` incondicionales | Diff mínimo, pero todo consumidor de `Repository<A>` gana un runtime asíncrono, contradiciendo la afirmación de rollback de la propuesta ("ningún crate existente gana una dependencia no-dev") | Rechazada |
-| **Mismo crate, módulo `event_sourcing` detrás de `event-sourcing = ["dep:tokio", "dep:async-trait"]`** | Dos líneas de Cargo; helpers compartidos dentro del crate; consumidores síncronos intactos | **Elegida** — refleja el patrón de dependencias opcionales del propio `ego-effect-store` (`effect-store/Cargo.toml:46-50`), que es un crate único con backends por feature, no una separación sync/async |
+| **Mismo crate, módulo `event_sourcing` detrás de `event-sourcing = ["dep:tokio", "dep:async-trait", "dep:chrono"]`** | Dos líneas de Cargo; helpers compartidos dentro del crate; consumidores síncronos intactos | **Elegida** — refleja el patrón de dependencias opcionales del propio `ego-effect-store` (`effect-store/Cargo.toml:46-50`), que es un crate único con backends por feature, no una separación sync/async |
 
 `Snapshot` queda **fuera** de la feature: no agrega ninguna dependencia.
+
+La garantía de la feature es sobre el propio `Cargo.toml` de `ego-persistence-stoolap`, no sobre el
+árbol de dependencias resuelto: `chrono` y `async-trait` ya los declara incondicionalmente
+`ego-persistence-api` (dependencia propia de este crate), así que están presentes en el árbol con o
+sin `event-sourcing` — `cargo tree -p ego-persistence-stoolap --no-default-features` muestra ambos.
+El beneficio efectivo de la feature hoy es `tokio`: esa dependencia sí desaparece realmente cuando
+la feature está apagada, verificado de la misma forma. Gatear también `chrono`/`async-trait` acá
+sigue evitando que este crate introduzca su propia dependencia directa innecesaria sobre ellos, que
+es la propiedad que AD-1 realmente controla — pero no alcanza, por sí solo, para sacarlos del árbol
+de un build puramente síncrono.
 
 ### AD-2: Frontera de reutilización
 
