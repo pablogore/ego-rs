@@ -36,12 +36,12 @@ Chain strategy: stacked-to-main
 
 ## Phase 2: EventStore<E> (`event-sourcing` feature) (PR2, may split)
 
-- [ ] 2.1 Edit `crates/persistence-stoolap/Cargo.toml`: optional `tokio`/`async-trait`, `event-sourcing = ["dep:tokio", "dep:async-trait"]` feature, dev-dep `ego-persistent-entity`.
-- [ ] 2.2 Create `crates/persistence-stoolap/src/event_sourcing/event_store.rs`: `StoolapEventStore::open()` reusing `stoolap_common::dsn_for` + DSN guard; `run_blocking` shaped on `StoolapEffectStore::run_blocking` (`crates/effect-store/src/stoolap/mod.rs`) (read-only pattern reference).
-- [ ] 2.3 Implement `append`/`load`/`list`, each ending in exactly one `tx.commit()` (AD-3.4); classify conflicts via `stoolap_common::is_write_conflict`.
-- [ ] 2.4 Implement unit-of-work + receipts per the `EventStore<E>` trait contract (`persistence-api/src/persistence/event_store.rs:47`, read-only). Confirm slice size before/after; split to 2a/2b if over budget.
-- [ ] 2.5 Unit tests (`#[tokio::test]`, current-thread): append/load/list; optimistic-concurrency conflict; receipt conflict; dropped UoW leaves nothing committed.
-- [ ] 2.6 Unit test: tenant isolation — same aggregate id under two `tenant_id`s, no cross-tenant visibility (spec: Tenant Scoping Is Honored Correctly).
+- [x] 2.1 Edit `crates/persistence-stoolap/Cargo.toml`: optional `tokio`/`async-trait`, `event-sourcing = ["dep:tokio", "dep:async-trait"]` feature, dev-dep `ego-persistent-entity`.
+- [x] 2.2 Create `crates/persistence-stoolap/src/event_sourcing/event_store.rs`: `StoolapEventStore::open()` reusing `stoolap_common::dsn_for` + DSN guard; `run_blocking` shaped on `StoolapEffectStore::run_blocking` (`crates/effect-store/src/stoolap/mod.rs`) (read-only pattern reference).
+- [x] 2.3 Implement `append`/`load`/`list`, each ending in exactly one `tx.commit()` (AD-3.4); classify conflicts via `stoolap_common::is_write_conflict`.
+- [x] 2.4 Implement unit-of-work + receipts per the `EventStore<E>` trait contract (`persistence-api/src/persistence/event_store.rs:47`, read-only). Confirm slice size before/after; split to 2a/2b if over budget.
+- [x] 2.5 Unit tests (`#[tokio::test]`, current-thread): append/load/list; optimistic-concurrency conflict; receipt conflict; dropped UoW leaves nothing committed.
+- [x] 2.6 Unit test: tenant isolation — same aggregate id under two `tenant_id`s, no cross-tenant visibility (spec: Tenant Scoping Is Honored Correctly).
 
 ## Phase 3: Production Composition + Restart Recovery (PR3, test-only)
 
