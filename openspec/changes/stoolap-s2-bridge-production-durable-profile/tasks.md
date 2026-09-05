@@ -45,7 +45,7 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: Production Composition + Restart Recovery (PR3, test-only)
 
-- [ ] 3.1 Create `crates/persistence-stoolap/tests/production_restart_recovery.rs`: phase-1 scope builds real `EntityRuntimeBuilder::profile(Profile::Production)` with `StoolapEventStore`/snapshot store, `try_build()`, commands across snapshot threshold, drop.
-- [ ] 3.2 Same file, phase 2: reopen identical path, recover entity, assert state+version match phase 1 (spec: Committed State Survives Runtime Destruction and File Reopen).
-- [ ] 3.3 Same file: negative control — `Profile::Production` + in-memory stores still refused.
-- [ ] 3.4 Same file: assert `try_build()` succeeds with zero PostgreSQL dependency present (spec: Production Builds Without PostgreSQL).
+- [x] 3.1 Create `crates/persistence-stoolap/tests/production_restart_recovery.rs`: phase-1 scope builds real `EntityRuntimeBuilder::profile(Profile::Production)` with `StoolapEventStore`/snapshot store, `try_build()`, commands across snapshot threshold, drop.
+- [x] 3.2 Same file, phase 2: reopen identical path, recover entity, assert state+version match phase 1 (spec: Committed State Survives Runtime Destruction and File Reopen).
+- [x] 3.3 Same file: negative control — `Profile::Production` + in-memory stores still refused.
+- [x] 3.4 Same file: assert `try_build()` succeeds with zero PostgreSQL dependency present (spec: Production Builds Without PostgreSQL).

@@ -32,6 +32,9 @@ stoolap = { version = "0.4", features = ["test-failpoints"] }
 # composition path. No cycle: `persistent-entity` does not depend on this
 # crate (design.md).
 persistent-entity = { path = "../persistent-entity" }
+# `EntityRuntimeBuilder::with_snapshot_store` takes `Arc<Mutex<dyn Snapshot>>`
+# keyed to this exact lock type — matches `persistent-entity`'s own choice.
+parking_lot = "0.12"
 # `event_sourcing`'s colocated tests run under plain `#[tokio::test]`
 # (current-thread) — the same flavor `StoolapEffectStore`'s conformance suite
 # uses, and the one `spawn_blocking` (not `block_in_place`) is required to
@@ -40,3 +43,10 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 [features]
 event-sourcing = ["dep:tokio", "dep:async-trait", "dep:chrono"]
+
+# Cargo can't feature-gate code inside a `tests/` binary, only the binary
+# itself: `cargo check --workspace --all-targets` (CI, no explicit
+# `--features`) must skip this target rather than fail to compile it.
+[[test]]
+name = "production_restart_recovery"
+required-features = ["event-sourcing"]

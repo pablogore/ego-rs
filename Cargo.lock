@@ -909,6 +909,7 @@ dependencies = [
  "chrono",
  "ego-persistence-api",
  "ego-testkit",
+ "parking_lot",
  "persistent-entity",
  "serde",
  "serde_json",
