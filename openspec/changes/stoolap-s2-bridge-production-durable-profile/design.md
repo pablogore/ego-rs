@@ -35,9 +35,15 @@ already have. `EventStore<E>` (`event_store.rs:47`) is `#[async_trait]`, so only
 `durable: true` — the exact defect this design must not repeat. Rule:
 
 1. Both stores open only through the shared `dsn_for()`.
-2. `open()` reads back `db.dsn()` and returns `PersistenceError::Internal` if it lacks `sync=full`.
-   Stoolap's process-global registry can hand back a live engine opened earlier under a weaker sync
-   mode for the same path (recorded in `effect-store/src/stoolap/mod.rs:170-173`); fail closed.
+2. `open()` opens through the shared `dsn_for()` (`sync=full`), then reads back `db.dsn()` and
+   returns `PersistenceError::Internal` if it lacks `sync=full` — a defensive second check.
+   Verified during implementation (`snapshot.rs`'s
+   `open_refuses_a_path_already_locked_by_a_non_durable_engine`): Stoolap's process-global registry
+   shares one live engine only for an *identical* DSN string (`effect-store/src/stoolap/mod.rs:170-173`)
+   — a different DSN for the same path, such as an already-open weaker-sync engine, is never handed
+   back. Instead `Database::open()` itself fails with `stoolap::Error::DatabaseLocked` (the on-disk
+   file lock is already held), caught by the same `map_err(internal_err)` as any other open failure,
+   before the `sync=full` check ever runs. Either failure mode fails closed the same way.
 3. `is_durable() -> true` is then backed by a construction invariant, not by presence — the property
    `require_durably_configured` (`profile.rs:44-50`) demands.
 4. `append` and unit-of-work `commit` each end in exactly one `tx.commit()`. No deferred or batched
