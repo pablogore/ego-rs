@@ -36,10 +36,16 @@ no tenga ya. `EventStore<E>` (`event_store.rs:47`) es `#[async_trait]`, así que
 `durable: true` — exactamente el defecto que este diseño no debe repetir. Regla:
 
 1. Ambos almacenes abren únicamente a través del `dsn_for()` compartido.
-2. `open()` relee `db.dsn()` y devuelve `PersistenceError::Internal` si no lleva `sync=full`.
-   El registro global de proceso de Stoolap puede devolver un motor vivo abierto antes bajo un modo de
-   sync más débil para la misma ruta (documentado en `effect-store/src/stoolap/mod.rs:170-173`); se
-   falla cerrado.
+2. `open()` abre a través del `dsn_for()` compartido (`sync=full`) y luego relee `db.dsn()`,
+   devolviendo `PersistenceError::Internal` si no lleva `sync=full` — una segunda comprobación
+   defensiva. Verificado durante la implementación (`snapshot.rs`,
+   `open_refuses_a_path_already_locked_by_a_non_durable_engine`): el registro global de proceso de
+   Stoolap comparte un motor vivo solo para un DSN *idéntico*
+   (`effect-store/src/stoolap/mod.rs:170-173`) — un DSN distinto para la misma ruta, como un motor ya
+   abierto con sync más débil, nunca se devuelve. En cambio, `Database::open()` falla directamente con
+   `stoolap::Error::DatabaseLocked` (el bloqueo de archivo en disco ya está tomado), capturado por el
+   mismo `map_err(internal_err)` que cualquier otro fallo de apertura, antes de que se ejecute la
+   comprobación de `sync=full`. Ambos modos de fallo cierran de la misma manera.
 3. `is_durable() -> true` queda entonces respaldado por un invariante de construcción, no por
    presencia — la propiedad que exige `require_durably_configured` (`profile.rs:44-50`).
 4. `append` y el `commit` de la unidad de trabajo terminan cada uno en exactamente un `tx.commit()`.
