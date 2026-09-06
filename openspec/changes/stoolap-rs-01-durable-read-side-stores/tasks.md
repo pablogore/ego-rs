@@ -43,7 +43,7 @@ Chain strategy: feature-branch-chain
 - [x] 1.8 GREEN same file: implement `write_offset`'s three-step UPDATE-first / INSERT `ON CONFLICT DO NOTHING` / re-UPDATE (AD-4); implement `read_offset`.
 - [x] 1.9 RED+GREEN `crates/persistence-stoolap/tests/read_side_stores.rs` (create): offset reopen test — write, **drop every store handle for the path**, `open()` the same file again, `read_offset` for the written key returns the identical value and a never-written sibling key still returns `None` (spec "Offset And Dedup State Survive Close And Reopen"); `is_durable()` returns `true` only once this is proven.
 - [x] 1.10 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green; `cargo build --workspace` and `cargo test --workspace` with the feature off are unchanged (spec/proposal success criterion).
-- [x] 1.11 Verification: `rg block_in_place crates/persistence-stoolap/src/read_side` returns nothing; `rg -i "multi-process|multi-node|distributed|kubernetes" crates/persistence-stoolap/src/read_side crates/persistence-stoolap/tests/read_side_stores.rs` returns nothing.
+- [x] 1.11 Verification: `rg block_in_place crates/persistence-stoolap/src/read_side` returns nothing; manual review of `crates/persistence-stoolap/src/read_side` and `crates/persistence-stoolap/tests/read_side_stores.rs` confirms no positive claim of multi-process, multi-node, Kubernetes, or distributed-coordination support — explicit documentation stating these modes are unsupported is required and permitted, not prohibited (a blind word-ban grep would incorrectly flag that required documentation).
 
 ## Phase 2: Dedup Store — PR2
 
@@ -54,7 +54,7 @@ Chain strategy: feature-branch-chain
 - [ ] 2.5 RED same file: `the_same_event_id_under_a_different_projection_and_tag_is_independent` — isolation across the full key.
 - [ ] 2.6 GREEN same file: implement `mark_seen` (`INSERT ... ON CONFLICT (projection_id, tag, event_id) DO NOTHING`, AD-4) and `seen` (`SELECT 1 ... LIMIT 1`, presence is the answer).
 - [ ] 2.7 RED+GREEN `tests/read_side_stores.rs`: dedup reopen test — mark seen, **drop every store handle for the path**, reopen the same file, `seen()` for the marked triple still returns `true` (spec "A dedup mark survives a close/reopen cycle").
-- [ ] 2.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green for both offset and dedup sections; repeat the `block_in_place` / multi-process-claim grep sweep from 1.11 over `dedup.rs`.
+- [ ] 2.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green for both offset and dedup sections; repeat the `block_in_place` grep and the no-positive-multi-process-claim review from 1.11 over `dedup.rs`.
 
 ## Phase 3: AD-11 Helper Hoist + Claim Store Construction + Unit Tests — PR3
 
@@ -75,7 +75,7 @@ Chain strategy: feature-branch-chain
 - [ ] 3.15 GREEN: confirm 3.14 passes against 3.13's `set_lease` (no additional production code — `release` setting an already-expired `lease_until` is the whole mechanism).
 - [ ] 3.16 GREEN same file: error classification — a raw `stoolap::Error` for which `stoolap_common::is_write_conflict` is `true` maps to `ClaimError::Transient`, everything else to `Fatal`; `affected == 0` on a fence-verified mutation maps to `StaleOwner`, never `Transient` (AD-8).
 - [ ] 3.17 Document + flag (no production code): a module-doc line on `claim.rs` states the satisfiable reading of "lease expiry is caller-computed" per design AD-7 — the *lease bound* (`lease_until`) is always the caller's, and the store's own "now" comes only from the injected `Clock`, never ambient system time; the store never reads `Utc::now()`/`SystemTime::now()`/SQL `now()`. Record in the PR description that `spec.md`/`spec.es.md`'s "Lease Expiry Is Always Caller-Computed" wording ("never on a clock read performed inside the store") is literally unimplementable against `try_claim`'s real signature (no `now` parameter) and flag it to `sdd-verify`/a human for a follow-up clarification pass — do not silently reinterpret without this paper trail.
-- [ ] 3.18 Verification: `cargo tree -p ego-persistence-stoolap --features read-side -e normal` unchanged from 1.2 (AD-11 only moves code, adds no dependency); `cargo test -p ego-persistence-stoolap --features read-side` (claim unit tests) green; `cargo test -p ego-persistence-stoolap --features operation-reservation` green (no regression); repeat the `block_in_place` / multi-process-claim grep sweep over `claim.rs`.
+- [ ] 3.18 Verification: `cargo tree -p ego-persistence-stoolap --features read-side -e normal` unchanged from 1.2 (AD-11 only moves code, adds no dependency); `cargo test -p ego-persistence-stoolap --features read-side` (claim unit tests) green; `cargo test -p ego-persistence-stoolap --features operation-reservation` green (no regression); repeat the `block_in_place` grep and the no-positive-multi-process-claim review over `claim.rs`.
 
 ## Phase 4: Claim Concurrency Race + Reopen Durability + Shared-Engine Tests — PR4
 
@@ -86,7 +86,7 @@ Chain strategy: feature-branch-chain
 - [ ] 4.5 RED same file: `claim_state_survives_close_and_reopen` — hold a claim under a valid fence, **drop every store handle for the path**, reopen the same file; a different owner's `try_claim` on the identical `claim_id` still returns `Ok(None)` and the held fence still verifies through `renew`; separately, a fence released before the drop reopens as immediately reclaimable with a strictly greater token on the next takeover. Test name and module comment state explicitly this is drop-and-reopen, **not** crash/power-loss safety (spec "Claim Durability Is Drop-And-Reopen, Not Crash Recovery").
 - [ ] 4.6 GREEN: confirm 4.5 passes; review the test's doc comment and assertions to confirm no crash-safety language is implied anywhere.
 - [ ] 4.7 RED+GREEN same file: `three_stores_at_one_path_share_one_engine` — offset, dedup, and claim stores opened at one identical path all observe the same database (Stoolap's process-global-engine-per-DSN property), mirroring `tests/reservation_conformance.rs:258-311`'s precedent; re-proved here, not assumed (design "Concurrency Scope").
-- [ ] 4.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green; if flaky under default parallel threads, re-run with `--test-threads=1` (S3 precedent) and record the finding; grep sweep confirms no `block_in_place` and no multi-process/multi-node/Kubernetes/distributed-coordination claim anywhere in this PR's new test names, comments, or docs.
+- [ ] 4.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green; if flaky under default parallel threads, re-run with `--test-threads=1` (S3 precedent) and record the finding; grep sweep confirms no `block_in_place`; manual review confirms no positive claim of multi-process/multi-node/Kubernetes/distributed-coordination support anywhere in this PR's new test names, comments, or docs (unsupported-mode documentation remains required and permitted).
 
 ## Phase 5: Production Composition + Negative Control — PR5
 
@@ -102,7 +102,7 @@ Chain strategy: feature-branch-chain
 
 - No PostgreSQL dependency introduced anywhere in this change.
 - No `block_in_place` anywhere — only `tokio::task::spawn_blocking` via each store's own `run_blocking()`.
-- No multi-process, multi-node, Kubernetes, or distributed-coordination claim in any doc, comment, or test name shipped by this change.
+- No positive claim of multi-process, multi-node, Kubernetes, or distributed-coordination support in any doc, comment, or test name shipped by this change. Explicit documentation stating these modes are unsupported is required and permitted — this criterion prohibits false claims of support, not the words themselves.
 - Every store's `is_durable()` reports `true` only when backed by a real, fail-closed, `sync=full`-verified Stoolap connection — never a hardcoded literal.
 - `cargo tree` (or equivalent) confirms zero new transitive dependencies for the `read-side` feature — recorded at PR1 (1.2), reconfirmed at PR3 (3.18) and PR5 (5.7).
 
