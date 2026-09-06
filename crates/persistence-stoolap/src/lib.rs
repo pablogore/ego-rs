@@ -13,6 +13,9 @@ pub mod event_sourcing;
 #[cfg(feature = "operation-reservation")]
 pub mod operation;
 
+#[cfg(feature = "read-side")]
+pub mod read_side;
+
 pub use persistence::repository::StoolapRepository;
 pub use persistence::snapshot::StoolapSnapshotStore;
 
@@ -21,3 +24,6 @@ pub use event_sourcing::event_store::StoolapEventStore;
 
 #[cfg(feature = "operation-reservation")]
 pub use operation::reservation::StoolapOperationReservationStore;
+
+#[cfg(feature = "read-side")]
+pub use read_side::offset::StoolapOffsetStore;
