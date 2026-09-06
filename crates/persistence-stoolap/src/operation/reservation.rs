@@ -39,7 +39,9 @@ use ego_domain::operation::{
 };
 use ego_domain::Clock;
 
-use crate::persistence::stoolap_common::{dsn_declares_sync_full, dsn_for, encode_tenant};
+use crate::persistence::stoolap_common::{
+    dsn_declares_sync_full, dsn_for, encode_tenant, token_for_storage, token_from_storage,
+};
 
 const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
@@ -67,29 +69,6 @@ CREATE TABLE IF NOT EXISTS operation_reservations (
 /// Maps a raw Stoolap error to the port's opaque backend variant.
 fn backend_err(e: impl std::fmt::Display) -> ReservationError {
     ReservationError::Backend(e.to_string())
-}
-
-/// Converts a token into the column's type, refusing rather than wrapping —
-/// mirrors `PostgresOperationReservationStore::token_for_storage` (AD-10; not
-/// shared cross-crate because that function is `pub(crate)` in
-/// `ego-persistence`).
-fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
-    i64::try_from(token.value()).map_err(|_| ReservationError::FencingExhausted)
-}
-
-/// Rebuilds a token from the column, refusing a value no writer of ours could
-/// produce — mirrors `PostgresOperationReservationStore::token_from_storage`
-/// (AD-10).
-fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
-    if raw <= 0 {
-        return Err(ReservationError::Backend(format!(
-            "stored fencing_token {raw} is not positive; the sequence starts at 1"
-        )));
-    }
-    let value = u64::try_from(raw).map_err(|_| {
-        ReservationError::Backend(format!("stored fencing_token {raw} is not representable"))
-    })?;
-    Ok(FencingToken::from_value(value))
 }
 
 /// Clamped rather than refused: `batch` is an upper bound, so removing fewer
