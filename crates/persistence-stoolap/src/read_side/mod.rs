@@ -11,8 +11,9 @@
 //! one node — see `openspec/changes/stoolap-rs-01-durable-read-side-stores/design.md`
 //! "Concurrency Scope".
 //!
-//! PR1 shipped `offset`; PR2 (this revision) adds `dedup`. `claim` lands in
-//! a later PR of the same change.
+//! PR1 shipped `offset`; PR2 added `dedup`; PR3 (this revision) adds
+//! `claim`.
 
+pub mod claim;
 pub mod dedup;
 pub mod offset;

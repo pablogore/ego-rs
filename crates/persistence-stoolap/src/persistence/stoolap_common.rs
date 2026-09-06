@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use ego_persistence_api::operation::reservation::{FencingToken, ReservationError};
 use ego_persistence_api::persistence::PersistenceError;
 
 /// The scope a `None` tenant is stored under. Never returned to a caller,
@@ -62,6 +63,36 @@ pub(crate) fn is_write_conflict(e: &stoolap::Error) -> bool {
         }
         _ => false,
     }
+}
+
+/// Converts a token into the column's type, refusing rather than wrapping —
+/// mirrors `PostgresOperationReservationStore::token_for_storage`.
+///
+/// Hoisted from `operation/reservation.rs` (design.md AD-11): both callers —
+/// `operation::reservation` (behind `#[cfg(feature = "operation-reservation")]`)
+/// and `read_side::claim` (behind `#[cfg(feature = "read-side")]`) — need this
+/// exact guard, and `operation/reservation.rs` cannot be referenced in place
+/// from `read_side` because a cross-feature reference would break under
+/// `--features read-side` alone. `FencingToken`/`ReservationError` live in
+/// `ego-persistence-api`, an unconditional dependency of this crate, so this
+/// module — created to end exactly this kind of per-store duplication — can
+/// host both functions with no new edge.
+pub(crate) fn token_for_storage(token: FencingToken) -> Result<i64, ReservationError> {
+    i64::try_from(token.value()).map_err(|_| ReservationError::FencingExhausted)
+}
+
+/// Rebuilds a token from the column, refusing a value no writer of ours could
+/// produce — mirrors `PostgresOperationReservationStore::token_from_storage`.
+pub(crate) fn token_from_storage(raw: i64) -> Result<FencingToken, ReservationError> {
+    if raw <= 0 {
+        return Err(ReservationError::Backend(format!(
+            "stored fencing_token {raw} is not positive; the sequence starts at 1"
+        )));
+    }
+    let value = u64::try_from(raw).map_err(|_| {
+        ReservationError::Backend(format!("stored fencing_token {raw} is not representable"))
+    })?;
+    Ok(FencingToken::from_value(value))
 }
 
 #[cfg(test)]
