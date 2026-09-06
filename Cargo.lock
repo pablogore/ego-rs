@@ -906,7 +906,9 @@ name = "ego-persistence-stoolap"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
+ "ego-domain",
  "ego-persistence-api",
  "ego-testkit",
  "parking_lot",
@@ -979,7 +981,10 @@ dependencies = [
  "console-exporter",
  "ego-domain",
  "ego-effect-store",
+ "ego-persistence",
  "ego-persistence-api",
+ "ego-persistence-memory",
+ "ego-persistence-stoolap",
  "ego-runtime",
  "ego-security-sdk",
  "ego-service-sdk-macros",
@@ -996,6 +1001,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "stoolap",
  "syn 2.0.119",
  "tempfile",

@@ -10,8 +10,14 @@ pub mod persistence;
 #[cfg(feature = "event-sourcing")]
 pub mod event_sourcing;
 
+#[cfg(feature = "operation-reservation")]
+pub mod operation;
+
 pub use persistence::repository::StoolapRepository;
 pub use persistence::snapshot::StoolapSnapshotStore;
 
 #[cfg(feature = "event-sourcing")]
 pub use event_sourcing::event_store::StoolapEventStore;
+
+#[cfg(feature = "operation-reservation")]
+pub use operation::reservation::StoolapOperationReservationStore;

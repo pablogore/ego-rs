@@ -169,6 +169,39 @@ each store, fed into `require_durably_configured()` — never from
 - WHEN `AppBuilder::build()` runs
 - THEN it succeeds, byte-for-byte as before this change
 
+### Requirement: Operation Reservation Store Gate Under Production
+
+Under a production-grade profile, when a composition requires operation reservations for
+correctness, that composition MUST be rejected if its registered `OperationReservationStore`
+is not durable, and MUST be accepted if it is durable. When the composition does not require
+operation reservations, no reservation store gate applies — a composition with no such
+requirement is never forced to register a store it would never use. This mirrors the
+conditional shape already used by the effect-store and read-side claim-store gates: the
+capability is only governed once the composition's own configuration signals that it needs it.
+
+#### Scenario: A non-durable reservation store is rejected when reservations are required
+
+- GIVEN a production-grade profile and a composition that requires operation reservations for
+  correctness
+- WHEN the registered `OperationReservationStore` is not durable
+- THEN the composition is rejected, naming the reservation store as the unmet capability and
+  the exact registration call that fixes it
+
+#### Scenario: A durable reservation store is accepted when reservations are required
+
+- GIVEN a production-grade profile and a composition that requires operation reservations for
+  correctness
+- WHEN the registered `OperationReservationStore` is durable
+- THEN the composition succeeds
+
+#### Scenario: No gate applies when reservations are not required
+
+- GIVEN a production-grade profile and a composition that does not require operation
+  reservations for correctness
+- WHEN the composition is validated
+- THEN it succeeds regardless of whether a reservation store is registered, or of its
+  durability
+
 ### Requirement: Profile::Production's Doc Comment Reflects The Read-Side Durable Progress Slot
 
 `Profile::Production`'s doc comment (`crates/persistent-entity/src/profile.rs`)
@@ -190,18 +223,19 @@ for a capability this change already governs.
 
 ### Requirement: One Shared Predicate Is The Single Source Of Truth For The Rule
 
-Exactly one shared predicate MUST decide "declared production + capability
-not durably configured = refuse" for all four capabilities (event store,
-snapshot store, effect store, read-side durable progress). Because the
-capabilities live across a one-way crate boundary (`persistent-entity`
-cannot see `service-sdk`'s effect-store or read-side types), this predicate
-cannot itself inspect either builder directly: each composition surface
-(`EntityRuntimeBuilder`'s `validate_persistence()`, `RuntimeBuilder`'s
-`validate_persistence_profile()`, including its read-side branch) MUST
-compute its own capability's answer locally and pass it to the one shared
-predicate — never restate the refuse/allow decision itself. No second,
-independently-maintained definition of the decision MUST exist anywhere in
-the composition path.
+Exactly one shared predicate MUST decide "declared production + capability not durably
+configured = refuse" for all five capabilities (event store, snapshot store, effect store,
+read-side durable progress, operation reservation store). Because the capabilities live across
+a one-way crate boundary (`persistent-entity` cannot see `service-sdk`'s effect-store,
+read-side, or reservation types), this predicate cannot itself inspect either builder directly:
+each composition surface (`EntityRuntimeBuilder`'s `validate_persistence()`, `RuntimeBuilder`'s
+`validate_persistence_profile()`, including its read-side and reservation branches) MUST
+compute its own capability's answer locally and pass it to the one shared predicate — never
+restate the refuse/allow decision itself. No second, independently-maintained definition of the
+decision MUST exist anywhere in the composition path.
+
+(Previously: enumerated four capabilities — event store, snapshot store, effect store, and
+read-side durable progress — without the operation reservation store as a fifth.)
 
 #### Scenario: All three capabilities' decision routes through the same predicate
 
@@ -223,21 +257,30 @@ the composition path.
   three capabilities already use — no separate, independently-maintained
   read-side-only decision exists
 
+#### Scenario: The fifth capability's decision routes through the same predicate
+
+- GIVEN the operation reservation store gate added by this change
+- WHEN the codebase is inspected for its gating logic
+- THEN it computes its own local answer (is the registered `OperationReservationStore`
+  durable, when one is required?) and passes it to the same shared predicate the other four
+  capabilities already use — no separate, independently-maintained reservation-only decision
+  exists
+
 ### Requirement: Rejections Are Actionable
 
 Every rejection under this spec MUST name both the missing capability and
 the exact configuration call that resolves it.
 
-(Previously: enumerated three capabilities in its scenario; now includes
-read-side durable progress as a fourth.)
+(Previously: enumerated four capabilities in its scenario; now includes the operation
+reservation store as a fifth.)
 
 #### Scenario: Error names the capability and the fix
 
 - GIVEN any rejection produced by this spec's gate
 - WHEN the error is inspected
-- THEN it names the missing capability (event store, snapshot store,
-  effect store, or read-side durable progress) and the exact registration
-  or builder call that configures it
+- THEN it names the missing capability (event store, snapshot store, effect store, read-side
+  durable progress, or operation reservation store) and the exact registration or builder call
+  that configures it
 
 ### Requirement: Non-Production Compositions Compile And Pass Unmodified
 
