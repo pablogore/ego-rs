@@ -60,6 +60,11 @@ operation-reservation = [
     "dep:ego-domain",
     "dep:base64",
 ]
+# STOOLAP-RS-01 (design.md AD-1): all four deps are already declared above
+# for `event-sourcing`/`operation-reservation` — zero manifest additions,
+# zero new transitive edges. `base64` is deliberately excluded: no read-side
+# column stores bytes.
+read-side = ["dep:tokio", "dep:async-trait", "dep:chrono", "dep:ego-domain"]
 
 # Cargo can't feature-gate code inside a `tests/` binary, only the binary
 # itself: `cargo check --workspace --all-targets` (CI, no explicit
@@ -71,3 +76,7 @@ required-features = ["event-sourcing"]
 [[test]]
 name = "reservation_conformance"
 required-features = ["operation-reservation"]
+
+[[test]]
+name = "read_side_stores"
+required-features = ["read-side"]
