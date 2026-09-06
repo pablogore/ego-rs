@@ -72,7 +72,14 @@ fn succeeded_row_exists(dsn: &str) -> bool {
 #[tokio::test]
 async fn an_effect_accepted_before_a_restart_is_delivered_only_by_the_process_that_restarts() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dsn = format!("file://{}", dir.path().display());
+    // STOOLAP-EFFECT-01: `StoolapEffectStore::open` now opens through
+    // `?sync=full` — this inspector DSN must match it exactly, since
+    // Stoolap's registry keys a live engine by its *full* DSN string
+    // (STOOLAP-S1 finding). The unsuffixed DSN used to be an accidental
+    // alias for the same engine; now it would race process B's live handle
+    // as a second, independent engine on the same on-disk file and fail
+    // with `DatabaseLocked`.
+    let dsn = format!("file://{}?sync=full", dir.path().display());
 
     // --- "Process A": register a real user, accept the effect, never start.
     {

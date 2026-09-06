@@ -158,6 +158,38 @@ fn delete_batch_preserving_partial_count<T>(
     Ok(())
 }
 
+/// Builds the durable-sync DSN [`StoolapEffectStore::open`] must open
+/// through (STOOLAP-EFFECT-01): plain `file://{path}` leaves Stoolap at its
+/// default sync mode, so `capabilities().durable: true` would be an
+/// unbacked claim. `?sync=full` is the same convention
+/// `ego-persistence-stoolap::stoolap_common::dsn_for` already established
+/// for `StoolapEventStore`/`StoolapSnapshotStore` (STOOLAP-S2 design.md
+/// AD-3) — duplicated locally rather than shared across crates because that
+/// helper is `pub(crate)` there and this crate has no dependency on
+/// `ego-persistence-stoolap` (STOOLAP-S1 design.md KD-2 rejected sharing a
+/// connection type between the two for the opposite reason: they want
+/// different sync postures).
+fn dsn_for(path: &Path) -> String {
+    format!("file://{}?sync=full", path.display())
+}
+
+/// Whether `dsn` declares `sync=full` as an actual query parameter — not
+/// merely as a substring anywhere in the string (correction pass,
+/// STOOLAP-EFFECT-01).
+///
+/// A raw `dsn.contains("sync=full")` would also match a path segment that
+/// happens to contain that text (e.g. `file:///data/no_sync=full_here/db`),
+/// which is exactly the "path could make naive matching wrong" risk this
+/// fix must guard against. Stoolap's `Database` exposes no structured
+/// accessor for the sync mode it parsed (only the raw `dsn()` string), so
+/// this parses just the query section — everything after the first `?` —
+/// and requires an exact `sync=full` token between `&` separators.
+fn dsn_declares_sync_full(dsn: &str) -> bool {
+    dsn.split_once('?')
+        .map(|(_, query)| query.split('&').any(|param| param == "sync=full"))
+        .unwrap_or(false)
+}
+
 /// A durable, single-host [`EffectStateStore`]/[`EffectDedupStore`]
 /// implementation backed by an embedded Stoolap database.
 pub struct StoolapEffectStore {
@@ -171,9 +203,27 @@ impl StoolapEffectStore {
     /// [`StoolapEffectStore`] has been dropped genuinely reopens the on-disk
     /// database (design §3.6 Tier 2) — Stoolap's process-global registry
     /// only shares a live engine while a handle for that DSN is still alive.
+    ///
+    /// Fails closed (STOOLAP-EFFECT-01, mirroring `StoolapSnapshotStore::open`
+    /// in `ego-persistence-stoolap`): only ever returns a store whose live
+    /// engine reports `sync=full`. `open()` is `StoolapEffectStore`'s only
+    /// public constructor (the struct's sole field is private and it derives
+    /// neither `Default` nor any other public-construction trait), so a
+    /// value of this type existing at all is proof its engine passed this
+    /// check — `capabilities().durable: true` is therefore a property of the
+    /// constructed type, not a claim re-derived from parsing state on every
+    /// call.
     pub async fn open(path: &Path) -> Result<Self, EffectStoreError> {
-        let dsn = format!("file://{}", path.display());
+        let dsn = dsn_for(path);
         let db = Database::open(&dsn).map_err(backend_err)?;
+
+        if !dsn_declares_sync_full(db.dsn()) {
+            return Err(EffectStoreError::Backend(format!(
+                "stoolap engine at {:?} is not configured for durable sync (sync=full); \
+                 refusing to open a StoolapEffectStore that would misreport capabilities().durable",
+                db.dsn()
+            )));
+        }
 
         // Dialect note (design.md §6, Stoolap fidelity gate): Stoolap only
         // supports a single-column INTEGER PRIMARY KEY — a TEXT PK (as this
@@ -430,6 +480,11 @@ impl StoolapEffectStore {
             }
         }
     }
+
+    #[cfg(test)]
+    fn dsn(&self) -> &str {
+        self.db.dsn()
+    }
 }
 
 /// Wires the runtime-owned [`RetentionMaintenance`] capability (PROD-002
@@ -451,6 +506,11 @@ impl RetentionMaintenance for StoolapEffectStore {
 impl EffectStateStore for StoolapEffectStore {
     fn capabilities(&self) -> EffectStoreCapabilities {
         EffectStoreCapabilities {
+            // STOOLAP-EFFECT-01: `open()` is the only public constructor of
+            // `StoolapEffectStore` and fails closed unless the opened engine
+            // is `sync=full` (see `open`'s doc comment) — a live instance is
+            // therefore durable by construction, not by re-parsing `db.dsn()`
+            // on every call.
             durable: true,
             concurrent_local_safe: true,
             multi_node_safe: false,
@@ -686,6 +746,11 @@ impl EffectStateStore for StoolapEffectStore {
 impl EffectDedupStore for StoolapEffectStore {
     fn capabilities(&self) -> EffectStoreCapabilities {
         EffectStoreCapabilities {
+            // STOOLAP-EFFECT-01: `open()` is the only public constructor of
+            // `StoolapEffectStore` and fails closed unless the opened engine
+            // is `sync=full` (see `open`'s doc comment) — a live instance is
+            // therefore durable by construction, not by re-parsing `db.dsn()`
+            // on every call.
             durable: true,
             concurrent_local_safe: true,
             multi_node_safe: false,
@@ -802,6 +867,81 @@ mod tests {
         StoolapEffectStore::open(dir.path())
             .await
             .expect("open StoolapEffectStore")
+    }
+
+    // --- STOOLAP-EFFECT-01: durability is a construction invariant ---
+
+    /// `open()`'s public DSN construction, not just its `Debug`-adjacent
+    /// internals: `dsn()` must equal the canonical durable DSN this store's
+    /// contract requires, proving `open()` did not silently fall back to a
+    /// weaker configuration.
+    #[tokio::test]
+    async fn open_produces_a_store_configured_for_durable_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = StoolapEffectStore::open(dir.path()).await.unwrap();
+        assert_eq!(store.dsn(), dsn_for(dir.path()));
+        assert!(store.dsn().contains("sync=full"));
+    }
+
+    /// Proves the true contract: every instance the public API can actually
+    /// produce reports `durable: true` on both ports. Does not fabricate an
+    /// instance bypassing `open()` — `StoolapEffectStore`'s only public
+    /// constructor is `open()`, so a hand-built non-durable instance would
+    /// not be a state the real API could ever reach, and testing against it
+    /// would test a fiction, not the contract.
+    #[tokio::test]
+    async fn public_open_produces_durable_capabilities() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = StoolapEffectStore::open(dir.path()).await.unwrap();
+
+        assert!(EffectStateStore::capabilities(&store).durable);
+        assert!(EffectDedupStore::capabilities(&store).durable);
+    }
+
+    /// Regression guard: if `dsn_for` ever stops requesting `sync=full`,
+    /// `open()`'s fail-closed check must reject it — proving
+    /// `capabilities().durable: true` stays backed by a real guarantee
+    /// instead of silently becoming an unbacked claim again.
+    #[test]
+    fn open_would_reject_a_dsn_without_sync_full() {
+        assert!(!dsn_declares_sync_full("file:///tmp/db"));
+        assert!(!dsn_declares_sync_full("file:///tmp/no_sync=full_here/db"));
+        assert!(dsn_declares_sync_full(&dsn_for(Path::new("/tmp/db"))));
+    }
+
+    /// Regression guard for STOOLAP-EFFECT-01 (fail-closed criterion 2): a
+    /// live, weakly-configured engine already holds `path` when `open()` is
+    /// called. `open()` must never hand back a store that would then report
+    /// `capabilities().durable == true` untruthfully. Also proves Stoolap's
+    /// DSN-keyed registry does not silently let the durable DSN share the
+    /// non-durable engine already open on the same path — the two are
+    /// treated as distinct handles.
+    ///
+    /// Two failure shapes are both "fails closed" here (STOOLAP-S2
+    /// design.md AD-3 criterion 2): Stoolap's own on-disk lock can reject
+    /// `Database::open` outright (`DatabaseLocked`, classified
+    /// `TemporarilyUnavailable`) before this store's `sync=full` check ever
+    /// runs, or a returned handle can fail that check explicitly (`Backend`).
+    /// Either way, no store is produced.
+    #[tokio::test]
+    async fn open_refuses_a_path_already_locked_by_a_non_durable_engine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let weak_dsn = format!("file://{}", dir.path().display());
+        let _weak_db = Database::open(&weak_dsn).unwrap();
+
+        // `StoolapEffectStore` has no `Debug` impl, so `unwrap_err` (which
+        // requires `T: Debug` for its own panic message) cannot be used here.
+        let err = match StoolapEffectStore::open(dir.path()).await {
+            Err(err) => err,
+            Ok(_) => panic!("expected open() to refuse a path locked by a non-durable engine"),
+        };
+        assert!(
+            matches!(
+                err,
+                EffectStoreError::Backend(_) | EffectStoreError::TemporarilyUnavailable(_)
+            ),
+            "expected a refused-open error, got {err:?}"
+        );
     }
 
     // --- Fix 2: backend_err / dedup_row_vanished_error classification ---

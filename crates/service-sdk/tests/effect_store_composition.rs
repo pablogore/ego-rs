@@ -479,7 +479,16 @@ async fn a_real_stoolap_effect_store_registered_via_with_effect_store_actually_r
     // the runtime merely *believes* it did. Polled, not asserted once,
     // because `mark_succeeded` lands asynchronously, a moment after the
     // executor above already returned.
-    let dsn = format!("file://{}", dir.path().display());
+    //
+    // STOOLAP-EFFECT-01: `StoolapEffectStore::open` now opens through
+    // `?sync=full` (a durable-sync engine, not just a durable-sounding
+    // capability claim) — this inspector DSN must match it exactly.
+    // Stoolap's registry keys a live engine by its *full* DSN string
+    // (STOOLAP-S1 finding), so `file://{path}` and `file://{path}?sync=full`
+    // are distinct identities: opening the old, unsuffixed DSN here would
+    // not share `store`'s live engine but instead race its on-disk lock as a
+    // second, independent engine, failing with `DatabaseLocked`.
+    let dsn = format!("file://{}?sync=full", dir.path().display());
     let inspector =
         stoolap::Database::open(&dsn).expect("open a second, independent handle on the same DSN");
     tokio::time::timeout(Duration::from_secs(1), async {
