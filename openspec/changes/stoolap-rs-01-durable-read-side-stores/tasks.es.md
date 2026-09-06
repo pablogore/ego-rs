@@ -47,14 +47,14 @@ Riesgo del presupuesto de 400 líneas: Medio
 
 ## Fase 2: Almacén de Dedup — PR2
 
-- [ ] 2.1 RED `src/read_side/dedup.rs`: prueba unitaria `seen_of_an_unmarked_triple_is_false` — falla al compilar, `StoolapDedupStore` aún no existe.
-- [ ] 2.2 GREEN mismo archivo: `StoolapDedupStore::open(path: &Path) -> Result<Self, DedupStoreError>`; `CREATE TABLE IF NOT EXISTS projection_dedup (... UNIQUE (projection_id, tag, event_id))` — **sin** columna de tenant, coincidiendo con la identidad propia del puerto sin tenant (AD-3); el mismo patrón de `open()` cerrado por defecto / `is_durable()` real que offset (AD-9); su propio `run_blocking` privado (AD-10).
-- [ ] 2.3 RED mismo archivo: `mark_seen_is_idempotent` — repetir `mark_seen` para la tripleta idéntica tiene éxito sin error, `seen()` sigue devolviendo `true`.
-- [ ] 2.4 RED mismo archivo: `no_dedup_entry_is_ever_pruned` — una marca escrita hace arbitrariamente mucho tiempo (simulado por la ausencia de cualquier ruta de limpieza basada en tiempo) sigue devolviendo `true` desde `seen()`; sin columna `seen_at`, sin TTL, sin retención (Non-Goal de spec).
-- [ ] 2.5 RED mismo archivo: `the_same_event_id_under_a_different_projection_and_tag_is_independent` — aislamiento a través de la clave completa.
-- [ ] 2.6 GREEN mismo archivo: implementar `mark_seen` (`INSERT ... ON CONFLICT (projection_id, tag, event_id) DO NOTHING`, AD-4) y `seen` (`SELECT 1 ... LIMIT 1`, la presencia es la respuesta).
-- [ ] 2.7 RED+GREEN `tests/read_side_stores.rs`: prueba de reapertura de dedup — marcar como visto, **soltar cada handle del almacén para esa ruta**, reabrir el mismo archivo, `seen()` para la tripleta marcada sigue devolviendo `true` (spec "A dedup mark survives a close/reopen cycle").
-- [ ] 2.8 Verificación: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` en verde tanto para la sección de offset como la de dedup; repetir el grep de `block_in_place` y la revisión de no-afirmación-positiva-multi-proceso de 1.11 sobre `dedup.rs`.
+- [x] 2.1 RED `src/read_side/dedup.rs`: prueba unitaria `seen_of_an_unmarked_triple_is_false` — falla al compilar, `StoolapDedupStore` aún no existe.
+- [x] 2.2 GREEN mismo archivo: `StoolapDedupStore::open(path: &Path) -> Result<Self, DedupStoreError>`; `CREATE TABLE IF NOT EXISTS projection_dedup (... UNIQUE (projection_id, tag, event_id))` — **sin** columna de tenant, coincidiendo con la identidad propia del puerto sin tenant (AD-3); el mismo patrón de `open()` cerrado por defecto / `is_durable()` real que offset (AD-9); su propio `run_blocking` privado (AD-10).
+- [x] 2.3 RED mismo archivo: `mark_seen_is_idempotent` — repetir `mark_seen` para la tripleta idéntica tiene éxito sin error, `seen()` sigue devolviendo `true`.
+- [x] 2.4 RED mismo archivo: `no_dedup_entry_is_ever_pruned` — una marca escrita hace arbitrariamente mucho tiempo (simulado por la ausencia de cualquier ruta de limpieza basada en tiempo) sigue devolviendo `true` desde `seen()`; sin columna `seen_at`, sin TTL, sin retención (Non-Goal de spec).
+- [x] 2.5 RED mismo archivo: `the_same_event_id_under_a_different_projection_and_tag_is_independent` — aislamiento a través de la clave completa.
+- [x] 2.6 GREEN mismo archivo: implementar `mark_seen` (`INSERT ... ON CONFLICT (projection_id, tag, event_id) DO NOTHING`, AD-4) y `seen` (`SELECT 1 ... LIMIT 1`, la presencia es la respuesta).
+- [x] 2.7 RED+GREEN `tests/read_side_stores.rs`: prueba de reapertura de dedup — marcar como visto, **soltar cada handle del almacén para esa ruta**, reabrir el mismo archivo, `seen()` para la tripleta marcada sigue devolviendo `true` (spec "A dedup mark survives a close/reopen cycle").
+- [x] 2.8 Verificación: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` en verde tanto para la sección de offset como la de dedup; repetir el grep de `block_in_place` y la revisión de no-afirmación-positiva-multi-proceso de 1.11 sobre `dedup.rs`.
 
 ## Fase 3: Elevación del Helper AD-11 + Construcción del Almacén de Claim + Pruebas Unitarias — PR3
 

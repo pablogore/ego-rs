@@ -47,14 +47,14 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Dedup Store — PR2
 
-- [ ] 2.1 RED `src/read_side/dedup.rs`: unit test `seen_of_an_unmarked_triple_is_false` — fails to compile, `StoolapDedupStore` does not exist yet.
-- [ ] 2.2 GREEN same file: `StoolapDedupStore::open(path: &Path) -> Result<Self, DedupStoreError>`; `CREATE TABLE IF NOT EXISTS projection_dedup (... UNIQUE (projection_id, tag, event_id))` — **no** tenant column, matching the port's own no-tenant identity (AD-3); same fail-closed `open()`/real `is_durable()` pattern as offset (AD-9); own private `run_blocking` (AD-10).
-- [ ] 2.3 RED same file: `mark_seen_is_idempotent` — repeat `mark_seen` for the identical triple succeeds without error, `seen()` still returns `true`.
-- [ ] 2.4 RED same file: `no_dedup_entry_is_ever_pruned` — a mark written arbitrarily long ago (simulated by no time-based cleanup path existing) still returns `true` from `seen()`; no `seen_at` column, no TTL, no retention (spec Non-Goal).
-- [ ] 2.5 RED same file: `the_same_event_id_under_a_different_projection_and_tag_is_independent` — isolation across the full key.
-- [ ] 2.6 GREEN same file: implement `mark_seen` (`INSERT ... ON CONFLICT (projection_id, tag, event_id) DO NOTHING`, AD-4) and `seen` (`SELECT 1 ... LIMIT 1`, presence is the answer).
-- [ ] 2.7 RED+GREEN `tests/read_side_stores.rs`: dedup reopen test — mark seen, **drop every store handle for the path**, reopen the same file, `seen()` for the marked triple still returns `true` (spec "A dedup mark survives a close/reopen cycle").
-- [ ] 2.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green for both offset and dedup sections; repeat the `block_in_place` grep and the no-positive-multi-process-claim review from 1.11 over `dedup.rs`.
+- [x] 2.1 RED `src/read_side/dedup.rs`: unit test `seen_of_an_unmarked_triple_is_false` — fails to compile, `StoolapDedupStore` does not exist yet.
+- [x] 2.2 GREEN same file: `StoolapDedupStore::open(path: &Path) -> Result<Self, DedupStoreError>`; `CREATE TABLE IF NOT EXISTS projection_dedup (... UNIQUE (projection_id, tag, event_id))` — **no** tenant column, matching the port's own no-tenant identity (AD-3); same fail-closed `open()`/real `is_durable()` pattern as offset (AD-9); own private `run_blocking` (AD-10).
+- [x] 2.3 RED same file: `mark_seen_is_idempotent` — repeat `mark_seen` for the identical triple succeeds without error, `seen()` still returns `true`.
+- [x] 2.4 RED same file: `no_dedup_entry_is_ever_pruned` — a mark written arbitrarily long ago (simulated by no time-based cleanup path existing) still returns `true` from `seen()`; no `seen_at` column, no TTL, no retention (spec Non-Goal).
+- [x] 2.5 RED same file: `the_same_event_id_under_a_different_projection_and_tag_is_independent` — isolation across the full key.
+- [x] 2.6 GREEN same file: implement `mark_seen` (`INSERT ... ON CONFLICT (projection_id, tag, event_id) DO NOTHING`, AD-4) and `seen` (`SELECT 1 ... LIMIT 1`, presence is the answer).
+- [x] 2.7 RED+GREEN `tests/read_side_stores.rs`: dedup reopen test — mark seen, **drop every store handle for the path**, reopen the same file, `seen()` for the marked triple still returns `true` (spec "A dedup mark survives a close/reopen cycle").
+- [x] 2.8 Verification: `cargo test -p ego-persistence-stoolap --features read-side --test read_side_stores` green for both offset and dedup sections; repeat the `block_in_place` grep and the no-positive-multi-process-claim review from 1.11 over `dedup.rs`.
 
 ## Phase 3: AD-11 Helper Hoist + Claim Store Construction + Unit Tests — PR3
 
