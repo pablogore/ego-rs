@@ -26,4 +26,6 @@ pub use event_sourcing::event_store::StoolapEventStore;
 pub use operation::reservation::StoolapOperationReservationStore;
 
 #[cfg(feature = "read-side")]
+pub use read_side::dedup::StoolapDedupStore;
+#[cfg(feature = "read-side")]
 pub use read_side::offset::StoolapOffsetStore;
