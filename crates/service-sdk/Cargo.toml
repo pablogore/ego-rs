@@ -74,6 +74,7 @@ ego-persistence-memory = { path = "../persistence-memory" }
 ego-persistence = { path = "../persistence" }
 ego-persistence-stoolap = { path = "../persistence-stoolap", features = [
     "operation-reservation",
+    "read-side",
 ] }
 # Constructs a real `PostgresOperationReservationStore` via `connect_lazy`
 # (parses the DSN, never opens a socket) — same idiom

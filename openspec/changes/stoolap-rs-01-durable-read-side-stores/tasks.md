@@ -90,13 +90,13 @@ Chain strategy: feature-branch-chain
 
 ## Phase 5: Production Composition + Negative Control — PR5
 
-- [ ] 5.1 `crates/service-sdk/Cargo.toml`: add `"read-side"` to the existing `ego-persistence-stoolap` dev-dependency feature list (AD-13, one word).
-- [ ] 5.2 RED `crates/service-sdk/tests/read_side_progress_composition.rs` (extend, existing file): a real `Profile::Production` composition over a `tempfile::tempdir()`-backed on-disk Stoolap database, using real `StoolapOffsetStore`, `StoolapDedupStore`, and `StoolapReadSideClaimStore` through `App::builder()` / `try_build()` — not solely `is_durable()` on an isolated store (spec "A Real Profile::Production Composition Exercises The Gate").
-- [ ] 5.3 GREEN: confirm the durable Stoolap composition builds successfully under the unmodified gate.
-- [ ] 5.4 RED same file: negative control — the identical composition with exactly one store swapped for the file's existing `VolatileOffsetStore` (or an equivalent volatile claim/dedup store) under `Profile::Production`.
-- [ ] 5.5 GREEN: confirm the same gate, unmodified, rejects the negative-control composition as `CompositionError::Validation(RuntimeError::PersistenceNotConfigured(_))` — no gate code is touched by this PR.
-- [ ] 5.6 Verify-don't-touch: read `openspec/specs/real-infrastructure-verification/spec.md`'s Purpose, Requirements, and Non-Goals; confirm all five requirements remain PostgreSQL-specific and none is engaged by this change (design AD-14); record the confirmation in the PR description; make **zero** edits to that file.
-- [ ] 5.7 Verification: `cargo test -p ego-service-sdk --test read_side_progress_composition` green; `cargo test --workspace` with the `read-side` feature off on `persistence-stoolap` unaffected; final `cargo tree -p ego-service-sdk --features read-side -e normal` (or equivalent workspace-wide check) confirms zero new transitive dependencies introduced end to end by the whole change.
+- [x] 5.1 `crates/service-sdk/Cargo.toml`: add `"read-side"` to the existing `ego-persistence-stoolap` dev-dependency feature list (AD-13, one word).
+- [x] 5.2 RED `crates/service-sdk/tests/read_side_progress_composition.rs` (extend, existing file): a real `Profile::Production` composition over a `tempfile::tempdir()`-backed on-disk Stoolap database, using real `StoolapOffsetStore`, `StoolapDedupStore`, and `StoolapReadSideClaimStore` through `App::builder()` / `try_build()` — not solely `is_durable()` on an isolated store (spec "A Real Profile::Production Composition Exercises The Gate").
+- [x] 5.3 GREEN: confirm the durable Stoolap composition builds successfully under the unmodified gate.
+- [x] 5.4 RED same file: negative control — the identical composition with exactly one store swapped for the file's existing `VolatileOffsetStore` (or an equivalent volatile claim/dedup store) under `Profile::Production`.
+- [x] 5.5 GREEN: confirm the same gate, unmodified, rejects the negative-control composition as `CompositionError::Validation(RuntimeError::PersistenceNotConfigured(_))` — no gate code is touched by this PR.
+- [x] 5.6 Verify-don't-touch: read `openspec/specs/real-infrastructure-verification/spec.md`'s Purpose, Requirements, and Non-Goals; confirm all five requirements remain PostgreSQL-specific and none is engaged by this change (design AD-14); record the confirmation in the PR description; make **zero** edits to that file.
+- [x] 5.7 Verification: `cargo test -p ego-service-sdk --test read_side_progress_composition` green; `cargo test --workspace` with the `read-side` feature off on `persistence-stoolap` unaffected; final `cargo tree -p ego-service-sdk --features read-side -e normal` (or equivalent workspace-wide check) confirms zero new transitive dependencies introduced end to end by the whole change.
 
 ## Cross-Cutting Acceptance Criteria (apply to every PR above, not stated once)
 
