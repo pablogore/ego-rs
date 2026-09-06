@@ -33,7 +33,9 @@ use ego_persistence_api::persistence::{
     resolve_tenant, EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent,
 };
 
-use crate::persistence::stoolap_common::{dsn_for, encode_tenant, internal_err, is_write_conflict};
+use crate::persistence::stoolap_common::{
+    dsn_declares_sync_full, dsn_for, encode_tenant, internal_err, is_write_conflict,
+};
 
 const CREATE_EVENTS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -210,7 +212,7 @@ where
         let dsn = dsn_for(path);
         let db = Database::open(&dsn).map_err(internal_err)?;
 
-        if !db.dsn().contains("sync=full") {
+        if !dsn_declares_sync_full(db.dsn()) {
             return Err(PersistenceError::Internal(format!(
                 "stoolap engine at {:?} is not configured for durable sync (sync=full); \
                  refusing to open an EventStore that would misreport is_durable()",
@@ -260,7 +262,7 @@ where
     /// Truthful by construction (design.md AD-3 criterion 3), like
     /// `StoolapSnapshotStore::is_durable`.
     fn is_durable(&self) -> bool {
-        self.db.dsn().contains("sync=full")
+        dsn_declares_sync_full(self.db.dsn())
     }
 
     async fn append(

@@ -868,6 +868,7 @@ impl RuntimeBuilder {
         self.validate_effect_store_profile()?;
         self.validate_read_side_progress_profile()?;
         self.validate_read_side_claim_profile()?;
+        self.validate_operation_reservation_profile()?;
         Ok(())
     }
 
@@ -939,6 +940,34 @@ impl RuntimeBuilder {
             "durable read-side claim store (ReadSideClaimStore)",
             "AppBuilder::read_side_claims(store) (or \
              RuntimeBuilder::with_read_side_claim_store(..)), passing a store whose \
+             is_durable() returns true",
+        )?;
+        Ok(())
+    }
+
+    /// Under `Profile::Production`, a registered [`OperationReservationStore`]
+    /// must be durable (AD-3).
+    ///
+    /// Conditional on registration alone, not on
+    /// [`IdempotencyEnforcementMode`]: `build()` constructs
+    /// `ReservationConfig` from `self.idempotency_reservation_store`
+    /// unconditionally of the enforcement mode, and the health contributor
+    /// wired alongside it is keyed on the store's presence for the same
+    /// reason — a `Compatibility` runtime that registered one is still
+    /// dispatching through it, so it is still a real dependency and is
+    /// checked here. A composition that registers none never reserves
+    /// anything, so there is nothing to refuse, exactly as
+    /// `validate_effect_store_profile` and `validate_read_side_claim_profile`
+    /// leave their own capability ungoverned when it is never exercised.
+    fn validate_operation_reservation_profile(&self) -> Result<(), RuntimeError> {
+        let Some(store) = &self.idempotency_reservation_store else {
+            return Ok(());
+        };
+        persistent_entity::profile::require_durably_configured(
+            self.profile,
+            store.is_durable(),
+            "operation reservation store (OperationReservationStore)",
+            "RuntimeBuilder::with_operation_reservation_store(store), passing a store whose \
              is_durable() returns true",
         )?;
         Ok(())
@@ -4259,6 +4288,159 @@ mod tests {
         let builder = compat()
             .profile(Profile::Production)
             .with_read_side_progress("users-by-tenant", offset, dedup);
+
+        let err = builder
+            .clone()
+            .try_build()
+            .err()
+            .expect("try_build must report the same refusal build() panics on");
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+
+        let _ = builder.build();
+    }
+
+    // -- STOOLAP-S3 Phase 4: the operation reservation store production gate
+
+    /// Minimal `OperationReservationStore` stub for the reservation
+    /// production gate matrix, mirroring `StubClaimStore`/`StubOffsetStore`/
+    /// `StubDedupStore` above: the gate reads only `is_durable()`, so every
+    /// other method is `unreachable!()`.
+    struct StubReservationStore(bool);
+
+    #[async_trait::async_trait]
+    impl ego_domain::operation::OperationReservationStore for StubReservationStore {
+        fn is_durable(&self) -> bool {
+            self.0
+        }
+
+        async fn reserve(
+            &self,
+            _req: ego_domain::operation::ReserveRequest,
+        ) -> Result<
+            ego_domain::operation::ReservationOutcome,
+            ego_domain::operation::ReservationError,
+        > {
+            unreachable!("the gate reads only is_durable()")
+        }
+
+        async fn renew(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            unreachable!("the gate reads only is_durable()")
+        }
+
+        async fn complete(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+            _response: ego_domain::operation::StoredServiceResponse,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            unreachable!("the gate reads only is_durable()")
+        }
+
+        async fn abandon(
+            &self,
+            _fence: &ego_domain::operation::OwnerFence,
+        ) -> Result<(), ego_domain::operation::ReservationError> {
+            unreachable!("the gate reads only is_durable()")
+        }
+
+        async fn purge_completed_before(
+            &self,
+            _cutoff: chrono::DateTime<chrono::Utc>,
+            _batch: usize,
+        ) -> Result<u64, ego_domain::operation::ReservationError> {
+            unreachable!("the gate reads only is_durable()")
+        }
+
+        async fn probe(&self) -> Result<(), ego_domain::operation::ReservationError> {
+            unreachable!("the gate reads only is_durable()")
+        }
+    }
+
+    /// Task 4.1: the full matrix — {Dev, Production} x {no store, volatile
+    /// store, durable store}. Only `Profile::Production` with a registered
+    /// volatile store refuses; every other cell — including `Production`
+    /// with no store registered at all — builds successfully (AD-3, spec
+    /// "No gate applies when reservations are not required").
+    #[test]
+    fn validate_operation_reservation_profile_matrix() {
+        for (profile, store, should_err) in [
+            (Profile::Dev, None, false),
+            (Profile::Dev, Some(false), false),
+            (Profile::Dev, Some(true), false),
+            (Profile::Production, None, false),
+            (Profile::Production, Some(false), true),
+            (Profile::Production, Some(true), false),
+        ] {
+            let mut builder = compat().profile(profile);
+            if let Some(durable) = store {
+                builder = builder
+                    .with_operation_reservation_store(Arc::new(StubReservationStore(durable)));
+            }
+            let result = builder.try_build();
+            assert_eq!(
+                result.is_err(),
+                should_err,
+                "profile={profile:?} store={store:?} expected_err={should_err}"
+            );
+        }
+    }
+
+    /// Task 4.2 / AD-3: a registered volatile store under `Production` must
+    /// refuse even under `IdempotencyEnforcementMode::Compatibility` — the
+    /// gate's trigger is registration, not `MandatoryKey`. `compat()`
+    /// already sets `Compatibility`, so this is the one test distinguishing
+    /// the two possible triggers the design considered and rejected the
+    /// second of.
+    #[test]
+    fn validate_operation_reservation_profile_rejects_volatile_store_under_compatibility_mode() {
+        let err = compat()
+            .profile(Profile::Production)
+            .with_operation_reservation_store(Arc::new(StubReservationStore(false)))
+            .try_build()
+            .err()
+            .expect(
+                "a volatile reservation store must refuse under Production even under \
+                 Compatibility mode",
+            );
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+    }
+
+    /// Task 4.3: the refusal must name both the missing capability and the
+    /// exact fixing call, mirroring
+    /// `validate_read_side_claim_profile_rejects_volatile_claim_store`.
+    #[test]
+    fn validate_operation_reservation_profile_rejects_volatile_store() {
+        let err = compat()
+            .profile(Profile::Production)
+            .with_operation_reservation_store(Arc::new(StubReservationStore(false)))
+            .try_build()
+            .err()
+            .expect("a volatile reservation store must refuse under Production");
+
+        assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("operation reservation store"),
+            "the refusal must name the missing capability: {message}"
+        );
+        assert!(
+            message.contains("with_operation_reservation_store"),
+            "the refusal must name the exact fixing call: {message}"
+        );
+    }
+
+    /// Task 4.4: `build()` and `try_build()` must agree on this validation
+    /// too, mirroring `build_and_try_build_agree_on_read_side_claim_validation`.
+    #[test]
+    #[should_panic(expected = "operation reservation store")]
+    fn build_and_try_build_agree_on_operation_reservation_validation() {
+        let builder = compat()
+            .profile(Profile::Production)
+            .with_operation_reservation_store(Arc::new(StubReservationStore(false)));
 
         let err = builder
             .clone()

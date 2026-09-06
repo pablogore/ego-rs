@@ -58,6 +58,13 @@ impl InMemoryOperationReservationStore {
 
 #[async_trait]
 impl OperationReservationStore for InMemoryOperationReservationStore {
+    /// Explicit, not inherited: this store's state lives only in process
+    /// memory, so honesty about that fact should not depend on the trait's
+    /// default never changing underneath it.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
         let operation_id = OperationId::new(req.tenant.clone(), req.operation_key.clone());
         let mut records = self
@@ -379,6 +386,18 @@ mod tests {
             owner_id: OwnerId::new(owner),
             lease_until,
         }
+    }
+
+    /// spec `persistence-memory-adapter`: "The in-memory store reports
+    /// non-durable" — its state does not survive a process restart.
+    #[test]
+    fn the_in_memory_store_reports_non_durable() {
+        let clock = Arc::new(FixedClock::new(epoch()));
+        let store = InMemoryOperationReservationStore::new(clock);
+        assert!(
+            !store.is_durable(),
+            "the in-memory store must never claim durability it cannot provide"
+        );
     }
 
     /// A mutation that waits on the store's lock must evaluate the lease against

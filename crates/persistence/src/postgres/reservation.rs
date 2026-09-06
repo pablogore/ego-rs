@@ -200,6 +200,14 @@ impl PostgresOperationReservationStore {
 
 #[async_trait]
 impl OperationReservationStore for PostgresOperationReservationStore {
+    /// Already satisfies cross-restart persistence with atomic ownership
+    /// transfer (`ON CONFLICT DO NOTHING` plus the fence-verified CAS every
+    /// mutator uses); declaring anything other than durable would understate
+    /// a guarantee this store already provides.
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
         let tenant = tenant_column(req.tenant.as_ref());
         let key = req.operation_key.as_str().to_string();
@@ -608,6 +616,30 @@ impl PostgresOperationReservationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ego_domain::time::SystemClock;
+    use sqlx::postgres::PgPoolOptions;
+
+    /// Builds a store with no real connection: `is_durable()` is pure and
+    /// never touches the pool, so `connect_lazy` (parses the DSN, connects on
+    /// first use) is enough — no test database required.
+    fn store_without_a_live_connection() -> PostgresOperationReservationStore {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@localhost/db")
+            .expect("connect_lazy only parses the DSN, it does not connect");
+        PostgresOperationReservationStore::new(pool, Arc::new(SystemClock))
+    }
+
+    /// spec `idempotent-command-processing`: "The PostgreSQL-backed store
+    /// reports durable" — it already satisfies cross-restart persistence
+    /// with atomic ownership transfer.
+    #[tokio::test]
+    async fn the_postgres_store_reports_durable() {
+        assert!(
+            store_without_a_live_connection().is_durable(),
+            "the Postgres-backed store must report durable: declaring \
+             anything else would understate a guarantee it already provides"
+        );
+    }
 
     /// The stored-token guard admits exactly the positive values.
     ///

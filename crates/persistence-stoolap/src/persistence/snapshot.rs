@@ -20,7 +20,7 @@ use ego_persistence_api::persistence::{resolve_tenant, PersistenceError, Snapsho
 use serde_json::Value;
 use stoolap::Database;
 
-use super::stoolap_common::{dsn_for, encode_tenant, internal_err};
+use super::stoolap_common::{dsn_declares_sync_full, dsn_for, encode_tenant, internal_err};
 
 const CREATE_SNAPSHOTS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -71,7 +71,7 @@ impl StoolapSnapshotStore {
         let dsn = dsn_for(path);
         let db = Database::open(&dsn).map_err(internal_err)?;
 
-        if !db.dsn().contains("sync=full") {
+        if !dsn_declares_sync_full(db.dsn()) {
             return Err(PersistenceError::Internal(format!(
                 "stoolap engine at {:?} is not configured for durable sync (sync=full); \
                  refusing to open a Snapshot store that would misreport is_durable()",
@@ -97,7 +97,7 @@ impl Snapshot for StoolapSnapshotStore {
     /// re-derives from the same `db.dsn()` invariant rather than a fixed
     /// `true`.
     fn is_durable(&self) -> bool {
-        self.db.dsn().contains("sync=full")
+        dsn_declares_sync_full(self.db.dsn())
     }
 
     fn save_snapshot(

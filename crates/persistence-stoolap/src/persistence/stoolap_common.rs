@@ -31,6 +31,22 @@ pub(crate) fn internal_err(e: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Internal(e.to_string())
 }
 
+/// Whether `dsn` declares `sync=full` as an actual query parameter — not
+/// merely as a substring anywhere in the string (AD-9, promoted from
+/// `crates/effect-store/src/stoolap/mod.rs::dsn_declares_sync_full`).
+///
+/// A raw `dsn.contains("sync=full")` would also match a path segment that
+/// happens to contain that text (e.g. `file:///data/no_sync=full_here/db`).
+/// Stoolap's `Database` exposes no structured accessor for the sync mode it
+/// parsed (only the raw `dsn()` string), so this parses just the query
+/// section — everything after the first `?` — and requires an exact
+/// `sync=full` token between `&` separators.
+pub(crate) fn dsn_declares_sync_full(dsn: &str) -> bool {
+    dsn.split_once('?')
+        .map(|(_, query)| query.split('&').any(|param| param == "sync=full"))
+        .unwrap_or(false)
+}
+
 /// Classifies a raw Stoolap error as a lost optimistic-concurrency race
 /// (`Conflict`) rather than a genuine failure (`Internal`). Default is
 /// fail-loud: anything not recognized here stays `Internal`.
@@ -92,5 +108,12 @@ mod tests {
         assert!(!is_write_conflict(&stoolap::Error::TableNotFound(
             "aggregates".into()
         )));
+    }
+
+    #[test]
+    fn dsn_declares_sync_full_rejects_a_path_containing_the_text_without_the_param() {
+        assert!(!dsn_declares_sync_full("file:///tmp/db"));
+        assert!(!dsn_declares_sync_full("file:///tmp/no_sync=full_here/db"));
+        assert!(dsn_declares_sync_full(&dsn_for(Path::new("/tmp/db"))));
     }
 }

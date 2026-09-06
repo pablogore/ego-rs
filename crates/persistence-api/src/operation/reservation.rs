@@ -64,6 +64,16 @@ pub enum OldestCompleted {
 /// mutating method MUST implement.
 #[async_trait]
 pub trait OperationReservationStore: Send + Sync {
+    /// Whether reservations written through this store survive a process
+    /// restart.
+    ///
+    /// Defaults to `false`: honest for every implementation that has not
+    /// considered the question. `Profile::Production` reads this; a durable
+    /// implementation overrides it to `true`.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
     /// Attempts to reserve `req`'s operation, or observes its current state.
     async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError>;
 
@@ -164,6 +174,65 @@ pub trait OperationReservationStore: Send + Sync {
     /// until the outage. The compiler refusing an incomplete `impl` is the
     /// cheapest place to catch that.
     async fn probe(&self) -> Result<(), ReservationError>;
+}
+
+/// Forwards through a shared handle, so a composition root can hold the
+/// store as `Arc<dyn OperationReservationStore>` and a generic caller can
+/// still use `Arc<ConcreteStore>` directly as an `S: OperationReservationStore`.
+#[async_trait]
+impl<T: OperationReservationStore + Send + Sync + ?Sized> OperationReservationStore
+    for std::sync::Arc<T>
+{
+    /// **Load-bearing in a generic context** (AD-2): omitting this makes
+    /// `Arc<ConcreteStore>` used as an `S: OperationReservationStore` report
+    /// the trait's `false` default regardless of what it wraps.
+    fn is_durable(&self) -> bool {
+        (**self).is_durable()
+    }
+
+    async fn reserve(&self, req: ReserveRequest) -> Result<ReservationOutcome, ReservationError> {
+        (**self).reserve(req).await
+    }
+
+    async fn renew(
+        &self,
+        fence: &OwnerFence,
+        until: DateTime<Utc>,
+    ) -> Result<(), ReservationError> {
+        (**self).renew(fence, until).await
+    }
+
+    async fn complete(
+        &self,
+        fence: &OwnerFence,
+        response: StoredServiceResponse,
+    ) -> Result<(), ReservationError> {
+        (**self).complete(fence, response).await
+    }
+
+    async fn abandon(&self, fence: &OwnerFence) -> Result<(), ReservationError> {
+        (**self).abandon(fence).await
+    }
+
+    async fn purge_completed_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch: usize,
+    ) -> Result<u64, ReservationError> {
+        (**self).purge_completed_before(cutoff, batch).await
+    }
+
+    /// A wrapper MUST forward this rather than inherit the default — see the
+    /// port's own doc on [`OperationReservationStore::oldest_completed`].
+    /// Inheriting it would silently hide a capability the inner store
+    /// actually has.
+    async fn oldest_completed(&self) -> Result<OldestCompleted, ReservationError> {
+        (**self).oldest_completed().await
+    }
+
+    async fn probe(&self) -> Result<(), ReservationError> {
+        (**self).probe().await
+    }
 }
 
 /// The deterministic identity of one reservation: the `CanonicalTenant` it is
@@ -590,6 +659,183 @@ mod tests {
         assert_ne!(
             ReservationError::StaleOwner,
             ReservationError::Backend("boom".into())
+        );
+    }
+
+    /// spec `persistence-api-surface`: "A bare implementation that does not
+    /// override the signal reports non-durable".
+    #[test]
+    fn a_bare_implementation_defaults_is_durable_to_false() {
+        struct Bare;
+
+        #[async_trait]
+        impl OperationReservationStore for Bare {
+            async fn reserve(
+                &self,
+                _req: ReserveRequest,
+            ) -> Result<ReservationOutcome, ReservationError> {
+                unreachable!("this fixture exists only to exercise is_durable")
+            }
+            async fn renew(
+                &self,
+                _fence: &OwnerFence,
+                _until: DateTime<Utc>,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn complete(
+                &self,
+                _fence: &OwnerFence,
+                _response: StoredServiceResponse,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn purge_completed_before(
+                &self,
+                _cutoff: DateTime<Utc>,
+                _batch: usize,
+            ) -> Result<u64, ReservationError> {
+                unreachable!()
+            }
+            async fn probe(&self) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+        }
+
+        assert!(
+            !Bare.is_durable(),
+            "an implementation that never overrides the signal must report non-durable"
+        );
+    }
+
+    /// AD-2: the `Arc<T>` forwarding impl is load-bearing for a *generic*
+    /// context — not for the `Arc<dyn _>` gate call site, where the concrete
+    /// store's override resolves either way. Pinned here by instantiating a
+    /// generic `S: OperationReservationStore` with `Arc<Concrete>` directly,
+    /// the same shape `assert_reservation_store_conformance`
+    /// (`testkit/src/reservation_conformance.rs:963`) uses. Deleting the
+    /// forwarding `is_durable` body (leaving the rest of the impl in place)
+    /// would make this compile and silently report `false`.
+    #[test]
+    fn arc_of_a_durable_store_used_as_a_generic_s_reports_durable() {
+        struct Durable;
+
+        #[async_trait]
+        impl OperationReservationStore for Durable {
+            fn is_durable(&self) -> bool {
+                true
+            }
+
+            async fn reserve(
+                &self,
+                _req: ReserveRequest,
+            ) -> Result<ReservationOutcome, ReservationError> {
+                unreachable!("this fixture exists only to exercise is_durable")
+            }
+            async fn renew(
+                &self,
+                _fence: &OwnerFence,
+                _until: DateTime<Utc>,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn complete(
+                &self,
+                _fence: &OwnerFence,
+                _response: StoredServiceResponse,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn purge_completed_before(
+                &self,
+                _cutoff: DateTime<Utc>,
+                _batch: usize,
+            ) -> Result<u64, ReservationError> {
+                unreachable!()
+            }
+            async fn probe(&self) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+        }
+
+        fn reports_durable<S: OperationReservationStore>(store: &S) -> bool {
+            store.is_durable()
+        }
+
+        let wrapped: std::sync::Arc<Durable> = std::sync::Arc::new(Durable);
+        assert!(
+            reports_durable(&wrapped),
+            "Arc<Concrete> used directly as a generic S: OperationReservationStore \
+             must forward is_durable() to the inner store's answer, not the trait's \
+             false default"
+        );
+    }
+
+    /// Symmetric to the durable case above: an explicit `false` override,
+    /// not the bare default, must also survive `Arc<T>` forwarding through
+    /// the generic `S` path. Without this, a forwarding impl that always
+    /// returned `true` (or was otherwise hardcoded) would still pass the
+    /// durable-only check above.
+    #[test]
+    fn arc_of_an_explicitly_non_durable_store_used_as_a_generic_s_reports_non_durable() {
+        struct ExplicitlyVolatile;
+
+        #[async_trait]
+        impl OperationReservationStore for ExplicitlyVolatile {
+            fn is_durable(&self) -> bool {
+                false
+            }
+
+            async fn reserve(
+                &self,
+                _req: ReserveRequest,
+            ) -> Result<ReservationOutcome, ReservationError> {
+                unreachable!("this fixture exists only to exercise is_durable")
+            }
+            async fn renew(
+                &self,
+                _fence: &OwnerFence,
+                _until: DateTime<Utc>,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn complete(
+                &self,
+                _fence: &OwnerFence,
+                _response: StoredServiceResponse,
+            ) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn abandon(&self, _fence: &OwnerFence) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+            async fn purge_completed_before(
+                &self,
+                _cutoff: DateTime<Utc>,
+                _batch: usize,
+            ) -> Result<u64, ReservationError> {
+                unreachable!()
+            }
+            async fn probe(&self) -> Result<(), ReservationError> {
+                unreachable!()
+            }
+        }
+
+        fn reports_durable<S: OperationReservationStore>(store: &S) -> bool {
+            store.is_durable()
+        }
+
+        let wrapped: std::sync::Arc<ExplicitlyVolatile> = std::sync::Arc::new(ExplicitlyVolatile);
+        assert!(
+            !reports_durable(&wrapped),
+            "Arc<Concrete> forwarding must not report durable for a store that \
+             explicitly overrides is_durable() to false"
         );
     }
 

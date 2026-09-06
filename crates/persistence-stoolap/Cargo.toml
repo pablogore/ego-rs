@@ -16,6 +16,13 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 tokio = { version = "1", optional = true, features = ["rt"] }
 async-trait = { version = "0.1", optional = true }
+# `operation-reservation` feature only (design.md AD-7): `Clock` for the
+# reservation store's injected-time reads.
+ego-domain = { path = "../domain", optional = true }
+# Stoolap's `core::Value` has no binary/BYTEA variant, so `response` bytes
+# are stored as base64-encoded TEXT — same convention as
+# `effect-store/src/stoolap/mod.rs`.
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 # The shared conformance harness (S3). One direction only: ego-testkit has no
@@ -43,6 +50,16 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 [features]
 event-sourcing = ["dep:tokio", "dep:async-trait", "dep:chrono"]
+# STOOLAP-S3 (design.md AD-7): a new feature rather than reusing
+# `event-sourcing`, because this store needs `ego-domain` (for `Clock`) and
+# `base64` deps that `event-sourcing` consumers should not gain.
+operation-reservation = [
+    "dep:tokio",
+    "dep:async-trait",
+    "dep:chrono",
+    "dep:ego-domain",
+    "dep:base64",
+]
 
 # Cargo can't feature-gate code inside a `tests/` binary, only the binary
 # itself: `cargo check --workspace --all-targets` (CI, no explicit
@@ -50,3 +67,7 @@ event-sourcing = ["dep:tokio", "dep:async-trait", "dep:chrono"]
 [[test]]
 name = "production_restart_recovery"
 required-features = ["event-sourcing"]
+
+[[test]]
+name = "reservation_conformance"
+required-features = ["operation-reservation"]
