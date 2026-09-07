@@ -58,3 +58,6 @@ graphify-out/
 # Compiled test/scratch binaries
 test_const_closure_good
 test_const_closure_bad
+
+# Downloaded shipwright binary (make shipwright-bin / make gate)
+/bin/
