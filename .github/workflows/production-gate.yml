@@ -45,7 +45,7 @@ jobs:
       # fails immediately with "connection refused" — no engine to talk to.
       - name: Install Dagger CLI
         run: |
-          curl -fsSL https://dagger.io/install.sh | sh
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
           echo "${PWD}/bin" >> "$GITHUB_PATH"
 
       - name: shipwright -step lint (clippy)
