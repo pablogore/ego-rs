@@ -4,9 +4,10 @@ name: Shipwright Validation (shadow, non-blocking)
 # (xtask-verify-*, command-run-suite) plus rust-integration-test's new
 # Docker-in-Docker attachment against a real Linux runner. Purely additive:
 # does not touch production-gate.yml, replaces no native CI gate, and blocks
-# nothing. Builds shipwright from source off the branch under validation
-# instead of the pinned release, since that branch's DinD fix has not been
-# tagged yet.
+# nothing. Builds shipwright from source off develop (PR #240/#241 merged
+# there) instead of the pinned release: v0.8.0 was cut from main, which
+# hasn't been promoted past #239 yet, so no tagged release contains the
+# rust-command provider or the AsService Docker-in-Docker fix.
 on:
   workflow_dispatch:
   push:
@@ -30,8 +31,8 @@ jobs:
       # "not supplied"), so it gets sent to a different repo's fetch and
       # rejected outright. shipwright is public — an unauthenticated clone
       # needs no token at all.
-      - name: Checkout shipwright (feat/rust-command-provider)
-        run: git clone --depth 1 --branch feat/rust-command-provider https://github.com/pablogore/shipwright shipwright-src
+      - name: Checkout shipwright (develop)
+        run: git clone --depth 1 --branch develop https://github.com/pablogore/shipwright shipwright-src
 
       - name: Set up Go
         uses: actions/setup-go@v5
