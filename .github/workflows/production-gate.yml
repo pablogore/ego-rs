@@ -28,6 +28,16 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      # Root workspace and integration-tests are separate Cargo workspaces
+      # (see integration-tests/Cargo.toml) with independent target dirs and
+      # lockfiles; both get cached, keyed on their own Cargo.lock.
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            integration-tests
+
       # Pinned release binary from github.com/pablogore/shipwright — the
       # Dagger-backed pipeline runner. Only "lint" (clippy, via the "clippy"
       # rust Tester provider) runs through it today: the unit-test and
