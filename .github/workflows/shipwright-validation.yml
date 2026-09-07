@@ -1,13 +1,19 @@
 name: Shipwright Validation (shadow, non-blocking)
 
 # Validates the shadow rust-command steps in .shipwright/workflow.yaml
-# (xtask-verify-*, command-run-suite) plus rust-integration-test's new
-# Docker-in-Docker attachment against a real Linux runner. Purely additive:
-# does not touch production-gate.yml, replaces no native CI gate, and blocks
-# nothing. Builds shipwright from source off develop (PR #240/#241 merged
-# there) instead of the pinned release: v0.8.0 was cut from main, which
-# hasn't been promoted past #239 yet, so no tagged release contains the
+# (xtask-verify-*, command-run-suite) against a real Linux runner. Purely
+# additive: does not touch production-gate.yml, replaces no native CI gate,
+# and blocks nothing. Builds shipwright from source off develop (PR #240/#241
+# merged there) instead of the pinned release: v0.8.0 was cut from main,
+# which hasn't been promoted past #239 yet, so no tagged release contains the
 # rust-command provider or the AsService Docker-in-Docker fix.
+#
+# No rust-integration-test step here: it always invokes plain `cargo test`
+# against integration-tests/Cargo.toml, which cannot express this suite's
+# required entrypoint (`cargo run --bin run-suite`, the only thing that
+# provisions the Postgres testcontainer) — every Postgres-dependent test
+# fails immediately without it. command-run-suite (rust-command) below runs
+# the correct invocation instead.
 on:
   workflow_dispatch:
   push:
@@ -68,15 +74,6 @@ jobs:
       - name: shipwright -step xtask-verify-hygiene
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-hygiene
 
-      # continue-on-error: this step's own outcome is independently
-      # meaningful (does DinD hang or not?) and must not hide
-      # command-run-suite's result below it — a real failure here still
-      # fails the job overall via the "check shadow step results" step.
-      - name: shipwright -step integration (rust-integration-test, DinD)
-        id: integration
-        continue-on-error: true
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step integration
-
       - name: shipwright -step command-run-suite (rust-command, DinD)
         id: command-run-suite
         continue-on-error: true
@@ -85,7 +82,5 @@ jobs:
       - name: Check shadow step results
         if: always()
         run: |
-          echo "integration:        ${{ steps.integration.outcome }}"
           echo "command-run-suite:  ${{ steps.command-run-suite.outcome }}"
-          test "${{ steps.integration.outcome }}" = "success"
           test "${{ steps.command-run-suite.outcome }}" = "success"
