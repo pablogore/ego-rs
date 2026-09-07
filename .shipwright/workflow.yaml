@@ -37,6 +37,53 @@ spec:
         manifestPath: integration-tests/Cargo.toml
         locked: true
 
+    # --- SHADOW VALIDATION, rust-command (not yet load-bearing) ---
+    # Temporary steps proving rust-command as the general Cargo-invocation
+    # primitive against real ego-rs commands, run alongside (never replacing)
+    # unit/lint/integration above.
+    - id: xtask-verify-layers
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-layers"
+        cacheKey: xtask
+
+    - id: xtask-verify-isolation
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-isolation"
+        cacheKey: xtask
+
+    - id: xtask-verify-hygiene
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-hygiene"
+        cacheKey: xtask
+
+    - id: command-run-suite
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        manifestPath: integration-tests/Cargo.toml
+        command: "run --bin run-suite"
+        docker: true
+        cacheKey: run-suite
+    # --- END SHADOW VALIDATION ---
+
   execution:
     failFast: false
     timeout: 30m

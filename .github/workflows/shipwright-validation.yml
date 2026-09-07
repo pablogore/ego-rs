@@ -1,0 +1,72 @@
+name: Shipwright Validation (shadow, non-blocking)
+
+# Validates the shadow rust-command steps in .shipwright/workflow.yaml
+# (xtask-verify-*, command-run-suite) plus rust-integration-test's new
+# Docker-in-Docker attachment against a real Linux runner. Purely additive:
+# does not touch production-gate.yml, replaces no native CI gate, and blocks
+# nothing. Builds shipwright from source off the branch under validation
+# instead of the pinned release, since that branch's DinD fix has not been
+# tagged yet.
+on:
+  workflow_dispatch:
+  push:
+    branches: [opsx/cicd-shipwright-lint-gate]
+
+concurrency:
+  group: shipwright-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate-shadow-steps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ego-rs
+        uses: actions/checkout@v4
+
+      - name: Checkout shipwright (feat/rust-command-provider)
+        uses: actions/checkout@v4
+        with:
+          repository: pablogore/shipwright
+          ref: feat/rust-command-provider
+          path: shipwright-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: shipwright-src/go.mod
+
+      - name: Build shipwright from source
+        run: |
+          cd shipwright-src
+          go build -o "${GITHUB_WORKSPACE}/shipwright" .
+
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
+          echo "${PWD}/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            integration-tests
+
+      - name: shipwright -step xtask-verify-layers
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-layers
+
+      - name: shipwright -step xtask-verify-isolation
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-isolation
+
+      - name: shipwright -step xtask-verify-hygiene
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-hygiene
+
+      - name: shipwright -step integration (rust-integration-test, DinD)
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step integration
+
+      - name: shipwright -step command-run-suite (rust-command, DinD)
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step command-run-suite
