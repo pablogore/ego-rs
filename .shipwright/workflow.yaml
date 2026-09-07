@@ -1,0 +1,42 @@
+apiVersion: shipwright.dev/v1
+kind: Workflow
+metadata:
+  name: ego-rs-production-gate
+  description: >-
+    Rust quality gate for ego-rs: unit tests, clippy, and the
+    Testcontainers-backed integration suite, run through Shipwright's
+    Dagger-backed Rust providers instead of raw cargo invocations.
+spec:
+  source:
+    path: .
+  steps:
+    - id: unit
+      capability: test
+      uses:
+        provider: rust-test
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        locked: true
+
+    - id: lint
+      capability: test
+      uses:
+        provider: clippy
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+
+    - id: integration
+      capability: test
+      uses:
+        provider: rust-integration-test
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        manifestPath: integration-tests/Cargo.toml
+        locked: true
+
+  execution:
+    failFast: false
+    timeout: 30m

@@ -7,11 +7,14 @@ name: Production Gate
 on:
   pull_request:
   push:
-    branches: [develop]
+    branches: [develop, main]
 
 concurrency:
   group: production-gate-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  SHIPWRIGHT_VERSION: "v0.6.0"
 
 jobs:
   production-readiness:
@@ -24,6 +27,20 @@ jobs:
       # rustup (preinstalled on GitHub-hosted runners) and prints the version.
       - name: Resolve pinned Rust toolchain
         run: rustup show
+
+      # Pinned release binary from github.com/pablogore/shipwright — the
+      # Dagger-backed pipeline runner. Only "lint" (clippy, via the "clippy"
+      # rust Tester provider) runs through it today: the unit-test and
+      # integration-test capabilities are generic `cargo test` wrappers that
+      # do not reproduce run-suite's shared-container orchestration below,
+      # and there is no xtask provider yet — see .shipwright/workflow.yaml.
+      - name: Install shipwright
+        run: |
+          curl -fL -o shipwright "https://github.com/pablogore/shipwright/releases/download/${SHIPWRIGHT_VERSION}/shipwright-linux-amd64"
+          chmod +x shipwright
+
+      - name: shipwright -step lint (clippy)
+        run: ./shipwright --workflow .shipwright/workflow.yaml -step lint
 
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets

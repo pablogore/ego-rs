@@ -970,7 +970,7 @@ mod tests {
     fn projection_spec_claims_is_absent_by_default() {
         let spec = ProjectionSpec::new(
             "proj",
-            || Vec::<(EventTag, String)>::new(),
+            Vec::<(EventTag, String)>::new,
             NoopHandler,
             FakeStore,
             FakeDedup,
