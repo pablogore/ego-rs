@@ -39,8 +39,17 @@ jobs:
           curl -fL -o shipwright "https://github.com/pablogore/shipwright/releases/download/${SHIPWRIGHT_VERSION}/shipwright-linux-amd64"
           chmod +x shipwright
 
+      # Shipwright's Dagger-backed providers need an active Dagger session:
+      # `dagger run` provisions one (using the runner's Docker daemon) for
+      # the wrapped command and tears it down after. Without it, shipwright
+      # fails immediately with "connection refused" — no engine to talk to.
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dagger.io/install.sh | sh
+          echo "${PWD}/bin" >> "$GITHUB_PATH"
+
       - name: shipwright -step lint (clippy)
-        run: ./shipwright --workflow .shipwright/workflow.yaml -step lint
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step lint
 
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
