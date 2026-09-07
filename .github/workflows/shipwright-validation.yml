@@ -1,23 +1,20 @@
-name: Shipwright Validation (shadow, non-blocking)
+name: Shipwright Validation (canonical candidate, non-blocking)
 
-# Validates the shadow rust-command steps in .shipwright/workflow.yaml
-# (xtask-verify-*, command-run-suite) against a real Linux runner. Purely
-# additive: does not touch production-gate.yml, replaces no native CI gate,
-# and blocks nothing. Builds shipwright from source off develop (PR #240/#241
-# merged there) instead of the pinned release: v0.8.0 was cut from main,
-# which hasn't been promoted past #239 yet, so no tagged release contains the
-# rust-command provider or the AsService Docker-in-Docker fix.
-#
-# No rust-integration-test step here: it always invokes plain `cargo test`
-# against integration-tests/Cargo.toml, which cannot express this suite's
-# required entrypoint (`cargo run --bin run-suite`, the only thing that
-# provisions the Postgres testcontainer) — every Postgres-dependent test
-# fails immediately without it. command-run-suite (rust-command) below runs
-# the correct invocation instead.
+# Runs the FULL .shipwright/workflow.yaml — the CANONICAL CANDIDATE for
+# ego-rs's Production Gate — with a single Shipwright invocation (no -step
+# selection: an external scheduler must not cherry-pick individual steps,
+# Shipwright's own graph decides what runs). Purely additive: does not touch
+# production-gate.yml, replaces no native CI gate, and blocks nothing yet —
+# production-gate.yml's native commands remain the load-bearing
+# SHADOW/NATIVE REFERENCE this run is validated against. Builds shipwright
+# from source off develop (PR #240/#241 merged there) instead of the pinned
+# release: v0.8.0 was cut from main, which hasn't been promoted past #239
+# yet, so no tagged release contains the rust-command provider or the
+# AsService Docker-in-Docker fix that production-integration needs.
 on:
   workflow_dispatch:
   push:
-    branches: [opsx/cicd-shipwright-lint-gate]
+    branches: [opsx/shipwright-canonical-gate]
 
 concurrency:
   group: shipwright-validation-${{ github.ref }}
@@ -25,7 +22,7 @@ concurrency:
 
 jobs:
   validate:
-    name: validate-shadow-steps
+    name: validate-canonical-workflow
     runs-on: ubuntu-latest
     steps:
       - name: Checkout ego-rs
@@ -65,22 +62,13 @@ jobs:
             .
             integration-tests
 
-      - name: shipwright -step xtask-verify-layers
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-layers
-
-      - name: shipwright -step xtask-verify-isolation
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-isolation
-
-      - name: shipwright -step xtask-verify-hygiene
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-hygiene
-
-      - name: shipwright -step command-run-suite (rust-command, DinD)
-        id: command-run-suite
+      - name: shipwright (canonical workflow, full run — no -step)
+        id: shipwright
         continue-on-error: true
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step command-run-suite
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml
 
-      - name: Check shadow step results
+      - name: Check canonical workflow result
         if: always()
         run: |
-          echo "command-run-suite:  ${{ steps.command-run-suite.outcome }}"
-          test "${{ steps.command-run-suite.outcome }}" = "success"
+          echo "shipwright (workspace-check, workspace-tests, workspace-lint, architecture-layers, architecture-isolation, repository-hygiene, production-integration): ${{ steps.shipwright.outcome }}"
+          test "${{ steps.shipwright.outcome }}" = "success"

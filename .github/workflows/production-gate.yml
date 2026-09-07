@@ -39,11 +39,15 @@ jobs:
             integration-tests
 
       # Pinned release binary from github.com/pablogore/shipwright — the
-      # Dagger-backed pipeline runner. Only "lint" (clippy, via the "clippy"
-      # rust Tester provider) runs through it today: the unit-test and
-      # integration-test capabilities are generic `cargo test` wrappers that
-      # do not reproduce run-suite's shared-container orchestration below,
-      # and there is no xtask provider yet — see .shipwright/workflow.yaml.
+      # Dagger-backed pipeline runner. Only "workspace-lint" (clippy, via the
+      # "clippy" rust Tester provider) runs through this pinned binary today:
+      # v0.6.0 predates the "rust-command" provider and its Docker-in-Docker
+      # fix, so it cannot run the rest of .shipwright/workflow.yaml (now the
+      # CANONICAL CANDIDATE for this entire gate). The commands below remain
+      # the load-bearing SHADOW/NATIVE REFERENCE until that full workflow is
+      # promoted — see .shipwright/workflow.yaml and
+      # .github/workflows/shipwright-validation.yml, which runs it complete
+      # (built from source, single invocation) to prove equivalence.
       - name: Install shipwright
         run: |
           curl -fL -o shipwright "https://github.com/pablogore/shipwright/releases/download/${SHIPWRIGHT_VERSION}/shipwright-linux-amd64"
@@ -58,8 +62,8 @@ jobs:
           curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
           echo "${PWD}/bin" >> "$GITHUB_PATH"
 
-      - name: shipwright -step lint (clippy)
-        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step lint
+      - name: shipwright -step workspace-lint (clippy)
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint
 
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets

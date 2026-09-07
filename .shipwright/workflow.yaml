@@ -3,24 +3,51 @@ kind: Workflow
 metadata:
   name: ego-rs-production-gate
   description: >-
-    Rust quality gate for ego-rs: unit tests and clippy, run through
-    Shipwright's Dagger-backed Rust providers instead of raw cargo
-    invocations. The Testcontainers-backed integration suite is validated
-    separately, under shadow validation below (command-run-suite).
+    CANONICAL CANDIDATE for ego-rs's Production Gate, run entirely through
+    Shipwright's Dagger-backed Rust providers. Every step below is the
+    Shipwright equivalent of a currently load-bearing command in
+    .github/workflows/production-gate.yml (see that file's own comments for
+    the native/shadow reference it still runs in parallel). Step ids name
+    the responsibility each gate protects, not the tool that happens to
+    implement it today (xtask, cargo-run, etc.) — see CONTRIBUTING.md for
+    the full command-to-step mapping.
 spec:
   source:
     path: .
   steps:
-    - id: unit
+    # Equivalent of: cargo check --workspace --all-targets
+    - id: workspace-check
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "check --workspace --all-targets"
+        cacheKey: workspace-check
+
+    # Equivalent of: cargo test --workspace
+    # No `locked: true` here on purpose: the native gate does not pass
+    # --locked, and rust-test's --locked would make this step strictly
+    # stricter (fail on a resolvable-but-stale Cargo.lock the native command
+    # would silently accept) — not an exact equivalent. See the audit report
+    # for the full argv comparison.
+    - id: workspace-tests
       capability: test
       uses:
         provider: rust-test
         version: "1"
       with:
         rustVersion: "1.90.0"
-        locked: true
 
-    - id: lint
+    # Equivalent of: cargo clippy --workspace --all-targets -- -D warnings
+    # (RustLinter's actual invocation omits --workspace: it runs
+    # `cargo clippy --all-targets -- -D warnings`. ego-rs's root Cargo.toml
+    # is a virtual manifest with no [workspace].default-members override, so
+    # cargo's own default scope for a virtual workspace is already every
+    # member — behaviorally equivalent here, but not a generic guarantee for
+    # every possible root Cargo.toml shape.)
+    - id: workspace-lint
       capability: test
       uses:
         provider: clippy
@@ -28,16 +55,8 @@ spec:
       with:
         rustVersion: "1.90.0"
 
-    # --- SHADOW VALIDATION, rust-command (not yet load-bearing) ---
-    # Temporary steps proving rust-command as the general Cargo-invocation
-    # primitive against real ego-rs commands, run alongside (never replacing)
-    # unit/lint above. command-run-suite is the integration suite's only
-    # Shipwright step: rust-integration-test (the "integration" step this
-    # block used to run alongside) always invokes plain `cargo test`, which
-    # cannot express integration-tests' required entrypoint
-    # (`cargo run --bin run-suite`, the only thing that provisions the
-    # suite's Postgres testcontainer) — see command-run-suite below instead.
-    - id: xtask-verify-layers
+    # Equivalent of: cargo run -p xtask -- verify-layers
+    - id: architecture-layers
       capability: test
       uses:
         provider: rust-command
@@ -47,7 +66,8 @@ spec:
         command: "run -p xtask -- verify-layers"
         cacheKey: xtask
 
-    - id: xtask-verify-isolation
+    # Equivalent of: cargo run -p xtask -- verify-isolation
+    - id: architecture-isolation
       capability: test
       uses:
         provider: rust-command
@@ -57,7 +77,8 @@ spec:
         command: "run -p xtask -- verify-isolation"
         cacheKey: xtask
 
-    - id: xtask-verify-hygiene
+    # Equivalent of: cargo run -p xtask -- verify-hygiene
+    - id: repository-hygiene
       capability: test
       uses:
         provider: rust-command
@@ -67,7 +88,19 @@ spec:
         command: "run -p xtask -- verify-hygiene"
         cacheKey: xtask
 
-    - id: command-run-suite
+    # Equivalent of:
+    #   cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+    # rust-command, not rust-integration-test: the latter always invokes
+    # plain `cargo test`, which cannot express run-suite as an entrypoint —
+    # only rust-command's arbitrary `command` can. docker: true attaches the
+    # validated Docker-in-Docker daemon (providers/rust/dockerdaemon.go) that
+    # run-suite's testcontainers-rs needs to provision Postgres 16 and 14.
+    # cacheKey isolated from "xtask"/default: integration-tests is a
+    # deliberately separate Cargo workspace (its own Cargo.toml, lockfile,
+    # target dir) — sharing a target cache with the root workspace's xtask
+    # builds would mix two independent dependency graphs in the same cache
+    # volume for no benefit.
+    - id: production-integration
       capability: test
       uses:
         provider: rust-command
@@ -78,7 +111,6 @@ spec:
         command: "run --bin run-suite"
         docker: true
         cacheKey: run-suite
-    # --- END SHADOW VALIDATION ---
 
   execution:
     failFast: false

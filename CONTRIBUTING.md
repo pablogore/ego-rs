@@ -23,6 +23,7 @@ protection on `develop` (not yet configured — the workflow existing does not
 make it mandatory on its own). It runs, in order:
 
 ```bash
+dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --all-targets -- -D warnings
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo run -p xtask -- verify-layers
@@ -31,6 +32,11 @@ cargo run -p xtask -- verify-hygiene
 cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 ```
 
+Lint (clippy) already runs through Shipwright's Dagger-backed `clippy`
+provider, not a raw `cargo clippy` invocation — `cargo fmt --all -- --check`
+is the only check still not wired into this gate (pre-existing formatting
+violations unrelated to production readiness; follow-up work).
+
 `run-suite` is the canonical entrypoint for the integration suite: it
 provisions real PostgreSQL 16 and 14 via testcontainers, migrates them, runs
 the tests, and reclaims the containers itself — Docker is the only local
@@ -38,7 +44,19 @@ requirement (`colima start` or Docker Desktop; see `integration-tests/README.md`
 No secrets are involved: production-profile tests supply deterministic
 non-dev test keys in code, never via environment variables.
 
-`cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D
-warnings` are not part of this gate yet — the tree currently has pre-existing
-violations unrelated to production readiness. Wiring them in is follow-up
-work, not part of this gate.
+### `.shipwright/workflow.yaml`: canonical candidate
+
+`.shipwright/workflow.yaml` defines the full gate above as a single
+Shipwright workflow (`workspace-check`, `workspace-tests`, `workspace-lint`,
+`architecture-layers`, `architecture-isolation`, `repository-hygiene`,
+`production-integration`), runnable with one invocation:
+
+```bash
+dagger run ./shipwright --workflow .shipwright/workflow.yaml
+```
+
+It is currently a **canonical candidate**, validated in
+`.github/workflows/shipwright-validation.yml` for semantic equivalence with
+the native commands above, but not yet the enforced gate — `production-gate.yml`'s
+native commands remain load-bearing until a follow-up PR removes them in
+favor of this single invocation.
