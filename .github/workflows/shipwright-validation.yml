@@ -30,6 +30,11 @@ jobs:
           repository: pablogore/shipwright
           ref: feat/rust-command-provider
           path: shipwright-src
+          # Unauthenticated: the job's default GITHUB_TOKEN is scoped to
+          # ego-rs only and gets rejected (not silently ignored) when reused
+          # against a different repo, even a public one. Public repo needs
+          # no auth at all.
+          token: ""
 
       - name: Set up Go
         uses: actions/setup-go@v5
