@@ -68,8 +68,24 @@ jobs:
       - name: shipwright -step xtask-verify-hygiene
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-hygiene
 
+      # continue-on-error: this step's own outcome is independently
+      # meaningful (does DinD hang or not?) and must not hide
+      # command-run-suite's result below it — a real failure here still
+      # fails the job overall via the "check shadow step results" step.
       - name: shipwright -step integration (rust-integration-test, DinD)
+        id: integration
+        continue-on-error: true
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step integration
 
       - name: shipwright -step command-run-suite (rust-command, DinD)
+        id: command-run-suite
+        continue-on-error: true
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step command-run-suite
+
+      - name: Check shadow step results
+        if: always()
+        run: |
+          echo "integration:        ${{ steps.integration.outcome }}"
+          echo "command-run-suite:  ${{ steps.command-run-suite.outcome }}"
+          test "${{ steps.integration.outcome }}" = "success"
+          test "${{ steps.command-run-suite.outcome }}" = "success"
