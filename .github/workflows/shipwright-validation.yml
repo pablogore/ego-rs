@@ -24,17 +24,14 @@ jobs:
       - name: Checkout ego-rs
         uses: actions/checkout@v4
 
+      # Plain `git clone`, not actions/checkout: the job's default
+      # GITHUB_TOKEN is scoped to ego-rs only and actions/checkout has no way
+      # to opt out of sending it (an explicit empty token: "" is rejected as
+      # "not supplied"), so it gets sent to a different repo's fetch and
+      # rejected outright. shipwright is public — an unauthenticated clone
+      # needs no token at all.
       - name: Checkout shipwright (feat/rust-command-provider)
-        uses: actions/checkout@v4
-        with:
-          repository: pablogore/shipwright
-          ref: feat/rust-command-provider
-          path: shipwright-src
-          # Unauthenticated: the job's default GITHUB_TOKEN is scoped to
-          # ego-rs only and gets rejected (not silently ignored) when reused
-          # against a different repo, even a public one. Public repo needs
-          # no auth at all.
-          token: ""
+        run: git clone --depth 1 --branch feat/rust-command-provider https://github.com/pablogore/shipwright shipwright-src
 
       - name: Set up Go
         uses: actions/setup-go@v5
