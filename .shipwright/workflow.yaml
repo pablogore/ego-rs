@@ -3,9 +3,10 @@ kind: Workflow
 metadata:
   name: ego-rs-production-gate
   description: >-
-    Rust quality gate for ego-rs: unit tests, clippy, and the
-    Testcontainers-backed integration suite, run through Shipwright's
-    Dagger-backed Rust providers instead of raw cargo invocations.
+    Rust quality gate for ego-rs: unit tests and clippy, run through
+    Shipwright's Dagger-backed Rust providers instead of raw cargo
+    invocations. The Testcontainers-backed integration suite is validated
+    separately, under shadow validation below (command-run-suite).
 spec:
   source:
     path: .
@@ -27,15 +28,57 @@ spec:
       with:
         rustVersion: "1.90.0"
 
-    - id: integration
+    # --- SHADOW VALIDATION, rust-command (not yet load-bearing) ---
+    # Temporary steps proving rust-command as the general Cargo-invocation
+    # primitive against real ego-rs commands, run alongside (never replacing)
+    # unit/lint above. command-run-suite is the integration suite's only
+    # Shipwright step: rust-integration-test (the "integration" step this
+    # block used to run alongside) always invokes plain `cargo test`, which
+    # cannot express integration-tests' required entrypoint
+    # (`cargo run --bin run-suite`, the only thing that provisions the
+    # suite's Postgres testcontainer) — see command-run-suite below instead.
+    - id: xtask-verify-layers
       capability: test
       uses:
-        provider: rust-integration-test
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-layers"
+        cacheKey: xtask
+
+    - id: xtask-verify-isolation
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-isolation"
+        cacheKey: xtask
+
+    - id: xtask-verify-hygiene
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "run -p xtask -- verify-hygiene"
+        cacheKey: xtask
+
+    - id: command-run-suite
+      capability: test
+      uses:
+        provider: rust-command
         version: "1"
       with:
         rustVersion: "1.90.0"
         manifestPath: integration-tests/Cargo.toml
-        locked: true
+        command: "run --bin run-suite"
+        docker: true
+        cacheKey: run-suite
+    # --- END SHADOW VALIDATION ---
 
   execution:
     failFast: false

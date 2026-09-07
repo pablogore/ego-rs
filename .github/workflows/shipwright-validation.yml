@@ -1,0 +1,86 @@
+name: Shipwright Validation (shadow, non-blocking)
+
+# Validates the shadow rust-command steps in .shipwright/workflow.yaml
+# (xtask-verify-*, command-run-suite) against a real Linux runner. Purely
+# additive: does not touch production-gate.yml, replaces no native CI gate,
+# and blocks nothing. Builds shipwright from source off develop (PR #240/#241
+# merged there) instead of the pinned release: v0.8.0 was cut from main,
+# which hasn't been promoted past #239 yet, so no tagged release contains the
+# rust-command provider or the AsService Docker-in-Docker fix.
+#
+# No rust-integration-test step here: it always invokes plain `cargo test`
+# against integration-tests/Cargo.toml, which cannot express this suite's
+# required entrypoint (`cargo run --bin run-suite`, the only thing that
+# provisions the Postgres testcontainer) — every Postgres-dependent test
+# fails immediately without it. command-run-suite (rust-command) below runs
+# the correct invocation instead.
+on:
+  workflow_dispatch:
+  push:
+    branches: [opsx/cicd-shipwright-lint-gate]
+
+concurrency:
+  group: shipwright-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate-shadow-steps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ego-rs
+        uses: actions/checkout@v4
+
+      # Plain `git clone`, not actions/checkout: the job's default
+      # GITHUB_TOKEN is scoped to ego-rs only and actions/checkout has no way
+      # to opt out of sending it (an explicit empty token: "" is rejected as
+      # "not supplied"), so it gets sent to a different repo's fetch and
+      # rejected outright. shipwright is public — an unauthenticated clone
+      # needs no token at all.
+      - name: Checkout shipwright (develop)
+        run: git clone --depth 1 --branch develop https://github.com/pablogore/shipwright shipwright-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: shipwright-src/go.mod
+
+      - name: Build shipwright from source
+        run: |
+          cd shipwright-src
+          go build -o "${GITHUB_WORKSPACE}/shipwright" .
+
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
+          echo "${PWD}/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            integration-tests
+
+      - name: shipwright -step xtask-verify-layers
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-layers
+
+      - name: shipwright -step xtask-verify-isolation
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-isolation
+
+      - name: shipwright -step xtask-verify-hygiene
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step xtask-verify-hygiene
+
+      - name: shipwright -step command-run-suite (rust-command, DinD)
+        id: command-run-suite
+        continue-on-error: true
+        run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step command-run-suite
+
+      - name: Check shadow step results
+        if: always()
+        run: |
+          echo "command-run-suite:  ${{ steps.command-run-suite.outcome }}"
+          test "${{ steps.command-run-suite.outcome }}" = "success"
