@@ -18,17 +18,27 @@ Before submitting any future OpenSpec change, verify SPEC-000 compliance:
 ## CI: Production Gate
 
 `.github/workflows/production-gate.yml` runs on every PR and every push to
-`develop`, job `production-readiness`. It must be required by branch
-protection on `develop` (not yet configured — the workflow existing does not
-make it mandatory on its own). It runs, in order:
+`develop`. The required check on `develop` branch protection is
+`production-readiness` (not yet configured — the workflow existing does not
+make it mandatory on its own); that job does no work itself, it only
+`needs:` four independent jobs that run in parallel — `lint`, `build-test`,
+`architecture`, `integration` — so wall-clock is bounded by the slowest of
+them, not the sum of all steps:
 
 ```bash
+# lint
 dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# build-test
 cargo check --workspace --all-targets
 cargo test --workspace
+
+# architecture
 cargo run -p xtask -- verify-layers
 cargo run -p xtask -- verify-isolation
 cargo run -p xtask -- verify-hygiene
+
+# integration
 cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 ```
 
