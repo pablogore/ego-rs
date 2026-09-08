@@ -60,49 +60,52 @@ before `sdd-apply` starts opening branches.
 
 ## Phase 0: Reconciliation Decision — Blocking, No Code
 
-- [ ] 0.1 Resolve Reconciliation Finding #1: either (a) amend `branch-promotion-integrity/spec.md` +
+- [x] 0.1 Resolve Reconciliation Finding #1: either (a) amend `branch-promotion-integrity/spec.md` +
       `spec.es.md`'s "An un-backported hotfix is reported" scenario to state the 72-hour allowance
       explicitly (add a paired scenario for the in-window case, matching design's own test-case
       language), or (b) redefine/drop AD-9 in `design.md` + `design.es.md` so a fresh un-backported
       hotfix is still reported and the window is removed. Do not start Phase 2's task 2.7 until one
-      side is amended and both documents agree.
+      side is amended and both documents agree. **Resolved via option (a)**: the requirement now
+      reads "A Main-Only Change Absent From Develop Is Reported As Drift, After A Grace Period" with
+      two scenarios (reported once older than the grace period, not yet reported while within it) —
+      matches design.md's AD-9 exactly. `design.md`/`design.es.md` unchanged.
 
 ## Phase 1: Release Automation (Slice 1) — PR1
 
 Covers `release-automation/spec.md`'s six requirements. Independent of Phase 0/2/3.
 
-- [ ] 1.1 Create `cliff.toml` at repo root (AD-2): `[bump] breaking_always_bump_major = false`,
+- [x] 1.1 Create `cliff.toml` at repo root (AD-2): `[bump] breaking_always_bump_major = false`,
       `features_always_bump_minor = true`, `initial_tag = "v0.1.0"`; `[git] tag_pattern = "v[0-9]*"`.
       Leave `[changelog]` on git-cliff's default template — do not hand-roll a grouping template;
       verify the default in 1.5 (satisfies "Release Body Is Human-Readable Record Grouped By
       Conventional-Commit Type").
-- [ ] 1.2 Create `.github/workflows/release.yml`: `on: push: branches: [main]`;
+- [x] 1.2 Create `.github/workflows/release.yml`: `on: push: branches: [main]`;
       `concurrency: { group: release, cancel-in-progress: false }`; `permissions: contents: write`;
       checkout with `fetch-depth: 0, fetch-tags: true` (git-cliff needs full history); pin
       `GIT_CLIFF_VERSION` as an env var, install via curl + chmod (AD-1, same pattern as
       `.github/workflows/shipwright-validation.yml`'s `SHIPWRIGHT_VERSION` + curl/chmod install at
       lines 24/50-51). Confirm the pinned git-cliff release tag and its linux asset filename actually
       resolve (design "Open Questions") — bump the pin if the tracker's `2.14.1` guess is stale.
-- [ ] 1.3 Same file: `VERSION="$(git cliff --bumped-version)"`; idempotency guard — if a tag named
+- [x] 1.3 Same file: `VERSION="$(git cliff --bumped-version)"`; idempotency guard — if a tag named
       `$VERSION` already exists, exit 0 before doing anything else (satisfies "cut only, and exactly
       once, as a direct result of a push landing on main").
-- [ ] 1.4 Same file: `git cliff --unreleased --tag "$VERSION" -o "$RUNNER_TEMP/notes.md"` (AD-3);
+- [x] 1.4 Same file: `git cliff --unreleased --tag "$VERSION" -o "$RUNNER_TEMP/notes.md"` (AD-3);
       `git tag -a "$VERSION" -m "$VERSION"`; `git push origin "$VERSION"` — an explicit tag refspec
       only, never a bare `git push` or any branch ref (AD-4; this is the one line the design
       invariant depends on); `gh release create "$VERSION" --verify-tag --notes-file
       "$RUNNER_TEMP/notes.md"` (AD-5) with `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` supplied via
       `env:`, never interpolated into a `run:` string.
-- [ ] 1.5 Manual dry-run, no push: locally run `git cliff --bumped-version` and `git cliff
+- [x] 1.5 Manual dry-run, no push: locally run `git cliff --bumped-version` and `git cliff
       --unreleased --tag <that-version>` against the current `main` head; confirm the rendered notes
       are grouped by Conventional-Commit type (closes Reconciliation Finding #3) and record the
       computed version in the PR description (design "Testing Strategy", Integration row; proposal
       risk "Version derivation misbehaves under 0.x semantics").
-- [ ] 1.6 `CONTRIBUTING.md`: add `## Branching, Releases, and Hotfixes` after `## CI: Production
+- [x] 1.6 `CONTRIBUTING.md`: add `## Branching, Releases, and Hotfixes` after `## CI: Production
       Gate` (confirmed anchor, current line 18) with only the `### Cutting a release` subsection for
       this PR — what triggers a release, that it is fully automatic, and the one-time baseline-tag
       seed commands (`git tag -a v0.1.0 <main-sha> -m v0.1.0 && git push origin v0.1.0`, AD-6). Leave
       `### Branching model` and `### Backport drift check` for PR3 (design "File Changes" table).
-- [ ] 1.7 Same subsection: append the first-release-only manual verification checklist, transcribed
+- [x] 1.7 Same subsection: append the first-release-only manual verification checklist, transcribed
       from design's "Testing Strategy" Manual row — seed the baseline tag; watch the first automated
       run; confirm exactly one new tag and one new Release; confirm `production-gate.yml` did **not**
       re-run as a result of the tag push; confirm `git log origin/main` is unchanged by the workflow;
@@ -112,7 +115,7 @@ Covers `release-automation/spec.md`'s six requirements. Independent of Phase 0/2
 - [ ] 1.8 Execute the baseline tag seed by hand on the current `main` head (design "Migration /
       Rollout" step 1), before or immediately after merging PR1. Record the seeded tag and its SHA in
       the PR description.
-- [ ] 1.9 Verification: review confirms no `run:` step in `release.yml` interpolates
+- [x] 1.9 Verification: review confirms no `run:` step in `release.yml` interpolates
       `${{ github.event... }}` (design Threat Matrix, "PR commands" row — values must arrive via
       `env:`), and the only `git push` in the file targets `"$VERSION"`, never a branch ref (design
       invariant fact 1).
