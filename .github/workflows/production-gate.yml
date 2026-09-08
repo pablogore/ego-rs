@@ -93,6 +93,14 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      # cargo check (the `check` job) takes 109s; this job's nextest run
+      # takes 397s building the exact same dependency graph plus ~114 test
+      # binaries — the delta is link time, not type-checking, since `check`
+      # never invokes the linker at all. mold is a drop-in faster linker for
+      # exactly this shape (many small binaries) on Linux.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -107,6 +115,8 @@ jobs:
 
       - name: cargo nextest run --workspace
         run: cargo nextest run --workspace
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       # nextest does not run doctests (a known, permanent limitation of the
       # tool, not a bug) — cargo test --doc keeps them covered without going
@@ -144,6 +154,9 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
       # integration-tests is a deliberately separate Cargo workspace (see
       # integration-tests/Cargo.toml) with its own target dir and lockfile.
       - name: Cache cargo registry and build artifacts
@@ -156,6 +169,8 @@ jobs:
       # containers before exiting — no secrets, no external services.
       - name: Production-critical integration suite (run-suite)
         run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   production-readiness:
     name: production-readiness
