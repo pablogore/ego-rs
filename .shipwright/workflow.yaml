@@ -15,6 +15,22 @@ spec:
   source:
     path: .
   steps:
+    # Equivalent of: cargo fmt --all -- --check
+    # No dedicated "fmt" provider exists in Shipwright's providers/rust
+    # registry (rust, rust-test, rust-integration-test, rust-command,
+    # clippy, cargo-audit, rust-container — no fmt/rustfmt entry, confirmed
+    # against internal/workflow/providers/register.go). rust-command is
+    # Shipwright's own generic escape hatch for exactly this gap.
+    - id: workspace-format
+      capability: test
+      uses:
+        provider: rust-command
+        version: "1"
+      with:
+        rustVersion: "1.90.0"
+        command: "fmt --all -- --check"
+        cacheKey: workspace-format
+
     # Equivalent of: cargo check --workspace --all-targets
     - id: workspace-check
       capability: test
@@ -40,20 +56,24 @@ spec:
       with:
         rustVersion: "1.90.0"
 
-    # Equivalent of: cargo clippy --workspace --all-targets -- -D warnings
-    # (RustLinter's actual invocation omits --workspace: it runs
-    # `cargo clippy --all-targets -- -D warnings`. ego-rs's root Cargo.toml
-    # is a virtual manifest with no [workspace].default-members override, so
-    # cargo's own default scope for a virtual workspace is already every
-    # member — behaviorally equivalent here, but not a generic guarantee for
-    # every possible root Cargo.toml shape.)
+    # Equivalent of: cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # NOT the dedicated "clippy" provider: RustLinter (providers/rust/rustlinter.go)
+    # hardcodes `cargo clippy --all-targets -- -D warnings` with no
+    # AllFeatures/Features field on its struct at all (unlike RustUnitTester,
+    # which does expose AllFeatures) — there is no way to express issue #229's
+    # literal `--workspace --all-features` contract through it. rust-command
+    # is Shipwright's own generic escape hatch, already load-bearing
+    # elsewhere in this manifest, so this closes the gap without requiring
+    # any change to Shipwright itself.
     - id: workspace-lint
       capability: test
       uses:
-        provider: clippy
+        provider: rust-command
         version: "1"
       with:
         rustVersion: "1.90.0"
+        command: "clippy --workspace --all-targets --all-features -- -D warnings"
+        cacheKey: workspace-lint
 
     # Equivalent of: cargo run -p xtask -- verify-layers
     - id: architecture-layers
