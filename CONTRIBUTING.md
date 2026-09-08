@@ -18,19 +18,32 @@ Before submitting any future OpenSpec change, verify SPEC-000 compliance:
 ## CI: Production Gate
 
 `.github/workflows/production-gate.yml` runs on every PR and every push to
-`develop`, job `production-readiness`. It must be required by branch
-protection on `develop` (not yet configured — the workflow existing does not
-make it mandatory on its own). It runs, in order:
+`develop`/`main`. Four independent jobs feed a no-op `production-readiness`
+gate job (the name required by branch protection, not yet configured to
+require it — the workflow existing does not make it mandatory on its own):
 
 ```bash
+# lint
 dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --all-targets -- -D warnings
+
+# build-test
 cargo check --workspace --all-targets
 cargo test --workspace
+
+# architecture
 cargo run -p xtask -- verify-layers
 cargo run -p xtask -- verify-isolation
 cargo run -p xtask -- verify-hygiene
+
+# integration
 cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 ```
+
+While a PR is a **draft**, only `lint` and `build-test` run on each push —
+`architecture` and `integration` are skipped, so the active-development
+feedback loop stays fast. Marking the PR "Ready for review" re-triggers the
+workflow with all four jobs; GitHub already refuses to merge a draft PR, so
+nothing unverified can reach `develop`/`main`.
 
 Lint (clippy) already runs through Shipwright's Dagger-backed `clippy`
 provider, not a raw `cargo clippy` invocation — `cargo fmt --all -- --check`
