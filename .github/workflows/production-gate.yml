@@ -4,6 +4,13 @@ name: Production Gate
 # the production-critical guarantees already closed as P0.1, P0.2, P0.3,
 # P1.1, CORE-018, and PROD-014C. Does not build/publish anything — see
 # CONTRIBUTING.md for what each step covers and how to reproduce locally.
+#
+# Runs as independent parallel jobs (lint / build-test / architecture /
+# integration) instead of one sequential job: wall-clock is bounded by the
+# slowest job, not the sum of all steps. `production-readiness` itself does
+# no work — it only `needs:` the others, so it stays green/red exactly when
+# they all do, and its name (the one branch protection requires on develop)
+# never changes.
 on:
   pull_request:
   push:
@@ -14,40 +21,30 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SHIPWRIGHT_VERSION: "v0.6.0"
+  SHIPWRIGHT_VERSION: "v0.12.0"
 
 jobs:
-  production-readiness:
-    name: production-readiness
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the compiler; this resolves/installs it via
-      # rustup (preinstalled on GitHub-hosted runners) and prints the version.
-      - name: Resolve pinned Rust toolchain
-        run: rustup show
-
-      # Root workspace and integration-tests are separate Cargo workspaces
-      # (see integration-tests/Cargo.toml) with independent target dirs and
-      # lockfiles; both get cached, keyed on their own Cargo.lock.
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            integration-tests
-
       # Pinned release binary from github.com/pablogore/shipwright — the
-      # Dagger-backed pipeline runner. Only "workspace-lint" (clippy, via the
-      # "clippy" rust Tester provider) runs through this pinned binary today:
-      # v0.6.0 predates the "rust-command" provider and its Docker-in-Docker
-      # fix, so it cannot run the rest of .shipwright/workflow.yaml (now the
-      # CANONICAL CANDIDATE for this entire gate). The commands below remain
-      # the load-bearing SHADOW/NATIVE REFERENCE until that full workflow is
-      # promoted — see .shipwright/workflow.yaml and
+      # Dagger-backed pipeline runner. v0.12.0 is the first tagged release
+      # with the "rust-command" provider Shipwright needs to run
+      # "workspace-lint" as .shipwright/workflow.yaml now defines it (v0.8.0
+      # had rust-command but a broken Docker-in-Docker fix; v0.9.0 was never
+      # published as a release; v0.10.0 was the first consumable fix — v0.6.0,
+      # pinned previously, predates rust-command entirely). Only
+      # "workspace-lint" runs through this pinned binary today — the other
+      # jobs below remain the load-bearing SHADOW/NATIVE REFERENCE until the
+      # rest of .shipwright/workflow.yaml (still the CANONICAL CANDIDATE for
+      # this entire gate, including the not-yet-enforced "workspace-format"
+      # step) is promoted — see .shipwright/workflow.yaml and
       # .github/workflows/shipwright-validation.yml, which runs it complete
-      # (built from source, single invocation) to prove equivalence.
+      # (single invocation, no -step) to prove equivalence. Dagger owns its
+      # own build cache for this step, so no Swatinem/rust-cache here.
       - name: Install shipwright
         run: |
           curl -fL -o shipwright "https://github.com/pablogore/shipwright/releases/download/${SHIPWRIGHT_VERSION}/shipwright-linux-amd64"
@@ -65,11 +62,37 @@ jobs:
       - name: shipwright -step workspace-lint (clippy)
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint
 
+  build-test:
+    name: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler; this resolves/installs it via
+      # rustup (preinstalled on GitHub-hosted runners) and prints the version.
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
 
       - name: cargo test --workspace
         run: cargo test --workspace
+
+  architecture:
+    name: architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: xtask verify-layers
         run: cargo run -p xtask -- verify-layers
@@ -80,9 +103,31 @@ jobs:
       - name: xtask verify-hygiene
         run: cargo run -p xtask -- verify-hygiene
 
-      # integration-tests is a deliberately separate Cargo workspace.
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      # integration-tests is a deliberately separate Cargo workspace (see
+      # integration-tests/Cargo.toml) with its own target dir and lockfile.
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integration-tests
+
       # run-suite provisions its own Postgres (16 + 14) via testcontainers,
       # migrates them, runs the real suite, and always reclaims the
       # containers before exiting — no secrets, no external services.
       - name: Production-critical integration suite (run-suite)
         run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+
+  production-readiness:
+    name: production-readiness
+    runs-on: ubuntu-latest
+    needs: [lint, build-test, architecture, integration]
+    steps:
+      - run: echo "All Production Gate jobs passed."
