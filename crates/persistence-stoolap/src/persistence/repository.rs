@@ -242,8 +242,10 @@ mod tests {
         serde_json::from_value(v).map_err(|e| PersistenceError::Internal(e.to_string()))
     }
 
-    type TestRepo =
-        StoolapRepository<TestAggregate, fn(serde_json::Value) -> Result<TestAggregate, PersistenceError>>;
+    type TestRepo = StoolapRepository<
+        TestAggregate,
+        fn(serde_json::Value) -> Result<TestAggregate, PersistenceError>,
+    >;
 
     fn new_repo(path: &Path) -> TestRepo {
         StoolapRepository::new(path, deserialize_test_aggregate as fn(_) -> _).unwrap()
@@ -388,7 +390,14 @@ mod tests {
         set_before_write_hook(move || {
             let mut peer = new_repo(&path);
             let bumped = peer
-                .save("agg-5", TestAggregate { value: "peer".into() }, None, 1)
+                .save(
+                    "agg-5",
+                    TestAggregate {
+                        value: "peer".into(),
+                    },
+                    None,
+                    1,
+                )
                 .unwrap();
             assert_eq!(bumped, 2);
         });
@@ -417,8 +426,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut repo = new_repo(dir.path());
 
-        stoolap::test_failpoints::WAL_WRITE_FAIL
-            .store(true, std::sync::atomic::Ordering::Release);
+        stoolap::test_failpoints::WAL_WRITE_FAIL.store(true, std::sync::atomic::Ordering::Release);
 
         let err = repo
             .save("agg-6", TestAggregate { value: "a".into() }, None, 0)

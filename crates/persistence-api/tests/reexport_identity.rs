@@ -127,9 +127,8 @@ fn _identity_operation_key_hash(
 /// `MAX_LEN` is a bare constant, not a type — an identity function proves
 /// nothing about the constant itself, so this is a const-equality assertion
 /// between both paths instead (spec: "A bare constant relocates too").
-const _: () = assert!(
-    ego_domain::operation::key::MAX_LEN == ego_persistence_api::operation::key::MAX_LEN
-);
+const _: () =
+    assert!(ego_domain::operation::key::MAX_LEN == ego_persistence_api::operation::key::MAX_LEN);
 
 fn _identity_operation_receipt(
     x: ego_domain::operation::receipt::OperationReceipt,
@@ -221,9 +220,7 @@ fn _identity_stored_service_response(
 /// than hand-declared, but the identity coercion proves the same thing: the
 /// old path resolves to the exact type the relocated macro invocation
 /// produced, not a second definition.
-fn _identity_tenant_id(
-    x: ego_domain::context::TenantId,
-) -> ego_persistence_api::context::TenantId {
+fn _identity_tenant_id(x: ego_domain::context::TenantId) -> ego_persistence_api::context::TenantId {
     x
 }
 
@@ -287,9 +284,13 @@ fn _identity_domain_event(
 /// same compiled function, not two functions that merely share a signature.
 #[test]
 fn resolve_tenant_old_path_is_the_new_path_function() {
-    let old: fn(Option<&str>) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
+    let old: fn(
+        Option<&str>,
+    ) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
         ego_domain::persistence::resolve_tenant;
-    let new: fn(Option<&str>) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
+    let new: fn(
+        Option<&str>,
+    ) -> Result<Option<String>, ego_persistence_api::persistence::PersistenceError> =
         ego_persistence_api::persistence::resolve_tenant;
     assert_eq!(old as usize, new as usize);
 }

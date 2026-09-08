@@ -750,8 +750,7 @@ pub fn build_runtime_with(
             Some(key) if key.len() < 32 => {
                 return Err(Box::new(ConfigError::Invalid {
                     field: "jwt_verification_key".to_string(),
-                    reason: "production JWT verification key must be at least 32 bytes"
-                        .to_string(),
+                    reason: "production JWT verification key must be at least 32 bytes".to_string(),
                 }))
             }
             Some(key) => key.clone(),

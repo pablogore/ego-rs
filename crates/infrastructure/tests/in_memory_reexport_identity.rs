@@ -58,9 +58,17 @@ type Elem = ego_domain::read_side::event_stream::EventStreamElement<serde_json::
 #[test]
 fn paginate_old_path_is_the_new_path_function() {
     type EmptyIter = std::iter::Empty<&'static Elem>;
-    let old: fn(EmptyIter, &str, Option<&ego_domain::read_side::offset::Offset>, usize) -> Vec<Elem> =
-        ego_infrastructure::persistence::in_memory::paginate;
-    let new: fn(EmptyIter, &str, Option<&ego_domain::read_side::offset::Offset>, usize) -> Vec<Elem> =
-        ego_persistence_memory::read_side::store::paginate;
+    let old: fn(
+        EmptyIter,
+        &str,
+        Option<&ego_domain::read_side::offset::Offset>,
+        usize,
+    ) -> Vec<Elem> = ego_infrastructure::persistence::in_memory::paginate;
+    let new: fn(
+        EmptyIter,
+        &str,
+        Option<&ego_domain::read_side::offset::Offset>,
+        usize,
+    ) -> Vec<Elem> = ego_persistence_memory::read_side::store::paginate;
     assert_eq!(old as usize, new as usize);
 }

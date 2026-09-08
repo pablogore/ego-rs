@@ -100,7 +100,11 @@ impl OffsetStore for PostgreSQLOffsetStore {
         .bind(projection_id)
         .bind(tag.value())
         .bind(tenant)
-        .bind(offset.as_sequence().expect("Offset has exactly one variant"))
+        .bind(
+            offset
+                .as_sequence()
+                .expect("Offset has exactly one variant"),
+        )
         .execute(&self.pool)
         .await
         .map_err(offset_error)?;

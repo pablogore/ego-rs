@@ -32,14 +32,14 @@ mod effects_e2e;
 mod entity_event_stores_profile;
 #[path = "reference_app/external_data_provider_lint.rs"]
 mod external_data_provider_lint;
+#[path = "reference_app/health_ready_wire.rs"]
+mod health_ready_wire;
 #[path = "reference_app/http_idempotency_span.rs"]
 mod http_idempotency_span;
 #[path = "reference_app/http_operation_key_carriage.rs"]
 mod http_operation_key_carriage;
 #[path = "reference_app/http_replay_and_conflict.rs"]
 mod http_replay_and_conflict;
-#[path = "reference_app/health_ready_wire.rs"]
-mod health_ready_wire;
 #[path = "reference_app/http_route.rs"]
 mod http_route;
 #[path = "reference_app/idempotency_wiring.rs"]
