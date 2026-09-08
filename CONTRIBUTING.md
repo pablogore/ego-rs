@@ -23,7 +23,7 @@ protection on `develop` (not yet configured — the workflow existing does not
 make it mandatory on its own). It runs, in order:
 
 ```bash
-dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --all-targets -- -D warnings
+dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo run -p xtask -- verify-layers
@@ -32,10 +32,14 @@ cargo run -p xtask -- verify-hygiene
 cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 ```
 
-Lint (clippy) already runs through Shipwright's Dagger-backed `clippy`
-provider, not a raw `cargo clippy` invocation — `cargo fmt --all -- --check`
-is the only check still not wired into this gate (pre-existing formatting
-violations unrelated to production readiness; follow-up work).
+Lint (clippy) already runs through Shipwright's Dagger-backed `workspace-lint`
+step (`rust-command` provider, running the literal `--workspace --all-targets
+--all-features -- -D warnings` contract — not the dedicated `clippy` provider,
+which cannot express `--all-features`), not a raw `cargo clippy` invocation.
+`cargo fmt --all -- --check` also has a Shipwright equivalent now
+(`workspace-format`, in `.shipwright/workflow.yaml`) — neither step is wired
+into this native gate yet; both remain candidate-only until the full manifest
+is promoted (see below).
 
 `run-suite` is the canonical entrypoint for the integration suite: it
 provisions real PostgreSQL 16 and 14 via testcontainers, migrates them, runs
@@ -47,9 +51,10 @@ non-dev test keys in code, never via environment variables.
 ### `.shipwright/workflow.yaml`: canonical candidate
 
 `.shipwright/workflow.yaml` defines the full gate above as a single
-Shipwright workflow (`workspace-check`, `workspace-tests`, `workspace-lint`,
-`architecture-layers`, `architecture-isolation`, `repository-hygiene`,
-`production-integration`), runnable with one invocation:
+Shipwright workflow (`workspace-format`, `workspace-check`, `workspace-tests`,
+`workspace-lint`, `architecture-layers`, `architecture-isolation`,
+`repository-hygiene`, `production-integration`), runnable with one
+invocation:
 
 ```bash
 dagger run ./shipwright --workflow .shipwright/workflow.yaml
