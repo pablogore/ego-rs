@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SHIPWRIGHT_VERSION: "v0.6.0"
+  SHIPWRIGHT_VERSION: "v0.12.0"
 
 jobs:
   production-readiness:
@@ -39,15 +39,19 @@ jobs:
             integration-tests
 
       # Pinned release binary from github.com/pablogore/shipwright — the
-      # Dagger-backed pipeline runner. Only "workspace-lint" (clippy, via the
-      # "clippy" rust Tester provider) runs through this pinned binary today:
-      # v0.6.0 predates the "rust-command" provider and its Docker-in-Docker
-      # fix, so it cannot run the rest of .shipwright/workflow.yaml (now the
-      # CANONICAL CANDIDATE for this entire gate). The commands below remain
-      # the load-bearing SHADOW/NATIVE REFERENCE until that full workflow is
-      # promoted — see .shipwright/workflow.yaml and
+      # Dagger-backed pipeline runner. v0.12.0 is the first tagged release
+      # with the "rust-command" provider Shipwright needs to run
+      # "workspace-lint" as .shipwright/workflow.yaml now defines it (v0.8.0
+      # had rust-command but a broken Docker-in-Docker fix; v0.9.0 was never
+      # published as a release; v0.10.0 was the first consumable fix — v0.6.0,
+      # pinned previously, predates rust-command entirely). Only
+      # "workspace-lint" runs through this pinned binary today — the commands
+      # below remain the load-bearing SHADOW/NATIVE REFERENCE until the rest
+      # of .shipwright/workflow.yaml (still the CANONICAL CANDIDATE for this
+      # entire gate, including the not-yet-enforced "workspace-format" step)
+      # is promoted — see .shipwright/workflow.yaml and
       # .github/workflows/shipwright-validation.yml, which runs it complete
-      # (built from source, single invocation) to prove equivalence.
+      # (single invocation, no -step) to prove equivalence.
       - name: Install shipwright
         run: |
           curl -fL -o shipwright "https://github.com/pablogore/shipwright/releases/download/${SHIPWRIGHT_VERSION}/shipwright-linux-amd64"
