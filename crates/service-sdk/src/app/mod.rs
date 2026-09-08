@@ -287,7 +287,9 @@ impl App {
             let _ = self.runtime.shutdown_async().await;
             return Err(CompositionError::Startup(startup_err));
         }
-        self.runtime.inner().record_app_started(started_at.elapsed());
+        self.runtime
+            .inner()
+            .record_app_started(started_at.elapsed());
         Ok(RunningApp {
             runtime: self.runtime,
         })
@@ -647,7 +649,8 @@ impl AppBuilder {
         }
         let projection_id = projection_id.into();
         if !self.read_side_progress_ids.insert(projection_id.clone()) {
-            self.pending_error = Some(CompositionError::DuplicateReadSideProgress { projection_id });
+            self.pending_error =
+                Some(CompositionError::DuplicateReadSideProgress { projection_id });
             return self;
         }
         self.runtime_builder =

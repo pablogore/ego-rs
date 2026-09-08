@@ -936,7 +936,9 @@ impl RuntimeBuilder {
         }
         persistent_entity::profile::require_durably_configured(
             self.profile,
-            self.read_side_claims.as_ref().is_some_and(|c| c.is_durable()),
+            self.read_side_claims
+                .as_ref()
+                .is_some_and(|c| c.is_durable()),
             "durable read-side claim store (ReadSideClaimStore)",
             "AppBuilder::read_side_claims(store) (or \
              RuntimeBuilder::with_read_side_claim_store(..)), passing a store whose \
@@ -4265,7 +4267,9 @@ mod tests {
             .with_read_side_claim_store(Arc::new(StubClaimStore(false)))
             .try_build()
             .err()
-            .expect("a volatile claim store must refuse under Production once progress is registered");
+            .expect(
+                "a volatile claim store must refuse under Production once progress is registered",
+            );
 
         assert!(matches!(err, RuntimeError::PersistenceNotConfigured(_)));
         let message = err.to_string();
