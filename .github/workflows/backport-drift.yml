@@ -1,0 +1,58 @@
+name: Backport Drift
+
+# Reports hotfixes on `main` that have no patch-equivalent commit on
+# `develop`, past a grace period, into one durable tracking issue —
+# non-blocking, report-only, no automated remediation
+# (branch-promotion-integrity spec; design.md AD-8). Never fails the job:
+# a red run would carry no content and be easy to ignore, so drift is
+# surfaced as an issue instead. See CONTRIBUTING.md, "Backport drift check".
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  backport-drift:
+    name: backport-drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ego-rs
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch main and develop
+        run: git fetch origin main develop
+
+      - name: Run the drift report
+        run: .github/scripts/backport-drift.sh origin/develop origin/main > "$RUNNER_TEMP/report.md"
+
+      # Upsert one open issue labelled `backport-drift` (AD-8): create it if
+      # missing and the report is non-empty, update its body if it already
+      # exists, close it once the report goes clean. This step always
+      # succeeds regardless of report content — the job is a reporter, not
+      # a gate.
+      - name: Upsert the backport-drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing="$(gh issue list --label backport-drift --state open --json number --jq '.[0].number')"
+
+          if [ -s "$RUNNER_TEMP/report.md" ]; then
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --body-file "$RUNNER_TEMP/report.md"
+            else
+              gh issue create \
+                --title "Backport drift: main has commits not yet on develop" \
+                --label backport-drift \
+                --body-file "$RUNNER_TEMP/report.md"
+            fi
+          else
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "No backport drift remaining as of this scheduled run."
+            fi
+          fi

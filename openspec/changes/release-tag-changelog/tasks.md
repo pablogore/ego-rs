@@ -172,27 +172,35 @@ Covers `branch-promotion-integrity/spec.md`'s remaining requirements (documented
 schedule, non-blocking end-to-end). Depends on PR2 (script must exist). Sequence after PR1 merges —
 not a code dependency, but both PRs insert subsections into the same new `CONTRIBUTING.md` heading.
 
-- [ ] 3.1 Create `.github/workflows/backport-drift.yml`: `on: { schedule: [{ cron: ... }],
+- [x] 3.1 Create `.github/workflows/backport-drift.yml`: `on: { schedule: [{ cron: ... }],
       workflow_dispatch: {} }`; `permissions: { contents: read, issues: write }`;
       `git fetch origin main develop`; run `.github/scripts/backport-drift.sh > report.md`.
-- [ ] 3.2 Same file: `[ -s report.md ]` decides create/update vs. close — upsert one open issue
+      **Deviation**: report is written to `$RUNNER_TEMP/report.md`, not a working-tree `report.md`,
+      matching AD-3's rationale for `release.yml`'s notes file (nothing ever lands in the repo tree,
+      not even transiently) — same effect, tighter invariant.
+- [x] 3.2 Same file: `[ -s report.md ]` decides create/update vs. close — upsert one open issue
       labelled `backport-drift` (`gh issue create` / `gh issue edit --body-file` / `gh issue close`,
       AD-8); the job always exits `0` regardless of report content (satisfies "non-blocking,
       report-only, no automated remediation").
-- [ ] 3.3 `CONTRIBUTING.md`: add `### Branching model` under the existing `## Branching, Releases,
+- [x] 3.3 `CONTRIBUTING.md`: add `### Branching model` under the existing `## Branching, Releases,
       and Hotfixes` heading — feature branches → `develop` via PR; `develop` → `main` via PR; a
       hotfix branches off `main`, lands on `main` via PR, and MUST subsequently be backported to
       `develop` (satisfies "branching model and hotfix obligation are documented").
-- [ ] 3.4 Same file: add `### Backport drift check` — what the `backport-drift` issue means, that
+- [x] 3.4 Same file: add `### Backport drift check` — what the `backport-drift` issue means, that
       the fix is `git cherry-pick` onto `develop` (patch-equivalent, so the next scheduled run closes
       the issue itself), and that the check never blocks a merge or push.
-- [ ] 3.5 Re-run 2.11's static invariant assertions, now scoped to both `release.yml` and
+- [x] 3.5 Re-run 2.11's static invariant assertions, now scoped to both `release.yml` and
       `backport-drift.yml`; extend `release-guards.test.sh` in place rather than duplicating the
-      check in a second file.
-- [ ] 3.6 Verification: confirm the merged `CONTRIBUTING.md` heading contains all three subsections
+      check in a second file. **Verified**: the checks in `release-guards.test.sh` already
+      conditionally covered `backport-drift.yml` (written that way in PR2, anticipating this file);
+      no test-file changes were needed in PR3. Full suite now reports 14 passed, 0 failed (was 12 in
+      PR2, +2 for the two new `backport-drift.yml` static-invariant assertions).
+- [x] 3.6 Verification: confirm the merged `CONTRIBUTING.md` heading contains all three subsections
       in the order design specifies — `### Branching model` → `### Cutting a release` → `### Backport
       drift check`. If PR3 lands with PR1 already merged, this is a pure ordering check; if the merge
       order inverted, move PR1's subsection to the correct position in this PR.
+      **Confirmed**: `grep -n "^### " CONTRIBUTING.md` shows the three subsections in exactly this
+      order (lines 66, 78, 142 at time of writing).
 
 ## Cross-Cutting Acceptance Criteria (apply to every PR above, not stated once)
 

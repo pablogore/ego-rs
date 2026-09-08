@@ -63,6 +63,18 @@ favor of this single invocation.
 
 ## Branching, Releases, and Hotfixes
 
+### Branching model
+
+- Feature work branches off `develop` and lands back on `develop` via PR.
+- `develop` promotes to `main` via PR when it is release-ready.
+- A hotfix branches off `main` directly and lands on `main` via PR — never
+  by routing an urgent fix through `develop` first, which would gate it
+  behind whatever else is in flight there.
+- Every hotfix that lands on `main` **must** subsequently be backported to
+  `develop`, by `git cherry-pick`, so `develop` never permanently diverges
+  from a fix that shipped. See "Backport drift check" below for how this is
+  monitored.
+
 ### Cutting a release
 
 `.github/workflows/release.yml` cuts exactly one release as a direct result
@@ -126,3 +138,24 @@ automated cut by hand before trusting the workflow going forward:
 - [ ] Re-run the completed `release.yml` job against that same `main` SHA
       from the Actions UI ("Re-run jobs") and confirm it creates no second
       tag or Release — the idempotency guard should exit cleanly instead.
+
+### Backport drift check
+
+`.github/workflows/backport-drift.yml` runs daily (and on demand via
+`workflow_dispatch`) and compares `main` against `develop` by patch content
+(`git cherry -v`, so a cherry-picked backport is recognized even though its
+commit SHA differs). A hotfix on `main` with no patch-equivalent commit on
+`develop`, older than the `BACKPORT_WINDOW_HOURS` grace period (72 hours by
+default — see `.github/scripts/backport-drift.sh`), is reported.
+
+A single open GitHub issue labelled `backport-drift` tracks this: it is
+created the first time drift is found, its body is refreshed on every
+subsequent run while drift remains, and it is closed automatically once
+the report goes clean. If you see this issue, the fix is a plain
+`git cherry-pick <sha>` of the listed commit(s) onto `develop` — once that
+lands, the next scheduled run recognizes the patch match and closes the
+issue itself, no manual close needed.
+
+This check never blocks a merge or a push. It is a report, not a gate —
+`backport-drift.sh` always exits `0`, and nothing in this workflow can fail
+a PR or branch protection check.
