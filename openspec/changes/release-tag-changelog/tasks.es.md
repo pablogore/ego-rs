@@ -64,24 +64,28 @@ división encadenada de 3 PRs antes de que `sdd-apply` empiece a abrir ramas.
 
 ## Fase 0: Decisión de Reconciliación — Bloqueante, Sin Código
 
-- [ ] 0.1 Resolver el Hallazgo de Reconciliación #1: ya sea (a) modificar
+- [x] 0.1 Resolver el Hallazgo de Reconciliación #1: ya sea (a) modificar
       `branch-promotion-integrity/spec.md` + `spec.es.md` en el escenario "An un-backported hotfix is
       reported" para declarar explícitamente la permisividad de 72 horas (añadir un escenario
       pareado para el caso dentro de ventana, alineado con el propio lenguaje de casos de prueba del
       design), o (b) redefinir/eliminar AD-9 en `design.md` + `design.es.md` de modo que un hotfix
       fresco sin respaldar siga reportándose y se elimine la ventana. No iniciar la tarea 2.7 de la
-      Fase 2 hasta que un lado se haya modificado y ambos documentos concuerden.
+      Fase 2 hasta que un lado se haya modificado y ambos documentos concuerden. **Resuelto vía la
+      opción (a)**: el requisito ahora dice "A Main-Only Change Absent From Develop Is Reported As
+      Drift, After A Grace Period" con dos escenarios (reportado una vez superado el periodo de
+      gracia, no reportado aún dentro del periodo) — coincide exactamente con el AD-9 de design.md.
+      `design.md`/`design.es.md` sin cambios.
 
 ## Fase 1: Automatización de Release (Porción 1) — PR1
 
 Cubre los seis requisitos de `release-automation/spec.md`. Independiente de las Fases 0/2/3.
 
-- [ ] 1.1 Crear `cliff.toml` en la raíz del repo (AD-2): `[bump] breaking_always_bump_major = false`,
+- [x] 1.1 Crear `cliff.toml` en la raíz del repo (AD-2): `[bump] breaking_always_bump_major = false`,
       `features_always_bump_minor = true`, `initial_tag = "v0.1.0"`; `[git] tag_pattern = "v[0-9]*"`.
       Dejar `[changelog]` con la plantilla por defecto de git-cliff — no confeccionar a mano una
       plantilla de agrupación; verificar el valor por defecto en 1.5 (satisface "Release Body Is
       Human-Readable Record Grouped By Conventional-Commit Type").
-- [ ] 1.2 Crear `.github/workflows/release.yml`: `on: push: branches: [main]`;
+- [x] 1.2 Crear `.github/workflows/release.yml`: `on: push: branches: [main]`;
       `concurrency: { group: release, cancel-in-progress: false }`; `permissions: contents: write`;
       checkout con `fetch-depth: 0, fetch-tags: true` (git-cliff necesita el historial completo); fijar
       `GIT_CLIFF_VERSION` como variable de entorno, instalar vía curl + chmod (AD-1, mismo patrón que
@@ -89,28 +93,28 @@ Cubre los seis requisitos de `release-automation/spec.md`. Independiente de las 
       `.github/workflows/shipwright-validation.yml` en las líneas 24/50-51). Confirmar que el tag de
       release fijado de git-cliff y el nombre de su asset linux realmente resuelven (design "Open
       Questions") — actualizar el pin si el `2.14.1` estimado del tracker está desactualizado.
-- [ ] 1.3 Mismo archivo: `VERSION="$(git cliff --bumped-version)"`; guardia de idempotencia — si ya
+- [x] 1.3 Mismo archivo: `VERSION="$(git cliff --bumped-version)"`; guardia de idempotencia — si ya
       existe un tag llamado `$VERSION`, salir con 0 antes de hacer nada más (satisface "cut only, and
       exactly once, as a direct result of a push landing on main").
-- [ ] 1.4 Mismo archivo: `git cliff --unreleased --tag "$VERSION" -o "$RUNNER_TEMP/notes.md"` (AD-3);
+- [x] 1.4 Mismo archivo: `git cliff --unreleased --tag "$VERSION" -o "$RUNNER_TEMP/notes.md"` (AD-3);
       `git tag -a "$VERSION" -m "$VERSION"`; `git push origin "$VERSION"` — únicamente un refspec de
       tag explícito, nunca un `git push` desnudo ni ninguna referencia de rama (AD-4; esta es la
       línea de la que depende el invariante de diseño); `gh release create "$VERSION" --verify-tag
       --notes-file "$RUNNER_TEMP/notes.md"` (AD-5) con `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`
       suministrado vía `env:`, nunca interpolado dentro de una cadena `run:`.
-- [ ] 1.5 Dry-run manual, sin push: ejecutar localmente `git cliff --bumped-version` y `git cliff
+- [x] 1.5 Dry-run manual, sin push: ejecutar localmente `git cliff --bumped-version` y `git cliff
       --unreleased --tag <esa-versión>` contra el head actual de `main`; confirmar que las notas
       renderizadas están agrupadas por tipo de Conventional Commit (cierra el Hallazgo de
       Reconciliación #3) y registrar la versión calculada en la descripción del PR (design "Testing
       Strategy", fila Integration; riesgo del proposal "Version derivation misbehaves under 0.x
       semantics").
-- [ ] 1.6 `CONTRIBUTING.md`: añadir `## Branching, Releases, and Hotfixes` después de `## CI:
+- [x] 1.6 `CONTRIBUTING.md`: añadir `## Branching, Releases, and Hotfixes` después de `## CI:
       Production Gate` (ancla confirmada, línea 18 actual) con solo la subsección `### Cutting a
       release` en este PR — qué dispara un release, que es completamente automático, y los comandos
       de siembra del tag base de una sola vez (`git tag -a v0.1.0 <main-sha> -m v0.1.0 && git push
       origin v0.1.0`, AD-6). Dejar `### Branching model` y `### Backport drift check` para PR3
       (tabla "File Changes" de design).
-- [ ] 1.7 Misma subsección: añadir la checklist de verificación manual solo-para-el-primer-release,
+- [x] 1.7 Misma subsección: añadir la checklist de verificación manual solo-para-el-primer-release,
       transcrita de la fila Manual de "Testing Strategy" de design — sembrar el tag base; observar la
       primera ejecución automatizada; confirmar exactamente un tag nuevo y un Release nuevo;
       confirmar que `production-gate.yml` **no** se reejecutó a causa del push del tag; confirmar que
@@ -121,7 +125,7 @@ Cubre los seis requisitos de `release-automation/spec.md`. Independiente de las 
 - [ ] 1.8 Ejecutar la siembra del tag base a mano sobre el head actual de `main` (design "Migration /
       Rollout" paso 1), antes o inmediatamente después de fusionar PR1. Registrar el tag sembrado y
       su SHA en la descripción del PR.
-- [ ] 1.9 Verificación: la revisión confirma que ningún paso `run:` en `release.yml` interpola
+- [x] 1.9 Verificación: la revisión confirma que ningún paso `run:` en `release.yml` interpola
       `${{ github.event... }}` (design Threat Matrix, fila "PR commands" — los valores deben llegar
       vía `env:`), y que el único `git push` del archivo apunta a `"$VERSION"`, nunca a una
       referencia de rama (hecho 1 del invariante de diseño).
