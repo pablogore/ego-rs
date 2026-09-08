@@ -125,42 +125,46 @@ Covers `release-automation/spec.md`'s six requirements. Independent of Phase 0/2
 Covers `branch-promotion-integrity/spec.md`'s drift-reporting and patch-equivalence requirements at
 the script layer. Independent of Phase 1 (no file overlap). Gated by Phase 0 for task 2.7 only.
 
-- [ ] 2.1 RED: create `.github/scripts/release-guards.test.sh`. First case: build a throwaway repo
+- [x] 2.1 RED: create `.github/scripts/release-guards.test.sh`. First case: build a throwaway repo
       under `mktemp -d`, land a hotfix on `main`, merge it into `develop` normally, run
       `.github/scripts/backport-drift.sh` (does not exist yet) against it, assert empty stdout and
       exit code `0`. Confirm the test fails only because the script is missing.
-- [ ] 2.2 GREEN: create `.github/scripts/backport-drift.sh`. Signature: optional
+- [x] 2.2 GREEN: create `.github/scripts/backport-drift.sh`. Signature: optional
       `<upstream-ref> <head-ref>` (default `origin/develop origin/main`); reads
       `BACKPORT_WINDOW_HOURS` (default `72`); never uses `git -C` or `cd`s — operates on the cwd
       repository only (design Threat Matrix, "Git repository selection" row); runs
       `git cherry -v "$upstream" "$head"`, treats `+`-prefixed lines as drift (AD-7); writes a
       markdown report to stdout (empty when clean); always exits `0`. Make 2.1 pass.
-- [ ] 2.3 RED: add the cherry-pick case — hotfix on `main`, backported to `develop` via
+- [x] 2.3 RED: add the cherry-pick case — hotfix on `main`, backported to `develop` via
       `git cherry-pick` (different commit SHA, same patch), assert empty stdout.
-- [ ] 2.4 GREEN: confirm 2.3 passes against the unmodified 2.2 implementation (patch-id comparison
+- [x] 2.4 GREEN: confirm 2.3 passes against the unmodified 2.2 implementation (patch-id comparison
       already covers this per AD-7); if it fails, fix the classification logic.
-- [ ] 2.5 RED: add the "old unbackported" case — hotfix on `main` with a committer date older than
+- [x] 2.5 RED: add the "old unbackported" case — hotfix on `main` with a committer date older than
       `BACKPORT_WINDOW_HOURS` and no equivalent commit on `develop`; assert non-empty stdout that
       names the commit.
-- [ ] 2.6 GREEN: implement the committer-age filter using `BACKPORT_WINDOW_HOURS` in
+- [x] 2.6 GREEN: implement the committer-age filter using `BACKPORT_WINDOW_HOURS` in
       `backport-drift.sh`; make 2.5 pass.
-- [ ] 2.7 RED: add the "fresh unbackported, in-window" case, per Phase 0's resolved decision — assert
+- [x] 2.7 RED: add the "fresh unbackported, in-window" case, per Phase 0's resolved decision — assert
       empty stdout if AD-9's window stands, or assert non-empty stdout if Phase 0 removed/shrank it.
       Do not author this case ahead of the Phase 0 decision.
-- [ ] 2.8 GREEN: confirm 2.7 passes against the Phase-0-resolved behavior; adjust the age filter if
+      **Confirmed against Phase 0's resolved decision** (branch-promotion-integrity/spec.md,
+      "...After A Grace Period"): AD-9's 72h window stands, so this case asserts empty stdout.
+- [x] 2.8 GREEN: confirm 2.7 passes against the Phase-0-resolved behavior; adjust the age filter if
       Phase 0 changed it.
-- [ ] 2.9 RED: repo-selection isolation case (design Threat Matrix) — invoke the script with cwd set
+- [x] 2.9 RED: repo-selection isolation case (design Threat Matrix) — invoke the script with cwd set
       to a scratch repo distinct from any outer checkout; assert it reports only that scratch repo's
       drift.
-- [ ] 2.10 GREEN: confirm 2.9 passes (should already hold given 2.2 never uses `git -C` or absolute
+- [x] 2.10 GREEN: confirm 2.9 passes (should already hold given 2.2 never uses `git -C` or absolute
       paths; add a regression fix only if it fails).
-- [ ] 2.11 RED+GREEN: static invariant assertions (design "Testing Strategy", loop/injection row) in
+- [x] 2.11 RED+GREEN: static invariant assertions (design "Testing Strategy", loop/injection row) in
       the same test file — grep `release.yml` (already merged from PR1, or present on this branch)
       to assert no `git push` line targets a branch ref, and no `run:` block contains
       `${{ github.event... }}`. Scope this PR's assertion to `release.yml` only —
       `backport-drift.yml` does not exist until PR3; re-run the full assertion in Phase 3.
-- [ ] 2.12 Verification: `bash .github/scripts/release-guards.test.sh` green end to end; confirm no
+- [x] 2.12 Verification: `bash .github/scripts/release-guards.test.sh` green end to end; confirm no
       network call and no `gh` invocation anywhere in the suite (design constraint — pure git/bash).
+      **Verified**: 12 passed, 0 failed, exit code 0; `grep -n "gh \|curl\|wget"` over the test file
+      finds no invocation (only a prose comment mentioning "100 hours ago" matched incidentally).
 
 ## Phase 3: Backport Drift Workflow + Branching/Hotfix Docs — PR3
 
