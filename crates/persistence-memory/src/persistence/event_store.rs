@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use ego_persistence_api::event::DomainEvent;
 use ego_persistence_api::operation::OperationReceipt;
 use ego_persistence_api::persistence::resolve_tenant;
-use ego_persistence_api::persistence::{EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent};
+use ego_persistence_api::persistence::{
+    EventStore, EventStoreUnitOfWork, PersistenceError, StoredEvent,
+};
 
 type StreamKey = (String, String, Option<String>);
 

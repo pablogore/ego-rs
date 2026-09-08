@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ego_domain::Clock;
 use ego_persistence_api::operation::reservation::{
     FencingToken, Lease, OldestCompleted, OperationId, OperationReservationStore, OwnerFence,
     OwnerId, ReservationError, ReservationOutcome, ReserveRequest, StoredServiceResponse,
 };
-use ego_domain::Clock;
 
 /// One reservation's persisted state.
 #[derive(Debug, Clone)]
