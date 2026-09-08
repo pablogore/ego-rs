@@ -33,8 +33,8 @@ use sqlx::{PgPool, Row};
 
 use ego_domain::operation::ReservationError;
 use ego_domain::Clock;
-use ego_persistence_api::read_side::claim::{ClaimError, ClaimFence, ClaimId, ReadSideClaimStore};
 use ego_persistence_api::operation::reservation::OwnerId;
+use ego_persistence_api::read_side::claim::{ClaimError, ClaimFence, ClaimId, ReadSideClaimStore};
 
 use crate::postgres::is_fatal;
 use crate::postgres::reservation::{token_for_storage, token_from_storage};
@@ -207,10 +207,16 @@ impl ReadSideClaimStore for PostgreSQLReadSideClaimStore {
         }))
     }
 
-    async fn renew(&self, fence: &ClaimFence, lease_until: DateTime<Utc>) -> Result<(), ClaimError> {
-        self.mutate_claimed(fence, move |projection_id, tag, tenant, owner_id, token, now| {
-            sqlx::query(
-                r#"UPDATE projection_claims
+    async fn renew(
+        &self,
+        fence: &ClaimFence,
+        lease_until: DateTime<Utc>,
+    ) -> Result<(), ClaimError> {
+        self.mutate_claimed(
+            fence,
+            move |projection_id, tag, tenant, owner_id, token, now| {
+                sqlx::query(
+                    r#"UPDATE projection_claims
                    SET lease_until = $1
                    WHERE projection_id = $2
                      AND tag = $3
@@ -218,15 +224,16 @@ impl ReadSideClaimStore for PostgreSQLReadSideClaimStore {
                      AND owner_id = $5
                      AND fencing_token = $6
                      AND lease_until > $7"#,
-            )
-            .bind(lease_until)
-            .bind(projection_id)
-            .bind(tag)
-            .bind(tenant)
-            .bind(owner_id)
-            .bind(token)
-            .bind(now)
-        })
+                )
+                .bind(lease_until)
+                .bind(projection_id)
+                .bind(tag)
+                .bind(tenant)
+                .bind(owner_id)
+                .bind(token)
+                .bind(now)
+            },
+        )
         .await
     }
 

@@ -374,8 +374,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut store = new_store(dir.path());
 
-        stoolap::test_failpoints::WAL_WRITE_FAIL
-            .store(true, std::sync::atomic::Ordering::Release);
+        stoolap::test_failpoints::WAL_WRITE_FAIL.store(true, std::sync::atomic::Ordering::Release);
 
         let err = store
             .save_snapshot("agg-3", None, 1, serde_json::json!({"value": "a"}))
@@ -394,8 +393,7 @@ mod tests {
         // The failed write must not be visible even after a drop and reopen —
         // not just to the handle that saw the error, which could pass by
         // reading back its own uncommitted in-memory state.
-        stoolap::test_failpoints::WAL_WRITE_FAIL
-            .store(false, std::sync::atomic::Ordering::Release);
+        stoolap::test_failpoints::WAL_WRITE_FAIL.store(false, std::sync::atomic::Ordering::Release);
         drop(store);
         let reopened = new_store(dir.path());
         assert_eq!(reopened.load_snapshot("agg-3", None).unwrap(), None);

@@ -386,7 +386,15 @@ impl StoolapReadSideClaimStore {
                      WHERE projection_id = $2 AND tag = $3 AND tenant = $4
                        AND owner_id = $5 AND fencing_token = $6
                        AND lease_until > $7",
-                    (new_lease_until, projection_id, tag, tenant, owner, token, now),
+                    (
+                        new_lease_until,
+                        projection_id,
+                        tag,
+                        tenant,
+                        owner,
+                        token,
+                        now,
+                    ),
                 )
                 .map_err(classify_error)?;
 
@@ -399,6 +407,11 @@ impl StoolapReadSideClaimStore {
     }
 }
 
+/// Colocated unit tests open a real embedded Stoolap database per test, each
+/// against its own `tempfile` path — same documented exception
+/// `persistence/repository.rs` relies on (`skills/testing/SKILL.md` Rule 1,
+/// design.md AD-3 criterion 4, AD-4, AD-7, and the same embedded/file-backed
+/// reasoning as AD-9 criterion 1).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,11 +439,7 @@ mod tests {
         }
     }
 
-    async fn fresh_store() -> (
-        StoolapReadSideClaimStore,
-        Arc<TestClock>,
-        tempfile::TempDir,
-    ) {
+    async fn fresh_store() -> (StoolapReadSideClaimStore, Arc<TestClock>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let clock = Arc::new(TestClock::new(epoch()));
         let store = StoolapReadSideClaimStore::open(dir.path(), clock.clone())
@@ -588,16 +597,23 @@ mod tests {
             fencing_token: FencingToken::from_value(original.fencing_token.value() + 1),
         };
         assert_eq!(
-            store.renew(&mismatched, clock.now() + Duration::seconds(60)).await,
+            store
+                .renew(&mismatched, clock.now() + Duration::seconds(60))
+                .await,
             Err(ClaimError::StaleOwner)
         );
-        assert_eq!(store.release(&mismatched).await, Err(ClaimError::StaleOwner));
+        assert_eq!(
+            store.release(&mismatched).await,
+            Err(ClaimError::StaleOwner)
+        );
 
         // A fence whose lease has already lapsed also fails StaleOwner — a
         // lapsed holder may not resurrect its own claim.
         clock.advance(Duration::seconds(31));
         assert_eq!(
-            store.renew(&original, clock.now() + Duration::seconds(60)).await,
+            store
+                .renew(&original, clock.now() + Duration::seconds(60))
+                .await,
             Err(ClaimError::StaleOwner)
         );
         assert_eq!(store.release(&original).await, Err(ClaimError::StaleOwner));

@@ -206,19 +206,27 @@ where
         .expect("a systemwide delete must find and remove the row it just wrote");
     match repository.load(SYSTEMWIDE_ID, None) {
         Err(PersistenceError::NotFound { .. }) => {}
-        other => panic!(
-            "the systemwide aggregate must be gone after delete, got {other:?}"
-        ),
+        other => panic!("the systemwide aggregate must be gone after delete, got {other:?}"),
     }
 
     // --- Two different tenants sharing one aggregate identity do not
     //     collide -----------------------------------------------------------
     const SHARED_ID: &str = "shared-aggregate-id";
     repository
-        .save(SHARED_ID, conformance_aggregate("tenant-a"), Some("tenant-a"), 0)
+        .save(
+            SHARED_ID,
+            conformance_aggregate("tenant-a"),
+            Some("tenant-a"),
+            0,
+        )
         .expect("tenant A's save must succeed");
     repository
-        .save(SHARED_ID, conformance_aggregate("tenant-b"), Some("tenant-b"), 0)
+        .save(
+            SHARED_ID,
+            conformance_aggregate("tenant-b"),
+            Some("tenant-b"),
+            0,
+        )
         .expect(
             "tenant B's save must succeed independently — same aggregate id, a \
              different tenant, so this must not collide with tenant A's row",
@@ -238,16 +246,19 @@ where
     );
     match repository.load(SHARED_ID, None) {
         Err(PersistenceError::NotFound { .. }) => {}
-        other => panic!(
-            "a systemwide load must not find either tenant's row, got {other:?}"
-        ),
+        other => panic!("a systemwide load must not find either tenant's row, got {other:?}"),
     }
 
     // --- A tenant scope and the systemwide scope sharing one aggregate
     //     identity do not collide --------------------------------------------
     const SHARED_ID_2: &str = "scoped-vs-systemwide";
     repository
-        .save(SHARED_ID_2, conformance_aggregate("scoped"), Some("tenant-a"), 0)
+        .save(
+            SHARED_ID_2,
+            conformance_aggregate("scoped"),
+            Some("tenant-a"),
+            0,
+        )
         .expect("the tenant-scoped save must succeed");
     repository
         .save(SHARED_ID_2, conformance_aggregate("systemwide"), None, 0)

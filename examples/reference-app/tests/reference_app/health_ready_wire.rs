@@ -39,7 +39,9 @@ use tokio::task::JoinHandle;
 struct UnusedAuthn;
 impl AuthenticationProvider for UnusedAuthn {
     fn authenticate(&self, _: &Credential) -> Result<SecurityContext, AuthenticationError> {
-        Err(AuthenticationError::InvalidToken("unused in this test".into()))
+        Err(AuthenticationError::InvalidToken(
+            "unused in this test".into(),
+        ))
     }
 }
 

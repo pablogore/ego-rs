@@ -3,13 +3,13 @@
 pub mod aggregate_type_backfill;
 pub mod event_store;
 pub mod migrations;
+/// The durable [`ego_persistence_api::read_side::claim::ReadSideClaimStore`]
+/// (PROD-014C).
+pub mod read_side_claim;
 /// The durable [`ego_domain::read_side::DedupStore`].
 pub mod read_side_dedup;
 /// The durable [`ego_domain::read_side::OffsetStore`].
 pub mod read_side_offset;
-/// The durable [`ego_persistence_api::read_side::claim::ReadSideClaimStore`]
-/// (PROD-014C).
-pub mod read_side_claim;
 pub mod repository;
 
 /// The durable operation-reservation store.

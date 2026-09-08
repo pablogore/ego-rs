@@ -32,8 +32,10 @@ use kitlogger::KITLogger;
 use kitlogger_log_domain::Severity;
 use sqlx::PgPool;
 
+pub use ego_persistence_memory::read_side::{
+    dedup::InMemoryDedupStore, offset::InMemoryOffsetStore,
+};
 pub use projection::{TenantUsersView, UserSummary, UsersByTenantHandler, UsersByTenantStore};
-pub use ego_persistence_memory::read_side::{dedup::InMemoryDedupStore, offset::InMemoryOffsetStore};
 pub use store::{FakeDurableDedupStore, FakeDurableOffsetStore, ReadSideSink, SharedReadSideStore};
 
 /// CORE-005 projection ID. Every `UsersByTenant`-relevant event is filed
