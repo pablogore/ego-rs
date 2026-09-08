@@ -136,44 +136,50 @@ Cubre los requisitos de reporte de drift y equivalencia de parche de
 `branch-promotion-integrity/spec.md` a nivel de script. Independiente de la Fase 1 (sin solapamiento
 de archivos). Condicionada por la Fase 0 solo para la tarea 2.7.
 
-- [ ] 2.1 RED: crear `.github/scripts/release-guards.test.sh`. Primer caso: construir un repositorio
+- [x] 2.1 RED: crear `.github/scripts/release-guards.test.sh`. Primer caso: construir un repositorio
       desechable bajo `mktemp -d`, aterrizar un hotfix en `main`, fusionarlo en `develop`
       normalmente, ejecutar `.github/scripts/backport-drift.sh` (aún no existe) contra él, afirmar
       stdout vacío y código de salida `0`. Confirmar que la prueba falla solo porque falta el script.
-- [ ] 2.2 GREEN: crear `.github/scripts/backport-drift.sh`. Firma: `<upstream-ref> <head-ref>`
+- [x] 2.2 GREEN: crear `.github/scripts/backport-drift.sh`. Firma: `<upstream-ref> <head-ref>`
       opcionales (por defecto `origin/develop origin/main`); lee `BACKPORT_WINDOW_HOURS` (por defecto
       `72`); nunca usa `git -C` ni hace `cd` — opera solo sobre el repositorio del cwd (design Threat
       Matrix, fila "Git repository selection"); ejecuta `git cherry -v "$upstream" "$head"`, trata
       las líneas prefijadas con `+` como drift (AD-7); escribe un reporte markdown en stdout (vacío
       cuando está limpio); siempre sale con `0`. Hacer pasar 2.1.
-- [ ] 2.3 RED: añadir el caso de cherry-pick — hotfix en `main`, respaldado en `develop` vía
+- [x] 2.3 RED: añadir el caso de cherry-pick — hotfix en `main`, respaldado en `develop` vía
       `git cherry-pick` (SHA de commit distinto, mismo parche), afirmar stdout vacío.
-- [ ] 2.4 GREEN: confirmar que 2.3 pasa contra la implementación 2.2 sin modificar (la comparación
+- [x] 2.4 GREEN: confirmar que 2.3 pasa contra la implementación 2.2 sin modificar (la comparación
       por patch-id ya lo cubre según AD-7); si falla, corregir la lógica de clasificación.
-- [ ] 2.5 RED: añadir el caso "old unbackported" — hotfix en `main` con fecha de committer más
+- [x] 2.5 RED: añadir el caso "old unbackported" — hotfix en `main` con fecha de committer más
       antigua que `BACKPORT_WINDOW_HOURS` y sin commit equivalente en `develop`; afirmar stdout no
       vacío que nombre el commit.
-- [ ] 2.6 GREEN: implementar el filtro de antigüedad de committer usando `BACKPORT_WINDOW_HOURS` en
+- [x] 2.6 GREEN: implementar el filtro de antigüedad de committer usando `BACKPORT_WINDOW_HOURS` en
       `backport-drift.sh`; hacer pasar 2.5.
-- [ ] 2.7 RED: añadir el caso "fresh unbackported, in-window", según la decisión resuelta en la Fase
+- [x] 2.7 RED: añadir el caso "fresh unbackported, in-window", según la decisión resuelta en la Fase
       0 — afirmar stdout vacío si la ventana de AD-9 se mantiene, o afirmar stdout no vacío si la
       Fase 0 la eliminó/redujo. No redactar este caso antes de la decisión de la Fase 0.
-- [ ] 2.8 GREEN: confirmar que 2.7 pasa contra el comportamiento resuelto en la Fase 0; ajustar el
+      **Confirmado contra la decisión resuelta de la Fase 0** (branch-promotion-integrity/spec.md,
+      "...After A Grace Period"): la ventana de 72h de AD-9 se mantiene, por lo que este caso afirma
+      stdout vacío.
+- [x] 2.8 GREEN: confirmar que 2.7 pasa contra el comportamiento resuelto en la Fase 0; ajustar el
       filtro de antigüedad si la Fase 0 lo cambió.
-- [ ] 2.9 RED: caso de aislamiento de selección de repositorio (design Threat Matrix) — invocar el
+- [x] 2.9 RED: caso de aislamiento de selección de repositorio (design Threat Matrix) — invocar el
       script con el cwd apuntando a un repositorio de scratch distinto de cualquier checkout externo;
       afirmar que reporta solo el drift de ese repositorio de scratch.
-- [ ] 2.10 GREEN: confirmar que 2.9 pasa (debería cumplirse ya dado que 2.2 nunca usa `git -C` ni
+- [x] 2.10 GREEN: confirmar que 2.9 pasa (debería cumplirse ya dado que 2.2 nunca usa `git -C` ni
       rutas absolutas; añadir una corrección de regresión solo si falla).
-- [ ] 2.11 RED+GREEN: aserciones de invariantes estáticos (design "Testing Strategy", fila
+- [x] 2.11 RED+GREEN: aserciones de invariantes estáticos (design "Testing Strategy", fila
       loop/injection) en el mismo archivo de pruebas — hacer grep sobre `release.yml` (ya fusionado
       desde PR1, o presente en esta rama) para afirmar que ninguna línea `git push` apunta a una
       referencia de rama, y que ningún bloque `run:` contiene `${{ github.event... }}`. Acotar la
       aserción de este PR solo a `release.yml` — `backport-drift.yml` no existe hasta PR3;
       reejecutar la aserción completa en la Fase 3.
-- [ ] 2.12 Verificación: `bash .github/scripts/release-guards.test.sh` verde de principio a fin;
+- [x] 2.12 Verificación: `bash .github/scripts/release-guards.test.sh` verde de principio a fin;
       confirmar que no hay llamada de red ni invocación de `gh` en ningún lugar de la suite
       (restricción de design — git/bash puro).
+      **Verificado**: 12 aprobadas, 0 fallidas, código de salida 0; `grep -n "gh \|curl\|wget"` sobre
+      el archivo de pruebas no encuentra ninguna invocación (solo coincide incidentalmente un
+      comentario en prosa que menciona "100 hours ago").
 
 ## Fase 3: Workflow de Backport Drift + Documentación de Branching/Hotfix — PR3
 
