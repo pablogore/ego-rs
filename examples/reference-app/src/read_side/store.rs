@@ -175,7 +175,9 @@ impl OffsetStore for FakeDurableOffsetStore {
         tenant: &str,
         offset: &Offset,
     ) -> Result<(), OffsetStoreError> {
-        self.0.write_offset(projection_id, tag, tenant, offset).await
+        self.0
+            .write_offset(projection_id, tag, tenant, offset)
+            .await
     }
 }
 
@@ -332,7 +334,10 @@ mod tests {
         assert!(store.is_durable(), "must declare durable (AD-9)");
 
         let tag = EventTag::new("users-by-tenant:tenant-a");
-        assert_eq!(store.read_offset("proj", &tag, "tenant-a").await.unwrap(), None);
+        assert_eq!(
+            store.read_offset("proj", &tag, "tenant-a").await.unwrap(),
+            None
+        );
 
         store
             .write_offset("proj", &tag, "tenant-a", &Offset::sequence(3))

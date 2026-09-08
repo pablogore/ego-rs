@@ -233,7 +233,10 @@ mod apply_env_overrides_tests {
             None,
         );
 
-        assert_eq!(config.database.url, "postgres://operator-supplied-host:5432/real");
+        assert_eq!(
+            config.database.url,
+            "postgres://operator-supplied-host:5432/real"
+        );
         assert_ne!(config.database.url, default_url);
     }
 

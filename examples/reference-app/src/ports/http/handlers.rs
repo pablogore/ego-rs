@@ -253,7 +253,9 @@ pub async fn ready_handler(State(state): State<AppState>) -> (StatusCode, Json<H
         }
         HealthStatus::Unhealthy => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(HealthResponse { status: "not_ready" }),
+            Json(HealthResponse {
+                status: "not_ready",
+            }),
         ),
     }
 }
