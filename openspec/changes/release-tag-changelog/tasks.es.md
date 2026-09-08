@@ -188,30 +188,40 @@ programación recurrente, no bloqueante de extremo a extremo). Depende de PR2 (e
 existir). Secuenciar después de que PR1 se fusione — no es una dependencia de código, pero ambos PRs
 insertan subsecciones en el mismo encabezado nuevo de `CONTRIBUTING.md`.
 
-- [ ] 3.1 Crear `.github/workflows/backport-drift.yml`: `on: { schedule: [{ cron: ... }],
+- [x] 3.1 Crear `.github/workflows/backport-drift.yml`: `on: { schedule: [{ cron: ... }],
       workflow_dispatch: {} }`; `permissions: { contents: read, issues: write }`;
       `git fetch origin main develop`; ejecutar `.github/scripts/backport-drift.sh > report.md`.
-- [ ] 3.2 Mismo archivo: `[ -s report.md ]` decide crear/actualizar vs. cerrar — upsert de un único
+      **Desviación**: el reporte se escribe en `$RUNNER_TEMP/report.md`, no en un `report.md` del
+      árbol de trabajo, siguiendo la misma lógica de AD-3 para el archivo de notas de `release.yml`
+      (nada aterriza nunca en el árbol del repositorio, ni siquiera transitoriamente) — mismo efecto,
+      invariante más estricto.
+- [x] 3.2 Mismo archivo: `[ -s report.md ]` decide crear/actualizar vs. cerrar — upsert de un único
       issue abierto etiquetado `backport-drift` (`gh issue create` / `gh issue edit --body-file` /
       `gh issue close`, AD-8); el job siempre sale con `0` independientemente del contenido del
       reporte (satisface "non-blocking, report-only, no automated remediation").
-- [ ] 3.3 `CONTRIBUTING.md`: añadir `### Branching model` bajo el encabezado existente
+- [x] 3.3 `CONTRIBUTING.md`: añadir `### Branching model` bajo el encabezado existente
       `## Branching, Releases, and Hotfixes` — las ramas de feature promueven a `develop` vía PR;
       `develop` promueve a `main` vía PR; un hotfix se ramifica desde `main`, aterriza en `main` vía
       PR, y DEBE respaldarse posteriormente en `develop` (satisface "branching model and hotfix
       obligation are documented").
-- [ ] 3.4 Mismo archivo: añadir `### Backport drift check` — qué significa el issue
+- [x] 3.4 Mismo archivo: añadir `### Backport drift check` — qué significa el issue
       `backport-drift`, que la corrección es un `git cherry-pick` sobre `develop` (equivalente en
       parche, así que la siguiente ejecución programada cierra el issue por sí sola), y que la
       verificación nunca bloquea un merge ni un push.
-- [ ] 3.5 Reejecutar las aserciones de invariantes estáticos de 2.11, ahora acotadas tanto a
+- [x] 3.5 Reejecutar las aserciones de invariantes estáticos de 2.11, ahora acotadas tanto a
       `release.yml` como a `backport-drift.yml`; extender `release-guards.test.sh` en el mismo lugar
-      en vez de duplicar la comprobación en un segundo archivo.
-- [ ] 3.6 Verificación: confirmar que el encabezado fusionado de `CONTRIBUTING.md` contiene las tres
+      en vez de duplicar la comprobación en un segundo archivo. **Verificado**: las comprobaciones en
+      `release-guards.test.sh` ya cubrían condicionalmente `backport-drift.yml` (escritas así en PR2,
+      anticipando este archivo); no se necesitó cambiar el archivo de pruebas en PR3. La suite
+      completa ahora reporta 14 aprobadas, 0 fallidas (eran 12 en PR2, +2 por las dos nuevas
+      aserciones de invariantes estáticos sobre `backport-drift.yml`).
+- [x] 3.6 Verificación: confirmar que el encabezado fusionado de `CONTRIBUTING.md` contiene las tres
       subsecciones en el orden que especifica design — `### Branching model` → `### Cutting a
       release` → `### Backport drift check`. Si PR3 aterriza con PR1 ya fusionado, esto es una simple
       comprobación de orden; si el orden de fusión se invirtió, mover la subsección de PR1 a la
       posición correcta en este PR.
+      **Confirmado**: `grep -n "^### " CONTRIBUTING.md` muestra las tres subsecciones exactamente en
+      este orden (líneas 66, 78, 142 al momento de escribir esto).
 
 ## Criterios de Aceptación Transversales (aplican a todos los PRs anteriores, no se repiten)
 
