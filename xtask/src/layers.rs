@@ -246,18 +246,21 @@ mod tests {
         // CORE-PERSIST-A AD-1/SC-7: a domain-layer crate MAY depend on
         // another domain-layer crate (the ego-domain -> ego-persistence-api
         // edge). This is the narrow same-layer self-edge, not a wider hole.
-        let graph = graph_from(&[("ego-domain", &["ego-persistence-api"]), ("ego-persistence-api", &[])]);
-        let layers = layers_from(&[
-            ("ego-domain", "domain"),
-            ("ego-persistence-api", "domain"),
+        let graph = graph_from(&[
+            ("ego-domain", &["ego-persistence-api"]),
+            ("ego-persistence-api", &[]),
         ]);
+        let layers = layers_from(&[("ego-domain", "domain"), ("ego-persistence-api", "domain")]);
 
         assert!(check_direction(&graph, &layers).is_empty());
     }
 
     #[test]
     fn direction_check_still_fails_domain_to_foundation() {
-        let graph = graph_from(&[("domain-crate", &["foundation-crate"]), ("foundation-crate", &[])]);
+        let graph = graph_from(&[
+            ("domain-crate", &["foundation-crate"]),
+            ("foundation-crate", &[]),
+        ]);
         let layers = layers_from(&[
             ("domain-crate", "domain"),
             ("foundation-crate", "foundation"),
