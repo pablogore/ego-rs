@@ -114,7 +114,9 @@ impl<T: OffsetStore + Send + Sync + ?Sized> OffsetStore for std::sync::Arc<T> {
         tenant: &str,
         offset: &Offset,
     ) -> Result<(), OffsetStoreError> {
-        (**self).write_offset(projection_id, tag, tenant, offset).await
+        (**self)
+            .write_offset(projection_id, tag, tenant, offset)
+            .await
     }
 }
 
@@ -204,7 +206,10 @@ mod tests {
         let store: Arc<dyn OffsetStore + Send + Sync> = Arc::new(DurableOffsetStore::default());
         let tag = EventTag::new("users-by-tenant");
 
-        assert_eq!(store.read_offset("proj", &tag, "tenant").await.unwrap(), None);
+        assert_eq!(
+            store.read_offset("proj", &tag, "tenant").await.unwrap(),
+            None
+        );
 
         store
             .write_offset("proj", &tag, "tenant", &Offset::sequence(7))

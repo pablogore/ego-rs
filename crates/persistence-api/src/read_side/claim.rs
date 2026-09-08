@@ -97,11 +97,8 @@ pub trait ReadSideClaimStore: Send + Sync {
     /// `StaleOwner`, leaving the claim unmodified — a lapsed holder
     /// resurrecting its claim would defeat a takeover that was already
     /// legitimate.
-    async fn renew(
-        &self,
-        fence: &ClaimFence,
-        lease_until: DateTime<Utc>,
-    ) -> Result<(), ClaimError>;
+    async fn renew(&self, fence: &ClaimFence, lease_until: DateTime<Utc>)
+        -> Result<(), ClaimError>;
 
     /// Releases an owned, still-valid claim, making the stream immediately
     /// claimable without waiting for expiry. Same fence rule as `renew`.
