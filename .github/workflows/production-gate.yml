@@ -125,9 +125,22 @@ jobs:
       - name: Production-critical integration suite (run-suite)
         run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 
+  # The release and backport-drift workflows only ever run on `main` or on a
+  # schedule, so nothing else in CI compiles them. Their guard suite is pure
+  # git + bash — no network, no `gh` — so it runs here, on every PR, and is
+  # the only place a regression in either workflow is caught before it lands.
+  release-guards:
+    name: release-guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release and backport-drift guard suite
+        run: bash .github/scripts/release-guards.test.sh
+
   production-readiness:
     name: production-readiness
     runs-on: ubuntu-latest
-    needs: [lint, build-test, architecture, integration]
+    needs: [lint, build-test, architecture, integration, release-guards]
     steps:
       - run: echo "All Production Gate jobs passed."
