@@ -93,6 +93,17 @@ jobs:
       # The Repository Tree"; design.md invariant fact 1). A tag push
       # carries no `branches:` match, so it cannot retrigger this workflow
       # or production-gate.yml.
+      # `git tag -a` writes a tag object, and a tag object needs a tagger
+      # identity. GitHub-hosted runners configure none and actions/checkout
+      # adds none, so without this the tag step dies with "Committer identity
+      # unknown" — on the first real release, which is the run least able to
+      # absorb it.
+      - name: Configure the tagger identity
+        if: steps.existing_tag.outputs.state == 'new'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Tag the release
         if: steps.existing_tag.outputs.state == 'new'
         run: |

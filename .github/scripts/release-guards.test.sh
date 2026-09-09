@@ -268,6 +268,42 @@ test_release_guard_compares_the_tagged_commit() {
     "$(cat "$file")" "::error::Tag"
 }
 
+# --- Case 8: `git tag -a` writes a tag object, which needs a tagger
+# identity. GitHub-hosted runners configure none and actions/checkout adds
+# none, so a workflow that tags must configure one itself or die with
+# "Committer identity unknown" on the first real release. ---
+test_release_configures_a_tagger_identity() {
+  local file="$REPO_ROOT/.github/workflows/release.yml"
+  if [ ! -f "$file" ]; then
+    fail "release.yml not found for static invariant check"
+    return
+  fi
+
+  # A YAML comment mentioning the command is not the command. Without this
+  # filter the doc comment above the step matches first and the ordering
+  # check reads backwards.
+  first_uncommented() {
+    grep -n "$1" "$file" | grep -v ':[[:space:]]*#' | head -n1 | cut -d: -f1
+  }
+
+  local tag_line
+  tag_line="$(first_uncommented 'git tag -a')"
+  if [ -z "$tag_line" ]; then
+    return
+  fi
+
+  local name_line email_line
+  name_line="$(first_uncommented 'git config user\.name')"
+  email_line="$(first_uncommented 'git config user\.email')"
+
+  if [ -n "$name_line" ] && [ -n "$email_line" ] \
+    && [ "$name_line" -lt "$tag_line" ] && [ "$email_line" -lt "$tag_line" ]; then
+    pass "release.yml: a tagger identity is configured before git tag -a"
+  else
+    fail "release.yml: git tag -a runs without a tagger identity configured before it"
+  fi
+}
+
 echo "== release-guards.test.sh =="
 
 if [ ! -f "$DRIFT_SCRIPT" ]; then
@@ -282,6 +318,7 @@ test_repo_isolation
 test_no_push_targets_a_branch_ref
 test_no_run_block_interpolates_github_event
 test_release_guard_compares_the_tagged_commit
+test_release_configures_a_tagger_identity
 
 echo "== ${PASS} passed, ${FAIL} failed =="
 
