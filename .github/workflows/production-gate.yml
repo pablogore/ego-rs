@@ -5,12 +5,17 @@ name: Production Gate
 # P1.1, CORE-018, and PROD-014C. Does not build/publish anything — see
 # CONTRIBUTING.md for what each step covers and how to reproduce locally.
 #
-# Runs as independent parallel jobs (lint / build-test / architecture /
+# Runs as independent parallel jobs (lint / check / test / architecture /
 # integration) instead of one sequential job: wall-clock is bounded by the
-# slowest job, not the sum of all steps. `production-readiness` itself does
-# no work — it only `needs:` the others, so it stays green/red exactly when
-# they all do, and its name (the one branch protection requires on develop)
-# never changes.
+# slowest job, not the sum of all steps. `check` and `test` are split out of
+# what used to be one "build-test" job — cargo check gives a fast fail
+# signal on its own runner instead of queuing behind the workspace test run,
+# and `test` uses cargo-nextest (parallel test-binary execution) instead of
+# plain `cargo test`, which was the single slowest job in the gate (~520s,
+# dwarfing lint/architecture/integration). `production-readiness` itself
+# does no work — it only `needs:` the others, so it stays green/red exactly
+# when they all do, and its name (the one branch protection requires on
+# develop) never changes.
 on:
   pull_request:
   push:
@@ -62,8 +67,8 @@ jobs:
       - name: shipwright -step workspace-lint (clippy)
         run: dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint
 
-  build-test:
-    name: build-test
+  check:
+    name: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +84,45 @@ jobs:
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
 
-      - name: cargo test --workspace
-        run: cargo test --workspace
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show
+
+      # cargo check (the `check` job) takes 109s; this job's nextest run
+      # takes 397s building the exact same dependency graph plus ~114 test
+      # binaries — the delta is link time, not type-checking, since `check`
+      # never invokes the linker at all. mold is a drop-in faster linker for
+      # exactly this shape (many small binaries) on Linux.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Prebuilt binary, not `cargo install` (which would compile nextest
+      # itself on every cache miss) — nextest parallelizes test *binary*
+      # execution across cores, unlike `cargo test`'s more conservative
+      # default, and was the fix for this job's ~520s runtime.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest run --workspace
+        run: cargo nextest run --workspace
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      # nextest does not run doctests (a known, permanent limitation of the
+      # tool, not a bug) — cargo test --doc keeps them covered without going
+      # back to plain `cargo test` for everything else.
+      - name: cargo test --doc --workspace
+        run: cargo test --doc --workspace
 
   architecture:
     name: architecture
@@ -112,6 +154,9 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
       # integration-tests is a deliberately separate Cargo workspace (see
       # integration-tests/Cargo.toml) with its own target dir and lockfile.
       - name: Cache cargo registry and build artifacts
@@ -124,6 +169,8 @@ jobs:
       # containers before exiting — no secrets, no external services.
       - name: Production-critical integration suite (run-suite)
         run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   # The release and backport-drift workflows only ever run on `main` or on a
   # schedule, so nothing else in CI compiles them. Their guard suite is pure
@@ -141,6 +188,6 @@ jobs:
   production-readiness:
     name: production-readiness
     runs-on: ubuntu-latest
-    needs: [lint, build-test, architecture, integration, release-guards]
+    needs: [lint, check, test, architecture, integration, release-guards]
     steps:
       - run: echo "All Production Gate jobs passed."

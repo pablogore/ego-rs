@@ -21,17 +21,23 @@ Before submitting any future OpenSpec change, verify SPEC-000 compliance:
 `develop`. The required check on `develop` branch protection is
 `production-readiness` (not yet configured — the workflow existing does not
 make it mandatory on its own); that job does no work itself, it only
-`needs:` four independent jobs that run in parallel — `lint`, `build-test`,
-`architecture`, `integration` — so wall-clock is bounded by the slowest of
-them, not the sum of all steps:
+`needs:` five independent jobs that run in parallel — `lint`, `check`,
+`test`, `architecture`, `integration` — so wall-clock is bounded by the
+slowest of them, not the sum of all steps. `check` and `test` used to be one
+`build-test` job; they were split because `cargo test --workspace` alone
+(~520s) dwarfed every other job, and giving `cargo check` its own runner
+means a compile error fails fast instead of queuing behind the full test run:
 
 ```bash
 # lint
 dagger run ./shipwright --workflow .shipwright/workflow.yaml -step workspace-lint  # cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-# build-test
+# check
 cargo check --workspace --all-targets
-cargo test --workspace
+
+# test
+cargo nextest run --workspace
+cargo test --doc --workspace  # nextest does not run doctests
 
 # architecture
 cargo run -p xtask -- verify-layers
@@ -41,6 +47,11 @@ cargo run -p xtask -- verify-hygiene
 # integration
 cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
 ```
+
+`test` uses `cargo-nextest` (`cargo install cargo-nextest --locked` locally,
+or `cargo binstall cargo-nextest`) instead of plain `cargo test` — it
+parallelizes test-binary execution across cores. `cargo test --doc` still
+covers doctests since nextest cannot run those.
 
 Lint (clippy) already runs through Shipwright's Dagger-backed `workspace-lint`
 step (`rust-command` provider, running the literal `--workspace --all-targets
