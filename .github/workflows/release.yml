@@ -1,0 +1,123 @@
+name: Release
+
+# Cuts exactly one release as a direct result of a push landing on `main` —
+# never on `develop`, never per-PR (release-automation spec, "A Release Is
+# Cut Only, And Exactly Once, As A Direct Result Of A Push Landing On
+# Main"). git-cliff computes the version and renders the notes from
+# Conventional Commits already in history; the only push this job makes is
+# an explicit tag refspec, never a branch ref, so it cannot retrigger this
+# workflow or production-gate.yml's `push: branches: [develop, main]`
+# trigger (design.md, "Design Invariant: no loop, no bypass"). See
+# CONTRIBUTING.md, "Cutting a release".
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  GIT_CLIFF_VERSION: "v2.14.1"
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ego-rs
+        uses: actions/checkout@v4
+        with:
+          # git-cliff needs full history and every tag to compute the
+          # version and the changelog range since the previous release.
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Pinned release binary from github.com/orhun/git-cliff, same
+      # curl + chmod pattern as production-gate.yml's SHIPWRIGHT_VERSION
+      # install — and the identical command runs locally (see
+      # CONTRIBUTING.md's dry-run instructions), so CI and a local run
+      # compute the same version from the same cliff.toml.
+      - name: Install git-cliff
+        run: |
+          curl -fL -o git-cliff.tar.gz "https://github.com/orhun/git-cliff/releases/download/${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION#v}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf git-cliff.tar.gz
+          install -m 0755 "git-cliff-${GIT_CLIFF_VERSION#v}/git-cliff" /usr/local/bin/git-cliff
+
+      - name: Compute the next version
+        id: version
+        run: |
+          VERSION="$(git cliff --bumped-version)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Idempotency guard. An existing tag is benign in exactly one case:
+      # it already points at this very commit, which is what a manual re-run
+      # against the same `main` head produces. The same version resolving to
+      # a *different* commit means the tag history and the computed version
+      # disagree, and skipping silently would publish nothing while
+      # reporting success — so the job fails loudly instead.
+      #
+      # `git rev-list -n1` resolves an annotated tag to the commit it points
+      # at. `git rev-parse` on the same tag returns the tag object's own SHA,
+      # which never equals HEAD, so it cannot answer this question at all.
+      - name: Check for an existing tag
+        id: existing_tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            tagged_sha="$(git rev-list -n1 "${VERSION}")"
+            current_sha="$(git rev-parse HEAD)"
+            if [ "${tagged_sha}" = "${current_sha}" ]; then
+              echo "${VERSION} is already released at ${current_sha}; nothing to do."
+              echo "state=already-released" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Tag ${VERSION} already exists at ${tagged_sha}, but main is at ${current_sha}. Releases are immutable: resolve the tag before re-running."
+              exit 1
+            fi
+          else
+            echo "state=new" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render release notes
+        if: steps.existing_tag.outputs.state == 'new'
+        run: |
+          git cliff --unreleased --tag "${{ steps.version.outputs.version }}" -o "$RUNNER_TEMP/notes.md"
+
+      # Annotated tag, pushed as an explicit tag refspec only — never a
+      # bare `git push` and never a branch ref (release-automation spec,
+      # "Release Notes Publish Only To The GitHub Release Body, Never To
+      # The Repository Tree"; design.md invariant fact 1). A tag push
+      # carries no `branches:` match, so it cannot retrigger this workflow
+      # or production-gate.yml.
+      # `git tag -a` writes a tag object, and a tag object needs a tagger
+      # identity. GitHub-hosted runners configure none and actions/checkout
+      # adds none, so without this the tag step dies with "Committer identity
+      # unknown" — on the first real release, which is the run least able to
+      # absorb it.
+      - name: Configure the tagger identity
+        if: steps.existing_tag.outputs.state == 'new'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag the release
+        if: steps.existing_tag.outputs.state == 'new'
+        run: |
+          git tag -a "${{ steps.version.outputs.version }}" -m "${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      # `--verify-tag` requires the tag to already exist and fails loudly
+      # instead of silently creating a lightweight one if the tag step
+      # above ever regresses (design.md AD-4).
+      - name: Publish the GitHub Release
+        if: steps.existing_tag.outputs.state == 'new'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --verify-tag \
+            --notes-file "$RUNNER_TEMP/notes.md"
