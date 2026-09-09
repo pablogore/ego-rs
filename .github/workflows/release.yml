@@ -53,20 +53,37 @@ jobs:
           VERSION="$(git cliff --bumped-version)"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      # Idempotency guard: if this exact SHA's version was already tagged
-      # (for example, a manual re-run against the same `main` head), do
-      # nothing rather than fail or create a second tag/Release.
+      # Idempotency guard. An existing tag is benign in exactly one case:
+      # it already points at this very commit, which is what a manual re-run
+      # against the same `main` head produces. The same version resolving to
+      # a *different* commit means the tag history and the computed version
+      # disagree, and skipping silently would publish nothing while
+      # reporting success — so the job fails loudly instead.
+      #
+      # `git rev-list -n1` resolves an annotated tag to the commit it points
+      # at. `git rev-parse` on the same tag returns the tag object's own SHA,
+      # which never equals HEAD, so it cannot answer this question at all.
       - name: Check for an existing tag
         id: existing_tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            tagged_sha="$(git rev-list -n1 "${VERSION}")"
+            current_sha="$(git rev-parse HEAD)"
+            if [ "${tagged_sha}" = "${current_sha}" ]; then
+              echo "${VERSION} is already released at ${current_sha}; nothing to do."
+              echo "state=already-released" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Tag ${VERSION} already exists at ${tagged_sha}, but main is at ${current_sha}. Releases are immutable: resolve the tag before re-running."
+              exit 1
+            fi
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "state=new" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Render release notes
-        if: steps.existing_tag.outputs.exists == 'false'
+        if: steps.existing_tag.outputs.state == 'new'
         run: |
           git cliff --unreleased --tag "${{ steps.version.outputs.version }}" -o "$RUNNER_TEMP/notes.md"
 
@@ -77,7 +94,7 @@ jobs:
       # carries no `branches:` match, so it cannot retrigger this workflow
       # or production-gate.yml.
       - name: Tag the release
-        if: steps.existing_tag.outputs.exists == 'false'
+        if: steps.existing_tag.outputs.state == 'new'
         run: |
           git tag -a "${{ steps.version.outputs.version }}" -m "${{ steps.version.outputs.version }}"
           git push origin "${{ steps.version.outputs.version }}"
@@ -86,7 +103,7 @@ jobs:
       # instead of silently creating a lightweight one if the tag step
       # above ever regresses (design.md AD-4).
       - name: Publish the GitHub Release
-        if: steps.existing_tag.outputs.exists == 'false'
+        if: steps.existing_tag.outputs.state == 'new'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

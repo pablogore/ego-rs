@@ -44,6 +44,18 @@ assert_not_empty_containing() {
   fi
 }
 
+# Asserts that a haystack contains a needle, naming what was missing when it
+# does not — the static invariant cases below read better as "the file must
+# say X" than as "grep -c must equal 1".
+assert_contains() {
+  local desc="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    pass "$desc"
+  else
+    fail "$desc (expected to find: ${needle})"
+  fi
+}
+
 assert_not_contains() {
   local desc="$1" haystack="$2" needle="$3"
   if printf '%s' "$haystack" | grep -q -- "$needle"; then
@@ -233,6 +245,29 @@ test_no_run_block_interpolates_github_event() {
   fi
 }
 
+# --- Case 7: the release guard must distinguish "already tagged at this
+# commit" from "this version is tagged somewhere else". The first is a benign
+# re-run, the second is a release-history inconsistency that must fail the
+# job rather than skip silently.
+#
+# `git rev-parse <tag>` on an annotated tag returns the tag object's SHA, not
+# the commit's, so a guard built on it alone can never make that distinction.
+# The guard must resolve the tag to a commit and compare it against HEAD. ---
+test_release_guard_compares_the_tagged_commit() {
+  local file="$REPO_ROOT/.github/workflows/release.yml"
+  if [ ! -f "$file" ]; then
+    fail "release.yml not found for static invariant check"
+    return
+  fi
+
+  assert_contains "release.yml: the tag guard resolves the tag to a commit" \
+    "$(cat "$file")" "git rev-list -n1"
+  assert_contains "release.yml: the tag guard compares against HEAD" \
+    "$(cat "$file")" "git rev-parse HEAD"
+  assert_contains "release.yml: a version tagged at another commit fails the job" \
+    "$(cat "$file")" "::error::Tag"
+}
+
 echo "== release-guards.test.sh =="
 
 if [ ! -f "$DRIFT_SCRIPT" ]; then
@@ -246,6 +281,7 @@ test_fresh_unbackported_within_window_is_not_reported
 test_repo_isolation
 test_no_push_targets_a_branch_ref
 test_no_run_block_interpolates_github_event
+test_release_guard_compares_the_tagged_commit
 
 echo "== ${PASS} passed, ${FAIL} failed =="
 
