@@ -56,10 +56,24 @@ pub(crate) fn is_write_conflict(e: &stoolap::Error) -> bool {
         stoolap::Error::UniqueConstraint { .. } => true,
         stoolap::Error::TransactionAborted => true,
         stoolap::Error::LockAcquisitionFailed(_) | stoolap::Error::DatabaseLocked => true,
-        // Pinned, brittle-but-documented arm (EC-7): Stoolap's MVCC write-claim
-        // conflict has no dedicated error variant, only this message text.
+        // Pinned, brittle-but-documented arm (EC-7): none of Stoolap's MVCC
+        // write conflicts has a dedicated error variant, only message text on
+        // `Internal`. Stoolap 0.4.0 raises three, all of them a lost race and
+        // all of them retry-safe:
+        //
+        //   - "row N has uncommitted changes from transaction M" — the
+        //     pessimistic write-claim conflict, raised when the write is taken.
+        //   - "write conflict: row N was modified by another transaction" and
+        //     "write conflict: row N was concurrently inserted by another
+        //     transaction" — OCC validation, raised at commit instead.
+        //
+        // Which one a racer hits depends on whether it collides while claiming
+        // the write or only at commit, so recognizing one and not the others
+        // makes the classification depend on scheduling: the same lost race
+        // surfaces as retry-safe or as fatal from run to run.
         stoolap::Error::Internal { message } => {
             message.contains("uncommitted changes from transaction")
+                || message.starts_with("write conflict:")
         }
         _ => false,
     }
@@ -132,6 +146,43 @@ mod tests {
             "held by another writer".into()
         )));
         assert!(is_write_conflict(&stoolap::Error::DatabaseLocked));
+    }
+
+    /// Stoolap raises this when a racer loses the OCC check at commit on an
+    /// UPDATE. It is the message the concurrent-takeover claim test hit, and
+    /// classifying it as fatal made a lost race look like data corruption.
+    #[test]
+    fn is_write_conflict_recognizes_an_occ_update_conflict_at_commit() {
+        assert!(is_write_conflict(&stoolap::Error::Internal {
+            message: "write conflict: row 1 was modified by another transaction".into()
+        }));
+    }
+
+    /// The INSERT counterpart of the same OCC check.
+    #[test]
+    fn is_write_conflict_recognizes_an_occ_insert_conflict_at_commit() {
+        assert!(is_write_conflict(&stoolap::Error::Internal {
+            message: "write conflict: row 7 was concurrently inserted by another transaction"
+                .into()
+        }));
+    }
+
+    /// The pessimistic write-claim conflict, raised before commit.
+    #[test]
+    fn is_write_conflict_recognizes_a_pessimistic_write_claim_conflict() {
+        assert!(is_write_conflict(&stoolap::Error::Internal {
+            message: "row 1 has uncommitted changes from transaction 42".into()
+        }));
+    }
+
+    /// `Internal` is Stoolap's catch-all, so recognizing it wholesale would
+    /// turn every genuine internal failure into a retry. Only the conflict
+    /// messages above are retry-safe.
+    #[test]
+    fn is_write_conflict_fails_loud_for_an_unrecognized_internal_error() {
+        assert!(!is_write_conflict(&stoolap::Error::Internal {
+            message: "checksum mismatch reading page 12".into()
+        }));
     }
 
     #[test]
