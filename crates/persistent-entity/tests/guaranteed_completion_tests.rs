@@ -165,7 +165,6 @@ async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
         .build();
 
     let triple = EntityTriple::new("default".to_string(), "probe", "recovery-panic-1");
-    let aggregate_id = triple.aggregate_id();
 
     let entity_ref = runtime
         .entity_ref::<TestCommand, TestState>("probe", "recovery-panic-1", handler())
@@ -195,7 +194,7 @@ async fn panic_during_recovery_answers_enqueued_caller_and_leaves_no_zombie() {
     // eventual effect instead of asserting a fixed delay.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if runtime.registry.lookup(&aggregate_id).is_none() {
+        if runtime.registry.lookup(&triple).is_none() {
             break;
         }
         assert!(
@@ -327,7 +326,6 @@ async fn panic_mid_processing_after_real_successes_answers_the_remainder() {
     > = Arc::new(PanicOnBoomHandler);
 
     let triple = EntityTriple::new("default".to_string(), "probe", "mid-drain-1");
-    let aggregate_id = triple.aggregate_id();
 
     // Spawns the actor; no `.await` occurs in `entity_ref()` itself, so the
     // task is not yet polled by the time this call returns.
@@ -337,7 +335,7 @@ async fn panic_mid_processing_after_real_successes_answers_the_remainder() {
 
     let erased = runtime
         .registry
-        .lookup(&aggregate_id)
+        .lookup(&triple)
         .expect("fresh entry must exist immediately after entity_ref()");
     let mailbox = erased
         .downcast::<BoundedMailbox<ActorEnvelope<ProbeCommand>>>()
@@ -457,7 +455,6 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
         .expect("victim runtime must build");
 
     let triple = EntityTriple::new("default".to_string(), "probe", "shutdown-recovering-1");
-    let aggregate_id = triple.aggregate_id();
 
     let (registry, rx) = victim_rt.block_on(async {
         let runtime = EntityRuntimeBuilder::<TestEvent>::new()
@@ -472,7 +469,7 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
 
         let erased = runtime
             .registry
-            .lookup(&aggregate_id)
+            .lookup(&triple)
             .expect("fresh entry must exist immediately after entity_ref()");
         let mailbox = erased
             .downcast::<BoundedMailbox<ActorEnvelope<TestCommand>>>()
@@ -514,7 +511,7 @@ fn runtime_shutdown_while_recovering_answers_enqueued_caller() {
         "a caller enqueued while Recovering, orphaned by a runtime shutdown, must resolve to a terminal Err"
     );
     assert!(
-        registry.lookup(&aggregate_id).is_none(),
+        registry.lookup(&triple).is_none(),
         "no zombie registry entry must remain after the runtime shutdown"
     );
 }
@@ -594,13 +591,12 @@ async fn twenty_caller_probe_under_recovery_panic_resolves_all_and_activates_onc
     // Polling the real mailbox length is a genuine signal; a fixed
     // `yield_now()` budget is a guess that gets less reliable as N grows or
     // the machine is under load (see the 100-caller sibling test).
-    let aggregate_id =
-        EntityTriple::new("default".to_string(), "probe", "recovery-panic-20").aggregate_id();
+    let triple = EntityTriple::new("default".to_string(), "probe", "recovery-panic-20");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let enqueued = runtime
             .registry
-            .lookup(&aggregate_id)
+            .lookup(&triple)
             .and_then(|erased| {
                 erased
                     .downcast::<BoundedMailbox<ActorEnvelope<TestCommand>>>()
@@ -823,11 +819,8 @@ async fn downcast_mismatch_never_blocks_or_disturbs_other_triples() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
     let registry = Arc::new(EntityRegistry::new());
-    let bad_ids: Vec<String> = (0..10)
-        .map(|i| {
-            EntityTriple::new("default".to_string(), "probe", format!("no-runtime-{i}"))
-                .aggregate_id()
-        })
+    let bad_ids: Vec<EntityTriple> = (0..10)
+        .map(|i| EntityTriple::new("default".to_string(), "probe", format!("no-runtime-{i}")))
         .collect();
 
     let mut bad_handles = Vec::with_capacity(10);
@@ -897,7 +890,7 @@ async fn spawn_outside_runtime_panic_never_blocks_other_triples() {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "bad triple {id} must not remain as a zombie active entry"
+                "bad triple {id:?} must not remain as a zombie active entry"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -1039,7 +1032,6 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
     );
 
     let triple = EntityTriple::new("default".to_string(), "probe", "hundred-caller-retry-1");
-    let aggregate_id = triple.aggregate_id();
 
     const N: usize = 100;
     let started = Arc::new(AtomicUsize::new(0));
@@ -1092,7 +1084,7 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
     loop {
         let enqueued = runtime
             .registry
-            .lookup(&aggregate_id)
+            .lookup(&triple)
             .and_then(|erased| {
                 erased
                     .downcast::<BoundedMailbox<ActorEnvelope<TestCommand>>>()
@@ -1133,7 +1125,7 @@ async fn hundred_caller_probe_then_explicit_retry_activates_exactly_once_more() 
     // panic preempts it) in-body drain.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if runtime.registry.lookup(&aggregate_id).is_none() {
+        if runtime.registry.lookup(&triple).is_none() {
             break;
         }
         assert!(

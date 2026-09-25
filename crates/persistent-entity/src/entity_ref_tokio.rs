@@ -36,7 +36,7 @@ use ego_domain::Observability;
 /// `TokioEntityRef::new`, `Inserted` branch) alongside the actor itself, so a
 /// panic anywhere in `EntityActor::run()` drops this guard during unwind.
 pub(crate) struct TeardownGuard<C> {
-    pub(crate) aggregate_id: String,
+    pub(crate) entity_id: EntityTriple,
     pub(crate) registry: Arc<EntityRegistry>,
     pub(crate) epoch: u64,
     /// The same mailbox handle the actor holds — draining through this
@@ -61,7 +61,7 @@ impl<C> Drop for TeardownGuard<C> {
         // Step 3: remove-if-mine (epoch-scoped, idempotent — a safe no-op if
         // the actor's own exit path already removed this entry).
         self.registry
-            .deactivate_if_mine(&self.aggregate_id, self.epoch);
+            .deactivate_if_mine(&self.entity_id, self.epoch);
 
         // Step 4: publish a terminal state — but never stomp a terminal
         // state the actor already legitimately published. This only
@@ -136,7 +136,7 @@ where
 
         // Single-flight critical section (ADR-001): lazily builds the mailbox only
         // if no live entry exists yet, under one lock acquisition.
-        let outcome = registry.lookup_or_insert(&aggregate_id, || {
+        let outcome = registry.lookup_or_insert(&triple, || {
             let mailbox: BoundedMailbox<ActorEnvelope<C>> = BoundedMailbox::new(mailbox_capacity);
             Arc::new(mailbox) as Arc<dyn Any + Send + Sync>
         });
@@ -217,7 +217,7 @@ where
                 // released by `lookup_or_insert`'s return above — never
                 // constructed under the lock (Round 3 self-deadlock fix).
                 let guard = TeardownGuard {
-                    aggregate_id: aggregate_id.clone(),
+                    entity_id: entity_id.clone(),
                     registry: registry.clone(),
                     epoch,
                     mailbox: mailbox_for_actor,
@@ -302,12 +302,11 @@ mod tests {
     async fn mailbox_closed_in_teardown_window_is_retried_to_a_fresh_actor() {
         let registry = Arc::new(EntityRegistry::new());
         let triple = EntityTriple::new("default".to_string(), "counter", "reactivate-window-1");
-        let aggregate_id = triple.aggregate_id();
 
         // Simulate an old actor mid-teardown: insert a live entry directly
         // and close its mailbox out-of-band, without removing the entry —
         // the FR-010 window.
-        let stale_epoch = match registry.lookup_or_insert(&aggregate_id, || {
+        let stale_epoch = match registry.lookup_or_insert(&triple, || {
             let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
             mailbox.close();
             Arc::new(mailbox) as Arc<dyn Any + Send + Sync>
@@ -344,7 +343,7 @@ mod tests {
         );
 
         // Teardown completes: the stale entry is removed (deactivate() step 3).
-        registry.deactivate_if_mine(&aggregate_id, stale_epoch);
+        registry.deactivate_if_mine(&triple, stale_epoch);
 
         // The caller retries entity_ref(): no live entry exists now, so a
         // fresh, healthy actor is spawned for the same triple.

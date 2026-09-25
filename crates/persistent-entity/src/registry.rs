@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use crate::lifecycle::EntityState;
+use crate::scheduler::EntityTriple;
 
 const MAX_PASSIVATED_ENTRIES: usize = 10_000;
 
@@ -58,15 +59,21 @@ impl std::fmt::Debug for EntityRegistry {
 }
 
 /// A registry for tracking entity routing and passivation bookkeeping.
+///
+/// Entries are keyed by the full [`EntityTriple`] — tenant, entity type, and
+/// entity id together — never by the bare `aggregate_id` (which drops the
+/// tenant). This means two [`crate::runtime::EntityRuntime`]s pinned to
+/// different tenants may safely share one registry: their triples never
+/// collide, even when entity type and entity id happen to match (SEC-001).
 pub struct EntityRegistry {
-    /// Live routing entries, keyed by `aggregate_id`.
-    active: Mutex<HashMap<String, ActiveEntry>>,
+    /// Live routing entries, keyed by the full entity triple.
+    active: Mutex<HashMap<EntityTriple, ActiveEntry>>,
     /// Monotonic counter stamping each insert with a unique epoch — ABA-safe
     /// teardown identity (ADR-005).
     next_epoch: AtomicU64,
-    /// Entities that have passivated (aggregate_id → final version). Advisory
+    /// Entities that have passivated (triple → final version). Advisory
     /// bookkeeping only — never gates or forks routing (ADR-004).
-    passivated_entities: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    passivated_entities: Arc<std::sync::Mutex<HashMap<EntityTriple, u64>>>,
 }
 
 impl EntityRegistry {
@@ -80,7 +87,7 @@ impl EntityRegistry {
     }
 
     /// Single-flight lookup-or-insert (ADR-001). Under one lock acquisition:
-    /// returns the existing entry's erased mailbox if `entity_id` already has
+    /// returns the existing entry's erased mailbox if `triple` already has
     /// a live entry, otherwise lazily calls `make_mailbox` (never invoked on
     /// the hit path), inserts a new entry seeded `Recovering`, and hands the
     /// caller its epoch plus the sole [`watch::Sender`] for that entry.
@@ -88,12 +95,12 @@ impl EntityRegistry {
     /// `make_mailbox` runs synchronously, still under the lock — it must not
     /// `.await` or panic-prone-ly do more than construct a mailbox, matching
     /// ADR-001's "no `.await`, no `tokio::spawn`" critical-section contract.
-    pub fn lookup_or_insert<F>(&self, entity_id: &str, make_mailbox: F) -> RouteOutcome
+    pub fn lookup_or_insert<F>(&self, triple: &EntityTriple, make_mailbox: F) -> RouteOutcome
     where
         F: FnOnce() -> Arc<dyn Any + Send + Sync>,
     {
         let mut active = self.active.lock();
-        if let Some(entry) = active.get(entity_id) {
+        if let Some(entry) = active.get(triple) {
             return RouteOutcome::Existing {
                 mailbox: entry.mailbox.clone(),
             };
@@ -103,7 +110,7 @@ impl EntityRegistry {
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = watch::channel(EntityState::Recovering);
         active.insert(
-            entity_id.to_string(),
+            triple.clone(),
             ActiveEntry {
                 mailbox: mailbox.clone(),
                 rx,
@@ -116,21 +123,21 @@ impl EntityRegistry {
     /// Returns the live entry's erased mailbox handle, if one exists, without
     /// inserting anything. Presence-only lookup (ADR-008): sufficient for
     /// retry logic that only needs to know "is there still something here."
-    pub fn lookup(&self, entity_id: &str) -> Option<Arc<dyn Any + Send + Sync>> {
+    pub fn lookup(&self, triple: &EntityTriple) -> Option<Arc<dyn Any + Send + Sync>> {
         self.active
             .lock()
-            .get(entity_id)
+            .get(triple)
             .map(|entry| entry.mailbox.clone())
     }
 
-    /// Removes `entity_id`'s routing entry only if it is still owned by
+    /// Removes `triple`'s routing entry only if it is still owned by
     /// `epoch` — "removal is authority-scoped" (FR-001). A stale or
     /// superseded exit path's call is a safe no-op.
-    pub fn deactivate_if_mine(&self, entity_id: &str, epoch: u64) {
+    pub fn deactivate_if_mine(&self, triple: &EntityTriple, epoch: u64) {
         let mut active = self.active.lock();
-        let is_mine = matches!(active.get(entity_id), Some(entry) if entry.epoch == epoch);
+        let is_mine = matches!(active.get(triple), Some(entry) if entry.epoch == epoch);
         if is_mine {
-            active.remove(entity_id);
+            active.remove(triple);
         }
     }
 
@@ -157,14 +164,14 @@ impl EntityRegistry {
     /// Caps the passivated map at `MAX_PASSIVATED_ENTRIES` by evicting one
     /// arbitrary entry when the limit is reached, bounding memory in
     /// high-churn deployments.
-    pub fn mark_passivated(&self, entity_id: String, version: u64) {
+    pub fn mark_passivated(&self, triple: EntityTriple, version: u64) {
         let mut passivated = self.passivated_entities.lock().unwrap();
         if passivated.len() >= MAX_PASSIVATED_ENTRIES {
             if let Some(oldest) = passivated.keys().next().cloned() {
                 passivated.remove(&oldest);
             }
         }
-        passivated.insert(entity_id, version);
+        passivated.insert(triple, version);
     }
 }
 
@@ -176,6 +183,13 @@ mod tests {
 
     fn erased_probe<T: Any + Send + Sync + 'static>(value: T) -> Arc<dyn Any + Send + Sync> {
         Arc::new(value) as Arc<dyn Any + Send + Sync>
+    }
+
+    /// Builds a test triple for a fixed tenant — the tenant only matters for
+    /// the SEC-001 cross-tenant test below; every other test just needs a
+    /// stable identity to key the registry by.
+    fn triple(id: &str) -> EntityTriple {
+        EntityTriple::new("tenant-a".to_string(), "kind", id)
     }
 
     /// TASK-003 (FR-001, FR-005, NFR-002): N concurrent `lookup_or_insert`
@@ -194,7 +208,7 @@ mod tests {
             let registry = registry.clone();
             let spawn_count = spawn_count.clone();
             handles.push(tokio::spawn(async move {
-                match registry.lookup_or_insert("triple-1", || {
+                match registry.lookup_or_insert(&triple("triple-1"), || {
                     spawn_count.fetch_add(1, Ordering::SeqCst);
                     erased_probe(42usize)
                 }) {
@@ -229,7 +243,7 @@ mod tests {
     fn active_count_excludes_recovering_counts_active() {
         let registry = EntityRegistry::new();
 
-        let tx = match registry.lookup_or_insert("triple-2", || erased_probe(0usize)) {
+        let tx = match registry.lookup_or_insert(&triple("triple-2"), || erased_probe(0usize)) {
             RouteOutcome::Inserted { tx, .. } => tx,
             RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
         };
@@ -266,10 +280,11 @@ mod tests {
 
         // Cold activation, then teardown (Active -> removed), simulating a
         // passivation cycle from the registry's point of view.
-        let (epoch1, tx1) = match registry.lookup_or_insert("triple-5", || erased_probe(0usize)) {
-            RouteOutcome::Inserted { epoch, tx, .. } => (epoch, tx),
-            RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
-        };
+        let (epoch1, tx1) =
+            match registry.lookup_or_insert(&triple("triple-5"), || erased_probe(0usize)) {
+                RouteOutcome::Inserted { epoch, tx, .. } => (epoch, tx),
+                RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
+            };
         tx1.send(EntityState::Active)
             .expect("receiver still held by the registry entry");
         assert_eq!(
@@ -277,8 +292,8 @@ mod tests {
             1,
             "cold activation must be counted once Active"
         );
-        registry.mark_passivated("triple-5".to_string(), 1);
-        registry.deactivate_if_mine("triple-5", epoch1);
+        registry.mark_passivated(triple("triple-5"), 1);
+        registry.deactivate_if_mine(&triple("triple-5"), epoch1);
         assert_eq!(
             registry.active_count(),
             0,
@@ -287,7 +302,7 @@ mod tests {
 
         // Reactivation: a fresh lookup_or_insert for the same entity_id
         // starts a new Recovering entry under a new epoch.
-        let tx2 = match registry.lookup_or_insert("triple-5", || erased_probe(0usize)) {
+        let tx2 = match registry.lookup_or_insert(&triple("triple-5"), || erased_probe(0usize)) {
             RouteOutcome::Inserted { tx, .. } => tx,
             RouteOutcome::Existing { .. } => panic!("expected a fresh insert on reactivation"),
         };
@@ -316,13 +331,14 @@ mod tests {
     fn live_entry_is_unaffected_by_a_mismatched_lookup() {
         let registry = EntityRegistry::new();
 
-        let original = match registry.lookup_or_insert("triple-3", || erased_probe(7usize)) {
+        let original = match registry.lookup_or_insert(&triple("triple-3"), || erased_probe(7usize))
+        {
             RouteOutcome::Inserted { mailbox, .. } => mailbox,
             RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
         };
 
         let second_call_spawned = AtomicBool::new(false);
-        let erased = match registry.lookup_or_insert("triple-3", || {
+        let erased = match registry.lookup_or_insert(&triple("triple-3"), || {
             second_call_spawned.store(true, Ordering::SeqCst);
             erased_probe(String::from("wrong-type"))
         }) {
@@ -340,11 +356,12 @@ mod tests {
             "downcasting a usize-backed entry as String must fail closed, not fall through"
         );
 
-        let re_lookup =
-            match registry.lookup_or_insert("triple-3", || panic!("must not spawn again")) {
-                RouteOutcome::Existing { mailbox } => mailbox,
-                RouteOutcome::Inserted { .. } => panic!("triple-3 must still be live"),
-            };
+        let re_lookup = match registry
+            .lookup_or_insert(&triple("triple-3"), || panic!("must not spawn again"))
+        {
+            RouteOutcome::Existing { mailbox } => mailbox,
+            RouteOutcome::Inserted { .. } => panic!("triple-3 must still be live"),
+        };
         assert!(
             Arc::ptr_eq(&original, &re_lookup),
             "the original entry must be untouched by the failed mismatch lookup"
@@ -354,20 +371,20 @@ mod tests {
     #[test]
     fn deactivate_if_mine_is_a_noop_for_a_stale_epoch() {
         let registry = EntityRegistry::new();
-        let epoch = match registry.lookup_or_insert("triple-4", || erased_probe(1usize)) {
+        let epoch = match registry.lookup_or_insert(&triple("triple-4"), || erased_probe(1usize)) {
             RouteOutcome::Inserted { epoch, .. } => epoch,
             RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
         };
 
-        registry.deactivate_if_mine("triple-4", epoch + 1);
+        registry.deactivate_if_mine(&triple("triple-4"), epoch + 1);
         assert!(
-            registry.lookup("triple-4").is_some(),
+            registry.lookup(&triple("triple-4")).is_some(),
             "a stale epoch's removal attempt must not remove the live entry"
         );
 
-        registry.deactivate_if_mine("triple-4", epoch);
+        registry.deactivate_if_mine(&triple("triple-4"), epoch);
         assert!(
-            registry.lookup("triple-4").is_none(),
+            registry.lookup(&triple("triple-4")).is_none(),
             "the current epoch's removal attempt must remove the entry"
         );
     }
@@ -384,7 +401,9 @@ mod tests {
         let registry = EntityRegistry::new();
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            registry.lookup_or_insert("triple-poison", || panic!("boom: construction failure"));
+            registry.lookup_or_insert(&triple("triple-poison"), || {
+                panic!("boom: construction failure")
+            });
         }));
         assert!(
             panicked.is_err(),
@@ -395,11 +414,11 @@ mod tests {
         // must still succeed, and the panicking triple must have left no
         // partial entry behind (make_mailbox panicked before `active.insert`).
         assert!(
-            registry.lookup("triple-poison").is_none(),
+            registry.lookup(&triple("triple-poison")).is_none(),
             "a panic during construction must not leave a partial entry"
         );
 
-        let outcome = registry.lookup_or_insert("triple-other", || erased_probe(7usize));
+        let outcome = registry.lookup_or_insert(&triple("triple-other"), || erased_probe(7usize));
         let mailbox = match outcome {
             RouteOutcome::Inserted { mailbox, .. } => mailbox,
             RouteOutcome::Existing { .. } => {
@@ -416,5 +435,33 @@ mod tests {
             0,
             "triple-other is Recovering, not yet Active — active_count must still be usable post-panic"
         );
+    }
+
+    /// SEC-001: two triples that share `entity_type` and `entity_id` but
+    /// belong to different tenants must route to two distinct entries, never
+    /// alias onto the same live actor. This is what makes it safe for
+    /// runtimes pinned to different tenants to share one registry.
+    #[test]
+    fn same_type_and_id_different_tenant_are_distinct_entries() {
+        let registry = EntityRegistry::new();
+        let tenant_a = EntityTriple::new("tenant-a".to_string(), "kind", "shared-id");
+        let tenant_b = EntityTriple::new("tenant-b".to_string(), "kind", "shared-id");
+
+        match registry.lookup_or_insert(&tenant_a, || erased_probe(1usize)) {
+            RouteOutcome::Inserted { .. } => {}
+            RouteOutcome::Existing { .. } => {
+                panic!("tenant-a's triple must be a fresh insert")
+            }
+        }
+
+        match registry.lookup_or_insert(&tenant_b, || erased_probe(2usize)) {
+            RouteOutcome::Inserted { .. } => {}
+            RouteOutcome::Existing { .. } => {
+                panic!(
+                    "tenant-b's triple must also be a fresh insert — sharing entity_type and \
+                     entity_id with tenant-a must not alias onto tenant-a's live entry (SEC-001)"
+                )
+            }
+        }
     }
 }

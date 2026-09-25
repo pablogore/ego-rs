@@ -623,7 +623,7 @@ where
                         )));
                 }
                 self.registry
-                    .mark_passivated(self.entity_id.aggregate_id(), self.version);
+                    .mark_passivated(self.entity_id.clone(), self.version);
                 return;
             }
         }
@@ -643,7 +643,7 @@ where
         }
 
         self.registry
-            .mark_passivated(self.entity_id.aggregate_id(), self.version);
+            .mark_passivated(self.entity_id.clone(), self.version);
 
         self.transition(EntityState::Passivated);
     }
@@ -792,7 +792,7 @@ mod tests {
             _phantom: PhantomData,
         };
         let guard = TeardownGuard {
-            aggregate_id: entity_id.aggregate_id(),
+            entity_id: entity_id.clone(),
             registry,
             epoch: 0,
             mailbox,
