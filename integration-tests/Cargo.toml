@@ -99,6 +99,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[profile.test]
-inherits = "dev"
