@@ -78,8 +78,16 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      # Each job keeps its own cache (rust-cache's per-job default key). A
+      # shared one does not work: `cargo check` compiles in metadata mode and
+      # reuses almost nothing from a full test build (measured on PR #463:
+      # 44 units Fresh, 355 rebuilt), and `cargo run -p xtask` resolves other
+      # features than `--workspace`. Every cache is saved on develop only, so
+      # PRs read develop's cache and can never evict it.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
@@ -93,16 +101,16 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
-      # cargo check (the `check` job) takes 109s; this job's nextest run
-      # takes 397s building the exact same dependency graph plus ~114 test
-      # binaries — the delta is link time, not type-checking, since `check`
-      # never invokes the linker at all. mold is a drop-in faster linker for
-      # exactly this shape (many small binaries) on Linux.
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
-
+      # No custom linker: since 1.90 rustc links x86_64 Linux with its
+      # bundled rust-lld, and a cold A/B on the same commit (PR #463, run
+      # 36171969459) measured mold at 141s vs rust-lld at 137.5s for the
+      # test-binary build, plus 13-17s to apt-install mold. The link-time
+      # win comes from the shared debuginfo profile in Cargo.toml instead.
+      # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Prebuilt binary, not `cargo install` (which would compile nextest
       # itself on every cache miss) — nextest parallelizes test *binary*
@@ -115,8 +123,6 @@ jobs:
 
       - name: cargo nextest run --workspace
         run: cargo nextest run --workspace
-        env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       # nextest does not run doctests (a known, permanent limitation of the
       # tool, not a bug) — cargo test --doc keeps them covered without going
@@ -133,8 +139,11 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
+      # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: xtask verify-layers
         run: cargo run -p xtask -- verify-layers
@@ -154,23 +163,20 @@ jobs:
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
-
       # integration-tests is a deliberately separate Cargo workspace (see
-      # integration-tests/Cargo.toml) with its own target dir and lockfile.
+      # integration-tests/Cargo.toml) with its own target dir and lockfile,
+      # so it keeps its own cache. Saved on develop only, like the others.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: integration-tests
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # run-suite provisions its own Postgres (16 + 14) via testcontainers,
       # migrates them, runs the real suite, and always reclaims the
       # containers before exiting — no secrets, no external services.
       - name: Production-critical integration suite (run-suite)
         run: cargo run --manifest-path integration-tests/Cargo.toml --bin run-suite
-        env:
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   production-readiness:
     name: production-readiness
