@@ -137,6 +137,18 @@ async fn main() {
 
 See `crates/service-sdk/examples/hello_service.rs` for the full runnable version.
 
+## Tenancy
+
+ego-rs authorizes every request per tenant, but it does not yet isolate entities per tenant inside one runtime.
+
+| | Today |
+|---|---|
+| **Guaranteed** | Request-level tenant resolution and authorization: `#[tenant_scoped]` operations resolve the caller's tenant and reject mismatches or unauthorized cross-tenant access. Event and effect stores partition data by tenant. |
+| **Supported production model** | One persistence tenant per deployment. An `EntityRuntime` persists every entity under one tenant fixed when it is built. |
+| **Not guaranteed** | Entity isolation between tenants served by the same runtime. Two requests authenticated as different tenants that address the same entity type and id reach the same entity. |
+
+If one service must keep several tenants' entity data apart, deploy it once per tenant for now. The boundary is described in [ARCHITECTURE.md](./ARCHITECTURE.md), "Production tenancy scope (PROD-P0.3)", and lifting it is tracked in [PLAT-009 (#484)](https://github.com/pablogore/ego-rs/issues/484).
+
 ## Reference Service
 
 [`examples/reference-app`](./examples/reference-app) is the production reference service (CORE-018) — a dogfooding milestone that builds a real capability (tenant-scoped user registration) using only ego-rs's public APIs: Runtime/Service SDK, config, logging, JWT security, tenant enforcement, the CQRS read-side engine, and TestKit, wired together end-to-end behind a real HTTP server with Swagger docs. See [its README](./examples/reference-app/README.md) to run it.

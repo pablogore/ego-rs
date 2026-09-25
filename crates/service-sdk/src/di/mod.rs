@@ -77,6 +77,11 @@ where
     /// from within its own async request-handling path; it is not safe to
     /// call from a synchronous composition-time context (e.g. while still
     /// inside `AppBuilder::build`).
+    ///
+    /// **Tenancy:** there is no tenant parameter. The entity is addressed under the
+    /// runtime's fixed tenant, whatever tenant the calling request resolved, so two
+    /// tenants using the same `entity_id` reach the same entity (PROD-P0.3 in
+    /// ARCHITECTURE.md; per-request routing is #484).
     pub fn entity_ref<C, S>(
         &self,
         entity_type: &'static str,

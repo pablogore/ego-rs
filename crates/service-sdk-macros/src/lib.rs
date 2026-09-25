@@ -1084,6 +1084,10 @@ pub fn idempotent(_args: TokenStream, _input: TokenStream) -> TokenStream {
 /// silently did nothing when misapplied would be a false sense of enforcement,
 /// exactly the fail-open risk AD-007 already flags for a forgotten marker.
 /// Failing loudly here is cheaper than debugging a mistakenly-inert tenant guard.
+///
+/// Scope: this resolves and authorizes the request's tenant. It does not isolate
+/// entities: `EntityRuntimeRef::entity_ref` still routes by the runtime's fixed
+/// tenant (PROD-P0.3 in ARCHITECTURE.md; per-request routing is #484).
 #[proc_macro_attribute]
 pub fn tenant_scoped(_args: TokenStream, _input: TokenStream) -> TokenStream {
     let err = syn::Error::new(
