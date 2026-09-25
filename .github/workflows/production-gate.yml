@@ -81,24 +81,22 @@ jobs:
         run: rustup show
 
       # .cargo/config.toml links x86_64 Linux builds through
-      # scripts/cargo-linker.sh, which uses mold when it is installed. Even
-      # `cargo check` links build scripts and proc-macros, so every job that
-      # shares the cache needs the same linker; EGO_REQUIRE_MOLD=1 makes a
-      # missing mold fail the job instead of silently linking without it.
+      # scripts/cargo-linker.sh, which uses mold when it is installed.
+      # EGO_REQUIRE_MOLD=1 makes a missing mold fail the job instead of
+      # silently linking without it.
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      # One cache for check / test / architecture: they now build with the
-      # same profile and linker (.cargo/config.toml, root Cargo.toml), so the
-      # artifacts are interchangeable. Only the `test` job on develop saves
-      # it — the other jobs finish first and would otherwise win the save
-      # race with a smaller cache — and PRs only ever read develop's cache,
-      # so they can never evict it.
+      # Each job keeps its own cache (rust-cache's per-job default key). A
+      # shared one does not work: `cargo check` compiles in metadata mode and
+      # reuses almost nothing from a full test build (measured on PR #463:
+      # 44 units Fresh, 355 rebuilt), and `cargo run -p xtask` resolves other
+      # features than `--workspace`. Every cache is saved on develop only, so
+      # PRs read develop's cache and can never evict it.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: production-gate
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
@@ -127,11 +125,10 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      # The only saver of the shared cache — see the `check` job.
+      # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: production-gate
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       # Prebuilt binary, not `cargo install` (which would compile nextest
@@ -166,12 +163,11 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get update && sudo apt-get install -y mold
 
-      # Restores the shared cache the `test` job saves — see the `check` job.
+      # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: production-gate
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: xtask verify-layers
         run: cargo run -p xtask -- verify-layers
@@ -198,7 +194,7 @@ jobs:
 
       # integration-tests is a deliberately separate Cargo workspace (see
       # integration-tests/Cargo.toml) with its own target dir and lockfile,
-      # so it keeps its own cache. Saved on develop only, like the shared one.
+      # so it keeps its own cache. Saved on develop only, like the others.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:

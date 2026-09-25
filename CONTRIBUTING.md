@@ -72,9 +72,11 @@ non-dev test keys in code, never via environment variables.
 ### Compiler profile and linker (shared by CI and developers)
 
 CI jobs no longer pass their own `RUSTFLAGS`; every job and every checkout
-compiles with the same settings, so `check`, `test` and `architecture` restore
-one cache (`shared-key: production-gate`, saved only by `test` on `develop`,
-read-only for PRs).
+compiles with the same settings, so local builds match CI. Each CI job keeps
+its own cache, saved on `develop` only and read-only for PRs. The jobs do not
+share one cache on purpose: `cargo check` builds in metadata mode and reuses
+almost nothing from a full test build, and `cargo run -p xtask` resolves
+different features than `--workspace`.
 
 - **Profile** — the root `Cargo.toml` (and, as a separate workspace,
   `integration-tests/Cargo.toml`) sets `debug = "line-tables-only"` for
