@@ -69,7 +69,7 @@ requirement (`colima start` or Docker Desktop; see `integration-tests/README.md`
 No secrets are involved: production-profile tests supply deterministic
 non-dev test keys in code, never via environment variables.
 
-### Compiler profile and linker (shared by CI and developers)
+### Compiler profile (shared by CI and developers)
 
 CI jobs no longer pass their own `RUSTFLAGS`; every job and every checkout
 compiles with the same settings, so local builds match CI. Each CI job keeps
@@ -84,15 +84,11 @@ different features than `--workspace`.
   file:line for our code; the linker stops moving full debuginfo around. If
   you need full debuginfo to step through a dependency, override it locally:
   `cargo build --config 'profile.dev.package."*".debug=true'`.
-- **Linker** — `.cargo/config.toml` routes `x86_64-unknown-linux-gnu` links
-  through `scripts/cargo-linker.sh`: mold when it is on `PATH` (via clang,
-  else cc), the default linker otherwise. Installing mold locally
-  (`apt install mold`, `brew install mold`, …) is optional and only speeds up
-  linking; without it nothing breaks, which is also what keeps the Dagger
-  `lint` step working in the stock `rust:<version>` image. macOS and other
-  targets are untouched. CI sets `EGO_REQUIRE_MOLD=1` so a missing mold fails
-  the job instead of silently linking without it. The wrapper's own test is
-  `scripts/tests/test-cargo-linker.sh`.
+- **Linker** — nothing custom. Since Rust 1.90, `x86_64-unknown-linux-gnu`
+  links with rustc's bundled rust-lld by default, on CI and locally. mold was
+  measured against it on the same commit and was not faster (141s vs 137.5s
+  for a cold test-binary build, plus 13-17s to install it), so CI no longer
+  installs it and there is no linker configuration to keep in sync.
 
 ### `.shipwright/workflow.yaml`: canonical candidate
 

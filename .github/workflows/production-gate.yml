@@ -70,8 +70,6 @@ jobs:
   check:
     name: check
     runs-on: ubuntu-latest
-    env:
-      EGO_REQUIRE_MOLD: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -79,13 +77,6 @@ jobs:
       # rustup (preinstalled on GitHub-hosted runners) and prints the version.
       - name: Resolve pinned Rust toolchain
         run: rustup show
-
-      # .cargo/config.toml links x86_64 Linux builds through
-      # scripts/cargo-linker.sh, which uses mold when it is installed.
-      # EGO_REQUIRE_MOLD=1 makes a missing mold fail the job instead of
-      # silently linking without it.
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
 
       # Each job keeps its own cache (rust-cache's per-job default key). A
       # shared one does not work: `cargo check` compiles in metadata mode and
@@ -101,30 +92,20 @@ jobs:
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets
 
-      # Sub-second; guards the linker wrapper every Linux build goes through.
-      - name: scripts/tests/test-cargo-linker.sh
-        run: bash scripts/tests/test-cargo-linker.sh
-
   test:
     name: test
     runs-on: ubuntu-latest
-    env:
-      EGO_REQUIRE_MOLD: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Resolve pinned Rust toolchain
         run: rustup show
 
-      # cargo check (the `check` job) takes 109s; this job's nextest run
-      # takes 397s building the exact same dependency graph plus ~114 test
-      # binaries — the delta is link time, not type-checking, since `check`
-      # never links a test binary. mold is a drop-in faster linker for
-      # exactly this shape (many small binaries) on Linux; see the `check`
-      # job for how .cargo/config.toml picks it up.
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
-
+      # No custom linker: since 1.90 rustc links x86_64 Linux with its
+      # bundled rust-lld, and a cold A/B on the same commit (PR #463, run
+      # 36171969459) measured mold at 141s vs rust-lld at 137.5s for the
+      # test-binary build, plus 13-17s to apt-install mold. The link-time
+      # win comes from the shared debuginfo profile in Cargo.toml instead.
       # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -152,16 +133,11 @@ jobs:
   architecture:
     name: architecture
     runs-on: ubuntu-latest
-    env:
-      EGO_REQUIRE_MOLD: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Resolve pinned Rust toolchain
         run: rustup show
-
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
 
       # Per-job cache, saved on develop only — see the `check` job.
       - name: Cache cargo registry and build artifacts
@@ -181,16 +157,11 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    env:
-      EGO_REQUIRE_MOLD: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Resolve pinned Rust toolchain
         run: rustup show
-
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
 
       # integration-tests is a deliberately separate Cargo workspace (see
       # integration-tests/Cargo.toml) with its own target dir and lockfile,
