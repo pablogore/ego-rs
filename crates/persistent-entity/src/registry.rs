@@ -19,12 +19,15 @@ use crate::scheduler::EntityTriple;
 const MAX_PASSIVATED_ENTRIES: usize = 10_000;
 
 /// A live routing entry: the entity's type-erased mailbox handle, the
-/// actor-published lifecycle state (read-only from the registry's side), and
-/// a monotonic epoch identifying which activation created it (ADR-005).
+/// actor-published lifecycle state (read-only from the registry's side), a
+/// monotonic epoch identifying which activation created it (ADR-005), and
+/// the triple that created it — the authoritative owner, checked against the
+/// caller's own triple by SEC-001's defence-in-depth routing check.
 struct ActiveEntry {
     mailbox: Arc<dyn Any + Send + Sync>,
     rx: watch::Receiver<EntityState>,
     epoch: u64,
+    triple: EntityTriple,
 }
 
 /// Outcome of [`EntityRegistry::lookup_or_insert`]'s single-flight critical section.
@@ -33,6 +36,13 @@ pub enum RouteOutcome {
     Existing {
         /// The existing entry's type-erased mailbox handle.
         mailbox: Arc<dyn Any + Send + Sync>,
+        /// The triple recorded at this entry's insert time — the
+        /// authoritative owner. Callers must compare this against the
+        /// triple they looked up under and refuse to route on a mismatch
+        /// (SEC-001 defence-in-depth): a regression that ever keys the map
+        /// by something lossier than the full triple must fail loudly
+        /// instead of handing back another triple's live actor.
+        owner: EntityTriple,
     },
     /// No live entry existed; one was just inserted (state `Recovering`). The
     /// caller now owns spawning the actor for this epoch and, once Phase 3
@@ -103,6 +113,7 @@ impl EntityRegistry {
         if let Some(entry) = active.get(triple) {
             return RouteOutcome::Existing {
                 mailbox: entry.mailbox.clone(),
+                owner: entry.triple.clone(),
             };
         }
 
@@ -115,6 +126,7 @@ impl EntityRegistry {
                 mailbox: mailbox.clone(),
                 rx,
                 epoch,
+                triple: triple.clone(),
             },
         );
         RouteOutcome::Inserted { mailbox, epoch, tx }
@@ -173,6 +185,32 @@ impl EntityRegistry {
         }
         passivated.insert(triple, version);
     }
+
+    /// Test-only backdoor: inserts a live entry keyed by `key` but recording
+    /// `owner` as its authoritative triple — the two are normally identical
+    /// (see [`Self::lookup_or_insert`]), and this is the only way to build
+    /// the mismatched state a routing-key regression would produce, to prove
+    /// the defence-in-depth check in `entity_ref_tokio.rs` actually fires.
+    #[cfg(test)]
+    pub(crate) fn insert_mismatched_owner_for_test(
+        &self,
+        key: EntityTriple,
+        owner: EntityTriple,
+        mailbox: Arc<dyn Any + Send + Sync>,
+    ) {
+        let mut active = self.active.lock();
+        let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        let (_tx, rx) = watch::channel(EntityState::Recovering);
+        active.insert(
+            key,
+            ActiveEntry {
+                mailbox,
+                rx,
+                epoch,
+                triple: owner,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -212,7 +250,7 @@ mod tests {
                     spawn_count.fetch_add(1, Ordering::SeqCst);
                     erased_probe(42usize)
                 }) {
-                    RouteOutcome::Existing { mailbox } => mailbox,
+                    RouteOutcome::Existing { mailbox, .. } => mailbox,
                     RouteOutcome::Inserted { mailbox, .. } => mailbox,
                 }
             }));
@@ -342,7 +380,7 @@ mod tests {
             second_call_spawned.store(true, Ordering::SeqCst);
             erased_probe(String::from("wrong-type"))
         }) {
-            RouteOutcome::Existing { mailbox } => mailbox,
+            RouteOutcome::Existing { mailbox, .. } => mailbox,
             RouteOutcome::Inserted { .. } => {
                 panic!("must find the live entry, not insert a new one")
             }
@@ -359,7 +397,7 @@ mod tests {
         let re_lookup = match registry
             .lookup_or_insert(&triple("triple-3"), || panic!("must not spawn again"))
         {
-            RouteOutcome::Existing { mailbox } => mailbox,
+            RouteOutcome::Existing { mailbox, .. } => mailbox,
             RouteOutcome::Inserted { .. } => panic!("triple-3 must still be live"),
         };
         assert!(

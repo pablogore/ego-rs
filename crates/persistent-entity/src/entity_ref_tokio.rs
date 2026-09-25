@@ -74,6 +74,29 @@ impl<C> Drop for TeardownGuard<C> {
     }
 }
 
+/// Fails closed if a live entry's recorded owner triple does not match the
+/// triple it was just looked up under (SEC-001 defence-in-depth). Today this
+/// is unreachable — [`EntityRegistry`] is keyed by the full triple, so
+/// `owner` and `triple` always agree — but if the routing key ever
+/// regresses to something lossier (e.g. a bare `aggregate_id` string again),
+/// this must never hand the caller a mailbox belonging to a different
+/// tenant or entity. `debug_assert_eq!` makes the regression loud in debug
+/// builds; the `Err` return is the release-mode fail-closed path.
+fn ensure_owner_matches(triple: &EntityTriple, owner: &EntityTriple) -> Result<(), EntityError> {
+    debug_assert_eq!(
+        owner, triple,
+        "registry routing-key mismatch: looked up triple {triple:?} but the live entry belongs \
+         to {owner:?} — refusing to route to a mismatched actor"
+    );
+    if owner != triple {
+        return Err(EntityError::Internal(format!(
+            "registry routing-key mismatch: looked up triple {triple:?} but the live entry \
+             belongs to {owner:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Production [`EntityRef`] — spawns one [`EntityActor`] and holds its mailbox write-side.
 pub struct TokioEntityRef<C, E, S> {
     /// The entity's identity (tenant/type/id).
@@ -114,7 +137,9 @@ where
     /// Returns `Err(EntityError::Internal(..))` if a live entry exists but its
     /// erased mailbox does not downcast to `BoundedMailbox<ActorEnvelope<C>>`
     /// (ADR-002) — a programming error (mismatched `entity_type`/command
-    /// type). This is never treated as "no live entry" and never falls
+    /// type) — or if the entry's recorded owner triple does not match
+    /// `triple` (SEC-001 defence-in-depth; see [`ensure_owner_matches`]).
+    /// Neither case is ever treated as "no live entry," and neither falls
     /// through to a competing spawn.
     // Wiring constructor for the actor's full dependency set; splitting into a
     // params struct is a larger refactor out of scope for this change.
@@ -157,7 +182,13 @@ where
         };
 
         match outcome {
-            RouteOutcome::Existing { mailbox: erased } => {
+            RouteOutcome::Existing {
+                mailbox: erased,
+                owner,
+            } => {
+                // Never route to a mismatched owner, even before the
+                // downcast — SEC-001 defence-in-depth (ADR-001/ADR-002).
+                ensure_owner_matches(&triple, &owner)?;
                 // Downcast happens after the lock is released (ADR-001/ADR-002).
                 let mailbox = downcast(erased)?;
                 Ok(TokioEntityRef {
@@ -371,5 +402,90 @@ mod tests {
             CommandResult::Events { new_state, .. } => assert_eq!(new_state.value, 1),
             other => panic!("expected Events variant from the fresh actor, got {other:?}"),
         }
+    }
+
+    /// SEC-001 defence-in-depth: a live entry's owner triple matching the
+    /// caller's own triple must route normally — the check added above must
+    /// not be a false positive against the ordinary reuse path.
+    #[test]
+    fn existing_entry_with_matching_owner_routes_to_it() {
+        let registry = Arc::new(EntityRegistry::new());
+        let triple = EntityTriple::new("tenant-a".to_string(), "counter", "owner-match-1");
+
+        // Insert the normal way: owner and key are the same triple.
+        match registry.lookup_or_insert(&triple, || {
+            let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+            Arc::new(mailbox) as Arc<dyn Any + Send + Sync>
+        }) {
+            RouteOutcome::Inserted { .. } => {}
+            RouteOutcome::Existing { .. } => panic!("expected a fresh insert"),
+        }
+
+        // No live entry needs spawning here (the entry already exists), so
+        // this does not require a Tokio runtime.
+        let result = TokioEntityRef::<TestCommand, TestEvent, TestState>::new(
+            triple,
+            registry,
+            Arc::new(PersistenceFacade::<TestEvent>::new()),
+            Arc::new(NoopPublisher::new()),
+            Arc::new(NoSnapshot),
+            Arc::new(TestEntity::new()),
+            event_bus_channel().0,
+            4,
+            std::time::Duration::from_secs(300),
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "a matching owner triple must route to the existing mailbox, not fail closed: \
+             {result:?}"
+        );
+    }
+
+    /// SEC-001 defence-in-depth: if the routing map ever hands back an entry
+    /// whose recorded owner triple differs from the triple it was looked up
+    /// under (the state a routing-key regression would produce), the caller
+    /// must never route to it. Debug builds catch this loudly via
+    /// `debug_assert_eq!` inside `ensure_owner_matches`; release builds fail
+    /// closed with `Err(EntityError::Internal(..))` instead.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "registry routing-key mismatch")
+    )]
+    fn existing_entry_with_mismatched_owner_never_routes_to_it() {
+        let registry = Arc::new(EntityRegistry::new());
+        let requested = EntityTriple::new("tenant-a".to_string(), "counter", "owner-mismatch-1");
+        let other_owner = EntityTriple::new("tenant-b".to_string(), "counter", "owner-mismatch-1");
+
+        let mailbox: BoundedMailbox<ActorEnvelope<TestCommand>> = BoundedMailbox::new(4);
+        registry.insert_mismatched_owner_for_test(
+            requested.clone(),
+            other_owner,
+            Arc::new(mailbox) as Arc<dyn Any + Send + Sync>,
+        );
+
+        let result = TokioEntityRef::<TestCommand, TestEvent, TestState>::new(
+            requested,
+            registry,
+            Arc::new(PersistenceFacade::<TestEvent>::new()),
+            Arc::new(NoopPublisher::new()),
+            Arc::new(NoSnapshot),
+            Arc::new(TestEntity::new()),
+            event_bus_channel().0,
+            4,
+            std::time::Duration::from_secs(300),
+            None,
+            None,
+        );
+
+        // Reached only in release builds (debug builds already panicked
+        // above, per `should_panic`): the mismatch must still fail closed.
+        assert!(
+            matches!(result, Err(EntityError::Internal(ref msg)) if msg.contains("registry routing-key mismatch")),
+            "a routing-key mismatch must fail closed with EntityError::Internal in release \
+             builds, never route to the mismatched mailbox: {result:?}"
+        );
     }
 }
