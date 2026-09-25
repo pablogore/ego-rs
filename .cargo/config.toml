@@ -1,0 +1,10 @@
+# Shared by every CI job and every developer, so they compile identical
+# artifacts and CI jobs can restore one cache. Scoped to x86_64 Linux: other
+# targets (e.g. macOS contributors) keep their default linker.
+#
+# scripts/cargo-linker.sh links with mold when it is installed and falls back
+# to the system cc otherwise — see that script for why it is not a hard
+# `linker = "clang"`. A linker path containing a slash is resolved relative to
+# the directory that holds .cargo/, so this works from any checkout location.
+[target.x86_64-unknown-linux-gnu]
+linker = "scripts/cargo-linker.sh"

@@ -28,3 +28,16 @@ resolver = "2"
 [workspace.dependencies]
 mockall = "0.14.0"
 async-trait = "0.1"
+
+# Link time, not type-checking, dominates the test job, and full debuginfo is
+# most of what the linker has to move. Workspace crates keep line tables so
+# backtraces still show file:line; dependencies carry no debuginfo at all.
+# integration-tests/Cargo.toml is a separate workspace and repeats this block.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+inherits = "dev"

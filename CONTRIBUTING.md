@@ -69,6 +69,29 @@ requirement (`colima start` or Docker Desktop; see `integration-tests/README.md`
 No secrets are involved: production-profile tests supply deterministic
 non-dev test keys in code, never via environment variables.
 
+### Compiler profile and linker (shared by CI and developers)
+
+CI jobs no longer pass their own `RUSTFLAGS`; every job and every checkout
+compiles with the same settings, so `check`, `test` and `architecture` restore
+one cache (`shared-key: production-gate`, saved only by `test` on `develop`,
+read-only for PRs).
+
+- **Profile** — the root `Cargo.toml` (and, as a separate workspace,
+  `integration-tests/Cargo.toml`) sets `debug = "line-tables-only"` for
+  workspace crates and `debug = false` for dependencies. Backtraces keep
+  file:line for our code; the linker stops moving full debuginfo around. If
+  you need full debuginfo to step through a dependency, override it locally:
+  `cargo build --config 'profile.dev.package."*".debug=true'`.
+- **Linker** — `.cargo/config.toml` routes `x86_64-unknown-linux-gnu` links
+  through `scripts/cargo-linker.sh`: mold when it is on `PATH` (via clang,
+  else cc), the default linker otherwise. Installing mold locally
+  (`apt install mold`, `brew install mold`, …) is optional and only speeds up
+  linking; without it nothing breaks, which is also what keeps the Dagger
+  `lint` step working in the stock `rust:<version>` image. macOS and other
+  targets are untouched. CI sets `EGO_REQUIRE_MOLD=1` so a missing mold fails
+  the job instead of silently linking without it. The wrapper's own test is
+  `scripts/tests/test-cargo-linker.sh`.
+
 ### `.shipwright/workflow.yaml`: canonical candidate
 
 `.shipwright/workflow.yaml` defines the full gate above as a single
