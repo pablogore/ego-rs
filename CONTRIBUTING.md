@@ -69,6 +69,27 @@ requirement (`colima start` or Docker Desktop; see `integration-tests/README.md`
 No secrets are involved: production-profile tests supply deterministic
 non-dev test keys in code, never via environment variables.
 
+### Compiler profile (shared by CI and developers)
+
+CI jobs no longer pass their own `RUSTFLAGS`; every job and every checkout
+compiles with the same settings, so local builds match CI. Each CI job keeps
+its own cache, saved on `develop` only and read-only for PRs. The jobs do not
+share one cache on purpose: `cargo check` builds in metadata mode and reuses
+almost nothing from a full test build, and `cargo run -p xtask` resolves
+different features than `--workspace`.
+
+- **Profile** — the root `Cargo.toml` (and, as a separate workspace,
+  `integration-tests/Cargo.toml`) sets `debug = "line-tables-only"` for
+  workspace crates and `debug = false` for dependencies. Backtraces keep
+  file:line for our code; the linker stops moving full debuginfo around. If
+  you need full debuginfo to step through a dependency, override it locally:
+  `cargo build --config 'profile.dev.package."*".debug=true'`.
+- **Linker** — nothing custom. Since Rust 1.90, `x86_64-unknown-linux-gnu`
+  links with rustc's bundled rust-lld by default, on CI and locally. mold was
+  measured against it on the same commit and was not faster (141s vs 137.5s
+  for a cold test-binary build, plus 13-17s to install it), so CI no longer
+  installs it and there is no linker configuration to keep in sync.
+
 ### `.shipwright/workflow.yaml`: canonical candidate
 
 `.shipwright/workflow.yaml` defines the full gate above as a single
