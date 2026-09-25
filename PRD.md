@@ -176,7 +176,7 @@ Two service-registration mechanisms coexist, selected by what `#[service]` is ap
 
 ego.rs's evolution moves through eight capability phases. Phases 2-8 trace onto ROADMAP.md's own Execution Order (§9) — every ROADMAP phase is represented, either directly or, for phase 4 below, grouped explicitly under one product-level heading, so none is silently dropped:
 
-1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation, service composition, test infrastructure. Predates ROADMAP's Execution Order (see ROADMAP.md §2, Completed Foundation).
+1. **Foundation** — actor model, event sourcing, CQRS read-side projections, persistent entities, authentication/authorization, tenant isolation (request-level authorization and tenant-partitioned stores; entities are isolated per deployment, not per request tenant, see ARCHITECTURE.md PROD-P0.3 and [#484](https://github.com/pablogore/ego-rs/issues/484)), service composition, test infrastructure. Predates ROADMAP's Execution Order (see ROADMAP.md §2, Completed Foundation).
 2. **Application Composition** (ROADMAP Execution Order Phase 1 — Final Developer Experience) — the `App`/`AppBuilder` developer-facing composition surface, with `RuntimeBuilder` as the supported lower-level primitive
 3. **Production Foundation** (ROADMAP Phase 2) — mandatory CI gates, observability, security hardening, health/readiness/startup for single-node deployment
 4. **Reliable Distributed Integration** (ROADMAP Phases 3-4: Distributed Messaging + Reliable Integration) — a distributed-messaging SPI with broker adapters, transactional outbox, and optional CDC
