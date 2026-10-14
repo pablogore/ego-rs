@@ -1,0 +1,27 @@
+# git-cliff configuration for ego-rs.
+#
+# [changelog] and the rest of [git] are intentionally left unset — the
+# git-cliff 2.14.1 defaults already group the release body by
+# Conventional-Commit type (feat/fix/docs/refactor/style/test/chore-ci/
+# security/revert/other), and a bare local `git cliff` (no --config flag)
+# reproduces CI byte-for-byte because these settings live in the config
+# file, not as a CLI flag. See CONTRIBUTING.md, "Cutting a release".
+
+[bump]
+# A `feat` commit always bumps the minor version, even while the repo is
+# still on a 0.x major (git-cliff's default would bump only the patch
+# version for a 0.x feat commit).
+features_always_bump_minor = true
+# A breaking-change commit bumps the minor version while on 0.x, instead of
+# jumping straight to 1.0.0. The repo stays in 0.x until an explicit 1.0
+# decision (see proposal.md, "Version is derived from Conventional Commits
+# since the previous release, staying in 0.x").
+breaking_always_bump_major = false
+# Deterministic fallback if the workflow ever runs before the baseline tag
+# is seeded by hand (CONTRIBUTING.md, "Cutting a release").
+initial_tag = "v0.1.0"
+
+[git]
+# Release tags are the only tags this repo creates; this scopes git-cliff's
+# tag discovery so no other tag pattern is misread as a release.
+tag_pattern = "v[0-9]*"
